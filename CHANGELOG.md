@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-02
+
+Initial public release.
+
 ### Added
 - `issuectl new` — create issues and epics with strict validation, automatic
   numbering, and kebab-case slug generation (preserves Finnish characters).
@@ -89,12 +93,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the real-world ~144-issue monorepo).
 
 ### Removed
-- `issuectl dedup` stub — moved to roadmap until properly implemented.
-
-## [0.1.0] - Initial scaffold
-
-- Minimal `cargo new` scaffold with `clap`, `serde_yaml`, `regex`.
-- Stub commands; no functional implementation.
+- `issuectl dedup` stub — moved to a future release until properly
+  implemented.
 
 [Unreleased]: https://github.com/jarimustonen/issuectl/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/jarimustonen/issuectl/releases/tag/v0.1.0
