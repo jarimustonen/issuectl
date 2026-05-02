@@ -46,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--scope <PATH>` (repeatable) to limit.
 - `issuectl renumber --dry-run` previews the plan and ambiguous-reference
   list without modifying anything.
+- `issuectl --json renumber` (with or without `--dry-run`) emits a
+  structured report with the plan, ambiguous-mapping table, and
+  per-step counts. Useful for pipelines and `sed`-script generation —
+  agent feedback specifically asked for this.
 - Renumber's post-run report now lists each old number's spillover
   mapping (`#14 now maps to: #14 (kept) + #123 + #124`) and provides a
   ripgrep one-liner to find body-text references that need manual

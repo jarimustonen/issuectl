@@ -123,6 +123,7 @@ issue moves it back to `open/` and clears `closed:`.
 issuectl renumber                      Resolve duplicate numbers (preserve unique)
 issuectl renumber --dry-run            Preview the plan without modifying anything
 issuectl renumber --scope crates       Limit reference rewriting to one subtree
+issuectl --json renumber [--dry-run]   Structured plan + report (for pipelines)
 issuectl skill install                 Install /issue skill (default: Claude Code)
 issuectl skill install --agent codex   Install Codex prompt instead
 issuectl skill install --agent all     Install both

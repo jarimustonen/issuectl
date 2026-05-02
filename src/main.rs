@@ -395,7 +395,7 @@ fn main() -> Result<()> {
             status,
             commits,
         } => cmd_close(number, status, commits),
-        Command::Renumber { dry_run, scopes } => cmd_renumber(dry_run, scopes),
+        Command::Renumber { dry_run, scopes } => cmd_renumber(json_output, dry_run, scopes),
         Command::Skill { action } => match action {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
             SkillAction::Print { agent } => cmd_skill_print(&agent),
@@ -916,12 +916,16 @@ fn normalize_related_refs(refs: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
-fn cmd_renumber(dry_run: bool, scopes: Vec<PathBuf>) -> Result<()> {
+fn cmd_renumber(json: bool, dry_run: bool, scopes: Vec<PathBuf>) -> Result<()> {
     let root = find_root();
     let plans = build_renumber_plan(&root)?;
 
     if plans.is_empty() {
-        println!("No issues found.");
+        if json {
+            println!("{}", serde_json::json!({"applied": false, "total": 0}));
+        } else {
+            println!("No issues found.");
+        }
         return Ok(());
     }
 
@@ -938,11 +942,18 @@ fn cmd_renumber(dry_run: bool, scopes: Vec<PathBuf>) -> Result<()> {
             .collect()
     };
 
-    print_renumber_plan(&plans, &dir_map, &ambiguous, &scopes, &root);
-
-    if dry_run {
-        println!();
-        println!("Dry run — no files modified. Re-run without --dry-run to apply.");
+    if !json {
+        print_renumber_plan(&plans, &dir_map, &ambiguous, &scopes, &root);
+        if dry_run {
+            println!();
+            println!("Dry run — no files modified. Re-run without --dry-run to apply.");
+            return Ok(());
+        }
+    } else if dry_run {
+        let report = build_renumber_report(
+            &plans, &number_map, &ambiguous, &scopes, &root, false, None, None,
+        );
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
 
@@ -953,6 +964,22 @@ fn cmd_renumber(dry_run: bool, scopes: Vec<PathBuf>) -> Result<()> {
         .iter()
         .filter(|p| p.old_number != p.new_number)
         .count();
+
+    if json {
+        let report = build_renumber_report(
+            &plans,
+            &number_map,
+            &ambiguous,
+            &scopes,
+            &root,
+            true,
+            Some(changed_dirs),
+            Some(changed_files),
+        );
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
     println!();
     println!(
         "Done. {} item(s) renumbered ({} kept), {} dir(s) renamed, {} markdown file(s) rewritten.",
@@ -990,6 +1017,87 @@ fn cmd_renumber(dry_run: bool, scopes: Vec<PathBuf>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn build_renumber_report(
+    plans: &[RenumberPlan],
+    number_map: &BTreeMap<u32, BTreeSet<u32>>,
+    ambiguous: &BTreeSet<u32>,
+    scopes: &[PathBuf],
+    root: &Path,
+    applied: bool,
+    dirs_renamed: Option<usize>,
+    files_rewritten: Option<usize>,
+) -> serde_json::Value {
+    let renumbered: Vec<serde_json::Value> = plans
+        .iter()
+        .filter(|p| p.old_number != p.new_number)
+        .map(|p| {
+            let folder = p
+                .path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            serde_json::json!({
+                "old": p.old_number,
+                "new": p.new_number,
+                "old_dir": p.old_dir_name,
+                "new_dir": p.new_dir_name,
+                "folder": folder,
+                "path": p.path.to_string_lossy(),
+                "target_path": p.target_path.to_string_lossy(),
+            })
+        })
+        .collect();
+
+    let ambiguous_map: serde_json::Map<String, serde_json::Value> = ambiguous
+        .iter()
+        .map(|old| {
+            let news: Vec<u32> = number_map
+                .get(old)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default();
+            (
+                old.to_string(),
+                serde_json::json!({
+                    "kept_new": old,
+                    "new_numbers": news,
+                }),
+            )
+        })
+        .collect();
+
+    let scopes_json: Vec<String> = scopes.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+
+    let total = plans.len();
+    let renumbered_count = plans
+        .iter()
+        .filter(|p| p.old_number != p.new_number)
+        .count();
+    let mut summary = serde_json::Map::new();
+    summary.insert("total".into(), serde_json::json!(total));
+    summary.insert("kept".into(), serde_json::json!(total - renumbered_count));
+    summary.insert("renumbered".into(), serde_json::json!(renumbered_count));
+    summary.insert(
+        "ambiguous_old_numbers".into(),
+        serde_json::json!(ambiguous.len()),
+    );
+    if let Some(d) = dirs_renamed {
+        summary.insert("dirs_renamed".into(), serde_json::json!(d));
+    }
+    if let Some(f) = files_rewritten {
+        summary.insert("files_rewritten".into(), serde_json::json!(f));
+    }
+
+    serde_json::json!({
+        "applied": applied,
+        "root": root.to_string_lossy(),
+        "scopes": scopes_json,
+        "summary": serde_json::Value::Object(summary),
+        "renumbered": renumbered,
+        "ambiguous": serde_json::Value::Object(ambiguous_map),
+    })
 }
 
 fn default_renumber_scopes(root: &Path) -> Vec<PathBuf> {
@@ -1677,7 +1785,7 @@ Continues #12 and blocks **#13**.
 
         // Drive cmd_renumber through ROOT_OVERRIDE.
         let _ = ROOT_OVERRIDE.set(Some(tmp.path().to_path_buf()));
-        cmd_renumber(true, vec![]).unwrap();
+        cmd_renumber(false, true, vec![]).unwrap();
 
         let after: Vec<String> = fs::read_dir(tmp.path().join("issues/open"))
             .unwrap()
