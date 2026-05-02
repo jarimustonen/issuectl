@@ -349,7 +349,7 @@ fn main() -> Result<()> {
             related,
             source,
             description,
-        } => cmd_new(NewArgs {
+        } => cmd_new(json_output, NewArgs {
             issue_type,
             title,
             slug,
@@ -376,7 +376,7 @@ fn main() -> Result<()> {
             add_related,
             remove_related,
             add_commits,
-        } => cmd_update(UpdateArgs {
+        } => cmd_update(json_output, UpdateArgs {
             number,
             status,
             assignee,
@@ -394,7 +394,7 @@ fn main() -> Result<()> {
             number,
             status,
             commits,
-        } => cmd_close(number, status, commits),
+        } => cmd_close(json_output, number, status, commits),
         Command::Renumber { dry_run, scopes } => cmd_renumber(json_output, dry_run, scopes),
         Command::Skill { action } => match action {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
@@ -608,11 +608,24 @@ struct NewOutcome {
     item_path: PathBuf,
 }
 
-fn cmd_new(args: NewArgs) -> Result<()> {
+fn cmd_new(json: bool, args: NewArgs) -> Result<()> {
     let root = find_root();
     let out = do_new(&root, args)?;
-    println!("Created #{}: {}", out.number, out.title);
-    println!("  {}", out.item_path.display());
+    if json {
+        let report = serde_json::json!({
+            "number": out.number,
+            "title": out.title,
+            "item_path": out.item_path.to_string_lossy(),
+            "dir": out
+                .item_path
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned()),
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("Created #{}: {}", out.number, out.title);
+        println!("  {}", out.item_path.display());
+    }
     Ok(())
 }
 
@@ -695,10 +708,20 @@ struct UpdateOutcome {
     moved_to_open: bool,
 }
 
-fn cmd_update(args: UpdateArgs) -> Result<()> {
+fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
     let root = find_root();
     let number = args.number;
     let out = do_update(&root, args)?;
+    if json {
+        let report = serde_json::json!({
+            "number": number,
+            "final_dir": out.final_dir.to_string_lossy(),
+            "moved_to_closed": out.moved_to_closed,
+            "moved_to_open": out.moved_to_open,
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     if out.moved_to_closed {
         println!("Updated #{}: moved to {}", number, out.final_dir.display());
         println!("  status set to closing — moved to closed/");
@@ -812,9 +835,23 @@ fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> {
     })
 }
 
-fn cmd_close(number: u32, status: Option<String>, commits: Vec<String>) -> Result<()> {
+fn cmd_close(
+    json: bool,
+    number: u32,
+    status: Option<String>,
+    commits: Vec<String>,
+) -> Result<()> {
     let root = find_root();
     let out = do_close(&root, number, status, commits)?;
+    if json {
+        let report = serde_json::json!({
+            "number": number,
+            "final_dir": out.final_dir.to_string_lossy(),
+            "moved_to_closed": out.moved_to_closed,
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     if out.moved_to_closed {
         println!("Closed #{}: moved to {}", number, out.final_dir.display());
     } else {

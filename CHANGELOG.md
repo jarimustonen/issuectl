@@ -50,6 +50,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   structured report with the plan, ambiguous-mapping table, and
   per-step counts. Useful for pipelines and `sed`-script generation —
   agent feedback specifically asked for this.
+- `--json` now also covers `new`, `update`, and `close`. The skill
+  templates have been rewritten so every `issuectl` example uses
+  `--json`, since the consumer is an AI agent that should never have
+  to parse human-formatted output.
+- `AGENTS.md` at the repo root captures the rule that any CLI surface
+  change must update `templates/issue-skill.md` and
+  `templates/issue-prompt.md` in the same commit, and re-run
+  `issuectl skill install --agent all --force` so the in-repo
+  `.claude/` and `.codex/` copies don't drift.
 - Renumber's post-run report now lists each old number's spillover
   mapping (`#14 now maps to: #14 (kept) + #123 + #124`) and provides a
   ripgrep one-liner to find body-text references that need manual
