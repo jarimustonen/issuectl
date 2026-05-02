@@ -2,9 +2,22 @@
 name = "issuectl"
 version = "0.1.0"
 edition = "2021"
-description = "CLI for managing markdown-based issues with frontmatter"
+rust-version = "1.74"
+description = "AI-first CLI for managing markdown-based issues with YAML frontmatter"
 license = "MIT"
 repository = "https://github.com/jarimustonen/issuectl"
+homepage = "https://github.com/jarimustonen/issuectl"
+documentation = "https://github.com/jarimustonen/issuectl#readme"
+readme = "README.md"
+keywords = ["cli", "issues", "markdown", "frontmatter", "claude-code"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = [
+    "tests/fixtures/**",
+    "issues/**",
+    ".github/**",
+    ".workmux.yaml",
+    ".claude/**",
+]
 
 [[bin]]
 name = "issuectl"
