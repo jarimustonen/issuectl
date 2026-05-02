@@ -105,9 +105,7 @@ fn install_agent_template(repo_root: &Path, agent: Agent, force: bool) -> Result
         .to_string();
 
     if !force && path.exists() {
-        println!(
-            "  ~ {display} already exists (use --force to overwrite)"
-        );
+        println!("  ~ {display} already exists (use --force to overwrite)");
         return Ok(());
     }
 
@@ -140,16 +138,12 @@ mod tests {
     #[test]
     fn install_paths_differ_per_agent() {
         let root = Path::new("/tmp/repo");
-        assert!(
-            Agent::Claude
-                .install_path(root)
-                .ends_with(".claude/skills/issue/SKILL.md")
-        );
-        assert!(
-            Agent::Codex
-                .install_path(root)
-                .ends_with(".codex/prompts/issue.md")
-        );
+        assert!(Agent::Claude
+            .install_path(root)
+            .ends_with(".claude/skills/issue/SKILL.md"));
+        assert!(Agent::Codex
+            .install_path(root)
+            .ends_with(".codex/prompts/issue.md"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use chrono::Local;
 use serde_yaml::{Mapping, Value};
 
@@ -104,8 +104,7 @@ fn split_text(text: &str) -> (Option<&str>, Option<&str>) {
 /// Serialize a mapping back to YAML, then convert simple string arrays to
 /// flow style (`key: ["a", "b"]`) for readability.
 fn serialize_frontmatter(map: &Mapping) -> Result<String> {
-    let yaml =
-        serde_yaml::to_string(map).context("cannot serialize frontmatter back to YAML")?;
+    let yaml = serde_yaml::to_string(map).context("cannot serialize frontmatter back to YAML")?;
     Ok(flowify_string_arrays(&yaml))
 }
 
@@ -138,12 +137,7 @@ fn flowify_string_arrays(yaml: &str) -> String {
                 j += 1;
             }
             if all_simple && !items.is_empty() {
-                out.push_str(&format!(
-                    "{}{}: [{}]\n",
-                    indent,
-                    key,
-                    items.join(", ")
-                ));
+                out.push_str(&format!("{}{}: [{}]\n", indent, key, items.join(", ")));
                 i = j;
                 continue;
             }
@@ -192,7 +186,10 @@ fn is_complex_yaml_scalar(value: &str) -> bool {
 // ── Frontmatter mutation helpers ────────────────────────────────────────────
 
 pub fn set_string(map: &mut Mapping, key: &str, value: &str) {
-    map.insert(Value::String(key.to_string()), Value::String(value.to_string()));
+    map.insert(
+        Value::String(key.to_string()),
+        Value::String(value.to_string()),
+    );
 }
 
 pub fn set_u32(map: &mut Mapping, key: &str, value: u32) {
@@ -243,7 +240,10 @@ pub fn add_commit(map: &mut Mapping, hash: &str, summary: &str) -> Result<()> {
         _ => bail!("frontmatter field commits is not a list"),
     };
     let mut commit = Mapping::new();
-    commit.insert(Value::String("hash".into()), Value::String(hash.to_string()));
+    commit.insert(
+        Value::String("hash".into()),
+        Value::String(hash.to_string()),
+    );
     commit.insert(
         Value::String("summary".into()),
         Value::String(summary.to_string()),
@@ -311,8 +311,7 @@ pub fn render_new_item(args: &NewIssueArgs<'_>) -> String {
         map.insert(Value::String("labels".into()), Value::Sequence(seq));
     }
 
-    let yaml =
-        serialize_frontmatter(&map).expect("known-shape frontmatter must serialize");
+    let yaml = serialize_frontmatter(&map).expect("known-shape frontmatter must serialize");
 
     let mut body = String::new();
     body.push_str(&format!("# {}\n", args.title));
@@ -454,8 +453,7 @@ mod tests {
 
     #[test]
     fn round_trip_preserves_blank_line_before_body() {
-        let (_tmp, path) =
-            write_tmp("---\nstatus: open\n---\n\n# Title\n\nBody text\n");
+        let (_tmp, path) = write_tmp("---\nstatus: open\n---\n\n# Title\n\nBody text\n");
         let item = read_item(&path).unwrap();
         write_item(&path, &item).unwrap();
         let after = fs::read_to_string(&path).unwrap();
@@ -573,10 +571,7 @@ mod tests {
     #[test]
     fn add_to_string_list_errors_on_non_list() {
         let mut m = empty_map();
-        m.insert(
-            Value::String("labels".into()),
-            Value::String("oops".into()),
-        );
+        m.insert(Value::String("labels".into()), Value::String("oops".into()));
         assert!(add_to_string_list(&mut m, "labels", "infra").is_err());
     }
 

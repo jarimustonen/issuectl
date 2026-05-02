@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
 use regex::{Captures, Regex};
@@ -356,20 +356,23 @@ fn main() -> Result<()> {
             related,
             source,
             description,
-        } => cmd_new(json_output, NewArgs {
-            issue_type,
-            title,
-            slug,
-            reporter,
-            assignee,
-            owner,
-            priority,
-            epic,
-            labels,
-            related,
-            source,
-            description,
-        }),
+        } => cmd_new(
+            json_output,
+            NewArgs {
+                issue_type,
+                title,
+                slug,
+                reporter,
+                assignee,
+                owner,
+                priority,
+                epic,
+                labels,
+                related,
+                source,
+                description,
+            },
+        ),
         Command::Update {
             number,
             status,
@@ -383,20 +386,23 @@ fn main() -> Result<()> {
             add_related,
             remove_related,
             add_commits,
-        } => cmd_update(json_output, UpdateArgs {
-            number,
-            status,
-            assignee,
-            owner,
-            priority,
-            epic,
-            no_epic,
-            add_labels,
-            remove_labels,
-            add_related,
-            remove_related,
-            add_commits,
-        }),
+        } => cmd_update(
+            json_output,
+            UpdateArgs {
+                number,
+                status,
+                assignee,
+                owner,
+                priority,
+                epic,
+                no_epic,
+                add_labels,
+                remove_labels,
+                add_related,
+                remove_related,
+                add_commits,
+            },
+        ),
         Command::Close {
             number,
             status,
@@ -684,8 +690,7 @@ fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
         description: args.description.as_deref(),
     });
 
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("cannot create {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let item_path = dir.join("item.md");
     fs::write(&item_path, render)
         .with_context(|| format!("cannot write {}", item_path.display()))?;
@@ -825,11 +830,7 @@ fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> {
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
         fs::rename(&old_dir, &new_dir).with_context(|| {
-            format!(
-                "cannot move {} to {}",
-                old_dir.display(),
-                new_dir.display()
-            )
+            format!("cannot move {} to {}", old_dir.display(), new_dir.display())
         })?;
         new_dir
     } else {
@@ -846,12 +847,7 @@ fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> {
     })
 }
 
-fn cmd_close(
-    json: bool,
-    number: u32,
-    status: Option<String>,
-    commits: Vec<String>,
-) -> Result<()> {
+fn cmd_close(json: bool, number: u32, status: Option<String>, commits: Vec<String>) -> Result<()> {
     let root = find_root();
     let out = do_close(&root, number, status, commits)?;
     if json {
@@ -954,22 +950,14 @@ fn normalize_related_refs(refs: &[String]) -> Result<Vec<String>> {
         let trimmed = r.trim();
         let stripped = trimmed.strip_prefix('#').unwrap_or(trimmed);
         if stripped.is_empty() || !stripped.chars().all(|c| c.is_ascii_digit()) {
-            bail!(
-                "related reference must look like #NN or NN, got {:?}",
-                r
-            );
+            bail!("related reference must look like #NN or NN, got {:?}", r);
         }
         out.push(format!("#{stripped}"));
     }
     Ok(out)
 }
 
-fn cmd_renumber(
-    json: bool,
-    dry_run: bool,
-    scopes: Vec<PathBuf>,
-    pins: Vec<String>,
-) -> Result<()> {
+fn cmd_renumber(json: bool, dry_run: bool, scopes: Vec<PathBuf>, pins: Vec<String>) -> Result<()> {
     let pins = parse_pins(&pins)?;
     let root = find_root();
     let plans = build_renumber_plan(&root, &pins)?;
@@ -1005,7 +993,14 @@ fn cmd_renumber(
         }
     } else if dry_run {
         let report = build_renumber_report(
-            &plans, &number_map, &ambiguous, &scopes, &root, false, None, None,
+            &plans,
+            &number_map,
+            &ambiguous,
+            &scopes,
+            &root,
+            false,
+            None,
+            None,
         );
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -1053,7 +1048,13 @@ fn cmd_renumber(
                 .unwrap_or_default();
             let mapping = new_numbers
                 .iter()
-                .map(|n| if n == old { format!("#{n} (kept)") } else { format!("#{n}") })
+                .map(|n| {
+                    if n == old {
+                        format!("#{n} (kept)")
+                    } else {
+                        format!("#{n}")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(" + ");
             println!("  #{old} now maps to: {mapping}");
@@ -1122,7 +1123,10 @@ fn build_renumber_report(
         })
         .collect();
 
-    let scopes_json: Vec<String> = scopes.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let scopes_json: Vec<String> = scopes
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
 
     let total = plans.len();
     let renumbered_count = plans
@@ -1165,10 +1169,18 @@ fn print_renumber_plan(
     scopes: &[PathBuf],
     root: &Path,
 ) {
-    let changed: Vec<_> = plans.iter().filter(|p| p.old_number != p.new_number).collect();
+    let changed: Vec<_> = plans
+        .iter()
+        .filter(|p| p.old_number != p.new_number)
+        .collect();
     let kept = plans.len() - changed.len();
 
-    println!("Plan ({} items: {} keep their numbers, {} will be renumbered):", plans.len(), kept, changed.len());
+    println!(
+        "Plan ({} items: {} keep their numbers, {} will be renumbered):",
+        plans.len(),
+        kept,
+        changed.len()
+    );
     if changed.is_empty() {
         println!("  (no duplicate numbers found — nothing to renumber)");
     } else {
@@ -1358,10 +1370,7 @@ fn parse_pins(specs: &[String]) -> Result<BTreeMap<u32, String>> {
     Ok(out)
 }
 
-fn build_renumber_plan(
-    root: &Path,
-    pins: &BTreeMap<u32, String>,
-) -> Result<Vec<RenumberPlan>> {
+fn build_renumber_plan(root: &Path, pins: &BTreeMap<u32, String>) -> Result<Vec<RenumberPlan>> {
     let issues_dir = root.join("issues");
     let mut items = Vec::new();
 
@@ -1880,11 +1889,7 @@ Continues #12 and blocks **#13**.
 
     #[test]
     fn renumber_plan_no_renames_when_all_unique() {
-        let tmp = make_repo_with_dirs(&[
-            ("open", 1, "a"),
-            ("open", 2, "b"),
-            ("closed", 3, "c"),
-        ]);
+        let tmp = make_repo_with_dirs(&[("open", 1, "a"), ("open", 2, "b"), ("closed", 3, "c")]);
         let plans = build_renumber_plan(tmp.path(), &BTreeMap::new()).unwrap();
         let dir_map = build_dir_map(&plans);
         assert!(
@@ -1895,10 +1900,7 @@ Continues #12 and blocks **#13**.
 
     #[test]
     fn renumber_dry_run_does_not_modify_filesystem() {
-        let tmp = make_repo_with_dirs(&[
-            ("open", 1, "a"),
-            ("open", 1, "b"),
-        ]);
+        let tmp = make_repo_with_dirs(&[("open", 1, "a"), ("open", 1, "b")]);
         let before: Vec<String> = fs::read_dir(tmp.path().join("issues/open"))
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
@@ -1916,16 +1918,16 @@ Continues #12 and blocks **#13**.
         let mut after_sorted = after.clone();
         before_sorted.sort();
         after_sorted.sort();
-        assert_eq!(before_sorted, after_sorted, "dry-run must not change anything");
+        assert_eq!(
+            before_sorted, after_sorted,
+            "dry-run must not change anything"
+        );
     }
 
     #[test]
     fn parse_pins_accepts_valid_specs() {
-        let pins = parse_pins(&[
-            "26=multi-tenant".to_string(),
-            "33=tool-skills".to_string(),
-        ])
-        .unwrap();
+        let pins =
+            parse_pins(&["26=multi-tenant".to_string(), "33=tool-skills".to_string()]).unwrap();
         assert_eq!(pins.get(&26), Some(&"multi-tenant".to_string()));
         assert_eq!(pins.get(&33), Some(&"tool-skills".to_string()));
     }
@@ -1967,26 +1969,23 @@ Continues #12 and blocks **#13**.
 
     #[test]
     fn renumber_pin_rejects_no_match() {
-        let tmp = make_repo_with_dirs(&[
-            ("open", 26, "alpha"),
-            ("open", 26, "beta"),
-        ]);
+        let tmp = make_repo_with_dirs(&[("open", 26, "alpha"), ("open", 26, "beta")]);
         let mut pins = BTreeMap::new();
         pins.insert(26u32, "nonexistent".to_string());
         let result = build_renumber_plan(tmp.path(), &pins);
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("no dir slug contains"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no dir slug contains"),
             "expected 'no dir slug contains' error"
         );
     }
 
     #[test]
     fn renumber_pin_rejects_ambiguous_match() {
-        let tmp = make_repo_with_dirs(&[
-            ("open", 26, "tenant-foo"),
-            ("open", 26, "tenant-bar"),
-        ]);
+        let tmp = make_repo_with_dirs(&[("open", 26, "tenant-foo"), ("open", 26, "tenant-bar")]);
         let mut pins = BTreeMap::new();
         pins.insert(26u32, "tenant".to_string());
         let result = build_renumber_plan(tmp.path(), &pins);
@@ -2226,7 +2225,10 @@ mod cmd_tests {
     fn new_uses_auto_slug_from_title() {
         let tmp = fresh_repo();
         let out = do_new(tmp.path(), new_args("bug", "Login Redirect Loops")).unwrap();
-        assert!(out.item_path.to_string_lossy().contains("1-login-redirect-loops"));
+        assert!(out
+            .item_path
+            .to_string_lossy()
+            .contains("1-login-redirect-loops"));
     }
 
     #[test]
@@ -2519,7 +2521,10 @@ mod cmd_tests {
         )
         .unwrap();
         let content = read(&n.item_path);
-        assert!(content.contains("related: ['#3', '#7']") || content.contains("related: [\"#3\", \"#7\"]"));
+        assert!(
+            content.contains("related: ['#3', '#7']")
+                || content.contains("related: [\"#3\", \"#7\"]")
+        );
     }
 
     #[test]
@@ -2605,8 +2610,7 @@ mod cmd_tests {
     fn close_honors_explicit_status() {
         let tmp = fresh_repo();
         let n = make_one(&tmp, "bug", "Bug");
-        let outcome =
-            do_close(tmp.path(), n.number, Some("wontfix".into()), vec![]).unwrap();
+        let outcome = do_close(tmp.path(), n.number, Some("wontfix".into()), vec![]).unwrap();
         let content = read(&outcome.final_dir.join("item.md"));
         assert!(content.contains("status: wontfix"));
     }
@@ -2615,16 +2619,8 @@ mod cmd_tests {
     fn close_records_commit() {
         let tmp = fresh_repo();
         let n = make_one(&tmp, "bug", "Bug");
-        do_close(
-            tmp.path(),
-            n.number,
-            None,
-            vec!["abc:final fix".into()],
-        )
-        .unwrap();
-        let closed = tmp
-            .path()
-            .join(format!("issues/closed/{}-bug", n.number));
+        do_close(tmp.path(), n.number, None, vec!["abc:final fix".into()]).unwrap();
+        let closed = tmp.path().join(format!("issues/closed/{}-bug", n.number));
         let content = read(&closed.join("item.md"));
         assert!(content.contains("hash: abc"));
         assert!(content.contains("summary: final fix"));
