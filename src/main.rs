@@ -1077,6 +1077,7 @@ fn rewrite_issue_text(
     let heading_re = Regex::new(r"^(# )E?\d+\.\s+(.+)$").expect("valid heading regex");
     let epic_re = Regex::new(r"^(\s*epic:\s*)(\d+)(.*)$").expect("valid epic regex");
     let ref_re = Regex::new(r"#(\d+)\b").expect("valid reference regex");
+    let dir_regexes = compile_dir_regexes(dir_map);
 
     let mut rewritten = Vec::new();
     for line in text.lines() {
@@ -1101,7 +1102,7 @@ fn rewrite_issue_text(
                 }
             })
             .to_string();
-        let line = rewrite_issue_dir_paths(&line, dir_map);
+        let line = rewrite_issue_dir_paths(&line, &dir_regexes);
         rewritten.push(line);
     }
 
@@ -1112,14 +1113,25 @@ fn rewrite_issue_text(
     output
 }
 
-fn rewrite_issue_dir_paths(text: &str, dir_map: &BTreeMap<String, String>) -> String {
+fn compile_dir_regexes(dir_map: &BTreeMap<String, String>) -> Vec<(Regex, String)> {
+    dir_map
+        .iter()
+        .map(|(old_dir, new_dir)| {
+            let pattern = format!(
+                r"(^|[^A-Za-z0-9_-]){}($|[^A-Za-z0-9_-])",
+                regex::escape(old_dir)
+            );
+            (
+                Regex::new(&pattern).expect("valid directory path regex"),
+                new_dir.clone(),
+            )
+        })
+        .collect()
+}
+
+fn rewrite_issue_dir_paths(text: &str, regexes: &[(Regex, String)]) -> String {
     let mut rewritten = text.to_string();
-    for (old_dir, new_dir) in dir_map {
-        let pattern = format!(
-            r"(^|[^A-Za-z0-9_-]){}($|[^A-Za-z0-9_-])",
-            regex::escape(old_dir)
-        );
-        let dir_re = Regex::new(&pattern).expect("valid directory path regex");
+    for (dir_re, new_dir) in regexes {
         rewritten = dir_re
             .replace_all(&rewritten, |caps: &Captures| {
                 format!("{}{}{}", &caps[1], new_dir, &caps[2])
