@@ -23,11 +23,20 @@ can use it from a terminal too.
   rather than a UI for humans.
 - **Markdown-first.** Issues are just files. Edit them in your editor,
   attach screenshots and analysis docs, search them with `grep`.
+- **Worktree-friendly context handoff.** In worktree-based agent flows,
+  an issue body doubles as a durable, self-contained prompt: one agent
+  investigates and writes up `## Reproduction` / `## Analysis` /
+  `## Scope`, then a follow-up agent in a fresh worktree reads the
+  issue and implements directly from it. Frontmatter carries the
+  routing (assignee, status, epic, related); the body *is* the work
+  order. No external task tracker to sync, no chat history to
+  reconstruct — the file in `issues/` is the context.
 - **Round-trip safe.** Frontmatter mutations preserve field order and
   unknown keys. Body text is left verbatim.
 - **Renumber on merge.** When two branches both create issue #14,
-  `issuectl renumber` reassigns sequential numbers and rewrites
-  `#NN` and `epic:` cross-references across all markdown files.
+  `issuectl renumber` resolves the conflict (preserving unique numbers,
+  spilling duplicates) and rewrites `#NN` / `epic:` cross-references
+  across the whole repo.
 
 ## Features
 
