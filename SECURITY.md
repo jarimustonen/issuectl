@@ -9,7 +9,7 @@ pre-1.0.
 
 Please **do not** open a public GitHub issue for security vulnerabilities.
 
-Email **jari@itsellesi.fi** with:
+Email **jari.mustonen@iki.fi** with:
 
 - A description of the issue
 - Steps to reproduce

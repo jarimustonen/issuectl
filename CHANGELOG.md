@@ -29,14 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on stdout without writing to disk.
 - 95 unit and integration tests covering pure helpers, frontmatter
   round-trip, command flows (tempdir-backed), and renumber edge cases.
-- End-to-end test fixture at `tests/fixtures/grooveserve/` (~144 issues,
-  4 epics, duplicate-numbering edge cases, Finnish content).
+- End-to-end manual verification against a real-world ~144-issue
+  monorepo with duplicate-numbering edge cases (fixture removed
+  before publication).
 
 ### Changed
 - **`issuectl renumber` is now minimal by default.** Unique issue numbers
   are preserved; only duplicates are renumbered, with the first by sort
   order keeping its number and the rest spilling above the current max.
-  This drops 130 dir-renames to 22 on the grooveserve fixture (~144
+  This drops 130 dir-renames to 22 on the real-world ~144-issue monorepo (~144
   issues, 19 duplicate numbers). The previous compact-1..N renumbering
   is no longer available — file an issue if you need it back.
 - `issuectl renumber` now scans the **whole repo** for `.md` references
@@ -85,7 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per (file × line × dir-map entry), which on real-world data with
   ~150 markdown files and ~20 dir-map entries produced ~330k regex
   compilations and never finished. Hoisted to once per file (~15s on
-  the grooveserve fixture).
+  the real-world ~144-issue monorepo).
 
 ### Removed
 - `issuectl dedup` stub — moved to roadmap until properly implemented.

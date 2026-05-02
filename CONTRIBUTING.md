@@ -18,7 +18,7 @@ Useful one-liners while iterating:
 
 ```sh
 cargo run -- list                                # against this repo's issues/
-cargo run -- --root tests/fixtures/grooveserve list   # against the fixture
+cargo run -- --root /path/to/some/repo list          # against an external repo
 cargo test                                       # unit + integration tests
 cargo clippy --all-targets                       # linter
 cargo fmt --all                                  # format

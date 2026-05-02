@@ -171,7 +171,7 @@ Always run `--dry-run` first on a real repo to see the plan.
 
 ```sh
 issuectl --root ~/code/some-other-project list
-issuectl --root tests/fixtures/grooveserve stats
+issuectl --root /path/to/another/repo stats
 ```
 
 ## File format
@@ -255,22 +255,10 @@ Requires a Rust toolchain (2021 edition or newer).
 cargo build
 cargo test
 cargo clippy --all-targets
-cargo run -- --root tests/fixtures/grooveserve list
 ```
-
-The `tests/fixtures/grooveserve/` directory contains a real-world
-fixture (~144 issues, 4 epics, mixed types/statuses, Finnish slugs,
-duplicate-numbering edge cases) used for end-to-end manual verification.
 
 See [AGENTS-AI-FIRST-CLI.md](AGENTS-AI-FIRST-CLI.md) for the design
 principles every command follows.
-
-## Roadmap
-
-- [ ] `issuectl dedup` — detect duplicate issues by title/body similarity
-- [ ] Publish to crates.io
-- [ ] Pre-built binaries for macOS / Linux / Windows
-- [ ] Optional shell completions (`bash`, `zsh`, `fish`)
 
 ## Contributing
 
