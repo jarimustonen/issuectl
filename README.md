@@ -120,18 +120,34 @@ issue moves it back to `open/` and clears `closed:`.
 ### Maintenance
 
 ```
-issuectl renumber                      Uniquify numbers, fix #NN refs
+issuectl renumber                      Resolve duplicate numbers (preserve unique)
+issuectl renumber --dry-run            Preview the plan without modifying anything
+issuectl renumber --scope crates       Limit reference rewriting to one subtree
 issuectl skill install                 Install /issue skill (default: Claude Code)
 issuectl skill install --agent codex   Install Codex prompt instead
 issuectl skill install --agent all     Install both
 issuectl skill print [--agent codex]   Preview the template without installing
 ```
 
-`renumber` walks `issues/open/` and `issues/closed/`, assigns sequential
-numbers across both folders, renames the directories, and rewrites
-`#NN`, `epic: NN`, and `related: ["#NN"]` references in every markdown
-file in `issues/`. References to numbers that had multiple old
-directories are ambiguous and are reported instead of guessed.
+`renumber` is **minimal by default**: unique issue numbers keep their
+numbers, and only duplicates (multiple directories sharing one number,
+typical after merging two branches that each created issue #14) are
+renumbered. The first by sort order keeps the number and the rest spill
+above the current max — e.g. three #14's become #14 (kept), #192, #193.
+
+References to *unique* numbers stay valid automatically (since the
+numbers don't move). References to *duplicate* numbers (`#14`,
+`epic: 14`, `related: ["#14"]`) are reported as ambiguous and left
+unchanged for manual review — `issuectl` cannot guess which of the
+three the writer meant.
+
+By default, reference rewriting scans the whole repo for `.md` files
+(skipping `.git/`, `target/`, `node_modules/`, `.cargo/`, `dist/`,
+`build/`) so that monorepo references in `CLAUDE.md`, `AGENTS.md`,
+per-crate docs, etc. stay consistent. Use `--scope <PATH>` (repeatable)
+to narrow the search.
+
+Always run `--dry-run` first on a real repo to see the plan.
 
 ### Pointing to an external repo
 

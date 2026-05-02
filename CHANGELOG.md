@@ -33,6 +33,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   4 epics, duplicate-numbering edge cases, Finnish content).
 
 ### Changed
+- **`issuectl renumber` is now minimal by default.** Unique issue numbers
+  are preserved; only duplicates are renumbered, with the first by sort
+  order keeping its number and the rest spilling above the current max.
+  This drops 130 dir-renames to 22 on the grooveserve fixture (~144
+  issues, 19 duplicate numbers). The previous compact-1..N renumbering
+  is no longer available — file an issue if you need it back.
+- `issuectl renumber` now scans the **whole repo** for `.md` references
+  by default (skipping `.git`, `target`, `node_modules`, `.cargo`,
+  `dist`, `build`) instead of only `issues/`, so monorepo cross-references
+  in `CLAUDE.md`, per-crate `AGENTS.md`, etc. stay consistent. Use
+  `--scope <PATH>` (repeatable) to limit.
+- `issuectl renumber --dry-run` previews the plan and ambiguous-reference
+  list without modifying anything.
+- Renumber's post-run report now lists each old number's spillover
+  mapping (`#14 now maps to: #14 (kept) + #123 + #124`) and provides a
+  ripgrep one-liner to find body-text references that need manual
+  review.
 - Re-opening a closed issue (setting an active status from `closed/`)
   now clears the `closed:` field automatically.
 - Skill template (`templates/issue-skill.md`) rewritten to delegate

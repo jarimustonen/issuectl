@@ -262,8 +262,21 @@ enum Command {
         commits: Vec<String>,
     },
 
-    /// Renumber and fix cross-references during merges
-    Renumber,
+    /// Renumber duplicate issues and fix cross-references after merges.
+    /// Unique numbers are preserved; only duplicate numbers (multiple dirs
+    /// sharing one number) are renumbered, with the first kept and the rest
+    /// spilled above the current max.
+    Renumber {
+        /// Print the plan without modifying anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Path(s) under which to rewrite #NN references in markdown files.
+        /// Repeatable. Defaults to the entire repo root (recursively, .md
+        /// files only, skipping .git/target/node_modules/.cargo/dist/build).
+        #[arg(long = "scope", value_name = "PATH")]
+        scopes: Vec<PathBuf>,
+    },
 
     /// Install or preview the /issue skill template (Claude Code or Codex)
     Skill {
@@ -382,7 +395,7 @@ fn main() -> Result<()> {
             status,
             commits,
         } => cmd_close(number, status, commits),
-        Command::Renumber => cmd_renumber(),
+        Command::Renumber { dry_run, scopes } => cmd_renumber(dry_run, scopes),
         Command::Skill { action } => match action {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
             SkillAction::Print { agent } => cmd_skill_print(&agent),
@@ -903,7 +916,7 @@ fn normalize_related_refs(refs: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
-fn cmd_renumber() -> Result<()> {
+fn cmd_renumber(dry_run: bool, scopes: Vec<PathBuf>) -> Result<()> {
     let root = find_root();
     let plans = build_renumber_plan(&root)?;
 
@@ -914,33 +927,222 @@ fn cmd_renumber() -> Result<()> {
 
     let number_map = build_number_map(&plans);
     let dir_map = build_dir_map(&plans);
-    let ambiguous_numbers = ambiguous_numbers(&number_map);
+    let ambiguous = ambiguous_numbers(&number_map);
 
-    rewrite_issue_markdown(&root, &number_map, &dir_map)?;
+    let scopes = if scopes.is_empty() {
+        default_renumber_scopes(&root)
+    } else {
+        scopes
+            .into_iter()
+            .map(|p| if p.is_absolute() { p } else { root.join(p) })
+            .collect()
+    };
 
-    rename_issue_dirs(&plans)?;
+    print_renumber_plan(&plans, &dir_map, &ambiguous, &scopes, &root);
+
+    if dry_run {
+        println!();
+        println!("Dry run — no files modified. Re-run without --dry-run to apply.");
+        return Ok(());
+    }
+
+    let changed_files = rewrite_markdown_in_scopes(&scopes, &number_map, &dir_map)?;
+    rename_issue_dirs_changed_only(&plans)?;
 
     let changed_dirs = plans
         .iter()
         .filter(|p| p.old_number != p.new_number)
         .count();
+    println!();
     println!(
-        "Renumbered {} item(s); renamed {} directories.",
-        plans.len(),
-        changed_dirs
+        "Done. {} item(s) renumbered ({} kept), {} dir(s) renamed, {} markdown file(s) rewritten.",
+        changed_dirs,
+        plans.len() - changed_dirs,
+        changed_dirs,
+        changed_files,
     );
 
-    if !ambiguous_numbers.is_empty() {
-        let nums = ambiguous_numbers
-            .iter()
-            .map(|n| format!("#{n}"))
-            .collect::<Vec<_>>()
-            .join(", ");
+    if !ambiguous.is_empty() {
+        println!();
+        println!("Manual cleanup needed for ambiguous references:");
+        for old in &ambiguous {
+            let new_numbers: Vec<u32> = number_map
+                .get(old)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default();
+            let mapping = new_numbers
+                .iter()
+                .map(|n| if n == old { format!("#{n} (kept)") } else { format!("#{n}") })
+                .collect::<Vec<_>>()
+                .join(" + ");
+            println!("  #{old} now maps to: {mapping}");
+        }
+        println!();
         println!(
-            "Warning: duplicate old number(s) had ambiguous references and were left unchanged where referenced: {nums}"
+            "  Body-text and frontmatter references to these old numbers were left\n  \
+             unchanged. Find them with: rg -n '#({})\\b'",
+            ambiguous
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join("|")
         );
     }
 
+    Ok(())
+}
+
+fn default_renumber_scopes(root: &Path) -> Vec<PathBuf> {
+    vec![root.to_path_buf()]
+}
+
+fn print_renumber_plan(
+    plans: &[RenumberPlan],
+    dir_map: &BTreeMap<String, String>,
+    ambiguous: &BTreeSet<u32>,
+    scopes: &[PathBuf],
+    root: &Path,
+) {
+    let changed: Vec<_> = plans.iter().filter(|p| p.old_number != p.new_number).collect();
+    let kept = plans.len() - changed.len();
+
+    println!("Plan ({} items: {} keep their numbers, {} will be renumbered):", plans.len(), kept, changed.len());
+    if changed.is_empty() {
+        println!("  (no duplicate numbers found — nothing to renumber)");
+    } else {
+        for plan in &changed {
+            println!(
+                "  #{:<4} → #{:<4}  {}",
+                plan.old_number, plan.new_number, plan.new_dir_name
+            );
+        }
+    }
+
+    if !ambiguous.is_empty() {
+        println!();
+        println!(
+            "Ambiguous: {} old number(s) had multiple dirs; references to these may need manual review.",
+            ambiguous.len()
+        );
+    }
+
+    println!();
+    println!("Scopes for reference rewriting (.md files only):");
+    for s in scopes {
+        let display = s.strip_prefix(root).unwrap_or(s);
+        let display_str = if display.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            display.display().to_string()
+        };
+        println!("  {display_str}");
+    }
+    if !dir_map.is_empty() {
+        println!("Directory paths to rewrite: {}", dir_map.len());
+    }
+}
+
+fn rewrite_markdown_in_scopes(
+    scopes: &[PathBuf],
+    number_map: &BTreeMap<u32, BTreeSet<u32>>,
+    dir_map: &BTreeMap<String, String>,
+) -> Result<usize> {
+    let mut changed = 0usize;
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    for scope in scopes {
+        if !scope.exists() {
+            continue;
+        }
+        let files = if scope.is_file() {
+            vec![scope.clone()]
+        } else {
+            collect_markdown_files_filtered(scope)?
+        };
+        for path in files {
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if !seen.insert(canonical) {
+                continue;
+            }
+            let original = fs::read_to_string(&path)
+                .with_context(|| format!("cannot read {}", path.display()))?;
+            let rewritten = rewrite_issue_text(&original, number_map, dir_map);
+            if rewritten != original {
+                fs::write(&path, rewritten)
+                    .with_context(|| format!("cannot write {}", path.display()))?;
+                changed += 1;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+fn collect_markdown_files_filtered(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    walk_markdown(root, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+fn walk_markdown(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if entry.file_type()?.is_dir() {
+            if matches!(
+                name.as_str(),
+                ".git" | "target" | "node_modules" | ".cargo" | "dist" | "build"
+            ) {
+                continue;
+            }
+            walk_markdown(&path, out)?;
+        } else if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("md"))
+            .unwrap_or(false)
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn rename_issue_dirs_changed_only(plans: &[RenumberPlan]) -> Result<()> {
+    let changed: Vec<&RenumberPlan> = plans
+        .iter()
+        .filter(|p| p.old_dir_name != p.new_dir_name)
+        .collect();
+    if changed.is_empty() {
+        return Ok(());
+    }
+    for plan in &changed {
+        if plan.temp_path.exists() {
+            anyhow::bail!(
+                "temporary path already exists: {}",
+                plan.temp_path.display()
+            );
+        }
+        fs::rename(&plan.path, &plan.temp_path).with_context(|| {
+            format!(
+                "cannot move {} to {}",
+                plan.path.display(),
+                plan.temp_path.display()
+            )
+        })?;
+    }
+    for plan in &changed {
+        if plan.target_path.exists() {
+            anyhow::bail!("target path already exists: {}", plan.target_path.display());
+        }
+        fs::rename(&plan.temp_path, &plan.target_path).with_context(|| {
+            format!(
+                "cannot move {} to {}",
+                plan.temp_path.display(),
+                plan.target_path.display()
+            )
+        })?;
+    }
     Ok(())
 }
 
@@ -1003,24 +1205,49 @@ fn build_renumber_plan(root: &Path) -> Result<Vec<RenumberPlan>> {
             .then_with(|| a.3.cmp(&b.3))
     });
 
+    // Preserve-unique + spill-duplicates algorithm:
+    //   - Each unique old_number keeps its number (no rename)
+    //   - For duplicates (multiple dirs with the same old_number), the first
+    //     by sort order keeps the number; subsequent ones get fresh numbers
+    //     above the current max.
+    // This minimizes churn: only conflicting directories move, and references
+    // to non-duplicate numbers stay valid.
+    let mut max_number: u32 = items.iter().map(|i| i.0).max().unwrap_or(0);
     let temp_suffix = format!(".issuectl-renumber-{}", std::process::id());
-    let mut plans = Vec::with_capacity(items.len());
-    for (index, (old_number, folder, slug, path)) in items.into_iter().enumerate() {
-        let new_number = (index + 1) as u32;
-        let folder_path = issues_dir.join(folder);
-        let old_dir_name = format!("{old_number}-{slug}");
-        let new_dir_name = format!("{new_number}-{slug}");
-        plans.push(RenumberPlan {
-            old_number,
-            new_number,
-            old_dir_name,
-            new_dir_name: new_dir_name.clone(),
-            target_path: folder_path.join(new_dir_name),
-            temp_path: folder_path.join(format!("{old_number}-{slug}{temp_suffix}")),
-            path,
-        });
+
+    let mut groups: BTreeMap<u32, Vec<(String, String, PathBuf)>> = BTreeMap::new();
+    for (old_number, folder, slug, path) in items {
+        groups
+            .entry(old_number)
+            .or_default()
+            .push((folder, slug, path));
     }
 
+    let mut plans = Vec::new();
+    for (old_number, group) in groups {
+        for (i, (folder, slug, path)) in group.into_iter().enumerate() {
+            let new_number = if i == 0 {
+                old_number
+            } else {
+                max_number += 1;
+                max_number
+            };
+            let folder_path = issues_dir.join(&folder);
+            let old_dir_name = format!("{old_number}-{slug}");
+            let new_dir_name = format!("{new_number}-{slug}");
+            plans.push(RenumberPlan {
+                old_number,
+                new_number,
+                old_dir_name,
+                new_dir_name: new_dir_name.clone(),
+                target_path: folder_path.join(new_dir_name),
+                temp_path: folder_path.join(format!("{old_number}-{slug}{temp_suffix}")),
+                path,
+            });
+        }
+    }
+
+    plans.sort_by_key(|p| (p.old_number, p.new_number));
     Ok(plans)
 }
 
@@ -1048,49 +1275,6 @@ fn ambiguous_numbers(number_map: &BTreeMap<u32, BTreeSet<u32>>) -> BTreeSet<u32>
         .iter()
         .filter_map(|(old, new)| if new.len() > 1 { Some(*old) } else { None })
         .collect()
-}
-
-fn rewrite_issue_markdown(
-    root: &Path,
-    number_map: &BTreeMap<u32, BTreeSet<u32>>,
-    dir_map: &BTreeMap<String, String>,
-) -> Result<()> {
-    let issues_dir = root.join("issues");
-    for path in markdown_files(&issues_dir)? {
-        let original =
-            fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-        let rewritten = rewrite_issue_text(&original, number_map, dir_map);
-        if rewritten != original {
-            fs::write(&path, rewritten)
-                .with_context(|| format!("cannot write {}", path.display()))?;
-        }
-    }
-    Ok(())
-}
-
-fn markdown_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut result = Vec::new();
-    collect_markdown_files(dir, &mut result)?;
-    result.sort();
-    Ok(result)
-}
-
-fn collect_markdown_files(dir: &Path, result: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            collect_markdown_files(&path, result)?;
-        } else if path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("md"))
-            .unwrap_or(false)
-        {
-            result.push(path);
-        }
-    }
-    Ok(())
 }
 
 fn rewrite_issue_text(
@@ -1172,39 +1356,6 @@ fn mapped_number(old: u32, number_map: &BTreeMap<u32, BTreeSet<u32>>) -> Option<
     } else {
         None
     }
-}
-
-fn rename_issue_dirs(plans: &[RenumberPlan]) -> Result<()> {
-    for plan in plans {
-        if plan.temp_path.exists() {
-            anyhow::bail!(
-                "temporary path already exists: {}",
-                plan.temp_path.display()
-            );
-        }
-        fs::rename(&plan.path, &plan.temp_path).with_context(|| {
-            format!(
-                "cannot move {} to {}",
-                plan.path.display(),
-                plan.temp_path.display()
-            )
-        })?;
-    }
-
-    for plan in plans {
-        if plan.target_path.exists() {
-            anyhow::bail!("target path already exists: {}", plan.target_path.display());
-        }
-        fs::rename(&plan.temp_path, &plan.target_path).with_context(|| {
-            format!(
-                "cannot move {} to {}",
-                plan.temp_path.display(),
-                plan.target_path.display()
-            )
-        })?;
-    }
-
-    Ok(())
 }
 
 // ── Display helpers ─────────────────────────────────────────────────────────
@@ -1426,6 +1577,117 @@ Continues #12 and blocks **#13**.
             rewritten,
             "[#93](../72-auditoitavuus-asiantuntijanakyma/item.md) not 157-auditoitavuus-asiantuntijanakyma"
         );
+    }
+
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn make_repo_with_dirs(specs: &[(&str, u32, &str)]) -> TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues/closed")).unwrap();
+        for (folder, num, slug) in specs {
+            let dir = tmp
+                .path()
+                .join("issues")
+                .join(folder)
+                .join(format!("{num}-{slug}"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("item.md"),
+                format!("---\nstatus: open\n---\n\n# {slug}\n"),
+            )
+            .unwrap();
+        }
+        tmp
+    }
+
+    #[test]
+    fn renumber_plan_preserves_unique_numbers() {
+        let tmp = make_repo_with_dirs(&[
+            ("open", 1, "first"),
+            ("open", 5, "fifth"),
+            ("closed", 10, "tenth"),
+        ]);
+        let plans = build_renumber_plan(tmp.path()).unwrap();
+        for plan in &plans {
+            assert_eq!(plan.old_number, plan.new_number, "{plan:?}");
+        }
+    }
+
+    #[test]
+    fn renumber_plan_spills_duplicates_above_max() {
+        // Three issues share #14, max number is 50.
+        let tmp = make_repo_with_dirs(&[
+            ("open", 14, "alpha"),
+            ("open", 14, "beta"),
+            ("closed", 14, "gamma"),
+            ("open", 50, "max-issue"),
+        ]);
+        let plans = build_renumber_plan(tmp.path()).unwrap();
+
+        let kept_14: Vec<_> = plans
+            .iter()
+            .filter(|p| p.old_number == 14 && p.new_number == 14)
+            .collect();
+        assert_eq!(kept_14.len(), 1, "exactly one #14 should keep its number");
+
+        let spilled: Vec<_> = plans
+            .iter()
+            .filter(|p| p.old_number == 14 && p.new_number != 14)
+            .collect();
+        assert_eq!(spilled.len(), 2, "two #14 sources should spill");
+        for plan in &spilled {
+            assert!(
+                plan.new_number > 50,
+                "spilled number {} should be above max 50",
+                plan.new_number
+            );
+        }
+
+        let max_plan = plans.iter().find(|p| p.old_number == 50).unwrap();
+        assert_eq!(max_plan.new_number, 50, "max should be unchanged");
+    }
+
+    #[test]
+    fn renumber_plan_no_renames_when_all_unique() {
+        let tmp = make_repo_with_dirs(&[
+            ("open", 1, "a"),
+            ("open", 2, "b"),
+            ("closed", 3, "c"),
+        ]);
+        let plans = build_renumber_plan(tmp.path()).unwrap();
+        let dir_map = build_dir_map(&plans);
+        assert!(
+            dir_map.is_empty(),
+            "no renames expected when no duplicates: {dir_map:?}"
+        );
+    }
+
+    #[test]
+    fn renumber_dry_run_does_not_modify_filesystem() {
+        let tmp = make_repo_with_dirs(&[
+            ("open", 1, "a"),
+            ("open", 1, "b"),
+        ]);
+        let before: Vec<String> = fs::read_dir(tmp.path().join("issues/open"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+
+        // Drive cmd_renumber through ROOT_OVERRIDE.
+        let _ = ROOT_OVERRIDE.set(Some(tmp.path().to_path_buf()));
+        cmd_renumber(true, vec![]).unwrap();
+
+        let after: Vec<String> = fs::read_dir(tmp.path().join("issues/open"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        let mut before_sorted = before.clone();
+        let mut after_sorted = after.clone();
+        before_sorted.sort();
+        after_sorted.sort();
+        assert_eq!(before_sorted, after_sorted, "dry-run must not change anything");
     }
 }
 
