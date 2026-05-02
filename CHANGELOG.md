@@ -21,8 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--priority`, `--status`. Empty/whitespace-only string arguments are
   rejected with clear errors.
 - `--json` output for `list`, `show`, `search`, `stats`.
-- `issuectl skill install` to bootstrap a target repo with the `/issue`
-  Claude Code skill and `issues/AGENTS.md`.
+- `issuectl skill install --agent claude|codex|all` to bootstrap a target
+  repo with the `/issue` skill template (Claude Code at
+  `.claude/skills/issue/SKILL.md`, Codex at `.codex/prompts/issue.md`,
+  or both).
+- `issuectl skill print --agent claude|codex` to preview the template
+  on stdout without writing to disk.
 - 95 unit and integration tests covering pure helpers, frontmatter
   round-trip, command flows (tempdir-backed), and renumber edge cases.
 - End-to-end test fixture at `tests/fixtures/grooveserve/` (~144 issues,

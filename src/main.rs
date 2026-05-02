@@ -265,7 +265,7 @@ enum Command {
     /// Renumber and fix cross-references during merges
     Renumber,
 
-    /// Generate and install the /issue Claude Code skill
+    /// Install or preview the /issue skill template (Claude Code or Codex)
     Skill {
         #[command(subcommand)]
         action: SkillAction,
@@ -274,11 +274,23 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SkillAction {
-    /// Install the /issue skill and issues/AGENTS.md into the current repo
+    /// Install the /issue skill template into the current repo. By default
+    /// installs the Claude Code skill; use --agent codex for Codex CLI, or
+    /// --agent all for both.
     Install {
+        /// Which agent's skill format to install
+        #[arg(short = 'a', long, default_value = "claude", value_parser = PossibleValuesParser::new(["claude", "codex", "all"]))]
+        agent: String,
+
         /// Overwrite existing files
         #[arg(long)]
         force: bool,
+    },
+    /// Print the skill template to stdout (preview before installing)
+    Print {
+        /// Which agent's skill format to print
+        #[arg(short = 'a', long, default_value = "claude", value_parser = PossibleValuesParser::new(["claude", "codex"]))]
+        agent: String,
     },
 }
 
@@ -372,7 +384,8 @@ fn main() -> Result<()> {
         } => cmd_close(number, status, commits),
         Command::Renumber => cmd_renumber(),
         Command::Skill { action } => match action {
-            SkillAction::Install { force } => cmd_skill_install(force),
+            SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
+            SkillAction::Print { agent } => cmd_skill_print(&agent),
         },
     }
 }
@@ -931,9 +944,20 @@ fn cmd_renumber() -> Result<()> {
     Ok(())
 }
 
-fn cmd_skill_install(force: bool) -> Result<()> {
+fn cmd_skill_install(agent: &str, force: bool) -> Result<()> {
+    let agents = match agent {
+        "claude" => vec![skill::Agent::Claude],
+        "codex" => vec![skill::Agent::Codex],
+        "all" => vec![skill::Agent::Claude, skill::Agent::Codex],
+        other => bail!("unknown agent {other:?}; expected claude, codex, or all"),
+    };
     let root = find_root();
-    skill::install_skill(&root, force)
+    skill::install_skill(&root, &agents, force)
+}
+
+fn cmd_skill_print(agent: &str) -> Result<()> {
+    let resolved = skill::Agent::from_str(agent)?;
+    skill::print_skill(resolved)
 }
 
 #[derive(Debug, Clone)]

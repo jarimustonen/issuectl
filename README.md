@@ -34,7 +34,8 @@ can use it from a terminal too.
 - `list` / `show` / `search` / `stats` — browse with filters and JSON output
 - `new` / `update` / `close` — create, mutate, and resolve issues with strict validation
 - `renumber` — uniquify numbers and fix cross-references after merges
-- `skill install` — install the `/issue` Claude Code skill into a target repo
+- `skill install` / `skill print` — install or preview the `/issue` skill
+  template for Claude Code or Codex CLI (or both)
 - `--root <PATH>` — operate on an external repo from any working directory
 
 ## Install
@@ -120,7 +121,10 @@ issue moves it back to `open/` and clears `closed:`.
 
 ```
 issuectl renumber                      Uniquify numbers, fix #NN refs
-issuectl skill install [--force]       Install /issue skill in current repo
+issuectl skill install                 Install /issue skill (default: Claude Code)
+issuectl skill install --agent codex   Install Codex prompt instead
+issuectl skill install --agent all     Install both
+issuectl skill print [--agent codex]   Preview the template without installing
 ```
 
 `renumber` walks `issues/open/` and `issues/closed/`, assigns sequential
@@ -169,19 +173,35 @@ _Source: which service / page / feature_
 See [issues/AGENTS.md](issues/AGENTS.md) for the full schema reference,
 status workflow, and conventions.
 
-## Claude Code integration
+## Agent integration
 
-`issuectl skill install` writes a `/issue` skill to
-`.claude/skills/issue/SKILL.md` in the target repo. The skill instructs
-Claude Code to delegate Search/List/Show/Create/Update/Close to
-`issuectl` rather than poking at the filesystem directly. It still
-handles body markdown (`## Reproduction`, epic `## Issues`/`## Phases`
-sections, screenshot attachments) since those are not in the CLI's
-scope.
+`issuectl skill install` writes a `/issue` skill template into a target
+repo so an AI agent can drive issue management through `issuectl`
+rather than poking at the filesystem directly. Two formats are
+supported:
 
-The skill template is also available at
-[`templates/issue-skill.md`](templates/issue-skill.md) if you want to
-customize it before installing.
+| Agent             | Destination                       | Format                                 |
+| ----------------- | --------------------------------- | -------------------------------------- |
+| Claude Code       | `.claude/skills/issue/SKILL.md`   | YAML frontmatter + markdown body       |
+| Codex CLI         | `.codex/prompts/issue.md`         | Plain markdown prompt                  |
+
+```sh
+issuectl skill install                  # Claude Code skill (default)
+issuectl skill install --agent codex    # Codex prompt
+issuectl skill install --agent all      # both
+issuectl skill print                    # preview Claude template to stdout
+issuectl skill print --agent codex      # preview Codex template
+```
+
+The skill instructs the agent to delegate Search/List/Show/Create/Update/Close
+to `issuectl`, but leaves body markdown editing (`## Reproduction`,
+epic `## Issues`/`## Phases` sections, screenshot attachments) to the
+agent since those are out of scope for the CLI.
+
+Source templates live at
+[`templates/issue-skill.md`](templates/issue-skill.md) (Claude) and
+[`templates/issue-prompt.md`](templates/issue-prompt.md) (Codex) if you
+want to customize before installing.
 
 ## Configuration
 
