@@ -46,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--scope <PATH>` (repeatable) to limit.
 - `issuectl renumber --dry-run` previews the plan and ambiguous-reference
   list without modifying anything.
+- `issuectl renumber --pin NUMBER=SLUG_SUBSTRING` (repeatable) tells the
+  resolver which dir in a duplicate group keeps the original number.
+  Substring is matched against the slug within the group; errors if it
+  matches zero or multiple dirs (with the candidates listed). This
+  matters when the repo's docs reference a duplicate number meaning a
+  specific dir, not the alphabetically-first one. Wishlist item #12.
 - `issuectl --json renumber` (with or without `--dry-run`) emits a
   structured report with the plan, ambiguous-mapping table, and
   per-step counts. Useful for pipelines and `sed`-script generation —

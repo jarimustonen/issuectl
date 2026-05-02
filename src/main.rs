@@ -276,6 +276,13 @@ enum Command {
         /// files only, skipping .git/target/node_modules/.cargo/dist/build).
         #[arg(long = "scope", value_name = "PATH")]
         scopes: Vec<PathBuf>,
+
+        /// For a duplicate number, pick which directory keeps the original
+        /// number. Format: `NUMBER=SLUG_SUBSTRING`. The match must be
+        /// unique within the group. Repeatable for multiple duplicates.
+        /// Example: `--pin 26=multi-tenant` (when three #26's exist).
+        #[arg(long = "pin", value_name = "N=MATCH", value_parser = parse_non_empty)]
+        pins: Vec<String>,
     },
 
     /// Install or preview the /issue skill template (Claude Code or Codex)
@@ -395,7 +402,11 @@ fn main() -> Result<()> {
             status,
             commits,
         } => cmd_close(json_output, number, status, commits),
-        Command::Renumber { dry_run, scopes } => cmd_renumber(json_output, dry_run, scopes),
+        Command::Renumber {
+            dry_run,
+            scopes,
+            pins,
+        } => cmd_renumber(json_output, dry_run, scopes, pins),
         Command::Skill { action } => match action {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
             SkillAction::Print { agent } => cmd_skill_print(&agent),
@@ -953,9 +964,15 @@ fn normalize_related_refs(refs: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
-fn cmd_renumber(json: bool, dry_run: bool, scopes: Vec<PathBuf>) -> Result<()> {
+fn cmd_renumber(
+    json: bool,
+    dry_run: bool,
+    scopes: Vec<PathBuf>,
+    pins: Vec<String>,
+) -> Result<()> {
+    let pins = parse_pins(&pins)?;
     let root = find_root();
-    let plans = build_renumber_plan(&root)?;
+    let plans = build_renumber_plan(&root, &pins)?;
 
     if plans.is_empty() {
         if json {
@@ -1318,7 +1335,33 @@ struct RenumberPlan {
     temp_path: PathBuf,
 }
 
-fn build_renumber_plan(root: &Path) -> Result<Vec<RenumberPlan>> {
+fn parse_pins(specs: &[String]) -> Result<BTreeMap<u32, String>> {
+    let mut out = BTreeMap::new();
+    for spec in specs {
+        let (num_str, match_str) = spec
+            .split_once('=')
+            .with_context(|| format!("--pin must be NUMBER=MATCH, got {spec:?}"))?;
+        let number: u32 = num_str.trim().parse().with_context(|| {
+            format!(
+                "--pin: number part {:?} is not a valid u32 in {spec:?}",
+                num_str.trim()
+            )
+        })?;
+        let match_str = match_str.trim();
+        if match_str.is_empty() {
+            bail!("--pin {number}=: match string cannot be empty");
+        }
+        if out.insert(number, match_str.to_string()).is_some() {
+            bail!("--pin {number}: specified more than once");
+        }
+    }
+    Ok(out)
+}
+
+fn build_renumber_plan(
+    root: &Path,
+    pins: &BTreeMap<u32, String>,
+) -> Result<Vec<RenumberPlan>> {
     let issues_dir = root.join("issues");
     let mut items = Vec::new();
 
@@ -1368,8 +1411,49 @@ fn build_renumber_plan(root: &Path) -> Result<Vec<RenumberPlan>> {
             .push((folder, slug, path));
     }
 
+    // Validate every pin maps to an existing number.
+    for num in pins.keys() {
+        if !groups.contains_key(num) {
+            bail!("--pin {num}: no issue with that number exists");
+        }
+    }
+
     let mut plans = Vec::new();
-    for (old_number, group) in groups {
+    for (old_number, mut group) in groups {
+        // Apply --pin: move the matching dir to position 0 (the "keep" slot).
+        if let Some(pin_match) = pins.get(&old_number) {
+            if group.len() > 1 {
+                let matches: Vec<usize> = group
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, slug, _))| slug.contains(pin_match.as_str()))
+                    .map(|(i, _)| i)
+                    .collect();
+                match matches.len() {
+                    0 => bail!(
+                        "--pin {old_number}={pin_match}: no dir slug contains {pin_match:?} (candidates: {})",
+                        group.iter().map(|(_, s, _)| s.as_str()).collect::<Vec<_>>().join(", ")
+                    ),
+                    1 => {
+                        let i = matches[0];
+                        if i != 0 {
+                            group.swap(0, i);
+                        }
+                    }
+                    _ => bail!(
+                        "--pin {old_number}={pin_match}: matches {} dirs ({}); be more specific",
+                        matches.len(),
+                        matches
+                            .iter()
+                            .map(|i| group[*i].1.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                }
+            }
+            // group.len() == 1: pin is a no-op (only one dir, keeps its number anyway)
+        }
+
         for (i, (folder, slug, path)) in group.into_iter().enumerate() {
             let new_number = if i == 0 {
                 old_number
@@ -1754,7 +1838,7 @@ Continues #12 and blocks **#13**.
             ("open", 5, "fifth"),
             ("closed", 10, "tenth"),
         ]);
-        let plans = build_renumber_plan(tmp.path()).unwrap();
+        let plans = build_renumber_plan(tmp.path(), &BTreeMap::new()).unwrap();
         for plan in &plans {
             assert_eq!(plan.old_number, plan.new_number, "{plan:?}");
         }
@@ -1769,7 +1853,7 @@ Continues #12 and blocks **#13**.
             ("closed", 14, "gamma"),
             ("open", 50, "max-issue"),
         ]);
-        let plans = build_renumber_plan(tmp.path()).unwrap();
+        let plans = build_renumber_plan(tmp.path(), &BTreeMap::new()).unwrap();
 
         let kept_14: Vec<_> = plans
             .iter()
@@ -1801,7 +1885,7 @@ Continues #12 and blocks **#13**.
             ("open", 2, "b"),
             ("closed", 3, "c"),
         ]);
-        let plans = build_renumber_plan(tmp.path()).unwrap();
+        let plans = build_renumber_plan(tmp.path(), &BTreeMap::new()).unwrap();
         let dir_map = build_dir_map(&plans);
         assert!(
             dir_map.is_empty(),
@@ -1822,7 +1906,7 @@ Continues #12 and blocks **#13**.
 
         // Drive cmd_renumber through ROOT_OVERRIDE.
         let _ = ROOT_OVERRIDE.set(Some(tmp.path().to_path_buf()));
-        cmd_renumber(false, true, vec![]).unwrap();
+        cmd_renumber(false, true, vec![], vec![]).unwrap();
 
         let after: Vec<String> = fs::read_dir(tmp.path().join("issues/open"))
             .unwrap()
@@ -1833,6 +1917,105 @@ Continues #12 and blocks **#13**.
         before_sorted.sort();
         after_sorted.sort();
         assert_eq!(before_sorted, after_sorted, "dry-run must not change anything");
+    }
+
+    #[test]
+    fn parse_pins_accepts_valid_specs() {
+        let pins = parse_pins(&[
+            "26=multi-tenant".to_string(),
+            "33=tool-skills".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(pins.get(&26), Some(&"multi-tenant".to_string()));
+        assert_eq!(pins.get(&33), Some(&"tool-skills".to_string()));
+    }
+
+    #[test]
+    fn parse_pins_rejects_malformed_specs() {
+        assert!(parse_pins(&["nope".to_string()]).is_err()); // no =
+        assert!(parse_pins(&["abc=foo".to_string()]).is_err()); // non-numeric
+        assert!(parse_pins(&["26=".to_string()]).is_err()); // empty match
+        assert!(
+            parse_pins(&["26=foo".to_string(), "26=bar".to_string()]).is_err(),
+            "duplicate pin for same number must error"
+        );
+    }
+
+    #[test]
+    fn renumber_pin_keeps_matching_dir() {
+        // Three #26 issues; pin "multi-tenant" so the open one keeps #26.
+        let tmp = make_repo_with_dirs(&[
+            ("closed", 26, "infra-email"),
+            ("closed", 26, "matkalaskun"),
+            ("open", 26, "multi-tenant"),
+            ("open", 50, "max-issue"),
+        ]);
+        let mut pins = BTreeMap::new();
+        pins.insert(26u32, "multi-tenant".to_string());
+        let plans = build_renumber_plan(tmp.path(), &pins).unwrap();
+
+        let kept = plans
+            .iter()
+            .find(|p| p.old_number == 26 && p.new_number == 26)
+            .expect("one #26 should be kept");
+        assert!(
+            kept.old_dir_name.contains("multi-tenant"),
+            "pinned dir should keep the number, got {}",
+            kept.old_dir_name
+        );
+    }
+
+    #[test]
+    fn renumber_pin_rejects_no_match() {
+        let tmp = make_repo_with_dirs(&[
+            ("open", 26, "alpha"),
+            ("open", 26, "beta"),
+        ]);
+        let mut pins = BTreeMap::new();
+        pins.insert(26u32, "nonexistent".to_string());
+        let result = build_renumber_plan(tmp.path(), &pins);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("no dir slug contains"),
+            "expected 'no dir slug contains' error"
+        );
+    }
+
+    #[test]
+    fn renumber_pin_rejects_ambiguous_match() {
+        let tmp = make_repo_with_dirs(&[
+            ("open", 26, "tenant-foo"),
+            ("open", 26, "tenant-bar"),
+        ]);
+        let mut pins = BTreeMap::new();
+        pins.insert(26u32, "tenant".to_string());
+        let result = build_renumber_plan(tmp.path(), &pins);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("matches 2 dirs"),
+            "expected 'matches 2 dirs' error"
+        );
+    }
+
+    #[test]
+    fn renumber_pin_for_unknown_number_errors() {
+        let tmp = make_repo_with_dirs(&[("open", 1, "alpha")]);
+        let mut pins = BTreeMap::new();
+        pins.insert(99u32, "anything".to_string());
+        let result = build_renumber_plan(tmp.path(), &pins);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn renumber_pin_on_unique_number_is_noop() {
+        // Pin on a non-duplicate number is harmless.
+        let tmp = make_repo_with_dirs(&[("open", 5, "alpha")]);
+        let mut pins = BTreeMap::new();
+        pins.insert(5u32, "alpha".to_string());
+        let plans = build_renumber_plan(tmp.path(), &pins).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].old_number, 5);
+        assert_eq!(plans[0].new_number, 5);
     }
 }
 

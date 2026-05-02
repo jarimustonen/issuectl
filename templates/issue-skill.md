@@ -209,6 +209,35 @@ The plan output (`renumbered`, `ambiguous`, `summary`) tells you which
 old numbers had multiple sources and which references will need manual
 review afterward.
 
+**Choosing which duplicate keeps the number** — `--pin NUMBER=SLUG_SUBSTRING`:
+
+By default, when a number has multiple dirs, the first by sort order
+(closed/open then alphabetical slug) keeps the number. This may be
+**semantically wrong** — if the repo's docs reference `#26` meaning a
+specific issue (e.g. the multi-tenant epic, not the alphabetically-first
+"infra-email" one), the user should pin the canonical one.
+
+```sh
+# Show the default plan; user notices #26 keeps the wrong dir
+issuectl --json renumber --dry-run
+
+# Re-plan with explicit pin
+issuectl --json renumber --dry-run --pin 26=multi-tenant
+
+# Apply once the plan looks right
+issuectl --json renumber --pin 26=multi-tenant --pin 33=tool-skills
+```
+
+Match is a **substring of the slug** within the duplicate group. Errors
+if no match or multiple matches; the error lists candidates so the user
+can pick a more specific substring. Repeat `--pin` for each duplicate
+number that needs explicit resolution.
+
+When the user's request implies an obvious canonical issue ("keep #26
+as the multi-tenant one"), translate that into a `--pin` flag. When
+the user says only "renumber the duplicates", run the default plan
+first and surface the spillover so the user can decide.
+
 ## Notes
 
 - **Today's date** is set automatically by the CLI for `created`/`updated`

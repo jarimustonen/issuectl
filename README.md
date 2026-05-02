@@ -123,6 +123,7 @@ issue moves it back to `open/` and clears `closed:`.
 issuectl renumber                      Resolve duplicate numbers (preserve unique)
 issuectl renumber --dry-run            Preview the plan without modifying anything
 issuectl renumber --scope crates       Limit reference rewriting to one subtree
+issuectl renumber --pin 26=multi-tenant  Pin a specific dir to keep its number
 issuectl --json renumber [--dry-run]   Structured plan + report (for pipelines)
 issuectl skill install                 Install /issue skill (default: Claude Code)
 issuectl skill install --agent codex   Install Codex prompt instead
@@ -141,6 +142,13 @@ numbers don't move). References to *duplicate* numbers (`#14`,
 `epic: 14`, `related: ["#14"]`) are reported as ambiguous and left
 unchanged for manual review — `issuectl` cannot guess which of the
 three the writer meant.
+
+If the repo's docs reference a duplicate number meaning a *specific*
+one of the dirs (say, `#26` always meant the multi-tenant epic, not
+alphabetically-first `infra-email`), pin it with
+`--pin NUMBER=SLUG_SUBSTRING`. The pinned dir keeps the number and the
+others spill. Repeatable for multiple numbers. Errors if the substring
+matches zero or multiple dirs in the group.
 
 By default, reference rewriting scans the whole repo for `.md` files
 (skipping `.git/`, `target/`, `node_modules/`, `.cargo/`, `dist/`,
