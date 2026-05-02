@@ -65,3 +65,7 @@ publish-jobs = ["homebrew"]
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
+# Allow manual edits to .github/workflows/release.yml (we widened
+# permissions to write-all to fix HTTP 403 on release creation —
+# cargo-dist's default 'contents: write' was insufficient).
+allow-dirty = ["ci"]
