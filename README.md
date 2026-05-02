@@ -49,27 +49,41 @@ can use it from a terminal too.
 
 ## Install
 
-### Homebrew (macOS / Linux)
+Pick whichever channel suits your platform. After installing, verify with:
 
 ```sh
-brew tap jarimustonen/issuectl
-brew install issuectl
+issuectl --version
 ```
 
-### Pre-built binary (any platform)
+### Homebrew — macOS and Linux
+
+```sh
+brew install jarimustonen/issuectl/issuectl
+```
+
+The first run automatically taps `jarimustonen/homebrew-issuectl`. To
+upgrade later: `brew upgrade issuectl`.
+
+### Cargo — any platform with a Rust toolchain
+
+```sh
+cargo install issuectl
+```
+
+### Shell installer — any platform, no toolchain required
+
+Downloads the prebuilt binary for your OS/arch and drops it in
+`~/.cargo/bin` (or equivalent):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
     https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh
 ```
 
-Or download a tarball directly from the [releases page](https://github.com/jarimustonen/issuectl/releases).
-
-### crates.io
-
-```sh
-cargo install issuectl
-```
+Or grab a tarball manually from the
+[releases page](https://github.com/jarimustonen/issuectl/releases) —
+binaries are signed-checksummed and available for macOS (Intel +
+Apple Silicon) and Linux x86_64.
 
 ### From source
 
@@ -81,24 +95,37 @@ cargo install --path .
 
 ## Quick start
 
+After installing, set up your repo and create your first issue:
+
 ```sh
-# In a fresh repo:
-issuectl skill install
+cd path/to/your/repo
+
+# Install the /issue skill so Claude Code or Codex CLI can drive issuectl.
+# This also creates issues/AGENTS.md and issues/{open,closed}/ if they
+# don't exist yet.
+issuectl skill install --agent all
 
 # Create your first issue:
 issuectl new --type bug --title "Login loops on Safari" \
     --reporter alice --assignee bob --priority high
+# → Created #1: Login loops on Safari
+#     /your/repo/issues/open/1-login-loops-on-safari/item.md
 
 # Browse:
 issuectl list
 issuectl show 1
 
-# Update:
-issuectl update 1 --status in-progress \
-    --add-commit "abc123:fix redirect state init"
+# Move it through the workflow:
+issuectl update 1 --status in-progress
+issuectl update 1 --add-commit "abc1234:fix redirect state init"
+issuectl close 1                       # status → fixed (default for bugs)
+```
 
-# Close:
-issuectl close 1
+JSON output for any command (for scripting and AI agents):
+
+```sh
+issuectl --json list -t bug --status open
+issuectl --json show 1
 ```
 
 ## Usage
