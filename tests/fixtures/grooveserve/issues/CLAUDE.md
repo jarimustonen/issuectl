@@ -47,7 +47,7 @@ commits:              # optional — added as work progresses
     summary: "fix: description of the fix"
 ---
 
-# Issue title
+# NN. Issue title
 
 _Source: where it happens_
 
@@ -158,7 +158,7 @@ status: open
 priority: normal
 ---
 
-# Epic title
+# ENN. Epic title
 
 ## Goal
 
@@ -201,7 +201,7 @@ Epics use `owner` instead of `reporter`/`assignee` since they are owned long-ter
 Epics follow the same open/closed flow as issues:
 - Created in `open/NN-slug/item.md`
 - When all phases complete: set status to `done` → moved to `closed/`
-- Epics are distinguished by `type: epic` in frontmatter
+- The `E` prefix in the title (`# E40.`) distinguishes epics visually
 
 ## Issue Numbering
 
@@ -224,6 +224,26 @@ The skill determines the next number, gathers details (including type), and crea
 - When done, set a **closing status** (`done`, `fixed`, `wontfix`, etc.) — this automatically moves the issue from `open/` to `closed/`
 - Add the commit to `commits` when a fix/implementation is committed
 - Epics: update the `## Issues` and `## Phases` sections as child issues progress
+
+## Commit & worktree-spawn rules
+
+**Issue file changes are always committed.** Status changes, frontmatter
+updates, epic Worktree-loki / Decision log edits, new analysis.md files,
+git mv to `closed/` — none of these stay uncommitted. Commit them as you
+go (a small `docs(issues)` / `chore(issues)` commit is fine), so the
+issue tracker on `main` always reflects current state.
+
+**Before spawning a worktree for an issue:**
+1. Update the issue's `status:` to `in-progress` (and `updated:` date) in `issues/open/NN-*/item.md`
+2. Update the parent epic's Worktree-loki and Phase checkboxes if applicable
+3. **Commit those changes on `main`** (or whichever base branch the worktree forks from)
+4. Then spawn the worktree
+
+This keeps the worktree's base point already showing the new status — the
+worktree branch starts from a tree where the issue is correctly marked in
+flight, and `main` reflects what's currently being worked on at all times.
+The worktree itself will still update `commits:`, close the issue, and
+update the epic when its work is done.
 
 ## Images
 

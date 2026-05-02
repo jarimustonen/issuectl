@@ -65,7 +65,16 @@ struct Cli {
     /// Output as JSON
     #[arg(global = true, long)]
     json: bool,
+
+    /// Override the repo root (the directory that contains issues/). Useful
+    /// for pointing issuectl at an external project from another working
+    /// directory. When omitted, issuectl walks up from cwd looking for
+    /// issues/ or .git.
+    #[arg(global = true, long, value_name = "PATH")]
+    root: Option<PathBuf>,
 }
+
+static ROOT_OVERRIDE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
 fn parse_non_empty(s: &str) -> std::result::Result<String, String> {
     let trimmed = s.trim();
@@ -276,6 +285,7 @@ enum SkillAction {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let json_output = cli.json;
+    ROOT_OVERRIDE.set(cli.root).ok();
 
     match cli.command {
         Command::List {
@@ -368,6 +378,16 @@ fn main() -> Result<()> {
 }
 
 fn find_root() -> PathBuf {
+    if let Some(Some(p)) = ROOT_OVERRIDE.get() {
+        if !p.join("issues").is_dir() {
+            eprintln!(
+                "Error: --root {} does not contain an issues/ directory",
+                p.display()
+            );
+            std::process::exit(1);
+        }
+        return p.clone();
+    }
     repo::find_repo_root(None)
 }
 
