@@ -49,6 +49,28 @@ can use it from a terminal too.
 
 ## Install
 
+### Homebrew (macOS / Linux)
+
+```sh
+brew tap jarimustonen/issuectl
+brew install issuectl
+```
+
+### Pre-built binary (any platform)
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+    https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh
+```
+
+Or download a tarball directly from the [releases page](https://github.com/jarimustonen/issuectl/releases).
+
+### crates.io
+
+```sh
+cargo install issuectl
+```
+
 ### From source
 
 ```sh
@@ -56,10 +78,6 @@ git clone https://github.com/jarimustonen/issuectl
 cd issuectl
 cargo install --path .
 ```
-
-### From crates.io
-
-Not yet published.
 
 ## Quick start
 
