@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-05
+
+This release replaces sequential issue numbering with random word slugs.
+**Breaking change** to repo layout: existing repos must run `issuectl
+doctor --fix` once to migrate.
+
+### Added
+- `issuectl doctor` — repository health-check that detects legacy
+  `<NN>-<slug>/` directories, invalid/duplicate slugs, missing `item.md`,
+  and orphan epic references. Read-only by default; `--fix` performs
+  the one-shot migration: renames dirs to slug-only, drops `number:`
+  from frontmatter and writes `slug:`, and rewrites `#NN` body
+  references to `@slug` form (scoped to `issues/`). `--json` for
+  machine-readable output.
+- `src/slug` module with adjective-adjective-noun generator and shared
+  validation. Wordlists vendored under `src/slug/wordlists/` with
+  attribution in `NOTICE` (EFF Long Wordlist CC-BY 3.0, moby
+  Apache 2.0, `names` crate MIT).
+- Detection of legacy dirs even when `item.md` lacks a `number:`
+  field — falls back to parsing the dirname pattern, and tolerates
+  missing/malformed YAML frontmatter. Verified end-to-end against
+  real-world repos (~161 and ~240 legacy issues) where some items
+  had no frontmatter at all.
+
+### Changed
+- **Issue identifier is now a random `adjective-adjective-noun` slug**
+  (e.g. `quiet-brave-otter`) instead of a sequential integer. With
+  ~500 × ~500 × ~1000 wordlists the collision space (~250M) is large
+  enough that distributed/worktree workflows can land in any order
+  without renumbering. Frontmatter field `number:` is replaced by
+  `slug:`. Directory layout is `issues/{open,closed}/<slug>/`
+  (numeric prefix dropped). `issuectl new` returns `slug` (string)
+  in `--json` output instead of `number` (integer). All commands
+  (`show`, `update`, `close`) accept slugs.
+- Body cross-references use `@slug` instead of `#NN`. Markdown
+  headings (`# Title`) are no longer rewritten as references.
+- Slug claim at issue creation is now atomic (`mkdir`-based) so
+  concurrent `issuectl new` runs cannot overwrite each other.
+- Slug validation is unified across the crate; the `doctor` migration
+  refuses to write paths that would escape `issues/`.
+
+### Removed
+- `issuectl renumber` — collisions are no longer possible by
+  construction, so the band-aid is gone. Use `issuectl doctor --fix`
+  for the one-shot migration from numbered repos.
+
+### Fixed
+- `doctor --fix` now migrates legacy directories correctly even when
+  `item.md` has no `number:` (or no frontmatter at all) — previously
+  these were left in place while the loader still printed
+  legacy-numeric warnings, producing a contradictory "Repository OK"
+  summary.
+
 ## [0.1.0] - 2026-05-02
 
 Initial public release.
@@ -96,5 +149,6 @@ Initial public release.
 - `issuectl dedup` stub — moved to a future release until properly
   implemented.
 
-[Unreleased]: https://github.com/jarimustonen/issuectl/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jarimustonen/issuectl/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jarimustonen/issuectl/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jarimustonen/issuectl/releases/tag/v0.1.0
