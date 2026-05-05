@@ -91,6 +91,20 @@ fn parse_non_empty(s: &str) -> std::result::Result<String, String> {
     }
 }
 
+/// Clap value parser for any slug-shaped CLI argument. Rejects anything
+/// that wouldn't pass [`slug::is_valid`], which closes the path-traversal
+/// door for `Show/Update/Close <slug>` and keeps `--epic` / `--related`
+/// in line with the canonical slug shape.
+fn parse_slug_arg(s: &str) -> std::result::Result<String, String> {
+    let s = parse_non_empty(s)?;
+    if !slug::is_valid(&s) {
+        return Err(format!(
+            "{s:?} is not a valid slug (lowercase ASCII, kebab-case, ≥2 segments, no path separators)"
+        ));
+    }
+    Ok(s)
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// List or query issues by frontmatter fields
@@ -113,7 +127,7 @@ enum Command {
         status: Option<String>,
 
         /// Filter by parent epic slug
-        #[arg(short = 'e', long, value_parser = parse_non_empty)]
+        #[arg(short = 'e', long, value_parser = parse_slug_arg)]
         epic: Option<String>,
 
         /// Filter by label
@@ -132,7 +146,7 @@ enum Command {
     /// Show full details of a single issue
     Show {
         /// Issue slug
-        #[arg(value_parser = parse_non_empty)]
+        #[arg(value_parser = parse_slug_arg)]
         slug: String,
     },
 
@@ -181,7 +195,7 @@ enum Command {
         priority: String,
 
         /// Parent epic slug
-        #[arg(short = 'e', long, value_parser = parse_non_empty)]
+        #[arg(short = 'e', long, value_parser = parse_slug_arg)]
         epic: Option<String>,
 
         /// Add a label (repeatable)
@@ -204,7 +218,7 @@ enum Command {
     /// Update fields of an existing issue or epic
     Update {
         /// Issue slug
-        #[arg(value_parser = parse_non_empty)]
+        #[arg(value_parser = parse_slug_arg)]
         slug: String,
 
         /// New status (active or closing — closing also moves to closed/)
@@ -224,7 +238,7 @@ enum Command {
         priority: Option<String>,
 
         /// Set parent epic slug
-        #[arg(short = 'e', long, value_parser = parse_non_empty)]
+        #[arg(short = 'e', long, value_parser = parse_slug_arg)]
         epic: Option<String>,
 
         /// Remove the parent epic reference
@@ -255,7 +269,7 @@ enum Command {
     /// Set a closing status and move the issue to closed/
     Close {
         /// Issue slug
-        #[arg(value_parser = parse_non_empty)]
+        #[arg(value_parser = parse_slug_arg)]
         slug: String,
 
         /// Closing status (default: `fixed` for bugs, `done` otherwise)
@@ -631,9 +645,17 @@ fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
 
     let slug = match &args.slug {
         Some(s) => {
+            // `slugify` is permissive (Unicode + digits, any segment count).
+            // Tighten to the canonical slug shape so the override is
+            // round-trippable through `parse_slug_arg` later.
             let normalized = write::slugify(s, 10);
-            if normalized.is_empty() {
-                bail!("--slug {:?} did not yield any usable characters", s);
+            if !slug::is_valid(&normalized) {
+                bail!(
+                    "--slug {:?} normalized to {:?}, which is not a valid slug \
+                     (need ≥2 lowercase ASCII kebab segments, optional digits)",
+                    s,
+                    normalized
+                );
             }
             normalized
         }
@@ -926,7 +948,7 @@ fn normalize_related_refs(refs: &[String]) -> Result<Vec<String>> {
             continue;
         }
         let stripped = trimmed.strip_prefix('@').unwrap_or(trimmed);
-        if !slug_like(stripped) {
+        if !slug::is_valid(stripped) {
             bail!(
                 "related reference must be @slug or a kebab-case slug, got {:?}",
                 r
@@ -935,26 +957,6 @@ fn normalize_related_refs(refs: &[String]) -> Result<Vec<String>> {
         out.push(format!("@{stripped}"));
     }
     Ok(out)
-}
-
-fn slug_like(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    let mut prev_dash = false;
-    for ch in s.chars() {
-        if ch == '-' {
-            if prev_dash {
-                return false;
-            }
-            prev_dash = true;
-        } else if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
-            prev_dash = false;
-        } else {
-            return false;
-        }
-    }
-    !prev_dash && s.contains('-')
 }
 
 fn cmd_skill_install(agent: &str, force: bool) -> Result<()> {
@@ -1366,7 +1368,7 @@ mod tests {
     fn close_rejects_already_closed() {
         let tmp = fresh_repo();
         let mut a = new_args("bug", "Bug");
-        a.slug = Some("once".into());
+        a.slug = Some("once-only".into());
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
         let n = do_new(tmp.path(), a).unwrap();

@@ -74,6 +74,19 @@ pub fn parse_item_md(path: &Path, slug: &str, folder: &str) -> crate::models::Is
 
     let title = extract_title(body);
 
+    // Warn once per load when an issue still carries a legacy numeric epic
+    // reference. After `issuectl doctor --fix` these should not exist; an
+    // explicit nudge is more helpful than silent acceptance.
+    if let Some(ref e) = fm.epic {
+        if !e.is_empty() && e.chars().all(|c| c.is_ascii_digit()) {
+            eprintln!(
+                "warning: {}: epic: {} is a legacy numeric ref — run `issuectl doctor --fix`",
+                path.display(),
+                e
+            );
+        }
+    }
+
     crate::models::Issue {
         slug: slug.to_string(),
         folder: folder.to_string(),

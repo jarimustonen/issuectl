@@ -14,6 +14,21 @@ use crate::parser;
 use crate::slug;
 use crate::write;
 
+/// Parse a legacy item.md and return the numeric `number:` from the
+/// frontmatter, if present. The presence of `number:` is the gate for
+/// "this is a legacy issue" — directory-name pattern alone is not
+/// trustworthy because user-overridden slugs like `100-things-to-fix`
+/// look identical.
+fn legacy_number_from_frontmatter(item_path: &Path) -> Option<u32> {
+    let text = std::fs::read_to_string(item_path).ok()?;
+    let trimmed = text.trim_start();
+    let rest = trimmed.strip_prefix("---")?;
+    let end = rest.find("\n---")?;
+    let yaml = &rest[..end];
+    let fm: parser::Frontmatter = serde_yaml::from_str(yaml).ok()?;
+    fm.number
+}
+
 #[derive(Debug, Clone)]
 struct LegacyMigration {
     folder: String,
@@ -77,7 +92,13 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
                 continue;
             }
 
-            if let Some((number, _)) = parser::parse_legacy_dir(&dir_name) {
+            // A directory is "legacy" only when its item.md frontmatter
+            // contains a numeric `number:` field. The dirname pattern
+            // `<NN>-<slug>` alone is not enough — a user-supplied
+            // `--slug 100-things-to-fix` would match the pattern but is
+            // not legacy and must not be migrated.
+            let item_path = path.join("item.md");
+            if let Some(number) = legacy_number_from_frontmatter(&item_path) {
                 let new_slug = slug::generate_unique(repo_root);
                 let new_path = issues_dir.join(folder).join(&new_slug);
                 report.legacy_dirs.push(LegacyMigration {
@@ -555,10 +576,35 @@ mod tests {
     #[test]
     fn scan_detects_legacy_numbered_dirs() {
         let tmp = fresh_repo();
-        put_legacy(&tmp, "open", 1, "alpha", "---\nstatus: open\n---\n# A\n");
-        put_legacy(&tmp, "closed", 2, "beta", "---\nstatus: done\n---\n# B\n");
+        put_legacy(
+            &tmp,
+            "open",
+            1,
+            "alpha",
+            "---\nnumber: 1\nstatus: open\n---\n# A\n",
+        );
+        put_legacy(
+            &tmp,
+            "closed",
+            2,
+            "beta",
+            "---\nnumber: 2\nstatus: done\n---\n# B\n",
+        );
         let r = scan(tmp.path()).unwrap();
         assert_eq!(r.legacy_dirs.len(), 2);
+    }
+
+    #[test]
+    fn scan_does_not_migrate_user_slug_starting_with_digits() {
+        // Regression: a user-overridden slug `100-things-to-fix` looks like
+        // legacy `<NN>-<slug>` but lacks `number:` in frontmatter — must
+        // not be migrated.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/open/100-things-to-fix");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("item.md"), "---\nstatus: open\n---\n# T\n").unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert!(r.legacy_dirs.is_empty(), "should not detect as legacy");
     }
 
     #[test]
@@ -569,21 +615,21 @@ mod tests {
             "open",
             1,
             "first",
-            "---\nstatus: open\nepic: 2\nrelated: [\"#3\"]\n---\n# E1. First\n",
+            "---\nnumber: 1\nstatus: open\nepic: 2\nrelated: [\"#3\"]\n---\n# E1. First\n",
         );
         put_legacy(
             &tmp,
             "open",
             2,
             "epic-one",
-            "---\nstatus: open\ntype: epic\n---\n# Epic\n",
+            "---\nnumber: 2\nstatus: open\ntype: epic\n---\n# Epic\n",
         );
         put_legacy(
             &tmp,
             "open",
             3,
             "third",
-            "---\nstatus: open\n---\n# Third\n",
+            "---\nnumber: 3\nstatus: open\n---\n# Third\n",
         );
         let mut r = scan(tmp.path()).unwrap();
         apply(tmp.path(), &mut r).unwrap();

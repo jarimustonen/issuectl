@@ -87,20 +87,31 @@ fn slug_exists(repo_root: &Path, slug: &str) -> bool {
     false
 }
 
-/// Loose validation: lowercase, kebab, 2–4 segments, all-alpha segments.
+/// Validate that `s` is a usable slug. The canonical slug shape:
+/// - At least two `-`-separated segments (single-word slugs would collide
+///   with random `intensifier-adjective-noun` slugs unintentionally).
+/// - Each segment non-empty, lowercase ASCII letters and digits only.
+/// - No leading, trailing, or consecutive hyphens.
+///
+/// Random slugs always emit three lowercase-letter segments (a strict
+/// subset). User-supplied `--slug` overrides may include digits or extra
+/// segments — that's intentional, and `is_valid` accepts them.
 pub fn is_valid(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
+    if s.starts_with('-') || s.ends_with('-') || s.contains("--") {
+        return false;
+    }
     let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() < 2 || parts.len() > 4 {
+    if parts.len() < 2 {
         return false;
     }
     for p in &parts {
         if p.is_empty() {
             return false;
         }
-        if !p.chars().all(|c| c.is_ascii_lowercase()) {
+        if !p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
             return false;
         }
     }
@@ -131,20 +142,37 @@ mod tests {
     }
 
     #[test]
-    fn is_valid_accepts_2_to_4_segments() {
+    fn is_valid_accepts_minimum_two_segments() {
         assert!(is_valid("foo-bar"));
         assert!(is_valid("foo-bar-baz"));
         assert!(is_valid("foo-bar-baz-qux"));
+        assert!(is_valid("a-b-c-d-e")); // Profile B: no upper bound on segments.
     }
 
     #[test]
-    fn is_valid_rejects_too_few_or_too_many_segments() {
+    fn is_valid_rejects_single_segment() {
         assert!(!is_valid("foo"));
-        assert!(!is_valid("a-b-c-d-e"));
+        assert!(!is_valid("a"));
     }
 
     #[test]
-    fn is_valid_rejects_empty_segments() {
+    fn is_valid_accepts_digits_in_segments() {
+        assert!(is_valid("issue-7-redirect"));
+        assert!(is_valid("api-v2"));
+    }
+
+    #[test]
+    fn is_valid_accepts_purely_numeric_segments() {
+        // Profile B: digits anywhere, including stand-alone numeric segments.
+        // The legacy `#42` namespace is distinguished by the leading `#`,
+        // not by segment shape.
+        assert!(is_valid("42-fix"));
+        assert!(is_valid("fix-42"));
+        assert!(is_valid("2024-q4-plan"));
+    }
+
+    #[test]
+    fn is_valid_rejects_empty_segments_and_edge_hyphens() {
         assert!(!is_valid(""));
         assert!(!is_valid("foo-"));
         assert!(!is_valid("-foo"));
@@ -152,10 +180,10 @@ mod tests {
     }
 
     #[test]
-    fn is_valid_rejects_uppercase_or_digits() {
+    fn is_valid_rejects_uppercase_and_unicode() {
         assert!(!is_valid("Foo-bar"));
-        assert!(!is_valid("foo-bar1"));
-        assert!(!is_valid("foo-bar-baz_qux"));
+        assert!(!is_valid("käyttäjän-virhe"));
+        assert!(!is_valid("foo-bar_baz"));
     }
 
     #[test]
