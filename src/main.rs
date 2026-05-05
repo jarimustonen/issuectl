@@ -1,17 +1,18 @@
+mod doctor;
 mod models;
 mod parser;
 mod repo;
 mod skill;
+mod slug;
 mod write;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
-use regex::{Captures, Regex};
 
 const ISSUE_TYPES: &[&str] = &["bug", "task", "feature", "improvement", "chore", "epic"];
 const PRIORITIES: &[&str] = &["normal", "high"];
@@ -42,12 +43,13 @@ Examples:
   issuectl ls                              List open issues
   issuectl ls -t bug -p high               Filter by type and priority
   issuectl ls --closed --json              Closed issues as JSON
-  issuectl show 12                         Full details of issue #12
+  issuectl show extremely-quiet-otter          Full details by slug
   issuectl search redirect                 Keyword search
-  issuectl new --type bug --title \"...\"    Create a new issue (slug auto-derived)
-  issuectl update 12 --status testing      Change status
-  issuectl close 12 --status fixed         Move to closed/ with closing status
-  issuectl renumber                        Renumber and rewrite cross-refs
+  issuectl new --type bug --title \"...\"    Create a new issue (random slug)
+  issuectl update <slug> --status testing  Change status
+  issuectl close <slug> --status fixed     Move to closed/ with closing status
+  issuectl doctor                          Health-check the repo
+  issuectl doctor --fix                    Migrate legacy numbered issues
   issuectl skill install                   Install /issue skill in current repo
 ";
 
@@ -110,9 +112,9 @@ enum Command {
         #[arg(short = 's', long, value_parser = PossibleValuesParser::new(all_statuses()))]
         status: Option<String>,
 
-        /// Filter by parent epic number
-        #[arg(short = 'e', long)]
-        epic: Option<u32>,
+        /// Filter by parent epic slug
+        #[arg(short = 'e', long, value_parser = parse_non_empty)]
+        epic: Option<String>,
 
         /// Filter by label
         #[arg(short = 'l', long, value_parser = parse_non_empty)]
@@ -129,8 +131,9 @@ enum Command {
 
     /// Show full details of a single issue
     Show {
-        /// Issue number
-        number: u32,
+        /// Issue slug
+        #[arg(value_parser = parse_non_empty)]
+        slug: String,
     },
 
     /// Search issues by keyword in title, slug, and body
@@ -147,17 +150,17 @@ enum Command {
     /// Show summary statistics
     Stats,
 
-    /// Create a new issue or epic
+    /// Create a new issue or epic (random slug auto-generated)
     New {
         /// Item type
         #[arg(short = 't', long = "type", value_parser = PossibleValuesParser::new(ISSUE_TYPES))]
         issue_type: String,
 
-        /// Item title (markdown heading and slug source)
+        /// Item title (markdown heading)
         #[arg(long, value_parser = parse_non_empty)]
         title: String,
 
-        /// Override the auto-generated slug
+        /// Override the auto-generated slug (any kebab-case identifier)
         #[arg(long, value_parser = parse_non_empty)]
         slug: Option<String>,
 
@@ -177,15 +180,15 @@ enum Command {
         #[arg(short = 'p', long, default_value = "normal", value_parser = PossibleValuesParser::new(PRIORITIES))]
         priority: String,
 
-        /// Parent epic number
-        #[arg(short = 'e', long)]
-        epic: Option<u32>,
+        /// Parent epic slug
+        #[arg(short = 'e', long, value_parser = parse_non_empty)]
+        epic: Option<String>,
 
         /// Add a label (repeatable)
         #[arg(short = 'l', long = "label", value_parser = parse_non_empty)]
         labels: Vec<String>,
 
-        /// Add a related issue reference like "#12" (repeatable)
+        /// Add a related issue reference like "@extremely-quiet-otter" or bare slug (repeatable)
         #[arg(long = "related", value_parser = parse_non_empty)]
         related: Vec<String>,
 
@@ -200,8 +203,9 @@ enum Command {
 
     /// Update fields of an existing issue or epic
     Update {
-        /// Issue number
-        number: u32,
+        /// Issue slug
+        #[arg(value_parser = parse_non_empty)]
+        slug: String,
 
         /// New status (active or closing — closing also moves to closed/)
         #[arg(short = 's', long, value_parser = PossibleValuesParser::new(all_statuses()))]
@@ -219,9 +223,9 @@ enum Command {
         #[arg(short = 'p', long, value_parser = PossibleValuesParser::new(PRIORITIES))]
         priority: Option<String>,
 
-        /// Set parent epic number
-        #[arg(short = 'e', long)]
-        epic: Option<u32>,
+        /// Set parent epic slug
+        #[arg(short = 'e', long, value_parser = parse_non_empty)]
+        epic: Option<String>,
 
         /// Remove the parent epic reference
         #[arg(long, conflicts_with = "epic")]
@@ -235,7 +239,7 @@ enum Command {
         #[arg(long = "remove-label", value_parser = parse_non_empty)]
         remove_labels: Vec<String>,
 
-        /// Add a related reference like "#12" (repeatable)
+        /// Add a related reference like "@<slug>" or bare slug (repeatable)
         #[arg(long = "add-related", value_parser = parse_non_empty)]
         add_related: Vec<String>,
 
@@ -250,8 +254,9 @@ enum Command {
 
     /// Set a closing status and move the issue to closed/
     Close {
-        /// Issue number
-        number: u32,
+        /// Issue slug
+        #[arg(value_parser = parse_non_empty)]
+        slug: String,
 
         /// Closing status (default: `fixed` for bugs, `done` otherwise)
         #[arg(short = 's', long, value_parser = PossibleValuesParser::new(CLOSING_STATUSES))]
@@ -262,27 +267,11 @@ enum Command {
         commits: Vec<String>,
     },
 
-    /// Renumber duplicate issues and fix cross-references after merges.
-    /// Unique numbers are preserved; only duplicate numbers (multiple dirs
-    /// sharing one number) are renumbered, with the first kept and the rest
-    /// spilled above the current max.
-    Renumber {
-        /// Print the plan without modifying anything
+    /// Health-check the repo and (with --fix) migrate legacy numbered issues to slugs
+    Doctor {
+        /// Apply migrations and fixes (otherwise read-only report)
         #[arg(long)]
-        dry_run: bool,
-
-        /// Path(s) under which to rewrite #NN references in markdown files.
-        /// Repeatable. Defaults to the entire repo root (recursively, .md
-        /// files only, skipping .git/target/node_modules/.cargo/dist/build).
-        #[arg(long = "scope", value_name = "PATH")]
-        scopes: Vec<PathBuf>,
-
-        /// For a duplicate number, pick which directory keeps the original
-        /// number. Format: `NUMBER=SLUG_SUBSTRING`. The match must be
-        /// unique within the group. Repeatable for multiple duplicates.
-        /// Example: `--pin 26=multi-tenant` (when three #26's exist).
-        #[arg(long = "pin", value_name = "N=MATCH", value_parser = parse_non_empty)]
-        pins: Vec<String>,
+        fix: bool,
     },
 
     /// Install or preview the /issue skill template (Claude Code or Codex)
@@ -340,7 +329,7 @@ fn main() -> Result<()> {
             all,
             closed,
         ),
-        Command::Show { number } => cmd_show(json_output, number),
+        Command::Show { slug } => cmd_show(json_output, &slug),
         Command::Search { query, all } => cmd_search(json_output, &query, all),
         Command::Stats => cmd_stats(json_output),
         Command::New {
@@ -374,7 +363,7 @@ fn main() -> Result<()> {
             },
         ),
         Command::Update {
-            number,
+            slug,
             status,
             assignee,
             owner,
@@ -389,7 +378,7 @@ fn main() -> Result<()> {
         } => cmd_update(
             json_output,
             UpdateArgs {
-                number,
+                slug,
                 status,
                 assignee,
                 owner,
@@ -404,15 +393,11 @@ fn main() -> Result<()> {
             },
         ),
         Command::Close {
-            number,
+            slug,
             status,
             commits,
-        } => cmd_close(json_output, number, status, commits),
-        Command::Renumber {
-            dry_run,
-            scopes,
-            pins,
-        } => cmd_renumber(json_output, dry_run, scopes, pins),
+        } => cmd_close(json_output, &slug, status, commits),
+        Command::Doctor { fix } => doctor::run(&find_root(), fix, json_output),
         Command::Skill { action } => match action {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
             SkillAction::Print { agent } => cmd_skill_print(&agent),
@@ -441,13 +426,14 @@ fn load() -> Vec<models::Issue> {
 
 // ── Commands ────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_list(
     json: bool,
     assignee: Option<String>,
     issue_type: Option<String>,
     priority: Option<String>,
     status: Option<String>,
-    epic: Option<u32>,
+    epic: Option<String>,
     label: Option<String>,
     all: bool,
     closed: bool,
@@ -455,50 +441,36 @@ fn cmd_list(
     let issues = load();
     let mut filtered = issues;
 
-    // Folder filtering
     if closed && !all {
-        filtered = filtered
-            .into_iter()
-            .filter(|i| i.folder == "closed")
-            .collect();
+        filtered.retain(|i| i.folder == "closed");
     } else if !all && !closed {
-        filtered = filtered
-            .into_iter()
-            .filter(|i| i.folder == "open")
-            .collect();
+        filtered.retain(|i| i.folder == "open");
     }
 
-    // Field filters
     if let Some(a) = assignee {
         let a_lower = a.to_lowercase();
-        filtered = filtered
-            .into_iter()
-            .filter(|i| i.effective_assignee().to_lowercase() == a_lower)
-            .collect();
+        filtered.retain(|i| i.effective_assignee().to_lowercase() == a_lower);
     }
     if let Some(t) = issue_type {
-        filtered = filtered.into_iter().filter(|i| i.issue_type == t).collect();
+        filtered.retain(|i| i.issue_type == t);
     }
     if let Some(p) = priority {
-        filtered = filtered.into_iter().filter(|i| i.priority == p).collect();
+        filtered.retain(|i| i.priority == p);
     }
     if let Some(s) = status {
-        filtered = filtered.into_iter().filter(|i| i.status == s).collect();
+        filtered.retain(|i| i.status == s);
     }
     if let Some(e) = epic {
-        filtered = filtered.into_iter().filter(|i| i.epic == Some(e)).collect();
+        filtered.retain(|i| i.epic.as_deref() == Some(e.as_str()));
     }
     if let Some(l) = label {
         let l_lower = l.to_lowercase();
-        filtered = filtered
-            .into_iter()
-            .filter(|i| {
+        filtered.retain(|i| {
                 i.labels
                     .as_ref()
                     .map(|lbs| lbs.iter().any(|lb| lb.to_lowercase() == l_lower))
                     .unwrap_or(false)
-            })
-            .collect();
+            });
     }
 
     if json {
@@ -510,9 +482,9 @@ fn cmd_list(
     Ok(())
 }
 
-fn cmd_show(json: bool, number: u32) -> Result<()> {
+fn cmd_show(json: bool, slug: &str) -> Result<()> {
     let issues = load();
-    let issue = issues.iter().find(|i| i.number == number);
+    let issue = issues.iter().find(|i| i.slug == slug);
 
     match issue {
         Some(i) => {
@@ -524,7 +496,7 @@ fn cmd_show(json: bool, number: u32) -> Result<()> {
             Ok(())
         }
         None => {
-            eprintln!("Error: issue #{number} not found");
+            eprintln!("Error: issue {slug} not found");
             std::process::exit(1);
         }
     }
@@ -546,7 +518,7 @@ fn cmd_search(json: bool, query: &str, all: bool) -> Result<()> {
         })
         .collect();
 
-    filtered.sort_by_key(|i| i.number);
+    filtered.sort_by(|a, b| a.slug.cmp(&b.slug));
 
     if json {
         println!("{}", serde_json::to_string_pretty(&filtered)?);
@@ -612,7 +584,7 @@ struct NewArgs {
     assignee: Option<String>,
     owner: Option<String>,
     priority: String,
-    epic: Option<u32>,
+    epic: Option<String>,
     labels: Vec<String>,
     related: Vec<String>,
     source: Option<String>,
@@ -620,7 +592,7 @@ struct NewArgs {
 }
 
 struct NewOutcome {
-    number: u32,
+    slug: String,
     title: String,
     item_path: PathBuf,
 }
@@ -630,7 +602,7 @@ fn cmd_new(json: bool, args: NewArgs) -> Result<()> {
     let out = do_new(&root, args)?;
     if json {
         let report = serde_json::json!({
-            "number": out.number,
+            "slug": out.slug,
             "title": out.title,
             "item_path": out.item_path.to_string_lossy(),
             "dir": out
@@ -640,7 +612,7 @@ fn cmd_new(json: bool, args: NewArgs) -> Result<()> {
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("Created #{}: {}", out.number, out.title);
+        println!("Created {}: {}", out.slug, out.title);
         println!("  {}", out.item_path.display());
     }
     Ok(())
@@ -657,23 +629,27 @@ fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
 
     let related = normalize_related_refs(&args.related)?;
 
-    let highest = repo::find_highest_number(root);
-    let number = highest + 1;
-
     let slug = match &args.slug {
-        Some(s) => write::slugify(s, 10),
-        None => write::slugify(&args.title, 6),
+        Some(s) => {
+            let normalized = write::slugify(s, 10);
+            if normalized.is_empty() {
+                bail!("--slug {:?} did not yield any usable characters", s);
+            }
+            normalized
+        }
+        None => slug::generate_unique(root),
     };
-    if slug.is_empty() {
-        bail!(
-            "could not derive a slug from title {:?}; pass --slug to override",
-            args.title
-        );
-    }
 
-    let dir = write::issue_dir(root, "open", number, &slug);
+    let dir = write::issue_dir(root, "open", &slug);
     if dir.exists() {
         bail!("target directory already exists: {}", dir.display());
+    }
+    let closed_dir = write::issue_dir(root, "closed", &slug);
+    if closed_dir.exists() {
+        bail!(
+            "slug {slug} already used by closed issue at {}",
+            closed_dir.display()
+        );
     }
 
     let render = write::render_new_item(&write::NewIssueArgs {
@@ -683,7 +659,7 @@ fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
         reporter: args.reporter.as_deref(),
         assignee: args.assignee.as_deref(),
         owner: args.owner.as_deref(),
-        epic: args.epic,
+        epic: args.epic.as_deref(),
         labels: &args.labels,
         related: &related,
         source: args.source.as_deref(),
@@ -696,7 +672,7 @@ fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
         .with_context(|| format!("cannot write {}", item_path.display()))?;
 
     Ok(NewOutcome {
-        number,
+        slug,
         title: args.title,
         item_path,
     })
@@ -704,12 +680,12 @@ fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
 
 #[derive(Default)]
 struct UpdateArgs {
-    number: u32,
+    slug: String,
     status: Option<String>,
     assignee: Option<String>,
     owner: Option<String>,
     priority: Option<String>,
-    epic: Option<u32>,
+    epic: Option<String>,
     no_epic: bool,
     add_labels: Vec<String>,
     remove_labels: Vec<String>,
@@ -726,11 +702,11 @@ struct UpdateOutcome {
 
 fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
     let root = find_root();
-    let number = args.number;
+    let slug = args.slug.clone();
     let out = do_update(&root, args)?;
     if json {
         let report = serde_json::json!({
-            "number": number,
+            "slug": slug,
             "final_dir": out.final_dir.to_string_lossy(),
             "moved_to_closed": out.moved_to_closed,
             "moved_to_open": out.moved_to_open,
@@ -739,22 +715,21 @@ fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
         return Ok(());
     }
     if out.moved_to_closed {
-        println!("Updated #{}: moved to {}", number, out.final_dir.display());
+        println!("Updated {slug}: moved to {}", out.final_dir.display());
         println!("  status set to closing — moved to closed/");
     } else if out.moved_to_open {
         println!(
-            "Updated #{}: re-opened, moved to {}",
-            number,
+            "Updated {slug}: re-opened, moved to {}",
             out.final_dir.display()
         );
     } else {
-        println!("Updated #{number}");
+        println!("Updated {slug}");
     }
     Ok(())
 }
 
 fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> {
-    let (folder, slug, item_path) = locate_issue(root, args.number)?;
+    let (folder, item_path) = locate_issue(root, &args.slug)?;
     let mut item = write::read_item(&item_path)?;
 
     let mut new_folder = folder.clone();
@@ -786,7 +761,7 @@ fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> {
         write::set_string(&mut item.frontmatter, "priority", &p);
     }
     if let Some(e) = args.epic {
-        write::set_u32(&mut item.frontmatter, "epic", e);
+        write::set_string(&mut item.frontmatter, "epic", &e);
     } else if args.no_epic {
         write::remove_key(&mut item.frontmatter, "epic");
     }
@@ -817,7 +792,7 @@ fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> {
     write::write_item(&item_path, &item)?;
 
     let final_dir = if new_folder != folder {
-        let new_dir = write::issue_dir(root, &new_folder, args.number, &slug);
+        let new_dir = write::issue_dir(root, &new_folder, &args.slug);
         let old_dir = item_path
             .parent()
             .expect("item.md must have a parent")
@@ -847,12 +822,12 @@ fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> {
     })
 }
 
-fn cmd_close(json: bool, number: u32, status: Option<String>, commits: Vec<String>) -> Result<()> {
+fn cmd_close(json: bool, slug: &str, status: Option<String>, commits: Vec<String>) -> Result<()> {
     let root = find_root();
-    let out = do_close(&root, number, status, commits)?;
+    let out = do_close(&root, slug, status, commits)?;
     if json {
         let report = serde_json::json!({
-            "number": number,
+            "slug": slug,
             "final_dir": out.final_dir.to_string_lossy(),
             "moved_to_closed": out.moved_to_closed,
         });
@@ -860,22 +835,22 @@ fn cmd_close(json: bool, number: u32, status: Option<String>, commits: Vec<Strin
         return Ok(());
     }
     if out.moved_to_closed {
-        println!("Closed #{}: moved to {}", number, out.final_dir.display());
+        println!("Closed {slug}: moved to {}", out.final_dir.display());
     } else {
-        println!("Updated #{number}");
+        println!("Updated {slug}");
     }
     Ok(())
 }
 
 fn do_close(
     root: &Path,
-    number: u32,
+    slug: &str,
     status: Option<String>,
     commits: Vec<String>,
 ) -> Result<UpdateOutcome> {
-    let (folder, _slug, item_path) = locate_issue(root, number)?;
+    let (folder, item_path) = locate_issue(root, slug)?;
     if folder == "closed" {
-        bail!("issue #{number} is already in closed/ (use `update` to change status)");
+        bail!("issue {slug} is already in closed/ (use `update` to change status)");
     }
     let item = write::read_item(&item_path)?;
     let issue_type = item
@@ -895,7 +870,7 @@ fn do_close(
     do_update(
         root,
         UpdateArgs {
-            number,
+            slug: slug.to_string(),
             status: Some(resolved_status),
             add_commits: commits,
             ..Default::default()
@@ -903,33 +878,19 @@ fn do_close(
     )
 }
 
-fn locate_issue(root: &Path, number: u32) -> Result<(String, String, PathBuf)> {
+/// Locate an issue by slug. Returns (folder, item.md path).
+pub fn locate_issue(root: &Path, slug: &str) -> Result<(String, PathBuf)> {
     for folder in &["open", "closed"] {
-        let folder_path = root.join("issues").join(folder);
-        if !folder_path.is_dir() {
-            continue;
-        }
-        for entry in fs::read_dir(&folder_path)
-            .with_context(|| format!("cannot read {}", folder_path.display()))?
-        {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
+        let folder_path = root.join("issues").join(folder).join(slug);
+        if folder_path.is_dir() {
+            let item = folder_path.join("item.md");
+            if !item.is_file() {
+                bail!("{slug} directory has no item.md: {}", item.display());
             }
-            let name = entry.file_name().to_string_lossy().to_string();
-            let Some((num, slug)) = parser::parse_issue_dir(&name) else {
-                continue;
-            };
-            if num == number {
-                let item = entry.path().join("item.md");
-                if !item.is_file() {
-                    bail!("#{number} directory has no item.md: {}", item.display());
-                }
-                return Ok((folder.to_string(), slug, item));
-            }
+            return Ok((folder.to_string(), item));
         }
     }
-    bail!("issue #{number} not found in issues/open/ or issues/closed/")
+    bail!("issue {slug} not found in issues/open/ or issues/closed/")
 }
 
 fn parse_commit_spec(spec: &str) -> Result<(String, String)> {
@@ -944,380 +905,56 @@ fn parse_commit_spec(spec: &str) -> Result<(String, String)> {
     Ok((hash.to_string(), summary.to_string()))
 }
 
+/// Normalize a `--related`/`--add-related` reference. Accepts `@slug`, bare
+/// `slug`, or legacy `#NN`. Output is canonical `@slug` form (or `#NN` if the
+/// input was numeric — preserved verbatim so doctor can detect and migrate).
 fn normalize_related_refs(refs: &[String]) -> Result<Vec<String>> {
     let mut out = Vec::with_capacity(refs.len());
     for r in refs {
         let trimmed = r.trim();
-        let stripped = trimmed.strip_prefix('#').unwrap_or(trimmed);
-        if stripped.is_empty() || !stripped.chars().all(|c| c.is_ascii_digit()) {
-            bail!("related reference must look like #NN or NN, got {:?}", r);
+        if trimmed.is_empty() {
+            bail!("related reference cannot be empty");
         }
-        out.push(format!("#{stripped}"));
-    }
-    Ok(out)
-}
-
-fn cmd_renumber(json: bool, dry_run: bool, scopes: Vec<PathBuf>, pins: Vec<String>) -> Result<()> {
-    let pins = parse_pins(&pins)?;
-    let root = find_root();
-    let plans = build_renumber_plan(&root, &pins)?;
-
-    if plans.is_empty() {
-        if json {
-            println!("{}", serde_json::json!({"applied": false, "total": 0}));
-        } else {
-            println!("No issues found.");
-        }
-        return Ok(());
-    }
-
-    let number_map = build_number_map(&plans);
-    let dir_map = build_dir_map(&plans);
-    let ambiguous = ambiguous_numbers(&number_map);
-
-    let scopes = if scopes.is_empty() {
-        default_renumber_scopes(&root)
-    } else {
-        scopes
-            .into_iter()
-            .map(|p| if p.is_absolute() { p } else { root.join(p) })
-            .collect()
-    };
-
-    if !json {
-        print_renumber_plan(&plans, &dir_map, &ambiguous, &scopes, &root);
-        if dry_run {
-            println!();
-            println!("Dry run — no files modified. Re-run without --dry-run to apply.");
-            return Ok(());
-        }
-    } else if dry_run {
-        let report = build_renumber_report(
-            &plans,
-            &number_map,
-            &ambiguous,
-            &scopes,
-            &root,
-            false,
-            None,
-            None,
-        );
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(());
-    }
-
-    let changed_files = rewrite_markdown_in_scopes(&scopes, &number_map, &dir_map)?;
-    rename_issue_dirs_changed_only(&plans)?;
-
-    let changed_dirs = plans
-        .iter()
-        .filter(|p| p.old_number != p.new_number)
-        .count();
-
-    if json {
-        let report = build_renumber_report(
-            &plans,
-            &number_map,
-            &ambiguous,
-            &scopes,
-            &root,
-            true,
-            Some(changed_dirs),
-            Some(changed_files),
-        );
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(());
-    }
-
-    println!();
-    println!(
-        "Done. {} item(s) renumbered ({} kept), {} dir(s) renamed, {} markdown file(s) rewritten.",
-        changed_dirs,
-        plans.len() - changed_dirs,
-        changed_dirs,
-        changed_files,
-    );
-
-    if !ambiguous.is_empty() {
-        println!();
-        println!("Manual cleanup needed for ambiguous references:");
-        for old in &ambiguous {
-            let new_numbers: Vec<u32> = number_map
-                .get(old)
-                .map(|s| s.iter().copied().collect())
-                .unwrap_or_default();
-            let mapping = new_numbers
-                .iter()
-                .map(|n| {
-                    if n == old {
-                        format!("#{n} (kept)")
-                    } else {
-                        format!("#{n}")
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" + ");
-            println!("  #{old} now maps to: {mapping}");
-        }
-        println!();
-        println!(
-            "  Body-text and frontmatter references to these old numbers were left\n  \
-             unchanged. Find them with: rg -n '#({})\\b'",
-            ambiguous
-                .iter()
-                .map(|n| n.to_string())
-                .collect::<Vec<_>>()
-                .join("|")
-        );
-    }
-
-    Ok(())
-}
-
-fn build_renumber_report(
-    plans: &[RenumberPlan],
-    number_map: &BTreeMap<u32, BTreeSet<u32>>,
-    ambiguous: &BTreeSet<u32>,
-    scopes: &[PathBuf],
-    root: &Path,
-    applied: bool,
-    dirs_renamed: Option<usize>,
-    files_rewritten: Option<usize>,
-) -> serde_json::Value {
-    let renumbered: Vec<serde_json::Value> = plans
-        .iter()
-        .filter(|p| p.old_number != p.new_number)
-        .map(|p| {
-            let folder = p
-                .path
-                .parent()
-                .and_then(|parent| parent.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-            serde_json::json!({
-                "old": p.old_number,
-                "new": p.new_number,
-                "old_dir": p.old_dir_name,
-                "new_dir": p.new_dir_name,
-                "folder": folder,
-                "path": p.path.to_string_lossy(),
-                "target_path": p.target_path.to_string_lossy(),
-            })
-        })
-        .collect();
-
-    let ambiguous_map: serde_json::Map<String, serde_json::Value> = ambiguous
-        .iter()
-        .map(|old| {
-            let news: Vec<u32> = number_map
-                .get(old)
-                .map(|s| s.iter().copied().collect())
-                .unwrap_or_default();
-            (
-                old.to_string(),
-                serde_json::json!({
-                    "kept_new": old,
-                    "new_numbers": news,
-                }),
-            )
-        })
-        .collect();
-
-    let scopes_json: Vec<String> = scopes
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-
-    let total = plans.len();
-    let renumbered_count = plans
-        .iter()
-        .filter(|p| p.old_number != p.new_number)
-        .count();
-    let mut summary = serde_json::Map::new();
-    summary.insert("total".into(), serde_json::json!(total));
-    summary.insert("kept".into(), serde_json::json!(total - renumbered_count));
-    summary.insert("renumbered".into(), serde_json::json!(renumbered_count));
-    summary.insert(
-        "ambiguous_old_numbers".into(),
-        serde_json::json!(ambiguous.len()),
-    );
-    if let Some(d) = dirs_renamed {
-        summary.insert("dirs_renamed".into(), serde_json::json!(d));
-    }
-    if let Some(f) = files_rewritten {
-        summary.insert("files_rewritten".into(), serde_json::json!(f));
-    }
-
-    serde_json::json!({
-        "applied": applied,
-        "root": root.to_string_lossy(),
-        "scopes": scopes_json,
-        "summary": serde_json::Value::Object(summary),
-        "renumbered": renumbered,
-        "ambiguous": serde_json::Value::Object(ambiguous_map),
-    })
-}
-
-fn default_renumber_scopes(root: &Path) -> Vec<PathBuf> {
-    vec![root.to_path_buf()]
-}
-
-fn print_renumber_plan(
-    plans: &[RenumberPlan],
-    dir_map: &BTreeMap<String, String>,
-    ambiguous: &BTreeSet<u32>,
-    scopes: &[PathBuf],
-    root: &Path,
-) {
-    let changed: Vec<_> = plans
-        .iter()
-        .filter(|p| p.old_number != p.new_number)
-        .collect();
-    let kept = plans.len() - changed.len();
-
-    println!(
-        "Plan ({} items: {} keep their numbers, {} will be renumbered):",
-        plans.len(),
-        kept,
-        changed.len()
-    );
-    if changed.is_empty() {
-        println!("  (no duplicate numbers found — nothing to renumber)");
-    } else {
-        for plan in &changed {
-            println!(
-                "  #{:<4} → #{:<4}  {}",
-                plan.old_number, plan.new_number, plan.new_dir_name
-            );
-        }
-    }
-
-    if !ambiguous.is_empty() {
-        println!();
-        println!(
-            "Ambiguous: {} old number(s) had multiple dirs; references to these may need manual review.",
-            ambiguous.len()
-        );
-    }
-
-    println!();
-    println!("Scopes for reference rewriting (.md files only):");
-    for s in scopes {
-        let display = s.strip_prefix(root).unwrap_or(s);
-        let display_str = if display.as_os_str().is_empty() {
-            ".".to_string()
-        } else {
-            display.display().to_string()
-        };
-        println!("  {display_str}");
-    }
-    if !dir_map.is_empty() {
-        println!("Directory paths to rewrite: {}", dir_map.len());
-    }
-}
-
-fn rewrite_markdown_in_scopes(
-    scopes: &[PathBuf],
-    number_map: &BTreeMap<u32, BTreeSet<u32>>,
-    dir_map: &BTreeMap<String, String>,
-) -> Result<usize> {
-    let mut changed = 0usize;
-    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
-    for scope in scopes {
-        if !scope.exists() {
+        if let Some(rest) = trimmed.strip_prefix('#') {
+            if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
+                bail!(
+                    "related reference {:?} looks like #NN but isn't numeric",
+                    r
+                );
+            }
+            out.push(format!("#{rest}"));
             continue;
         }
-        let files = if scope.is_file() {
-            vec![scope.clone()]
-        } else {
-            collect_markdown_files_filtered(scope)?
-        };
-        for path in files {
-            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-            if !seen.insert(canonical) {
-                continue;
-            }
-            let original = fs::read_to_string(&path)
-                .with_context(|| format!("cannot read {}", path.display()))?;
-            let rewritten = rewrite_issue_text(&original, number_map, dir_map);
-            if rewritten != original {
-                fs::write(&path, rewritten)
-                    .with_context(|| format!("cannot write {}", path.display()))?;
-                changed += 1;
-            }
+        let stripped = trimmed.strip_prefix('@').unwrap_or(trimmed);
+        if !slug_like(stripped) {
+            bail!(
+                "related reference must be @slug or a kebab-case slug, got {:?}",
+                r
+            );
         }
+        out.push(format!("@{stripped}"));
     }
-    Ok(changed)
-}
-
-fn collect_markdown_files_filtered(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    walk_markdown(root, &mut out)?;
-    out.sort();
     Ok(out)
 }
 
-fn walk_markdown(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if entry.file_type()?.is_dir() {
-            if matches!(
-                name.as_str(),
-                ".git" | "target" | "node_modules" | ".cargo" | "dist" | "build"
-            ) {
-                continue;
+fn slug_like(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let mut prev_dash = false;
+    for ch in s.chars() {
+        if ch == '-' {
+            if prev_dash {
+                return false;
             }
-            walk_markdown(&path, out)?;
-        } else if path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("md"))
-            .unwrap_or(false)
-        {
-            out.push(path);
+            prev_dash = true;
+        } else if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            prev_dash = false;
+        } else {
+            return false;
         }
     }
-    Ok(())
-}
-
-fn rename_issue_dirs_changed_only(plans: &[RenumberPlan]) -> Result<()> {
-    let changed: Vec<&RenumberPlan> = plans
-        .iter()
-        .filter(|p| p.old_dir_name != p.new_dir_name)
-        .collect();
-    if changed.is_empty() {
-        return Ok(());
-    }
-    for plan in &changed {
-        if plan.temp_path.exists() {
-            anyhow::bail!(
-                "temporary path already exists: {}",
-                plan.temp_path.display()
-            );
-        }
-        fs::rename(&plan.path, &plan.temp_path).with_context(|| {
-            format!(
-                "cannot move {} to {}",
-                plan.path.display(),
-                plan.temp_path.display()
-            )
-        })?;
-    }
-    for plan in &changed {
-        if plan.target_path.exists() {
-            anyhow::bail!("target path already exists: {}", plan.target_path.display());
-        }
-        fs::rename(&plan.temp_path, &plan.target_path).with_context(|| {
-            format!(
-                "cannot move {} to {}",
-                plan.temp_path.display(),
-                plan.target_path.display()
-            )
-        })?;
-    }
-    Ok(())
+    !prev_dash && s.contains('-')
 }
 
 fn cmd_skill_install(agent: &str, force: bool) -> Result<()> {
@@ -1336,269 +973,9 @@ fn cmd_skill_print(agent: &str) -> Result<()> {
     skill::print_skill(resolved)
 }
 
-#[derive(Debug, Clone)]
-struct RenumberPlan {
-    old_number: u32,
-    new_number: u32,
-    old_dir_name: String,
-    new_dir_name: String,
-    path: PathBuf,
-    target_path: PathBuf,
-    temp_path: PathBuf,
-}
-
-fn parse_pins(specs: &[String]) -> Result<BTreeMap<u32, String>> {
-    let mut out = BTreeMap::new();
-    for spec in specs {
-        let (num_str, match_str) = spec
-            .split_once('=')
-            .with_context(|| format!("--pin must be NUMBER=MATCH, got {spec:?}"))?;
-        let number: u32 = num_str.trim().parse().with_context(|| {
-            format!(
-                "--pin: number part {:?} is not a valid u32 in {spec:?}",
-                num_str.trim()
-            )
-        })?;
-        let match_str = match_str.trim();
-        if match_str.is_empty() {
-            bail!("--pin {number}=: match string cannot be empty");
-        }
-        if out.insert(number, match_str.to_string()).is_some() {
-            bail!("--pin {number}: specified more than once");
-        }
-    }
-    Ok(out)
-}
-
-fn build_renumber_plan(root: &Path, pins: &BTreeMap<u32, String>) -> Result<Vec<RenumberPlan>> {
-    let issues_dir = root.join("issues");
-    let mut items = Vec::new();
-
-    for folder in ["open", "closed"] {
-        let folder_path = issues_dir.join(folder);
-        if !folder_path.is_dir() {
-            continue;
-        }
-
-        for entry in fs::read_dir(&folder_path)
-            .with_context(|| format!("cannot read {}", folder_path.display()))?
-        {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let dir_name = entry.file_name().to_string_lossy().to_string();
-            let Some((old_number, slug)) = parser::parse_issue_dir(&dir_name) else {
-                continue;
-            };
-            items.push((old_number, folder.to_string(), slug, entry.path()));
-        }
-    }
-
-    items.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| a.1.cmp(&b.1))
-            .then_with(|| a.2.cmp(&b.2))
-            .then_with(|| a.3.cmp(&b.3))
-    });
-
-    // Preserve-unique + spill-duplicates algorithm:
-    //   - Each unique old_number keeps its number (no rename)
-    //   - For duplicates (multiple dirs with the same old_number), the first
-    //     by sort order keeps the number; subsequent ones get fresh numbers
-    //     above the current max.
-    // This minimizes churn: only conflicting directories move, and references
-    // to non-duplicate numbers stay valid.
-    let mut max_number: u32 = items.iter().map(|i| i.0).max().unwrap_or(0);
-    let temp_suffix = format!(".issuectl-renumber-{}", std::process::id());
-
-    let mut groups: BTreeMap<u32, Vec<(String, String, PathBuf)>> = BTreeMap::new();
-    for (old_number, folder, slug, path) in items {
-        groups
-            .entry(old_number)
-            .or_default()
-            .push((folder, slug, path));
-    }
-
-    // Validate every pin maps to an existing number.
-    for num in pins.keys() {
-        if !groups.contains_key(num) {
-            bail!("--pin {num}: no issue with that number exists");
-        }
-    }
-
-    let mut plans = Vec::new();
-    for (old_number, mut group) in groups {
-        // Apply --pin: move the matching dir to position 0 (the "keep" slot).
-        if let Some(pin_match) = pins.get(&old_number) {
-            if group.len() > 1 {
-                let matches: Vec<usize> = group
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, (_, slug, _))| slug.contains(pin_match.as_str()))
-                    .map(|(i, _)| i)
-                    .collect();
-                match matches.len() {
-                    0 => bail!(
-                        "--pin {old_number}={pin_match}: no dir slug contains {pin_match:?} (candidates: {})",
-                        group.iter().map(|(_, s, _)| s.as_str()).collect::<Vec<_>>().join(", ")
-                    ),
-                    1 => {
-                        let i = matches[0];
-                        if i != 0 {
-                            group.swap(0, i);
-                        }
-                    }
-                    _ => bail!(
-                        "--pin {old_number}={pin_match}: matches {} dirs ({}); be more specific",
-                        matches.len(),
-                        matches
-                            .iter()
-                            .map(|i| group[*i].1.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                }
-            }
-            // group.len() == 1: pin is a no-op (only one dir, keeps its number anyway)
-        }
-
-        for (i, (folder, slug, path)) in group.into_iter().enumerate() {
-            let new_number = if i == 0 {
-                old_number
-            } else {
-                max_number += 1;
-                max_number
-            };
-            let folder_path = issues_dir.join(&folder);
-            let old_dir_name = format!("{old_number}-{slug}");
-            let new_dir_name = format!("{new_number}-{slug}");
-            plans.push(RenumberPlan {
-                old_number,
-                new_number,
-                old_dir_name,
-                new_dir_name: new_dir_name.clone(),
-                target_path: folder_path.join(new_dir_name),
-                temp_path: folder_path.join(format!("{old_number}-{slug}{temp_suffix}")),
-                path,
-            });
-        }
-    }
-
-    plans.sort_by_key(|p| (p.old_number, p.new_number));
-    Ok(plans)
-}
-
-fn build_number_map(plans: &[RenumberPlan]) -> BTreeMap<u32, BTreeSet<u32>> {
-    let mut number_map: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
-    for plan in plans {
-        number_map
-            .entry(plan.old_number)
-            .or_default()
-            .insert(plan.new_number);
-    }
-    number_map
-}
-
-fn build_dir_map(plans: &[RenumberPlan]) -> BTreeMap<String, String> {
-    plans
-        .iter()
-        .filter(|plan| plan.old_dir_name != plan.new_dir_name)
-        .map(|plan| (plan.old_dir_name.clone(), plan.new_dir_name.clone()))
-        .collect()
-}
-
-fn ambiguous_numbers(number_map: &BTreeMap<u32, BTreeSet<u32>>) -> BTreeSet<u32> {
-    number_map
-        .iter()
-        .filter_map(|(old, new)| if new.len() > 1 { Some(*old) } else { None })
-        .collect()
-}
-
-fn rewrite_issue_text(
-    text: &str,
-    number_map: &BTreeMap<u32, BTreeSet<u32>>,
-    dir_map: &BTreeMap<String, String>,
-) -> String {
-    let heading_re = Regex::new(r"^(# )E?\d+\.\s+(.+)$").expect("valid heading regex");
-    let epic_re = Regex::new(r"^(\s*epic:\s*)(\d+)(.*)$").expect("valid epic regex");
-    let ref_re = Regex::new(r"#(\d+)\b").expect("valid reference regex");
-    let dir_regexes = compile_dir_regexes(dir_map);
-
-    let mut rewritten = Vec::new();
-    for line in text.lines() {
-        let line = heading_re.replace(line, "$1$2").to_string();
-        let line = epic_re
-            .replace(&line, |caps: &Captures| {
-                let old = caps[2].parse::<u32>().ok();
-                if let Some(new_number) = old.and_then(|n| mapped_number(n, number_map)) {
-                    format!("{}{}{}", &caps[1], new_number, &caps[3])
-                } else {
-                    caps[0].to_string()
-                }
-            })
-            .to_string();
-        let line = ref_re
-            .replace_all(&line, |caps: &Captures| {
-                let old = caps[1].parse::<u32>().ok();
-                if let Some(new_number) = old.and_then(|n| mapped_number(n, number_map)) {
-                    format!("#{new_number}")
-                } else {
-                    caps[0].to_string()
-                }
-            })
-            .to_string();
-        let line = rewrite_issue_dir_paths(&line, &dir_regexes);
-        rewritten.push(line);
-    }
-
-    let mut output = rewritten.join("\n");
-    if text.ends_with('\n') {
-        output.push('\n');
-    }
-    output
-}
-
-fn compile_dir_regexes(dir_map: &BTreeMap<String, String>) -> Vec<(Regex, String)> {
-    dir_map
-        .iter()
-        .map(|(old_dir, new_dir)| {
-            let pattern = format!(
-                r"(^|[^A-Za-z0-9_-]){}($|[^A-Za-z0-9_-])",
-                regex::escape(old_dir)
-            );
-            (
-                Regex::new(&pattern).expect("valid directory path regex"),
-                new_dir.clone(),
-            )
-        })
-        .collect()
-}
-
-fn rewrite_issue_dir_paths(text: &str, regexes: &[(Regex, String)]) -> String {
-    let mut rewritten = text.to_string();
-    for (dir_re, new_dir) in regexes {
-        rewritten = dir_re
-            .replace_all(&rewritten, |caps: &Captures| {
-                format!("{}{}{}", &caps[1], new_dir, &caps[2])
-            })
-            .to_string();
-    }
-    rewritten
-}
-
-fn mapped_number(old: u32, number_map: &BTreeMap<u32, BTreeSet<u32>>) -> Option<u32> {
-    let numbers = number_map.get(&old)?;
-    if numbers.len() == 1 {
-        numbers.iter().next().copied()
-    } else {
-        None
-    }
-}
-
 // ── Display helpers ─────────────────────────────────────────────────────────
 
-const TABLE_HEADERS: &[&str] = &["#", "Title", "Type", "Status", "Pri", "Assignee"];
+const TABLE_HEADERS: &[&str] = &["Slug", "Title", "Type", "Status", "Pri", "Assignee"];
 
 fn print_issue_table(issues: &[models::Issue]) {
     if issues.is_empty() {
@@ -1610,7 +987,7 @@ fn print_issue_table(issues: &[models::Issue]) {
         .iter()
         .map(|i| {
             vec![
-                i.number.to_string(),
+                i.slug.clone(),
                 truncate(&i.title, 50),
                 i.issue_type.clone(),
                 i.status.clone(),
@@ -1620,7 +997,6 @@ fn print_issue_table(issues: &[models::Issue]) {
         })
         .collect();
 
-    // Calculate column widths
     let mut widths: Vec<usize> = TABLE_HEADERS.iter().map(|h| h.len()).collect();
     for row in &rows {
         for (j, cell) in row.iter().enumerate() {
@@ -1628,7 +1004,6 @@ fn print_issue_table(issues: &[models::Issue]) {
         }
     }
 
-    // Header
     let header: String = TABLE_HEADERS
         .iter()
         .enumerate()
@@ -1637,7 +1012,6 @@ fn print_issue_table(issues: &[models::Issue]) {
         .join("");
     println!("{}", header.trim_end());
 
-    // Separator
     let sep: String = widths
         .iter()
         .map(|w| "─".repeat(*w + 1))
@@ -1645,7 +1019,6 @@ fn print_issue_table(issues: &[models::Issue]) {
         .join("");
     println!("{}", sep.trim_end());
 
-    // Rows
     for row in &rows {
         let line: String = row
             .iter()
@@ -1660,7 +1033,7 @@ fn print_issue_table(issues: &[models::Issue]) {
 }
 
 fn print_issue_detail(issue: &models::Issue) {
-    println!("#{}  {}", issue.number, issue.title);
+    println!("{}  {}", issue.slug, issue.title);
     println!("{}", "─".repeat(60));
     println!("Status:   {}  ({})", issue.status, issue.folder);
     println!("Type:     {}", issue.issue_type);
@@ -1680,8 +1053,8 @@ fn print_issue_detail(issue: &models::Issue) {
     if let Some(ref u) = issue.updated {
         println!("Updated:  {}", u);
     }
-    if let Some(e) = issue.epic {
-        println!("Epic:     #{}", e);
+    if let Some(ref e) = issue.epic {
+        println!("Epic:     @{}", e);
     }
     if let Some(ref lbs) = issue.labels {
         if !lbs.is_empty() {
@@ -1720,7 +1093,7 @@ fn count_by_json<'a, F>(issues: &[&'a models::Issue], key_fn: F) -> serde_json::
 where
     F: Fn(&'a models::Issue) -> &str,
 {
-    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for issue in issues {
         let key = key_fn(issue).to_string();
         *counts.entry(key).or_insert(0) += 1;
@@ -1740,7 +1113,7 @@ where
 
     println!("{}", header);
     let mut sorted: Vec<_> = counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
     for (key, count) in sorted {
         println!("  {:20} {}", key, count);
     }
@@ -1749,417 +1122,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    fn map(pairs: &[(u32, &[u32])]) -> BTreeMap<u32, BTreeSet<u32>> {
-        pairs
-            .iter()
-            .map(|(old, new)| (*old, new.iter().copied().collect()))
-            .collect()
-    }
-
-    fn dirs(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(old, new)| (old.to_string(), new.to_string()))
-            .collect()
-    }
-
-    #[test]
-    fn rewrites_frontmatter_references_and_legacy_heading() {
-        let number_map = map(&[(10, &[1]), (12, &[2]), (13, &[3])]);
-        let text = "\
----
-epic: 10
-related: [\"#12\", \"#13\"]
----
-
-# E10. Epic title
-
-Continues #12 and blocks **#13**.
-";
-
-        let rewritten = rewrite_issue_text(text, &number_map, &BTreeMap::new());
-
-        assert!(rewritten.contains("epic: 1\n"));
-        assert!(rewritten.contains("related: [\"#2\", \"#3\"]"));
-        assert!(rewritten.contains("# Epic title\n"));
-        assert!(rewritten.contains("Continues #2 and blocks **#3**."));
-    }
-
-    #[test]
-    fn leaves_ambiguous_duplicate_references_unchanged() {
-        let number_map = map(&[(7, &[1, 2])]);
-        let text = "epic: 7\nrelated: [\"#7\"]\n# 7. Title\nSee #7.\n";
-
-        let rewritten = rewrite_issue_text(text, &number_map, &BTreeMap::new());
-
-        assert!(rewritten.contains("epic: 7\n"));
-        assert!(rewritten.contains("related: [\"#7\"]"));
-        assert!(rewritten.contains("# Title\n"));
-        assert!(rewritten.contains("See #7."));
-    }
-
-    #[test]
-    fn rewrites_markdown_link_display_and_issue_dir_path() {
-        let number_map = map(&[(75, &[93])]);
-        let dir_map = dirs(&[(
-            "57-auditoitavuus-asiantuntijanakyma",
-            "72-auditoitavuus-asiantuntijanakyma",
-        )]);
-        let text = "[#75](../57-auditoitavuus-asiantuntijanakyma/item.md) not 157-auditoitavuus-asiantuntijanakyma";
-
-        let rewritten = rewrite_issue_text(text, &number_map, &dir_map);
-
-        assert_eq!(
-            rewritten,
-            "[#93](../72-auditoitavuus-asiantuntijanakyma/item.md) not 157-auditoitavuus-asiantuntijanakyma"
-        );
-    }
-
-    use std::fs;
-    use tempfile::TempDir;
-
-    fn make_repo_with_dirs(specs: &[(&str, u32, &str)]) -> TempDir {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
-        fs::create_dir_all(tmp.path().join("issues/closed")).unwrap();
-        for (folder, num, slug) in specs {
-            let dir = tmp
-                .path()
-                .join("issues")
-                .join(folder)
-                .join(format!("{num}-{slug}"));
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(
-                dir.join("item.md"),
-                format!("---\nstatus: open\n---\n\n# {slug}\n"),
-            )
-            .unwrap();
-        }
-        tmp
-    }
-
-    #[test]
-    fn renumber_plan_preserves_unique_numbers() {
-        let tmp = make_repo_with_dirs(&[
-            ("open", 1, "first"),
-            ("open", 5, "fifth"),
-            ("closed", 10, "tenth"),
-        ]);
-        let plans = build_renumber_plan(tmp.path(), &BTreeMap::new()).unwrap();
-        for plan in &plans {
-            assert_eq!(plan.old_number, plan.new_number, "{plan:?}");
-        }
-    }
-
-    #[test]
-    fn renumber_plan_spills_duplicates_above_max() {
-        // Three issues share #14, max number is 50.
-        let tmp = make_repo_with_dirs(&[
-            ("open", 14, "alpha"),
-            ("open", 14, "beta"),
-            ("closed", 14, "gamma"),
-            ("open", 50, "max-issue"),
-        ]);
-        let plans = build_renumber_plan(tmp.path(), &BTreeMap::new()).unwrap();
-
-        let kept_14: Vec<_> = plans
-            .iter()
-            .filter(|p| p.old_number == 14 && p.new_number == 14)
-            .collect();
-        assert_eq!(kept_14.len(), 1, "exactly one #14 should keep its number");
-
-        let spilled: Vec<_> = plans
-            .iter()
-            .filter(|p| p.old_number == 14 && p.new_number != 14)
-            .collect();
-        assert_eq!(spilled.len(), 2, "two #14 sources should spill");
-        for plan in &spilled {
-            assert!(
-                plan.new_number > 50,
-                "spilled number {} should be above max 50",
-                plan.new_number
-            );
-        }
-
-        let max_plan = plans.iter().find(|p| p.old_number == 50).unwrap();
-        assert_eq!(max_plan.new_number, 50, "max should be unchanged");
-    }
-
-    #[test]
-    fn renumber_plan_no_renames_when_all_unique() {
-        let tmp = make_repo_with_dirs(&[("open", 1, "a"), ("open", 2, "b"), ("closed", 3, "c")]);
-        let plans = build_renumber_plan(tmp.path(), &BTreeMap::new()).unwrap();
-        let dir_map = build_dir_map(&plans);
-        assert!(
-            dir_map.is_empty(),
-            "no renames expected when no duplicates: {dir_map:?}"
-        );
-    }
-
-    #[test]
-    fn renumber_dry_run_does_not_modify_filesystem() {
-        let tmp = make_repo_with_dirs(&[("open", 1, "a"), ("open", 1, "b")]);
-        let before: Vec<String> = fs::read_dir(tmp.path().join("issues/open"))
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-            .collect();
-
-        // Drive cmd_renumber through ROOT_OVERRIDE.
-        let _ = ROOT_OVERRIDE.set(Some(tmp.path().to_path_buf()));
-        cmd_renumber(false, true, vec![], vec![]).unwrap();
-
-        let after: Vec<String> = fs::read_dir(tmp.path().join("issues/open"))
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-            .collect();
-        let mut before_sorted = before.clone();
-        let mut after_sorted = after.clone();
-        before_sorted.sort();
-        after_sorted.sort();
-        assert_eq!(
-            before_sorted, after_sorted,
-            "dry-run must not change anything"
-        );
-    }
-
-    #[test]
-    fn parse_pins_accepts_valid_specs() {
-        let pins =
-            parse_pins(&["26=multi-tenant".to_string(), "33=tool-skills".to_string()]).unwrap();
-        assert_eq!(pins.get(&26), Some(&"multi-tenant".to_string()));
-        assert_eq!(pins.get(&33), Some(&"tool-skills".to_string()));
-    }
-
-    #[test]
-    fn parse_pins_rejects_malformed_specs() {
-        assert!(parse_pins(&["nope".to_string()]).is_err()); // no =
-        assert!(parse_pins(&["abc=foo".to_string()]).is_err()); // non-numeric
-        assert!(parse_pins(&["26=".to_string()]).is_err()); // empty match
-        assert!(
-            parse_pins(&["26=foo".to_string(), "26=bar".to_string()]).is_err(),
-            "duplicate pin for same number must error"
-        );
-    }
-
-    #[test]
-    fn renumber_pin_keeps_matching_dir() {
-        // Three #26 issues; pin "multi-tenant" so the open one keeps #26.
-        let tmp = make_repo_with_dirs(&[
-            ("closed", 26, "infra-email"),
-            ("closed", 26, "matkalaskun"),
-            ("open", 26, "multi-tenant"),
-            ("open", 50, "max-issue"),
-        ]);
-        let mut pins = BTreeMap::new();
-        pins.insert(26u32, "multi-tenant".to_string());
-        let plans = build_renumber_plan(tmp.path(), &pins).unwrap();
-
-        let kept = plans
-            .iter()
-            .find(|p| p.old_number == 26 && p.new_number == 26)
-            .expect("one #26 should be kept");
-        assert!(
-            kept.old_dir_name.contains("multi-tenant"),
-            "pinned dir should keep the number, got {}",
-            kept.old_dir_name
-        );
-    }
-
-    #[test]
-    fn renumber_pin_rejects_no_match() {
-        let tmp = make_repo_with_dirs(&[("open", 26, "alpha"), ("open", 26, "beta")]);
-        let mut pins = BTreeMap::new();
-        pins.insert(26u32, "nonexistent".to_string());
-        let result = build_renumber_plan(tmp.path(), &pins);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("no dir slug contains"),
-            "expected 'no dir slug contains' error"
-        );
-    }
-
-    #[test]
-    fn renumber_pin_rejects_ambiguous_match() {
-        let tmp = make_repo_with_dirs(&[("open", 26, "tenant-foo"), ("open", 26, "tenant-bar")]);
-        let mut pins = BTreeMap::new();
-        pins.insert(26u32, "tenant".to_string());
-        let result = build_renumber_plan(tmp.path(), &pins);
-        assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("matches 2 dirs"),
-            "expected 'matches 2 dirs' error"
-        );
-    }
-
-    #[test]
-    fn renumber_pin_for_unknown_number_errors() {
-        let tmp = make_repo_with_dirs(&[("open", 1, "alpha")]);
-        let mut pins = BTreeMap::new();
-        pins.insert(99u32, "anything".to_string());
-        let result = build_renumber_plan(tmp.path(), &pins);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn renumber_pin_on_unique_number_is_noop() {
-        // Pin on a non-duplicate number is harmless.
-        let tmp = make_repo_with_dirs(&[("open", 5, "alpha")]);
-        let mut pins = BTreeMap::new();
-        pins.insert(5u32, "alpha".to_string());
-        let plans = build_renumber_plan(tmp.path(), &pins).unwrap();
-        assert_eq!(plans.len(), 1);
-        assert_eq!(plans[0].old_number, 5);
-        assert_eq!(plans[0].new_number, 5);
-    }
-}
-
-#[cfg(test)]
-mod helper_tests {
-    use super::*;
-
-    // ── parse_non_empty ────────────────────────────────────────────────────
-
-    #[test]
-    fn parse_non_empty_accepts_normal_value() {
-        assert_eq!(parse_non_empty("hello").unwrap(), "hello");
-        assert_eq!(parse_non_empty("a").unwrap(), "a");
-    }
-
-    #[test]
-    fn parse_non_empty_rejects_empty() {
-        assert!(parse_non_empty("").is_err());
-    }
-
-    #[test]
-    fn parse_non_empty_rejects_whitespace_only() {
-        assert!(parse_non_empty("   ").is_err());
-        assert!(parse_non_empty("\t").is_err());
-    }
-
-    #[test]
-    fn parse_non_empty_rejects_padded_value() {
-        assert!(parse_non_empty(" hello").is_err());
-        assert!(parse_non_empty("hello ").is_err());
-        assert!(parse_non_empty(" hello ").is_err());
-    }
-
-    // ── is_closing_status / all_statuses ───────────────────────────────────
-
-    #[test]
-    fn is_closing_status_classifies_correctly() {
-        for s in CLOSING_STATUSES {
-            assert!(is_closing_status(s), "{s} should be closing");
-        }
-        for s in ACTIVE_STATUSES {
-            assert!(!is_closing_status(s), "{s} should not be closing");
-        }
-        assert!(!is_closing_status("nonsense"));
-    }
-
-    #[test]
-    fn all_statuses_includes_active_and_closing() {
-        let s = all_statuses();
-        for v in ACTIVE_STATUSES.iter().chain(CLOSING_STATUSES.iter()) {
-            assert!(s.contains(v), "{v} should be in all_statuses");
-        }
-    }
-
-    // ── parse_commit_spec ──────────────────────────────────────────────────
-
-    #[test]
-    fn parse_commit_spec_basic() {
-        assert_eq!(
-            parse_commit_spec("abc123:fix login").unwrap(),
-            ("abc123".to_string(), "fix login".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_commit_spec_trims_components() {
-        assert_eq!(
-            parse_commit_spec("  abc123  :  fix login  ").unwrap(),
-            ("abc123".to_string(), "fix login".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_commit_spec_rejects_no_colon() {
-        assert!(parse_commit_spec("abc123 fix").is_err());
-    }
-
-    #[test]
-    fn parse_commit_spec_rejects_empty_hash() {
-        assert!(parse_commit_spec(":fix").is_err());
-        assert!(parse_commit_spec("  :fix").is_err());
-    }
-
-    #[test]
-    fn parse_commit_spec_rejects_empty_summary() {
-        assert!(parse_commit_spec("abc:").is_err());
-        assert!(parse_commit_spec("abc:  ").is_err());
-    }
-
-    #[test]
-    fn parse_commit_spec_keeps_subsequent_colons_in_summary() {
-        // First colon splits; rest is part of summary
-        assert_eq!(
-            parse_commit_spec("abc:fix: nested colon").unwrap(),
-            ("abc".to_string(), "fix: nested colon".to_string())
-        );
-    }
-
-    // ── normalize_related_refs ─────────────────────────────────────────────
-
-    #[test]
-    fn normalize_related_adds_hash_prefix() {
-        assert_eq!(
-            normalize_related_refs(&["12".to_string()]).unwrap(),
-            vec!["#12".to_string()]
-        );
-    }
-
-    #[test]
-    fn normalize_related_preserves_existing_hash() {
-        assert_eq!(
-            normalize_related_refs(&["#7".to_string()]).unwrap(),
-            vec!["#7".to_string()]
-        );
-    }
-
-    #[test]
-    fn normalize_related_handles_multiple() {
-        assert_eq!(
-            normalize_related_refs(&["#3".to_string(), "9".to_string()]).unwrap(),
-            vec!["#3".to_string(), "#9".to_string()]
-        );
-    }
-
-    #[test]
-    fn normalize_related_rejects_non_numeric() {
-        assert!(normalize_related_refs(&["foo".to_string()]).is_err());
-        assert!(normalize_related_refs(&["3a".to_string()]).is_err());
-        assert!(normalize_related_refs(&["#abc".to_string()]).is_err());
-    }
-
-    #[test]
-    fn normalize_related_rejects_empty() {
-        assert!(normalize_related_refs(&["".to_string()]).is_err());
-        assert!(normalize_related_refs(&["#".to_string()]).is_err());
-    }
-
-    #[test]
-    fn normalize_related_empty_input_is_ok() {
-        assert_eq!(normalize_related_refs(&[]).unwrap(), Vec::<String>::new());
-    }
-}
-
-#[cfg(test)]
-mod cmd_tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
@@ -2192,59 +1154,52 @@ mod cmd_tests {
         fs::read_to_string(path).unwrap()
     }
 
-    // ── do_new ─────────────────────────────────────────────────────────────
-
     #[test]
-    fn new_creates_first_issue_with_number_one() {
+    fn new_creates_random_slug_directory() {
         let tmp = fresh_repo();
         let mut args = new_args("bug", "First bug");
         args.reporter = Some("alice".into());
         args.assignee = Some("bob".into());
         let out = do_new(tmp.path(), args).unwrap();
-        assert_eq!(out.number, 1);
+        assert!(slug::is_valid(&out.slug), "{} should be valid slug", out.slug);
         assert!(out.item_path.exists());
         let content = read(&out.item_path);
         assert!(content.contains("type: bug"));
         assert!(content.contains("reporter: alice"));
         assert!(content.contains("assignee: bob"));
-        assert!(content.contains("status: open"));
-        assert!(content.contains("priority: normal"));
         assert!(content.contains("# First bug"));
-    }
-
-    #[test]
-    fn new_increments_number_across_open_and_closed() {
-        let tmp = fresh_repo();
-        fs::create_dir_all(tmp.path().join("issues/closed/5-foo")).unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open/2-bar")).unwrap();
-        let out = do_new(tmp.path(), new_args("task", "Next thing")).unwrap();
-        assert_eq!(out.number, 6);
-    }
-
-    #[test]
-    fn new_uses_auto_slug_from_title() {
-        let tmp = fresh_repo();
-        let out = do_new(tmp.path(), new_args("bug", "Login Redirect Loops")).unwrap();
-        assert!(out
-            .item_path
-            .to_string_lossy()
-            .contains("1-login-redirect-loops"));
     }
 
     #[test]
     fn new_honors_explicit_slug_override() {
         let tmp = fresh_repo();
-        let mut args = new_args("bug", "Some Long And Detailed Title");
-        args.slug = Some("custom".into());
+        let mut args = new_args("bug", "Some Long Title");
+        args.slug = Some("custom-thing".into());
         let out = do_new(tmp.path(), args).unwrap();
-        assert!(out.item_path.to_string_lossy().contains("1-custom"));
+        assert_eq!(out.slug, "custom-thing");
+        assert!(out.item_path.to_string_lossy().contains("/custom-thing/"));
     }
 
     #[test]
-    fn new_rejects_unsluggable_title() {
+    fn new_rejects_unsluggable_explicit_slug() {
         let tmp = fresh_repo();
-        let result = do_new(tmp.path(), new_args("bug", "!!!"));
-        assert!(result.is_err());
+        let mut args = new_args("bug", "Title");
+        args.slug = Some("!!!".into());
+        assert!(do_new(tmp.path(), args).is_err());
+    }
+
+    #[test]
+    fn new_rejects_existing_slug() {
+        let tmp = fresh_repo();
+        fs::create_dir_all(tmp.path().join("issues/open/taken")).unwrap();
+        fs::write(
+            tmp.path().join("issues/open/taken/item.md"),
+            "---\nstatus: open\n---\n",
+        )
+        .unwrap();
+        let mut args = new_args("bug", "Title");
+        args.slug = Some("taken".into());
+        assert!(do_new(tmp.path(), args).is_err());
     }
 
     #[test]
@@ -2252,14 +1207,6 @@ mod cmd_tests {
         let tmp = fresh_repo();
         let mut args = new_args("epic", "API v2");
         args.reporter = Some("alice".into());
-        assert!(do_new(tmp.path(), args).is_err());
-    }
-
-    #[test]
-    fn new_rejects_epic_with_assignee() {
-        let tmp = fresh_repo();
-        let mut args = new_args("epic", "API v2");
-        args.assignee = Some("alice".into());
         assert!(do_new(tmp.path(), args).is_err());
     }
 
@@ -2276,68 +1223,45 @@ mod cmd_tests {
         let tmp = fresh_repo();
         let mut args = new_args("epic", "API v2 migration");
         args.owner = Some("cara".into());
-        args.priority = "high".into();
         let out = do_new(tmp.path(), args).unwrap();
         let content = read(&out.item_path);
         assert!(content.contains("type: epic"));
         assert!(content.contains("owner: cara"));
-        assert!(content.contains("priority: high"));
-        assert!(!content.contains("reporter:"));
-        assert!(!content.contains("assignee:"));
     }
 
     #[test]
-    fn new_normalizes_related_without_hash() {
+    fn new_normalizes_related_to_at_form() {
         let tmp = fresh_repo();
         let mut args = new_args("bug", "B");
-        args.related = vec!["12".into(), "#7".into()];
+        args.related = vec!["@extremely-quiet-otter".into(), "amber-loud-fox".into()];
         let out = do_new(tmp.path(), args).unwrap();
         let content = read(&out.item_path);
-        assert!(content.contains("'#12'") || content.contains("\"#12\""));
+        assert!(content.contains("@extremely-quiet-otter"));
+        assert!(content.contains("@amber-loud-fox"));
+    }
+
+    #[test]
+    fn new_preserves_legacy_numeric_related() {
+        let tmp = fresh_repo();
+        let mut args = new_args("bug", "B");
+        args.related = vec!["#7".into()];
+        let out = do_new(tmp.path(), args).unwrap();
+        let content = read(&out.item_path);
         assert!(content.contains("'#7'") || content.contains("\"#7\""));
-    }
-
-    #[test]
-    fn new_rejects_invalid_related_ref() {
-        let tmp = fresh_repo();
-        let mut args = new_args("bug", "B");
-        args.related = vec!["not-a-number".into()];
-        assert!(do_new(tmp.path(), args).is_err());
-    }
-
-    #[test]
-    fn new_writes_source_and_description() {
-        let tmp = fresh_repo();
-        let mut args = new_args("bug", "B");
-        args.source = Some("frontend/login".into());
-        args.description = Some("Stuck in a loop.".into());
-        let out = do_new(tmp.path(), args).unwrap();
-        let content = read(&out.item_path);
-        assert!(content.contains("_Source: frontend/login_"));
-        assert!(content.contains("Stuck in a loop."));
-    }
-
-    // ── do_update ──────────────────────────────────────────────────────────
-
-    fn make_one(tmp: &TempDir, t: &str, title: &str) -> NewOutcome {
-        let mut a = new_args(t, title);
-        if t != "epic" {
-            a.reporter = Some("rep".into());
-            a.assignee = Some("ass".into());
-        } else {
-            a.owner = Some("own".into());
-        }
-        do_new(tmp.path(), a).unwrap()
     }
 
     #[test]
     fn update_sets_status_and_bumps_updated() {
         let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
+        let mut a = new_args("bug", "Bug");
+        a.slug = Some("my-test-slug".into());
+        a.reporter = Some("rep".into());
+        a.assignee = Some("ass".into());
+        let n = do_new(tmp.path(), a).unwrap();
         do_update(
             tmp.path(),
             UpdateArgs {
-                number: n.number,
+                slug: n.slug.clone(),
                 status: Some("in-progress".into()),
                 ..Default::default()
             },
@@ -2348,99 +1272,60 @@ mod cmd_tests {
     }
 
     #[test]
-    fn update_with_closing_status_moves_to_closed_and_stamps_date() {
+    fn update_with_closing_status_moves_to_closed() {
         let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
+        let mut a = new_args("bug", "Bug");
+        a.slug = Some("close-me".into());
+        a.reporter = Some("r".into());
+        a.assignee = Some("a".into());
+        let n = do_new(tmp.path(), a).unwrap();
         let outcome = do_update(
             tmp.path(),
             UpdateArgs {
-                number: n.number,
+                slug: n.slug.clone(),
                 status: Some("fixed".into()),
                 ..Default::default()
             },
         )
         .unwrap();
         assert!(outcome.moved_to_closed);
-        assert!(!outcome.moved_to_open);
-        let new_path = outcome.final_dir.join("item.md");
-        assert!(new_path.exists());
-        assert!(!n.item_path.exists());
-        let content = read(&new_path);
-        assert!(content.contains("status: fixed"));
-        assert!(content.contains("closed: "));
-    }
-
-    #[test]
-    fn update_active_status_on_closed_reopens_and_clears_closed_date() {
-        let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
-        // Close first
-        do_update(
-            tmp.path(),
-            UpdateArgs {
-                number: n.number,
-                status: Some("fixed".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        // Re-open
-        let outcome = do_update(
-            tmp.path(),
-            UpdateArgs {
-                number: n.number,
-                status: Some("in-progress".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(outcome.moved_to_open);
-        assert!(!outcome.moved_to_closed);
-        let new_path = outcome.final_dir.join("item.md");
-        assert!(new_path.exists());
-        let content = read(&new_path);
-        assert!(content.contains("status: in-progress"));
-        assert!(!content.contains("closed:"));
-    }
-
-    #[test]
-    fn update_closing_status_on_already_closed_stays_in_closed() {
-        let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
-        do_update(
-            tmp.path(),
-            UpdateArgs {
-                number: n.number,
-                status: Some("fixed".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let outcome = do_update(
-            tmp.path(),
-            UpdateArgs {
-                number: n.number,
-                status: Some("wontfix".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(!outcome.moved_to_closed);
-        assert!(!outcome.moved_to_open);
         let content = read(&outcome.final_dir.join("item.md"));
-        assert!(content.contains("status: wontfix"));
+        assert!(content.contains("status: fixed"));
+        assert!(content.contains("closed:"));
+        assert!(!n.item_path.exists());
+    }
+
+    #[test]
+    fn update_set_epic_replaces_value() {
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "T");
+        a.slug = Some("task-x".into());
+        a.epic = Some("api-v2".into());
+        let n = do_new(tmp.path(), a).unwrap();
+        do_update(
+            tmp.path(),
+            UpdateArgs {
+                slug: n.slug.clone(),
+                epic: Some("api-v3".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let content = read(&n.item_path);
+        assert!(content.contains("epic: api-v3"));
     }
 
     #[test]
     fn update_no_epic_clears_field() {
         let tmp = fresh_repo();
         let mut a = new_args("task", "T");
-        a.epic = Some(99);
+        a.slug = Some("task-y".into());
+        a.epic = Some("api-v2".into());
         let n = do_new(tmp.path(), a).unwrap();
         do_update(
             tmp.path(),
             UpdateArgs {
-                number: n.number,
+                slug: n.slug.clone(),
                 no_epic: true,
                 ..Default::default()
             },
@@ -2451,138 +1336,14 @@ mod cmd_tests {
     }
 
     #[test]
-    fn update_set_epic_replaces_value() {
-        let tmp = fresh_repo();
-        let mut a = new_args("task", "T");
-        a.epic = Some(5);
-        let n = do_new(tmp.path(), a).unwrap();
-        do_update(
-            tmp.path(),
-            UpdateArgs {
-                number: n.number,
-                epic: Some(11),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let content = read(&n.item_path);
-        assert!(content.contains("epic: 11"));
-        assert!(!content.contains("epic: 5"));
-    }
-
-    #[test]
-    fn update_label_add_remove_and_drop_when_empty() {
-        let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
-        do_update(
-            tmp.path(),
-            UpdateArgs {
-                number: n.number,
-                add_labels: vec!["frontend".into(), "auth".into()],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(read(&n.item_path).contains("labels: [frontend, auth]"));
-        do_update(
-            tmp.path(),
-            UpdateArgs {
-                number: n.number,
-                remove_labels: vec!["frontend".into()],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(read(&n.item_path).contains("labels: [auth]"));
-        do_update(
-            tmp.path(),
-            UpdateArgs {
-                number: n.number,
-                remove_labels: vec!["auth".into()],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let content = read(&n.item_path);
-        assert!(!content.contains("labels:"));
-    }
-
-    #[test]
-    fn update_add_related_normalizes_and_dedupes() {
-        let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
-        do_update(
-            tmp.path(),
-            UpdateArgs {
-                number: n.number,
-                add_related: vec!["3".into(), "#3".into(), "7".into()],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let content = read(&n.item_path);
-        assert!(
-            content.contains("related: ['#3', '#7']")
-                || content.contains("related: [\"#3\", \"#7\"]")
-        );
-    }
-
-    #[test]
-    fn update_add_commit_appends() {
-        let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
-        do_update(
-            tmp.path(),
-            UpdateArgs {
-                number: n.number,
-                add_commits: vec!["abc:fix login".into(), "def:tests".into()],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let content = read(&n.item_path);
-        assert!(content.contains("hash: abc"));
-        assert!(content.contains("summary: fix login"));
-        assert!(content.contains("hash: def"));
-        assert!(content.contains("summary: tests"));
-    }
-
-    #[test]
-    fn update_rejects_bad_commit_spec() {
-        let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
-        let result = do_update(
-            tmp.path(),
-            UpdateArgs {
-                number: n.number,
-                add_commits: vec!["nohash".into()],
-                ..Default::default()
-            },
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn update_rejects_unknown_issue() {
-        let tmp = fresh_repo();
-        let result = do_update(
-            tmp.path(),
-            UpdateArgs {
-                number: 999,
-                status: Some("done".into()),
-                ..Default::default()
-            },
-        );
-        assert!(result.is_err());
-    }
-
-    // ── do_close ───────────────────────────────────────────────────────────
-
-    #[test]
     fn close_defaults_to_fixed_for_bug() {
         let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
-        let outcome = do_close(tmp.path(), n.number, None, vec![]).unwrap();
+        let mut a = new_args("bug", "Bug");
+        a.slug = Some("bug-slug".into());
+        a.reporter = Some("r".into());
+        a.assignee = Some("a".into());
+        let n = do_new(tmp.path(), a).unwrap();
+        let outcome = do_close(tmp.path(), &n.slug, None, vec![]).unwrap();
         assert!(outcome.moved_to_closed);
         let content = read(&outcome.final_dir.join("item.md"));
         assert!(content.contains("status: fixed"));
@@ -2591,88 +1352,97 @@ mod cmd_tests {
     #[test]
     fn close_defaults_to_done_for_task() {
         let tmp = fresh_repo();
-        let n = make_one(&tmp, "task", "Task");
-        let outcome = do_close(tmp.path(), n.number, None, vec![]).unwrap();
+        let mut a = new_args("task", "Task");
+        a.slug = Some("task-slug".into());
+        a.reporter = Some("r".into());
+        a.assignee = Some("a".into());
+        let n = do_new(tmp.path(), a).unwrap();
+        let outcome = do_close(tmp.path(), &n.slug, None, vec![]).unwrap();
         let content = read(&outcome.final_dir.join("item.md"));
         assert!(content.contains("status: done"));
-    }
-
-    #[test]
-    fn close_defaults_to_done_for_epic() {
-        let tmp = fresh_repo();
-        let n = make_one(&tmp, "epic", "Epic");
-        let outcome = do_close(tmp.path(), n.number, None, vec![]).unwrap();
-        let content = read(&outcome.final_dir.join("item.md"));
-        assert!(content.contains("status: done"));
-    }
-
-    #[test]
-    fn close_honors_explicit_status() {
-        let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
-        let outcome = do_close(tmp.path(), n.number, Some("wontfix".into()), vec![]).unwrap();
-        let content = read(&outcome.final_dir.join("item.md"));
-        assert!(content.contains("status: wontfix"));
-    }
-
-    #[test]
-    fn close_records_commit() {
-        let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
-        do_close(tmp.path(), n.number, None, vec!["abc:final fix".into()]).unwrap();
-        let closed = tmp.path().join(format!("issues/closed/{}-bug", n.number));
-        let content = read(&closed.join("item.md"));
-        assert!(content.contains("hash: abc"));
-        assert!(content.contains("summary: final fix"));
     }
 
     #[test]
     fn close_rejects_already_closed() {
         let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
-        do_close(tmp.path(), n.number, None, vec![]).unwrap();
-        let result = do_close(tmp.path(), n.number, None, vec![]);
-        assert!(result.is_err());
+        let mut a = new_args("bug", "Bug");
+        a.slug = Some("once".into());
+        a.reporter = Some("r".into());
+        a.assignee = Some("a".into());
+        let n = do_new(tmp.path(), a).unwrap();
+        do_close(tmp.path(), &n.slug, None, vec![]).unwrap();
+        assert!(do_close(tmp.path(), &n.slug, None, vec![]).is_err());
     }
 
     #[test]
-    fn close_rejects_unknown_issue() {
+    fn locate_issue_finds_in_open_and_closed() {
         let tmp = fresh_repo();
-        let result = do_close(tmp.path(), 999, None, vec![]);
-        assert!(result.is_err());
-    }
-
-    // ── locate_issue ───────────────────────────────────────────────────────
-
-    #[test]
-    fn locate_issue_finds_in_open() {
-        let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
-        let (folder, slug, path) = locate_issue(tmp.path(), n.number).unwrap();
+        fs::create_dir_all(tmp.path().join("issues/open/foo-bar")).unwrap();
+        fs::write(
+            tmp.path().join("issues/open/foo-bar/item.md"),
+            "---\n---\n",
+        )
+        .unwrap();
+        let (folder, _) = locate_issue(tmp.path(), "foo-bar").unwrap();
         assert_eq!(folder, "open");
-        assert_eq!(slug, "bug");
-        assert_eq!(path, n.item_path);
+        assert!(locate_issue(tmp.path(), "missing").is_err());
     }
 
     #[test]
-    fn locate_issue_finds_in_closed() {
-        let tmp = fresh_repo();
-        let n = make_one(&tmp, "bug", "Bug");
-        do_close(tmp.path(), n.number, None, vec![]).unwrap();
-        let (folder, _, _) = locate_issue(tmp.path(), n.number).unwrap();
-        assert_eq!(folder, "closed");
+    fn parse_commit_spec_basic() {
+        assert_eq!(
+            parse_commit_spec("abc123:fix login").unwrap(),
+            ("abc123".to_string(), "fix login".to_string())
+        );
     }
 
     #[test]
-    fn locate_issue_returns_error_for_missing() {
-        let tmp = fresh_repo();
-        assert!(locate_issue(tmp.path(), 999).is_err());
+    fn parse_commit_spec_rejects_no_colon() {
+        assert!(parse_commit_spec("abc123 fix").is_err());
     }
 
     #[test]
-    fn locate_issue_errors_when_item_md_missing() {
-        let tmp = fresh_repo();
-        fs::create_dir_all(tmp.path().join("issues/open/3-no-item")).unwrap();
-        assert!(locate_issue(tmp.path(), 3).is_err());
+    fn normalize_related_accepts_at_and_bare_slug() {
+        assert_eq!(
+            normalize_related_refs(&["@extremely-quiet-otter".to_string()]).unwrap(),
+            vec!["@extremely-quiet-otter".to_string()]
+        );
+        assert_eq!(
+            normalize_related_refs(&["amber-loud-fox".to_string()]).unwrap(),
+            vec!["@amber-loud-fox".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_related_preserves_legacy_numeric() {
+        assert_eq!(
+            normalize_related_refs(&["#7".to_string()]).unwrap(),
+            vec!["#7".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_related_rejects_garbage() {
+        assert!(normalize_related_refs(&["not a slug".to_string()]).is_err());
+        assert!(normalize_related_refs(&["@".to_string()]).is_err());
+        assert!(normalize_related_refs(&["#abc".to_string()]).is_err());
+        assert!(normalize_related_refs(&["foo".to_string()]).is_err()); // no hyphen
+    }
+
+    #[test]
+    fn parse_non_empty_rejects_empty_and_padded() {
+        assert!(parse_non_empty("").is_err());
+        assert!(parse_non_empty("  ").is_err());
+        assert!(parse_non_empty(" a").is_err());
+    }
+
+    #[test]
+    fn is_closing_status_classifies_correctly() {
+        for s in CLOSING_STATUSES {
+            assert!(is_closing_status(s));
+        }
+        for s in ACTIVE_STATUSES {
+            assert!(!is_closing_status(s));
+        }
     }
 }

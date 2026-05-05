@@ -9,8 +9,7 @@ pub struct Commit {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
-    /// Derived from directory name (not frontmatter)
-    pub number: u32,
+    /// Canonical identifier — derived from directory name.
     pub slug: String,
     pub folder: String,
 
@@ -29,8 +28,8 @@ pub struct Issue {
     pub assignee: Option<String>,
     pub owner: Option<String>,
 
-    // Relationships
-    pub epic: Option<u32>,
+    // Relationships — references are slugs.
+    pub epic: Option<String>,
     pub related: Option<Vec<String>>,
     pub labels: Option<Vec<String>>,
 

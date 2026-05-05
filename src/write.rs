@@ -192,15 +192,8 @@ pub fn set_string(map: &mut Mapping, key: &str, value: &str) {
     );
 }
 
-pub fn set_u32(map: &mut Mapping, key: &str, value: u32) {
-    map.insert(
-        Value::String(key.to_string()),
-        Value::Number(serde_yaml::Number::from(value)),
-    );
-}
-
 pub fn remove_key(map: &mut Mapping, key: &str) {
-    map.remove(&Value::String(key.to_string()));
+    map.remove(Value::String(key.to_string()));
 }
 
 pub fn add_to_string_list(map: &mut Mapping, key: &str, value: &str) -> Result<()> {
@@ -261,7 +254,7 @@ pub struct NewIssueArgs<'a> {
     pub reporter: Option<&'a str>,
     pub assignee: Option<&'a str>,
     pub owner: Option<&'a str>,
-    pub epic: Option<u32>,
+    pub epic: Option<&'a str>,
     pub labels: &'a [String],
     pub related: &'a [String],
     pub source: Option<&'a str>,
@@ -292,7 +285,7 @@ pub fn render_new_item(args: &NewIssueArgs<'_>) -> String {
     set_string(&mut map, "priority", args.priority);
 
     if let Some(e) = args.epic {
-        set_u32(&mut map, "epic", e);
+        set_string(&mut map, "epic", e);
     }
     if !args.related.is_empty() {
         let seq: Vec<Value> = args
@@ -336,11 +329,8 @@ pub fn render_new_item(args: &NewIssueArgs<'_>) -> String {
     out
 }
 
-pub fn issue_dir(repo_root: &Path, folder: &str, number: u32, slug: &str) -> PathBuf {
-    repo_root
-        .join("issues")
-        .join(folder)
-        .join(format!("{number}-{slug}"))
+pub fn issue_dir(repo_root: &Path, folder: &str, slug: &str) -> PathBuf {
+    repo_root.join("issues").join(folder).join(slug)
 }
 
 #[cfg(test)]
@@ -537,14 +527,6 @@ mod tests {
     }
 
     #[test]
-    fn set_u32_inserts_number() {
-        let mut m = empty_map();
-        set_u32(&mut m, "epic", 42);
-        let v = m.get(Value::String("epic".into())).unwrap();
-        assert_eq!(v.as_u64(), Some(42));
-    }
-
-    #[test]
     fn remove_key_deletes() {
         let mut m = empty_map();
         set_string(&mut m, "epic", "x");
@@ -676,7 +658,7 @@ mod tests {
     #[test]
     fn render_new_item_includes_optional_fields() {
         let labels = vec!["frontend".to_string(), "auth".to_string()];
-        let related = vec!["#3".to_string()];
+        let related = vec!["@extremely-quiet-otter".to_string()];
         let a = NewIssueArgs {
             title: "X",
             issue_type: "task",
@@ -684,7 +666,7 @@ mod tests {
             reporter: Some("alice"),
             assignee: None,
             owner: None,
-            epic: Some(5),
+            epic: Some("api-v2-epic"),
             labels: &labels,
             related: &related,
             source: Some("frontend/login"),
@@ -692,9 +674,9 @@ mod tests {
         };
         let out = render_new_item(&a);
         assert!(out.contains("priority: high"));
-        assert!(out.contains("epic: 5"));
+        assert!(out.contains("epic: api-v2-epic"));
         assert!(out.contains("labels: [frontend, auth]"));
-        assert!(out.contains("'#3'") || out.contains("\"#3\""));
+        assert!(out.contains("'@extremely-quiet-otter'") || out.contains("@extremely-quiet-otter"));
         assert!(out.contains("_Source: frontend/login_"));
         assert!(out.contains("Stuck in loop."));
     }
@@ -713,7 +695,7 @@ mod tests {
 
     #[test]
     fn issue_dir_constructs_path() {
-        let p = issue_dir(Path::new("/tmp/repo"), "open", 42, "fix-it");
-        assert_eq!(p, Path::new("/tmp/repo/issues/open/42-fix-it"));
+        let p = issue_dir(Path::new("/tmp/repo"), "open", "extremely-quiet-otter");
+        assert_eq!(p, Path::new("/tmp/repo/issues/open/extremely-quiet-otter"));
     }
 }

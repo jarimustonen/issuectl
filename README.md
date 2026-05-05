@@ -8,7 +8,10 @@
 > just files in your repo.
 
 `issuectl` tracks issues, tasks, features, and epics as plain markdown
-files with YAML frontmatter, stored under `issues/open/NN-slug/item.md`.
+files with YAML frontmatter, stored under
+`issues/open/<slug>/item.md`. Each issue gets a random
+`intensifier-adjective-noun` slug (e.g. `extremely-quiet-otter`) so that
+work in parallel branches and worktrees never collides.
 The CLI is designed to be driven by AI agents (e.g. via the `/issue`
 [Claude Code](https://claude.com/claude-code) skill) — strict input
 validation, structured JSON output, no interactive prompts — but humans
@@ -33,16 +36,17 @@ can use it from a terminal too.
   reconstruct — the file in `issues/` is the context.
 - **Round-trip safe.** Frontmatter mutations preserve field order and
   unknown keys. Body text is left verbatim.
-- **Renumber on merge.** When two branches both create issue #14,
-  `issuectl renumber` resolves the conflict (preserving unique numbers,
-  spilling duplicates) and rewrites `#NN` / `epic:` cross-references
-  across the whole repo.
+- **Collision-free by construction.** Random `intensifier-adjective-noun`
+  slugs (~100M combinations) replace sequential numbering. Two branches
+  creating issues independently can be merged in any order without
+  renaming. `issuectl doctor --fix` handles one-shot migration from
+  legacy `<NN>-<slug>/` repos.
 
 ## Features
 
 - `list` / `show` / `search` / `stats` — browse with filters and JSON output
 - `new` / `update` / `close` — create, mutate, and resolve issues with strict validation
-- `renumber` — uniquify numbers and fix cross-references after merges
+- `doctor` — health-check the repo and migrate legacy numbered layouts
 - `skill install` / `skill print` — install or preview the `/issue` skill
   template for Claude Code or Codex CLI (or both)
 - `--root <PATH>` — operate on an external repo from any working directory
@@ -105,27 +109,27 @@ cd path/to/your/repo
 # don't exist yet.
 issuectl skill install --agent all
 
-# Create your first issue:
+# Create your first issue (random slug auto-generated):
 issuectl new --type bug --title "Login loops on Safari" \
     --reporter alice --assignee bob --priority high
-# → Created #1: Login loops on Safari
-#     /your/repo/issues/open/1-login-loops-on-safari/item.md
+# → Created extremely-quiet-otter: Login loops on Safari
+#     /your/repo/issues/open/extremely-quiet-otter/item.md
 
 # Browse:
 issuectl list
-issuectl show 1
+issuectl show extremely-quiet-otter
 
 # Move it through the workflow:
-issuectl update 1 --status in-progress
-issuectl update 1 --add-commit "abc1234:fix redirect state init"
-issuectl close 1                       # status → fixed (default for bugs)
+issuectl update extremely-quiet-otter --status in-progress
+issuectl update extremely-quiet-otter --add-commit "abc1234:fix redirect state init"
+issuectl close extremely-quiet-otter                       # status → fixed (default for bugs)
 ```
 
 JSON output for any command (for scripting and AI agents):
 
 ```sh
 issuectl --json list -t bug --status open
-issuectl --json show 1
+issuectl --json show extremely-quiet-otter
 ```
 
 ## Usage
@@ -138,31 +142,35 @@ issuectl ls -a alice                   Filter by assignee
 issuectl ls -t bug -p high             Combine filters
 issuectl ls --all                      Include closed issues
 issuectl ls --closed --json            Closed issues, machine-readable
-issuectl show 42                       Show single issue details
+issuectl show <slug>                   Show single issue details
 issuectl search redirect [--all]       Keyword search in title/slug/body
 issuectl stats [--json]                Summary statistics
 ```
 
 Filter flags: `-a/--assignee`, `-t/--type`, `-p/--priority`,
-`-s/--status`, `-e/--epic`, `-l/--label`, `--all`, `--closed`.
+`-s/--status`, `-e/--epic` (slug), `-l/--label`, `--all`, `--closed`.
 
 ### Write
 
 ```
 issuectl new --type bug --title "Login loops" \
     --reporter alice --assignee bob
+# Random slug auto-generated; pass --slug <kebab> to override.
 
 issuectl new --type epic --title "API v2 migration" \
     --owner cara --priority high
 
-issuectl update 42 --status in-progress
-issuectl update 42 --add-commit "abc123:fix login state" --add-label frontend
-issuectl update 42 --add-related "#41" --epic 5
-issuectl update 42 --no-epic --remove-label stale
+issuectl update <slug> --status in-progress
+issuectl update <slug> --add-commit "abc123:fix login state" --add-label frontend
+issuectl update <slug> --add-related "@other-slug" --epic api-v2-migration
+issuectl update <slug> --no-epic --remove-label stale
 
-issuectl close 42                       Defaults: `fixed` for bugs, `done` otherwise
-issuectl close 42 --status wontfix --commit "abc123:design decision"
+issuectl close <slug>                   Defaults: `fixed` for bugs, `done` otherwise
+issuectl close <slug> --status wontfix --commit "abc123:design decision"
 ```
+
+Cross-references in body markdown use `@<slug>` (e.g. `@extremely-quiet-otter`).
+The `epic:` and `related:` frontmatter fields store bare slugs / `@<slug>`.
 
 Strict validation: invalid `--type`, `--priority`, or `--status` values
 are rejected with the list of valid options. Closing statuses (`done`,
@@ -174,43 +182,33 @@ issue moves it back to `open/` and clears `closed:`.
 ### Maintenance
 
 ```
-issuectl renumber                      Resolve duplicate numbers (preserve unique)
-issuectl renumber --dry-run            Preview the plan without modifying anything
-issuectl renumber --scope crates       Limit reference rewriting to one subtree
-issuectl renumber --pin 26=multi-tenant  Pin a specific dir to keep its number
-issuectl --json renumber [--dry-run]   Structured plan + report (for pipelines)
+issuectl doctor                        Read-only health-check report
+issuectl doctor --fix                  Apply migrations and fixes
+issuectl --json doctor [--fix]         Machine-readable report
 issuectl skill install                 Install /issue skill (default: Claude Code)
 issuectl skill install --agent codex   Install Codex prompt instead
 issuectl skill install --agent all     Install both
 issuectl skill print [--agent codex]   Preview the template without installing
 ```
 
-`renumber` is **minimal by default**: unique issue numbers keep their
-numbers, and only duplicates (multiple directories sharing one number,
-typical after merging two branches that each created issue #14) are
-renumbered. The first by sort order keeps the number and the rest spill
-above the current max — e.g. three #14's become #14 (kept), #192, #193.
+`doctor` performs the following checks:
 
-References to *unique* numbers stay valid automatically (since the
-numbers don't move). References to *duplicate* numbers (`#14`,
-`epic: 14`, `related: ["#14"]`) are reported as ambiguous and left
-unchanged for manual review — `issuectl` cannot guess which of the
-three the writer meant.
+- **Legacy `<NN>-<slug>/` migration.** Renames each numbered directory to
+  a fresh `intensifier-adjective-noun` slug. Drops `number:` from
+  frontmatter and inserts `slug:`. Migrates `epic:` (numeric) and
+  `related: ["#NN"]` to slug form. Rewrites `#NN` body references to
+  `@<slug>` across all `.md` files in the repo (skipping `.git/`,
+  `target/`, `node_modules/`, `.cargo/`, `dist/`, `build/`). Ambiguous
+  numeric refs (where multiple dirs shared the same legacy number) are
+  left unchanged for manual review.
+- **Slug sanity.** Flags slugs that don't pass `is_valid()` (lowercase,
+  kebab, 2–4 alpha-only segments).
+- **Duplicates.** Flags any slug used twice across `open/` + `closed/`.
+- **Missing item.md.** Flags directories without an `item.md`.
+- **Orphan epic refs.** Flags `epic:` values that don't resolve to an
+  existing slug.
 
-If the repo's docs reference a duplicate number meaning a *specific*
-one of the dirs (say, `#26` always meant the multi-tenant epic, not
-alphabetically-first `infra-email`), pin it with
-`--pin NUMBER=SLUG_SUBSTRING`. The pinned dir keeps the number and the
-others spill. Repeatable for multiple numbers. Errors if the substring
-matches zero or multiple dirs in the group.
-
-By default, reference rewriting scans the whole repo for `.md` files
-(skipping `.git/`, `target/`, `node_modules/`, `.cargo/`, `dist/`,
-`build/`) so that monorepo references in `CLAUDE.md`, `AGENTS.md`,
-per-crate docs, etc. stay consistent. Use `--scope <PATH>` (repeatable)
-to narrow the search.
-
-Always run `--dry-run` first on a real repo to see the plan.
+Without `--fix`, `doctor` only reports. Use `--fix` to apply migrations.
 
 ### Pointing to an external repo
 
@@ -232,8 +230,8 @@ reporter: alice
 assignee: bob
 status: open
 priority: normal
-epic: 5
-related: ["#3", "#7"]
+epic: api-v2-migration
+related: ["@notably-brave-otter", "@simply-fierce-comet"]
 labels: [frontend, auth]
 commits:
   - hash: abc1234

@@ -4,8 +4,9 @@ updated: 2026-05-05
 type: feature
 reporter: jari
 assignee: jari
-status: open
+status: in-progress
 priority: normal
+slug: altogether-sassy-house
 ---
 
 # Replace sequential issue numbers with random word slugs

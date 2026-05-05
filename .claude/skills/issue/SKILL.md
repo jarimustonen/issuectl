@@ -10,8 +10,8 @@ interface. The user's message determines the action:
 
 - **Create**: user describes a problem, task, or feature → `issuectl new ...`
 - **Search/list**: user asks to find, list, or check issues → `issuectl ls`, `issuectl show`, `issuectl search`
-- **Close**: user says an issue is done/resolved → `issuectl close NN`
-- **Update**: user wants to change status, assignee, or other details → `issuectl update NN ...`
+- **Close**: user says an issue is done/resolved → `issuectl close <slug>`
+- **Update**: user wants to change status, assignee, or other details → `issuectl update <slug> ...`
 
 Determine the action from the user's message and arguments. If unclear, ask.
 
@@ -23,6 +23,14 @@ terminal users only. All examples below already include `--json`.
 `--priority`, `--status`, etc.) and exits non-zero on errors. Read stderr
 when a command fails — the error message names the offending value and
 the valid alternatives.
+
+## Identifiers
+
+Issues are identified by random `intensifier-adjective-noun` slugs (e.g.
+`extremely-quiet-otter`). The slug is the primary key in every command
+that takes an issue argument. Body cross-references use `@<slug>` form
+(e.g. `@extremely-quiet-otter`). The `epic:` and `related:` frontmatter
+fields store bare slugs / `@<slug>` strings (no leading `#NN`).
 
 ## Arguments
 
@@ -41,32 +49,33 @@ Use the CLI rather than greppa hakemistoa. The CLI knows the frontmatter schema.
   - `-s/--status`: open, in-progress, testing, done, fixed, wontfix, duplicate, cannot-reproduce, obsolete
   - `-a/--assignee USERNAME` (matches `assignee` for issues, `owner` for epics)
   - `-l/--label LABEL`
-  - `-e/--epic NN` (children of an epic)
+  - `-e/--epic <slug>` (children of an epic)
 - Include closed: `--all` (both) or `--closed` (only closed)
-- Show details for one: `issuectl --json show NN`
+- Show details for one: `issuectl --json show <slug>`
 - Keyword search across title/slug/body: `issuectl --json search KEYWORD [--all]`
 - Stats: `issuectl --json stats`
 
 **Default scope**: `ls` and `search` cover open issues only. Add `--all` when
-the user asks for "all issues", "closed issues", or "history of #NN".
+the user asks for "all issues", "closed issues", or "history of @<slug>".
 
 Process the JSON with `jq` to extract what the user asked for. Format the
 result as a compact list when displaying back to the user (e.g.
-`#NN — Title (type, status, assignee)`), not the raw JSON.
+`@<slug> — Title (type, status, assignee)`), not the raw JSON.
 
 ### Action: Close
 
 Closing means setting a **closing status** and moving the issue to `closed/`.
 The CLI does both atomically — never `git mv` by hand.
 
-- `issuectl --json close NN` — defaults to `fixed` for bugs, `done` otherwise
-- `issuectl --json close NN --status wontfix` — explicit closing status
-- `issuectl --json close NN --commit HASH:summary` — also record a commit (repeatable)
+- `issuectl --json close <slug>` — defaults to `fixed` for bugs, `done` otherwise
+- `issuectl --json close <slug> --status wontfix` — explicit closing status
+- `issuectl --json close <slug> --commit HASH:summary` — also record a commit (repeatable)
 
 Output shape:
 
 ```json
-{ "number": 12, "final_dir": "/abs/path/issues/closed/12-slug",
+{ "slug": "extremely-quiet-otter",
+  "final_dir": "/abs/path/issues/closed/extremely-quiet-otter",
   "moved_to_closed": true }
 ```
 
@@ -75,23 +84,23 @@ Output shape:
 - `done` — work completed successfully (tasks, features, chores, epics)
 - `fixed` — bug fix committed and verified
 - `wontfix` — decided not to fix (by design, out of scope, etc.)
-- `duplicate` — duplicate of another issue (also `--add-related "#NN"` via update first)
+- `duplicate` — duplicate of another issue (also `--add-related "@<slug>"` via update first)
 - `cannot-reproduce` — bug could not be reproduced
 - `obsolete` — no longer relevant
 
 **Steps**:
 1. Determine the appropriate closing status from the user's message
-2. Run `issuectl --json close NN [--status X] [--commit HASH:summary]`
+2. Run `issuectl --json close <slug> [--status X] [--commit HASH:summary]`
 3. **If closing an epic**: update the `## Issues` list in the epic's item.md with final statuses of all child issues (the CLI does not edit body markdown)
 4. **If the issue belongs to an epic** (has `epic:` in frontmatter): update the parent epic's `## Issues` list to reflect the closed status
-5. Confirm to user with the issue number, title, closing status, and new location
+5. Confirm to user with the slug, title, closing status, and new location
 
-**Batch close**: if the user provides multiple issue numbers, run `issuectl
+**Batch close**: if the user provides multiple slugs, run `issuectl
 --json close` for each. Confirm each one.
 
 ### Action: Update
 
-Use `issuectl --json update NN` with one or more flags. The CLI updates
+Use `issuectl --json update <slug>` with one or more flags. The CLI updates
 frontmatter and bumps `updated:` automatically. If the new status is a
 closing status, the issue is also moved to `closed/` (same as `close`).
 
@@ -100,22 +109,22 @@ Common flags:
 - `--status STATUS` (active or closing)
 - `--assignee USER` / `--owner USER` (epics)
 - `--priority normal|high`
-- `--epic NN` / `--no-epic`
+- `--epic <slug>` / `--no-epic`
 - `--add-label LABEL` / `--remove-label LABEL` (repeatable)
-- `--add-related "#NN"` / `--remove-related "#NN"` (repeatable)
+- `--add-related "@<slug>"` / `--remove-related "@<slug>"` (repeatable; bare slug also accepted)
 - `--add-commit HASH:summary` (repeatable)
 
 Example flows:
 
-- `issuectl --json update 12 --status in-progress`
-- `issuectl --json update 12 --assignee alice --status testing` (handoff to tester)
-- `issuectl --json update 12 --add-commit "abc123:fix login state"`
-- `issuectl --json update 12 --add-label backend --add-label api`
+- `issuectl --json update extremely-quiet-otter --status in-progress`
+- `issuectl --json update extremely-quiet-otter --assignee alice --status testing`
+- `issuectl --json update extremely-quiet-otter --add-commit "abc123:fix login state"`
+- `issuectl --json update extremely-quiet-otter --add-label backend --add-label api`
 
 Output shape:
 
 ```json
-{ "number": 12, "final_dir": "/abs/path/...",
+{ "slug": "extremely-quiet-otter", "final_dir": "/abs/path/...",
   "moved_to_closed": false, "moved_to_open": false }
 ```
 
@@ -166,18 +175,19 @@ issuectl --json new --type epic --title "API v2 migration" --owner cara --priori
 Output shape:
 
 ```json
-{ "number": 42, "title": "Login redirect loops on safari",
-  "item_path": "/abs/path/issues/open/42-login-redirect-loops/item.md",
-  "dir": "/abs/path/issues/open/42-login-redirect-loops" }
+{ "slug": "extremely-quiet-otter",
+  "title": "Login redirect loops on safari",
+  "item_path": "/abs/path/issues/open/extremely-quiet-otter/item.md",
+  "dir": "/abs/path/issues/open/extremely-quiet-otter" }
 ```
 
 The CLI:
-- Picks the next available number automatically (parsed from `.number`)
-- Generates a kebab-case slug from `--title` (override with `--slug` if needed)
-- Writes `issues/open/NN-slug/item.md` with the right frontmatter
-- Returns the number and path in `--json`
+- Generates a random `intensifier-adjective-noun` slug automatically
+- Writes `issues/open/<slug>/item.md` with the right frontmatter
+- Returns the slug and path in `--json` (parse `.slug`)
+- Optionally accepts `--slug <kebab>` to override the auto-generated value
 
-Other useful flags: `--epic NN`, `--label X` (repeatable), `--related "#NN"` (repeatable).
+Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slug>"` (repeatable).
 
 #### 3. Flesh out the body
 
@@ -196,32 +206,31 @@ into the issue directory. Reference them in item.md with relative paths.
 
 Show the created issue/epic path and a brief summary.
 
-### Action: Renumber (post-merge cleanup)
+### Action: Doctor (repository health-check + migration)
 
-If the user asks to fix duplicate issue numbers (typical after merging
-two branches that each created issue #14), use `issuectl renumber`:
+If the user asks to "check the repo" or "migrate legacy issues", use
+`issuectl doctor`:
 
-- Always preview first: `issuectl --json renumber --dry-run`
-- Apply: `issuectl --json renumber`
-- Limit reference rewriting to a subtree: `issuectl --json renumber --scope crates`
+- Read-only report: `issuectl --json doctor`
+- Apply migrations and fixes: `issuectl --json doctor --fix`
 
-The plan output (`renumbered`, `ambiguous`, `summary`) tells you which
-old numbers had multiple sources and which references will need manual
-review afterward.
+Doctor migrates legacy `<NN>-<slug>/` directories to slug-only layout,
+rewrites `number:` → `slug:` in frontmatter, migrates `epic:` and
+`related:` references, and rewrites `#NN` body refs to `@<slug>`. It
+also flags invalid slugs, duplicates, missing item.md files, and orphan
+epic refs.
 
 ## Notes
 
 - **Today's date** is set automatically by the CLI for `created`/`updated`
-- Write issue content in English; Finnish slugs are fine
-- Slugs are 3–6 words by default; override via `--slug` for special cases
+- Write issue content in English; Finnish text is fine in the body
+- Slugs are random `intensifier-adjective-noun`; override via `--slug` only when there's a strong reason
 - Default priority is `normal`; default status is `open`
 - There is no default type — always pass `--type`
 - All images must be AVIF — convert PNG/JPG/WebP first
-- **Epic linkage**: prefer the `epic:` frontmatter field. Some older issues may
-  use `_Epic: **#NN** title_` in the body — both are valid, frontmatter is
-  searchable and preferred
+- **Epic linkage**: prefer the `epic:` frontmatter field, value is the parent epic's slug
 - **Closing statuses** also move the directory to `closed/`. Use `issuectl
   --json close` (or `update --status`) — never `git mv` by hand
-- For raw filesystem operations, `issues/open/NN-slug/item.md` is the format;
+- For raw filesystem operations, `issues/open/<slug>/item.md` is the format;
   but prefer the CLI for anything it supports
 - **Always `--json`** when invoking `issuectl` from this skill

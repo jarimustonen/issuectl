@@ -39,8 +39,8 @@ reporter: username
 assignee: username
 status: open
 priority: normal
-epic: NN              # optional — parent epic number
-related: ["#NN"]      # optional — cross-references
+epic: parent-epic-slug  # optional — parent epic slug
+related: ["@other-slug"] # optional — cross-references (slug form)
 labels: [area, tag]   # optional — freeform tags
 commits:              # optional — added as work progresses
   - hash: abcdef12
@@ -80,8 +80,8 @@ Quick way to verify the issue (optional section, omit if not applicable).
 | `status`     | yes      | Current status (see workflow below)                |
 | `priority`   | yes      | `normal` or `high`                                 |
 | `commits`    | no       | List of related commits (hash + summary)           |
-| `epic`       | no       | Parent epic number (just the number, e.g. `5`)     |
-| `related`    | no       | Related issue numbers (e.g. `["#3", "#7"]`)        |
+| `epic`       | no       | Parent epic slug (e.g. `api-v2-migration`)         |
+| `related`    | no       | Related issue slugs (e.g. `["@notably-brave-otter"]`) |
 | `labels`     | no       | Freeform tags (e.g. `[infra, monitoring]`)         |
 | `closed`     | no       | Date issue was closed (YYYY-MM-DD), set when status becomes a closing status |
 
@@ -128,11 +128,13 @@ When setting status to `testing`, change `assignee` to whoever needs to verify i
 ### Body Conventions
 
 - `_Source: where it happens_` — which service/page/feature
-- `_Continues: #NN_` — reference to predecessor issue
+- `_Continues: @<slug>_` — reference to predecessor issue
 
-These are in the markdown body, not frontmatter.
+These are in the markdown body, not frontmatter. Cross-references in
+body text use `@<slug>` form (e.g. `@extremely-quiet-otter`).
 
-**Epic linkage**: prefer the `epic:` frontmatter field for new issues. Some older issues may use `_Epic: **#NN** title_` in the body — both are valid, but frontmatter is searchable and preferred.
+**Epic linkage**: prefer the `epic:` frontmatter field — value is the
+parent epic's slug.
 
 ## Epics
 
@@ -146,7 +148,7 @@ Epics track larger initiatives that span multiple issues and weeks. They live in
 
 ### Epic item.md format
 
-Epics use the same directory structure as issues (`open/NN-slug/item.md`) but with `type: epic` and adapted frontmatter and body:
+Epics use the same directory structure as issues (`open/<slug>/item.md`) but with `type: epic` and adapted frontmatter and body:
 
 ```markdown
 ---
@@ -166,17 +168,17 @@ One-paragraph description of what this epic achieves.
 
 ## Issues
 
-- **#NN** Issue title (status)
-- **#NN** Issue title (status)
+- **@notably-brave-otter** Issue title (status)
+- **@simply-fierce-comet** Issue title (status)
 
 ## Phases
 
 ### Phase 1: Name
-- [x] Completed task (#NN)
+- [x] Completed task (@notably-brave-otter)
 - [ ] Pending task
 
 ### Phase 2: Name
-- [ ] Pending task (#NN)
+- [ ] Pending task (@simply-fierce-comet)
 
 ## Notes
 
@@ -199,7 +201,7 @@ Epics use `owner` instead of `reporter`/`assignee` since they are owned long-ter
 ### Epic lifecycle
 
 Epics follow the same open/closed flow as issues:
-- Created in `open/NN-slug/item.md`
+- Created in `open/<slug>/item.md`
 - When all phases complete: set status to `done` → moved to `closed/`
 - Epics are distinguished by `type: epic` in frontmatter
 

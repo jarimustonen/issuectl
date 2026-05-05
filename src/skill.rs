@@ -52,10 +52,10 @@ pub fn install_skill(repo_root: &Path, agents: &[Agent], force: bool) -> Result<
     }
 
     println!();
-    if agents.iter().any(|a| *a == Agent::Claude) {
+    if agents.contains(&Agent::Claude) {
         println!("  Use /issue in Claude Code to create, search, update, and close issues.");
     }
-    if agents.iter().any(|a| *a == Agent::Codex) {
+    if agents.contains(&Agent::Codex) {
         println!("  Use /issue in Codex CLI (or invoke the prompt) to manage issues.");
     }
     println!("  Or use `issuectl list` to browse issues from the command line.");
