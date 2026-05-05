@@ -10,6 +10,14 @@ slug: altogether-sassy-house
 commits:
 - hash: f73bdda
   summary: replace sequential numbers with random slugs (phases 1-4 + docs)
+- hash: bbe6e4b
+  summary: unify slug validation, close path-traversal
+- hash: 061d39b
+  summary: atomic slug claim on issue creation
+- hash: 4a6ba01
+  summary: scope doctor rewrites to issues/, drop two-phase rename
+- hash: '95523e1'
+  summary: RandomState PRNG seeding, drop broken fallback
 ---
 
 # Replace sequential issue numbers with random word slugs
