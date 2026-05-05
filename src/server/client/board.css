@@ -160,13 +160,17 @@ h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.25rem; letter-spacin
 .card:focus-visible { outline: 2px solid var(--gp-focus); outline-offset: 2px; }
 
 .card-title {
+  display: block;
   font-size: 0.9rem; font-weight: 600; line-height: 1.35;
   color: var(--gp-text); margin-bottom: 0.35rem;
+  white-space: normal;
+  text-align: left;
 }
 .card-meta {
   display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center;
   font-size: 0.75rem; color: var(--gp-text-muted);
 }
+button.card { font: inherit; text-align: left; width: 100%; }
 .card-meta .slug {
   font-family: 'SF Mono', 'Fira Code', Menlo, Consolas, monospace;
   font-size: 0.7rem; color: var(--gp-text-faint);
@@ -199,15 +203,30 @@ h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.25rem; letter-spacin
 
 .empty { color: var(--gp-text-faint); font-size: 0.85rem; padding: 0.5rem 0.25rem; }
 
-/* === Detail dialog === */
+/* === Detail dialog ===
+   Explicit centering: WebKit's UA stylesheet doesn't reliably center a
+   <dialog> opened via showModal() when our own rules set width/max-width,
+   so we pin it ourselves with `margin: auto` + `inset: 0`. */
 .detail-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
   border: 1px solid var(--gp-border); border-radius: 12px;
   background: var(--gp-surface); color: var(--gp-text);
-  padding: 0; max-width: min(800px, 92vw); width: 100%;
-  max-height: 88vh; box-shadow: 0 12px 40px rgba(0,0,0,0.18);
+  padding: 0;
+  width: min(800px, 92vw);
+  max-height: 88vh; height: fit-content;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.18);
+  /* Don't pass scroll out to the page when the modal hits its scroll edge. */
+  overscroll-behavior: contain;
 }
 .detail-dialog::backdrop { background: rgba(0, 0, 0, 0.4); backdrop-filter: blur(2px); }
-.detail-dialog #detail-body { padding: 1.75rem 2rem 1rem; overflow-y: auto; max-height: 76vh; }
+.detail-dialog #detail-body {
+  padding: 1.75rem 2rem 1rem;
+  overflow-y: auto;
+  max-height: 76vh;
+  overscroll-behavior: contain;
+}
 .detail-dialog #detail-close {
   display: block; margin: 0.5rem 1rem 1rem auto;
   background: var(--gp-surface-alt); border: 1px solid var(--gp-border);
@@ -257,3 +276,47 @@ h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.25rem; letter-spacin
 }
 
 .issue-detail { max-width: 900px; margin: 0 auto; }
+
+/* === Parse-warning panel === */
+.warnings {
+  background: rgba(220, 38, 38, 0.08);
+  border: 1px solid rgba(220, 38, 38, 0.3);
+  color: var(--gp-error);
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  margin: 0 auto 1rem;
+  max-width: 1800px;
+  font-size: 0.85rem;
+}
+.warnings h2 {
+  font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 0.4rem; color: var(--gp-error);
+}
+.warnings ul { list-style: disc inside; margin: 0; }
+.warnings li { margin: 0.15rem 0; }
+.warnings code {
+  font-family: 'SF Mono', Menlo, monospace; font-size: 0.8rem;
+  color: var(--gp-text);
+}
+
+/* === Doc nav (item.md + sibling .md files) === */
+.doc-nav {
+  display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap;
+  padding: 0.5rem 0; margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--gp-border-subtle);
+}
+.doc-nav-label {
+  font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--gp-text-muted); font-weight: 600; margin-right: 0.25rem;
+}
+.doc-link {
+  font: inherit; font-size: 0.8rem;
+  background: var(--gp-surface-alt); color: var(--gp-text-secondary);
+  border: 1px solid var(--gp-border); border-radius: 6px;
+  padding: 0.2rem 0.55rem; cursor: pointer;
+}
+.doc-link:hover { background: var(--gp-surface-hover); color: var(--gp-text); }
+.doc-link-active {
+  background: var(--gp-accent-soft); color: var(--gp-accent-text);
+  border-color: var(--gp-accent-border);
+}

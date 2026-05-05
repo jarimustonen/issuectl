@@ -39,14 +39,13 @@ can use it from a terminal too.
 - **Collision-free by construction.** Random `intensifier-adjective-noun`
   slugs (~100M combinations) replace sequential numbering. Two branches
   creating issues independently can be merged in any order without
-  renaming. `issuectl doctor --fix` handles one-shot migration from
-  legacy `<NN>-<slug>/` repos.
+  renaming.
 
 ## Features
 
 - `list` / `show` / `search` / `stats` — browse with filters and JSON output
 - `new` / `update` / `close` — create, mutate, and resolve issues with strict validation
-- `doctor` — health-check the repo and migrate legacy numbered layouts
+- `doctor` — health-check the repo (slug sanity, duplicates, orphans)
 - `skill install` / `skill print` — install or preview the `/issue` skill
   template for Claude Code or Codex CLI (or both)
 - `serve` — run a local Trello-style web board (read-only)
@@ -184,8 +183,7 @@ issue moves it back to `open/` and clears `closed:`.
 
 ```
 issuectl doctor                        Read-only health-check report
-issuectl doctor --fix                  Apply migrations and fixes
-issuectl --json doctor [--fix]         Machine-readable report
+issuectl --json doctor                 Machine-readable report
 issuectl skill install                 Install /issue skill (default: Claude Code)
 issuectl skill install --agent codex   Install Codex prompt instead
 issuectl skill install --agent all     Install both
@@ -194,22 +192,12 @@ issuectl skill print [--agent codex]   Preview the template without installing
 
 `doctor` performs the following checks:
 
-- **Legacy `<NN>-<slug>/` migration.** Renames each numbered directory to
-  a fresh `intensifier-adjective-noun` slug. Drops `number:` from
-  frontmatter and inserts `slug:`. Migrates `epic:` (numeric) and
-  `related: ["#NN"]` to slug form. Rewrites `#NN` body references to
-  `@<slug>` across all `.md` files in the repo (skipping `.git/`,
-  `target/`, `node_modules/`, `.cargo/`, `dist/`, `build/`). Ambiguous
-  numeric refs (where multiple dirs shared the same legacy number) are
-  left unchanged for manual review.
-- **Slug sanity.** Flags slugs that don't pass `is_valid()` (lowercase,
-  kebab, 2–4 alpha-only segments).
+- **Slug sanity.** Flags slugs that don't pass `is_valid()` (lowercase
+  ASCII kebab-case, at least two segments, letters/digits only).
 - **Duplicates.** Flags any slug used twice across `open/` + `closed/`.
 - **Missing item.md.** Flags directories without an `item.md`.
 - **Orphan epic refs.** Flags `epic:` values that don't resolve to an
   existing slug.
-
-Without `--fix`, `doctor` only reports. Use `--fix` to apply migrations.
 
 ### Web view
 
@@ -220,13 +208,20 @@ issuectl serve --host 0.0.0.0          Bind to all interfaces (LAN access)
 ```
 
 `serve` runs a small read-only web server that renders `issues/` as a
-Trello-style Kanban board (Open / In progress / Testing / Closed columns).
-Filter by type, assignee, epic, or label, search across slug and title, and
-click any card to read the rendered markdown body. The server reads the
+Trello-style Kanban board (Open / In progress / Testing / Closed columns,
+plus an "Other" catchall for unrecognised statuses). Filter by type,
+assignee, epic, or label and search across slug and title; filter state
+persists in the URL, so reloads and bookmarks work. Click any card to
+open a modal with the rendered markdown body, frontmatter, and any
+additional `*.md` files alongside `item.md`. The server re-reads the
 filesystem on every request, so editing an `item.md` and refreshing the
-browser shows the change without restarting. Bind defaults to `127.0.0.1`
-(local-only); pass `--host 0.0.0.0` to expose to your network. Edits via the
-browser will land in a follow-up release.
+browser shows the change without restarting.
+
+Bind defaults to `127.0.0.1` (local-only). `--host 0.0.0.0` exposes the
+board to your network: there is **no authentication and no TLS**, so use
+it only on trusted networks — `serve` prints a stderr warning when bound
+to a non-loopback interface as a reminder. Edits via the browser will
+land in a follow-up release.
 
 ### Pointing to an external repo
 
