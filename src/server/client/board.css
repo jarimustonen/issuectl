@@ -153,9 +153,19 @@ h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.25rem; letter-spacin
 .card {
   background: var(--gp-surface); border: 1px solid var(--gp-border);
   border-radius: 8px; padding: 0.7rem 0.85rem;
-  cursor: pointer; transition: border-color 0.15s, background 0.15s, transform 0.05s;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s, transform 0.05s;
 }
-.card:hover { border-color: var(--gp-accent-border); background: var(--gp-surface-hover); }
+.card:hover {
+  border-color: var(--gp-accent);
+  background: var(--gp-surface-hover);
+}
+/* Inner accent ring on top of the existing border so the card visually
+   "ticks up" without a 1px layout shift. Suppressed when the card also
+   has the keyboard-focus ring so we don't draw two competing outlines. */
+.card:hover:not(:focus-visible) {
+  box-shadow: inset 0 0 0 1px var(--gp-accent);
+}
 .card:active { transform: translateY(1px); }
 .card:focus-visible { outline: 2px solid var(--gp-focus); outline-offset: 2px; }
 
@@ -234,6 +244,8 @@ button.card { font: inherit; text-align: left; width: 100%; }
   font-size: 0.85rem;
 }
 .detail-dialog #detail-close:hover { background: var(--gp-surface-hover); }
+
+.detail-title { margin-bottom: 0.25rem; }
 
 .detail-meta {
   display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem;
@@ -316,7 +328,13 @@ button.card { font: inherit; text-align: left; width: 100%; }
   padding: 0.2rem 0.55rem; cursor: pointer;
 }
 .doc-link:hover { background: var(--gp-surface-hover); color: var(--gp-text); }
-.doc-link-active {
-  background: var(--gp-accent-soft); color: var(--gp-accent-text);
-  border-color: var(--gp-accent-border);
+.doc-link-active,
+.doc-link-active:hover {
+  /* Hover must lose to active here, otherwise the user clicks a doc, the
+     button turns blue, and as long as the cursor stays on it the blue is
+     overwritten by the gray hover state — making the click look like it
+     did nothing until the mouse moves away. */
+  background: var(--gp-accent-soft);
+  color: var(--gp-accent-text);
+  border-color: var(--gp-accent);
 }

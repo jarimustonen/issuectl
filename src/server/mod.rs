@@ -50,9 +50,10 @@ async fn security_headers(req: Request<axum::body::Body>, next: Next) -> Respons
     h.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-             img-src 'self' data:; object-src 'none'; base-uri 'none'; \
-             frame-ancestors 'none'; form-action 'self'",
+            "default-src 'none'; script-src 'self'; style-src 'self'; \
+             img-src 'self' data:; connect-src 'self'; font-src 'self'; \
+             object-src 'none'; base-uri 'none'; frame-ancestors 'none'; \
+             form-action 'self'",
         ),
     );
     h.insert(
@@ -440,6 +441,63 @@ mod tests {
                 resp.status()
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn docs_endpoint_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.md"), "# secret").unwrap();
+        let dir = tmp.path().join("issues/open/safe-quiet-otter");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("item.md"), "---\nstatus: open\n---\n# T\n").unwrap();
+        // Plant a symlink inside the issue dir pointing to a file outside.
+        symlink(outside.path().join("secret.md"), dir.join("evil.md")).unwrap();
+
+        let resp = make_router(tmp.path())
+            .oneshot(
+                Request::get("/api/issues/safe-quiet-otter/docs/evil.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Must NOT be 200 — escaping the issue dir is forbidden. Either the
+        // FORBIDDEN status from the prefix-check or NOT_FOUND if the symlink
+        // can't be canonicalized; both are acceptable as long as the body
+        // never leaks.
+        assert_ne!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.status() == StatusCode::FORBIDDEN
+                || resp.status() == StatusCode::NOT_FOUND
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn issue_endpoint_rejects_symlinked_issue_dir() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::write(outside.path().join("item.md"), "---\nstatus: open\n---\n# leaked\n").unwrap();
+        symlink(
+            outside.path(),
+            tmp.path().join("issues/open/escaped-not-otter"),
+        )
+        .unwrap();
+
+        let resp = make_router(tmp.path())
+            .oneshot(
+                Request::get("/api/issues/escaped-not-otter")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

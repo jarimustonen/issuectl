@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::models::Issue;
@@ -188,18 +188,53 @@ pub fn load_issue_summaries(repo_root: &Path) -> (Vec<IssueSummary>, Vec<LoadWar
 }
 
 /// Locate a single issue's `item.md` by slug. Returns `(folder, item_path)`.
-/// Mirrors the previous CLI-side helper but lives in `repo.rs` so the web
-/// server can reuse it without depending on `main.rs`.
+///
+/// Refuses symlinked issue directories outright and verifies (via canonical
+/// path comparison) that the resolved directory stays under
+/// `<repo_root>/issues/{open,closed}/`. Without this, a symlinked entry like
+/// `issues/open/escaped -> /etc` would be invisible in `load_issues` (which
+/// uses `DirEntry::file_type` and so doesn't follow symlinks) but reachable
+/// via direct `/api/issues/<slug>` lookups — escape-by-asymmetry.
 pub fn locate_issue(repo_root: &Path, slug: &str) -> Result<(String, PathBuf)> {
+    let issues_root = repo_root.join(ISSUES_DIR);
+    let issues_root_canon = std::fs::canonicalize(&issues_root).with_context(|| {
+        format!("cannot canonicalize {}", issues_root.display())
+    })?;
+
     for folder in &["open", "closed"] {
-        let folder_path = repo_root.join(ISSUES_DIR).join(folder).join(slug);
-        if folder_path.is_dir() {
-            let item = folder_path.join("item.md");
-            if !item.is_file() {
-                bail!("{slug} directory has no item.md: {}", item.display());
-            }
-            return Ok((folder.to_string(), item));
+        let dir = issues_root.join(folder).join(slug);
+        let meta = match std::fs::symlink_metadata(&dir) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() {
+            bail!(
+                "issue directory is a symlink (refusing to follow): {}",
+                dir.display()
+            );
         }
+        if !meta.is_dir() {
+            continue;
+        }
+        let dir_canon = std::fs::canonicalize(&dir)
+            .with_context(|| format!("cannot canonicalize {}", dir.display()))?;
+        if !dir_canon.starts_with(&issues_root_canon) {
+            bail!(
+                "issue directory escapes repository: {} → {}",
+                dir.display(),
+                dir_canon.display()
+            );
+        }
+        let item = dir_canon.join("item.md");
+        let item_meta = std::fs::symlink_metadata(&item)
+            .with_context(|| format!("{slug} directory has no item.md: {}", item.display()))?;
+        if item_meta.file_type().is_symlink() || !item_meta.is_file() {
+            bail!(
+                "{slug} item.md is missing or symlinked: {}",
+                item.display()
+            );
+        }
+        return Ok((folder.to_string(), item));
     }
     bail!("issue {slug} not found in issues/open/ or issues/closed/")
 }
@@ -244,6 +279,27 @@ mod tests {
         assert_eq!(
             slugs,
             vec!["amber-loud-fox", "quiet-brave-otter", "tiny-wild-comet"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn locate_issue_rejects_symlinked_dir() {
+        use std::os::unix::fs::symlink;
+        let tmp = fresh_repo();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("item.md"), "---\nstatus: open\n---\n# x\n").unwrap();
+        symlink(
+            outside.path(),
+            tmp.path().join("issues/open/escaped-not-otter"),
+        )
+        .unwrap();
+        let r = locate_issue(tmp.path(), "escaped-not-otter");
+        assert!(r.is_err(), "symlinked issue dir must be rejected");
+        let msg = r.unwrap_err().to_string();
+        assert!(
+            msg.contains("symlink"),
+            "error should explain why: {msg}"
         );
     }
 

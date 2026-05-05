@@ -5,6 +5,26 @@ use axum::{
 };
 use serde::Serialize;
 
+/// Distinct failure modes for the docs endpoint. Mapping to status codes
+/// from a single match keeps "I/O error", "doc missing", and "you tried to
+/// escape the issue directory" from collapsing into one undifferentiated
+/// 404 — which made debugging traversal issues painful.
+enum DocError {
+    NotFound,
+    Forbidden,
+    Internal,
+}
+
+impl From<DocError> for StatusCode {
+    fn from(e: DocError) -> Self {
+        match e {
+            DocError::NotFound => StatusCode::NOT_FOUND,
+            DocError::Forbidden => StatusCode::FORBIDDEN,
+            DocError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
 use crate::repo::{self, IssueSummary, LoadWarning};
 use crate::slug;
 
@@ -89,27 +109,39 @@ pub async fn get_doc(
     let root = state.root.clone();
     let slug_owned = slug_param.clone();
     let doc_owned = doc_name.clone();
-    let body = tokio::task::spawn_blocking(move || {
-        let (folder, _item) = repo::locate_issue(root.as_path(), &slug_owned)?;
+    let body = tokio::task::spawn_blocking(move || -> Result<String, DocError> {
+        let (folder, _item) = repo::locate_issue(root.as_path(), &slug_owned)
+            .map_err(|_| DocError::NotFound)?;
         let path = root
             .join("issues")
             .join(&folder)
             .join(&slug_owned)
             .join(&doc_owned);
-        // Rebuilt-from-validated-segments path cannot escape the issue dir,
-        // but assert via canonicalization that it stays under the issue
-        // directory in case of symlinks.
-        let canon = std::fs::canonicalize(&path)?;
+        // Rebuilt-from-validated-segments path cannot escape the issue dir
+        // by string operations alone, but a symlink inside the dir could
+        // still point outward. Canonicalize both sides and require the doc
+        // to stay under the canonical issue directory.
+        let canon = std::fs::canonicalize(&path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => DocError::NotFound,
+            _ => DocError::Internal,
+        })?;
         let issue_dir =
-            std::fs::canonicalize(root.join("issues").join(&folder).join(&slug_owned))?;
+            std::fs::canonicalize(root.join("issues").join(&folder).join(&slug_owned))
+                .map_err(|_| DocError::Internal)?;
         if !canon.starts_with(&issue_dir) {
-            anyhow::bail!("doc path escapes issue directory");
+            return Err(DocError::Forbidden);
         }
-        Ok(std::fs::read_to_string(&path)?)
+        // Read via the canonical path — `path` would re-resolve symlinks
+        // that may have been swapped between canonicalize() and read().
+        let meta = std::fs::metadata(&canon).map_err(|_| DocError::NotFound)?;
+        if !meta.is_file() {
+            return Err(DocError::NotFound);
+        }
+        std::fs::read_to_string(&canon).map_err(|_| DocError::Internal)
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|_| StatusCode::NOT_FOUND)?;
+    .map_err(StatusCode::from)?;
 
     Ok(Json(DocResponse {
         name: doc_name,
@@ -143,14 +175,64 @@ fn list_extra_docs(dir: &std::path::Path) -> Vec<String> {
 
 /// Doc filename safety: bare basename ending in `.md`, ASCII letters/digits
 /// plus `-`, `_`, `.`. Blocks path separators, parent refs, and hidden files.
-fn is_safe_doc_name(name: &str) -> bool {
-    if name.is_empty() || name == "." || name == ".." || name.starts_with('.') {
+///
+/// SECURITY: the explicit `..` check is load-bearing — `a..b.md` and `....md`
+/// would otherwise pass the char-class predicate (since `.` is allowed).
+/// Don't drop it as a "redundant" cleanup. Likewise the `starts_with('.')`
+/// rule blocks dotfiles like `.git.md` and the empty/`.`/`..` literal cases.
+pub(super) fn is_safe_doc_name(name: &str) -> bool {
+    if name.is_empty() || name.starts_with('.') {
         return false;
     }
     if !name.ends_with(".md") {
         return false;
     }
+    if name.contains("..") {
+        return false;
+    }
     name.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        && !name.contains("..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_doc_name;
+
+    #[test]
+    fn doc_name_accepts_ordinary_md_files() {
+        for name in [
+            "analysis.md",
+            "design-v2.md",
+            "foo_bar.md",
+            "notes_2026.md",
+            "a-b-c.md",
+            "x.md",
+        ] {
+            assert!(is_safe_doc_name(name), "{name} should be accepted");
+        }
+    }
+
+    #[test]
+    fn doc_name_rejects_dangerous_patterns() {
+        for name in [
+            "",
+            ".",
+            "..",
+            ".hidden.md",
+            "..hidden.md",
+            "../item.md",
+            "..\\item.md",
+            "a/b.md",
+            "a\\b.md",
+            "a..b.md",
+            "....md",
+            "notes.txt",
+            "notes",
+            "é.md",        // non-ASCII
+            "file.md:zip", // alternate stream / colon
+            "name with space.md",
+        ] {
+            assert!(!is_safe_doc_name(name), "{name} should be rejected");
+        }
+    }
 }

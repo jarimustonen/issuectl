@@ -3,7 +3,7 @@ use axum::{
     http::{StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
-use pulldown_cmark::{Options, Parser};
+use pulldown_cmark::{Event, Options, Parser};
 
 use crate::repo;
 use crate::slug;
@@ -147,31 +147,38 @@ fn render_issue_page(issue: &crate::models::Issue) -> String {
 
 /// Render markdown to sanitized HTML. Used for issue bodies and side docs.
 ///
-/// We use an explicit `ammonia::Builder` rather than `ammonia::clean` so
-/// the policy is auditable from the codebase: ammonia's defaults strip
-/// `<input>` (breaking pulldown-cmark's task list output) and `id`
-/// attributes (breaking footnote backlinks). The allow-list below restores
-/// those specific cases without opening other holes.
+/// Two layers of defense:
+///
+/// 1. **Raw HTML in the markdown source is dropped before rendering.** Markdown
+///    normally passes through inline/block HTML untouched; we filter
+///    `Event::Html` and `Event::InlineHtml` so an issue body can't sneak in
+///    `<input type="password">`, `<div id="theme-toggle" class="card">`, or
+///    other markup that would survive a pure attribute-level sanitizer. After
+///    this filter the only HTML reaching the sanitizer is what
+///    pulldown-cmark itself emits.
+///
+/// 2. **Explicit `ammonia::Builder` policy** (vs. `ammonia::clean` defaults)
+///    so the allow-list is auditable. Ammonia defaults strip `<input>` (which
+///    breaks tasklist checkboxes) and `id` attributes (which breaks footnote
+///    backlinks); the additions below re-enable exactly those — and only
+///    those — for renderer-generated markup, which the layer 1 filter
+///    guarantees is the only source of those tags here.
 pub fn sanitize_markdown(md: &str) -> String {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_FOOTNOTES);
-    let parser = Parser::new_ext(md, opts);
+    let parser = Parser::new_ext(md, opts).filter(|ev| {
+        !matches!(ev, Event::Html(_) | Event::InlineHtml(_))
+    });
     let mut raw = String::new();
     pulldown_cmark::html::push_html(&mut raw, parser);
 
     let mut builder = ammonia::Builder::default();
     builder
-        // Task list checkboxes from pulldown-cmark.
         .add_tags(["input"])
         .add_tag_attributes("input", ["type", "disabled", "checked"])
-        // Footnote anchors/backlinks need stable id attributes; pulldown-cmark
-        // also emits `class="footnote-reference"` / `footnote-definition` which
-        // this stylesheet styles. The class names come from the renderer, not
-        // user content (markdown has no native `class` syntax), so allowing
-        // them here is safe.
         .add_tag_attributes("li", ["id", "class"])
         .add_tag_attributes("a", ["id", "class"])
         .add_tag_attributes("sup", ["id", "class"])
@@ -231,5 +238,39 @@ mod tests {
         let html = sanitize_markdown("see[^1]\n\n[^1]: details");
         assert!(html.contains("id=\"1\""), "footnote id stripped: {html}");
         assert!(html.contains("href=\"#1\""), "footnote ref stripped: {html}");
+    }
+
+    #[test]
+    fn sanitize_drops_user_authored_input_tag() {
+        // Even though we allow <input> at the ammonia layer for tasklist
+        // checkboxes, raw HTML in the markdown body is filtered before
+        // rendering. A phishing input is dropped wholesale.
+        let html = sanitize_markdown(r#"<input type="password" placeholder="API token">"#);
+        assert!(!html.contains("<input"), "raw input survived: {html}");
+    }
+
+    #[test]
+    fn sanitize_drops_user_authored_div_with_chrome_classes() {
+        // Without the raw-HTML filter, `<div id="theme-toggle" class="card">`
+        // would survive (pulldown passes it through; ammonia would let id/class
+        // through because we whitelist them on div for footnote styling). With
+        // the filter, the entire block — open tag, inner text, close tag — is
+        // dropped, which is fine because pulldown also drops the text inside a
+        // raw-HTML block.
+        let html = sanitize_markdown(
+            r#"<div id="theme-toggle" class="card detail-dialog">spoof</div>"#,
+        );
+        assert!(!html.contains("theme-toggle"));
+        assert!(!html.contains("detail-dialog"));
+        assert!(!html.contains("<div"));
+    }
+
+    #[test]
+    fn sanitize_drops_iframes_and_objects() {
+        let html = sanitize_markdown(
+            "<iframe src=\"https://evil\"></iframe>\n<object data=\"x\"></object>",
+        );
+        assert!(!html.contains("<iframe"));
+        assert!(!html.contains("<object"));
     }
 }

@@ -59,6 +59,15 @@
         state.warnings = data.warnings || [];
         renderWarnings();
         populateFilters();
+        // populateFilters rebuilds <option> lists from the loaded data; a
+        // URL-supplied filter value (e.g. `?epic=stale-slug` from a
+        // bookmark) might point at a value the data no longer contains.
+        // Drop those before re-applying — otherwise the <select> shows
+        // "all" while state.filters still has the stale value, and the
+        // board renders zero matches with no UI affordance to recover.
+        normalizeFiltersToOptions();
+        applyFiltersToInputs();
+        syncFiltersToUrl();
         render();
       })
       .catch(function (err) {
@@ -243,7 +252,7 @@
         '</nav>';
     }
 
-    return '<h2 style="margin-bottom:0.25rem">' + escapeHtml(d.title || d.slug) + '</h2>' +
+    return '<h2 class="detail-title">' + escapeHtml(d.title || d.slug) + '</h2>' +
       '<dl class="detail-meta">' + rows.join('') + '</dl>' +
       docsNav +
       '<div class="markdown-body" id="doc-body">' + (d.body_html || '') + '</div>';
@@ -314,6 +323,19 @@
     els.search.value = state.filters.search || '';
     ['type', 'assignee', 'epic', 'label'].forEach(function (k) {
       els[k].value = state.filters[k] || '';
+    });
+  }
+
+  function selectHasValue(sel, value) {
+    return Array.prototype.some.call(sel.options, function (o) { return o.value === value; });
+  }
+
+  function normalizeFiltersToOptions() {
+    ['type', 'assignee', 'epic', 'label'].forEach(function (k) {
+      var v = state.filters[k];
+      if (v && !selectHasValue(els[k], v)) {
+        state.filters[k] = '';
+      }
     });
   }
 

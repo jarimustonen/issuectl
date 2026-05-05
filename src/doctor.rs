@@ -19,6 +19,10 @@ struct DoctorReport {
     duplicate_slugs: Vec<String>,
     missing_item_md: Vec<String>,
     orphan_epic_refs: Vec<(String, String)>,
+    /// Per-issue parse warnings (malformed YAML, unreadable file, ...).
+    /// Keeps `doctor` consistent with the web `/api/issues` response,
+    /// which already surfaces the same warnings.
+    parse_errors: Vec<(String, String)>,
 }
 
 pub fn run(repo_root: &Path, json: bool) -> Result<()> {
@@ -51,15 +55,27 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
             let dir_name = entry.file_name().to_string_lossy().to_string();
             let path = entry.path();
 
-            if !path.join("item.md").is_file() {
-                report.missing_item_md.push(format!("{folder}/{dir_name}"));
-                continue;
-            }
-
+            // Report invalid slug + duplicate even when item.md is missing —
+            // the directory is still a problem worth flagging in one pass.
             if !slug::is_valid(&dir_name) {
                 report.invalid_slugs.push(format!("{folder}/{dir_name}"));
             }
             *all_slugs.entry(dir_name.clone()).or_insert(0) += 1;
+
+            let item_path = path.join("item.md");
+            if !item_path.is_file() {
+                report.missing_item_md.push(format!("{folder}/{dir_name}"));
+                continue;
+            }
+
+            // Surface parse warnings without printing them to stderr (the
+            // CLI report includes them at the end).
+            let parsed = parser::parse_item_md_with_warnings(&item_path, &dir_name, folder);
+            for w in parsed.warnings {
+                report
+                    .parse_errors
+                    .push((format!("{folder}/{dir_name}"), w));
+            }
         }
     }
 
@@ -102,7 +118,10 @@ fn detect_orphan_epic_refs(repo_root: &Path, report: &mut DoctorReport) -> Resul
                 continue;
             }
             let slug_id = entry.file_name().to_string_lossy().to_string();
-            let issue = parser::parse_item_md(&item, &slug_id, folder);
+            // Use the warning-collecting variant here too — the scan() pass
+            // already accounted for parse warnings; this second pass is just
+            // for epic-ref resolution and shouldn't double-print.
+            let issue = parser::parse_item_md_with_warnings(&item, &slug_id, folder).issue;
             if let Some(epic) = issue.epic.as_deref() {
                 let stripped = epic.strip_prefix('@').unwrap_or(epic);
                 if !existing_slugs.contains(stripped) {
@@ -121,6 +140,7 @@ fn render_text(report: &DoctorReport) {
         && report.duplicate_slugs.is_empty()
         && report.missing_item_md.is_empty()
         && report.orphan_epic_refs.is_empty()
+        && report.parse_errors.is_empty()
     {
         println!("Repository OK.");
         return;
@@ -153,6 +173,13 @@ fn render_text(report: &DoctorReport) {
         }
         println!();
     }
+    if !report.parse_errors.is_empty() {
+        println!("Parse warnings:");
+        for (location, msg) in &report.parse_errors {
+            println!("  {location}: {msg}");
+        }
+        println!();
+    }
 }
 
 fn render_json(report: &DoctorReport) -> serde_json::Value {
@@ -161,11 +188,17 @@ fn render_json(report: &DoctorReport) -> serde_json::Value {
         .iter()
         .map(|(s, e)| serde_json::json!({"slug": s, "epic": e}))
         .collect();
+    let parse_errors: Vec<serde_json::Value> = report
+        .parse_errors
+        .iter()
+        .map(|(loc, msg)| serde_json::json!({"location": loc, "message": msg}))
+        .collect();
     serde_json::json!({
         "invalid_slugs": report.invalid_slugs,
         "duplicate_slugs": report.duplicate_slugs,
         "missing_item_md": report.missing_item_md,
         "orphan_epic_refs": orphans,
+        "parse_errors": parse_errors,
     })
 }
 

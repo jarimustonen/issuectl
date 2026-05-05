@@ -10,7 +10,12 @@
 (function () {
   var stored = null;
   try { stored = localStorage.getItem('issuectl-theme'); } catch (e) {}
-  var theme = stored || 'auto';
+  // Validate the stored value before reflecting it into the DOM; an
+  // unrelated app on the same origin could have written garbage.
+  if (stored !== 'auto' && stored !== 'light' && stored !== 'dark') {
+    stored = 'auto';
+  }
+  var theme = stored;
   if (theme === 'auto') {
     try {
       theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -18,7 +23,5 @@
       theme = 'light';
     }
   }
-  if (theme === 'light' || theme === 'dark') {
-    document.documentElement.setAttribute('data-theme', theme);
-  }
+  document.documentElement.setAttribute('data-theme', theme);
 })();
