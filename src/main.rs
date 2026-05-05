@@ -2,6 +2,7 @@ mod doctor;
 mod models;
 mod parser;
 mod repo;
+mod server;
 mod skill;
 mod slug;
 mod write;
@@ -51,6 +52,7 @@ Examples:
   issuectl doctor                          Health-check the repo
   issuectl doctor --fix                    Migrate legacy numbered issues
   issuectl skill install                   Install /issue skill in current repo
+  issuectl serve                           Run a local Trello-style web board
 ";
 
 #[derive(Parser)]
@@ -293,6 +295,17 @@ enum Command {
         #[command(subcommand)]
         action: SkillAction,
     },
+
+    /// Run a local read-only web board (Trello-style) for the current repo
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+
+        /// Host/interface to bind to (default: 127.0.0.1, local-only)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -416,6 +429,7 @@ fn main() -> Result<()> {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
             SkillAction::Print { agent } => cmd_skill_print(&agent),
         },
+        Command::Serve { port, host } => server::run(find_root(), host, port),
     }
 }
 

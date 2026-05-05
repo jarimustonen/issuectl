@@ -49,6 +49,7 @@ can use it from a terminal too.
 - `doctor` — health-check the repo and migrate legacy numbered layouts
 - `skill install` / `skill print` — install or preview the `/issue` skill
   template for Claude Code or Codex CLI (or both)
+- `serve` — run a local Trello-style web board (read-only)
 - `--root <PATH>` — operate on an external repo from any working directory
 
 ## Install
@@ -209,6 +210,23 @@ issuectl skill print [--agent codex]   Preview the template without installing
   existing slug.
 
 Without `--fix`, `doctor` only reports. Use `--fix` to apply migrations.
+
+### Web view
+
+```
+issuectl serve                         Start the local board on http://127.0.0.1:7878
+issuectl serve --port 9000             Pick a different port
+issuectl serve --host 0.0.0.0          Bind to all interfaces (LAN access)
+```
+
+`serve` runs a small read-only web server that renders `issues/` as a
+Trello-style Kanban board (Open / In progress / Testing / Closed columns).
+Filter by type, assignee, epic, or label, search across slug and title, and
+click any card to read the rendered markdown body. The server reads the
+filesystem on every request, so editing an `item.md` and refreshing the
+browser shows the change without restarting. Bind defaults to `127.0.0.1`
+(local-only); pass `--host 0.0.0.0` to expose to your network. Edits via the
+browser will land in a follow-up release.
 
 ### Pointing to an external repo
 
