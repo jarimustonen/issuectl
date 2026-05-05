@@ -1,6 +1,6 @@
 use std::cell::Cell;
+use std::hash::{BuildHasher, RandomState};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod wordlists;
 
@@ -11,18 +11,14 @@ use wordlists::nouns::NOUNS;
 const COLLISION_RETRY_CAP: usize = 8;
 
 thread_local! {
+    /// Per-thread xorshift state. Seeded from the standard library's
+    /// `RandomState`, which is OS-seeded. Each new thread gets a fresh
+    /// seed; subsequent `next_u64` calls advance the state cheaply.
     static RNG_STATE: Cell<u64> = Cell::new(seed());
 }
 
 fn seed() -> u64 {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x9E3779B97F4A7C15);
-    let pid = std::process::id() as u64;
-    let mut s = nanos
-        .wrapping_mul(0x9E3779B97F4A7C15)
-        .wrapping_add(pid.wrapping_mul(0xBF58476D1CE4E5B9));
+    let mut s = RandomState::new().hash_one(());
     if s == 0 {
         s = 0x9E3779B97F4A7C15;
     }
@@ -32,12 +28,11 @@ fn seed() -> u64 {
 fn next_u64() -> u64 {
     RNG_STATE.with(|cell| {
         let mut x = cell.get();
+        // xorshift64 — standard parameters, period 2^64-1, never reaches
+        // zero from a non-zero seed.
         x ^= x << 13;
         x ^= x >> 7;
         x ^= x << 17;
-        if x == 0 {
-            x = 0x9E3779B97F4A7C15;
-        }
         cell.set(x);
         x
     })
@@ -45,6 +40,7 @@ fn next_u64() -> u64 {
 
 fn pick<'a>(words: &'a [&'a str]) -> &'a str {
     let n = words.len() as u64;
+    // Modulo bias is negligible for n ~ 1000 against u64 (~5e-17).
     let idx = (next_u64() % n) as usize;
     words[idx]
 }
@@ -61,7 +57,13 @@ pub fn generate() -> String {
 }
 
 /// Generate a slug that does not collide with an existing directory under
-/// `issues/{open,closed}/<slug>/`. Loops up to [`COLLISION_RETRY_CAP`] times.
+/// `issues/{open,closed}/<slug>/`. Loops up to [`COLLISION_RETRY_CAP`]
+/// times. With ~105M combinations (1094 intensifiers' worth ≈ 99 ×
+/// 1094 adjectives × 978 nouns), the birthday-paradox 50% mark sits
+/// around 12 000 issues — eight retries against any realistic
+/// half-full namespace gives ample headroom. If even that fails, the
+/// caller must regenerate (the atomic claim loop in `do_new` does
+/// exactly that).
 pub fn generate_unique(repo_root: &Path) -> String {
     for _ in 0..COLLISION_RETRY_CAP {
         let s = generate();
@@ -69,13 +71,11 @@ pub fn generate_unique(repo_root: &Path) -> String {
             return s;
         }
     }
-    // Astronomically unlikely with ~1B combinations; fall back to a slug
-    // suffixed with the current timestamp.
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{}-{nanos:x}", generate())
+    // Last-resort: return a fresh slug without re-checking. The caller
+    // (`do_new`'s atomic claim loop) will detect the collision via
+    // `fs::create_dir`'s EEXIST and try again — so we don't need a
+    // hex-suffixed fallback that would itself fail `is_valid`.
+    generate()
 }
 
 fn slug_exists(repo_root: &Path, slug: &str) -> bool {
