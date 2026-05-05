@@ -184,53 +184,59 @@ fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
         return Ok(());
     }
 
+    // Pre-flight: bail if scan generated overlapping slugs. With ~105M
+    // combinations and tens of legacy dirs the chance is negligible, but
+    // proceeding into a partial rename and discovering it halfway leaves
+    // the repo in a much worse state than refusing up-front.
+    if !report.duplicate_slugs.is_empty() {
+        bail!(
+            "doctor: scan produced colliding new slugs ({:?}); rerun to regenerate",
+            report.duplicate_slugs
+        );
+    }
+
     // Build maps for reference rewriting.
     let mut number_to_slug: BTreeMap<u32, String> = BTreeMap::new();
     let mut dir_to_slug: BTreeMap<String, String> = BTreeMap::new();
     for m in &report.legacy_dirs {
-        if number_to_slug.insert(m.old_number, m.new_slug.clone()).is_some() {
-            // Duplicate legacy number — leave the second mapping but flag.
-            // We'll still proceed; ambiguous numeric refs will be left alone.
-        }
+        let _prev = number_to_slug.insert(m.old_number, m.new_slug.clone());
+        // Duplicate legacy numbers are flagged via build_ambiguous below;
+        // rewrites for those numbers will be skipped.
         dir_to_slug.insert(m.old_dir_name.clone(), m.new_slug.clone());
     }
 
     let ambiguous_numbers = build_ambiguous(&report.legacy_dirs);
 
-    // Step 1: rename directories via temp suffix.
-    let temp_suffix = format!(".issuectl-doctor-{}", std::process::id());
+    // Single-phase atomic rename: old dirname (`<NN>-<slug>`) and new
+    // slug (`<intensifier-adj-noun>`) cannot collide, so the temp-suffix
+    // shuffle that the previous version did is unnecessary — and worse,
+    // an interruption mid-shuffle would leave `*.issuectl-doctor-<pid>`
+    // dirs that no subsequent doctor run could recognize.
     for m in &report.legacy_dirs {
-        let temp_path = m
-            .old_path
-            .with_file_name(format!("{}{temp_suffix}", m.old_dir_name));
-        fs::rename(&m.old_path, &temp_path).with_context(|| {
-            format!("cannot move {} to temp", m.old_path.display())
-        })?;
-    }
-    for m in &report.legacy_dirs {
-        let temp_path = m
-            .old_path
-            .with_file_name(format!("{}{temp_suffix}", m.old_dir_name));
         if m.new_path.exists() {
             bail!("target slug dir already exists: {}", m.new_path.display());
         }
-        fs::rename(&temp_path, &m.new_path).with_context(|| {
+        fs::rename(&m.old_path, &m.new_path).with_context(|| {
             format!(
-                "cannot move {} to {}",
-                temp_path.display(),
+                "cannot rename {} to {}",
+                m.old_path.display(),
                 m.new_path.display()
             )
         })?;
     }
 
-    // Step 2: rewrite frontmatter in each migrated item.md.
     for m in &report.legacy_dirs {
         let item_path = m.new_path.join("item.md");
         rewrite_item_frontmatter(&item_path, &m.new_slug, &number_to_slug, &ambiguous_numbers)?;
     }
 
-    // Step 3: rewrite body refs across the entire repo's markdown files.
-    let scopes = vec![repo_root.to_path_buf()];
+    // Body-ref rewrites are scoped to `issues/` by default. Documentation
+    // outside the issue tree (CHANGELOG, README, design docs) commonly
+    // contains literal `#NN` strings that are not issue references, and
+    // rewriting them silently is data loss. Users who want a wider sweep
+    // can run grep + a one-time replace themselves.
+    let issues_path = repo_root.join("issues");
+    let scopes = vec![issues_path];
     let files_rewritten =
         rewrite_markdown_in_scopes(&scopes, &number_to_slug, &dir_to_slug, &ambiguous_numbers)?;
     report.files_rewritten = files_rewritten;
@@ -417,9 +423,31 @@ fn rewrite_text(
             (Regex::new(&pat).expect("valid dir regex"), new.clone())
         })
         .collect();
+    let fence_re = Regex::new(r"^\s{0,3}(```+|~~~+)").expect("valid fence");
 
     let mut rewritten = Vec::new();
+    let mut in_fence: Option<String> = None;
     for line in text.lines() {
+        // Track fenced code-block state and pass through unchanged
+        // inside fences. The fence marker line itself is also passed
+        // through (no rewrites apply to ` ```rust` either).
+        if let Some(fence) = fence_re.captures(line).and_then(|c| c.get(1)) {
+            let marker = fence.as_str().chars().next().unwrap();
+            let len = fence.as_str().len();
+            let opening = marker.to_string().repeat(len);
+            in_fence = match in_fence {
+                None => Some(opening.clone()),
+                Some(open) if line.trim_start().starts_with(&open) && len >= open.len() => None,
+                Some(open) => Some(open),
+            };
+            rewritten.push(line.to_string());
+            continue;
+        }
+        if in_fence.is_some() {
+            rewritten.push(line.to_string());
+            continue;
+        }
+
         let line = heading_re.replace(line, "$1$2").to_string();
         let line = ref_re
             .replace_all(&line, |caps: &Captures| {
@@ -682,5 +710,40 @@ mod tests {
         assert!(out.contains("@amber-loud-fox"));
         assert!(out.contains("../amber-loud-fox/item.md"));
         assert!(out.contains("#99"), "unknown number left as-is");
+    }
+
+    #[test]
+    fn rewrite_text_skips_fenced_code_blocks() {
+        let mut nm = BTreeMap::new();
+        nm.insert(7, "amber-loud-fox".to_string());
+        let dm = BTreeMap::new();
+        let amb = BTreeSet::new();
+        let text = "Outside #7.\n```rust\n// inside #7\n```\nAfter #7.\n";
+        let out = rewrite_text(text, &nm, &dm, &amb);
+        assert!(out.contains("Outside @amber-loud-fox"));
+        assert!(out.contains("// inside #7"), "code block content untouched");
+        assert!(out.contains("After @amber-loud-fox"));
+    }
+
+    #[test]
+    fn fix_does_not_touch_files_outside_issues() {
+        let tmp = fresh_repo();
+        put_legacy(
+            &tmp,
+            "open",
+            1,
+            "alpha",
+            "---\nnumber: 1\nstatus: open\n---\n# A\n",
+        );
+        // CHANGELOG references `#1` legitimately (release note style).
+        let changelog = tmp.path().join("CHANGELOG.md");
+        fs::write(&changelog, "# CHANGELOG\n\n- Fixed #1 regression\n").unwrap();
+        let mut r = scan(tmp.path()).unwrap();
+        apply(tmp.path(), &mut r).unwrap();
+        let after = fs::read_to_string(&changelog).unwrap();
+        assert!(
+            after.contains("Fixed #1 regression"),
+            "CHANGELOG outside issues/ must not be rewritten, got: {after}"
+        );
     }
 }
