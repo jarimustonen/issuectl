@@ -14,19 +14,41 @@ use crate::parser;
 use crate::slug;
 use crate::write;
 
-/// Parse a legacy item.md and return the numeric `number:` from the
-/// frontmatter, if present. The presence of `number:` is the gate for
-/// "this is a legacy issue" — directory-name pattern alone is not
-/// trustworthy because user-overridden slugs like `100-things-to-fix`
-/// look identical.
-fn legacy_number_from_frontmatter(item_path: &Path) -> Option<u32> {
-    let text = std::fs::read_to_string(item_path).ok()?;
-    let trimmed = text.trim_start();
-    let rest = trimmed.strip_prefix("---")?;
-    let end = rest.find("\n---")?;
-    let yaml = &rest[..end];
-    let fm: parser::Frontmatter = serde_yaml::from_str(yaml).ok()?;
-    fm.number
+/// Decide whether an issue directory is in the legacy numbered layout and,
+/// if so, return its numeric id.
+///
+/// Two legacy variants exist in the wild:
+///
+/// 1. **Explicit:** frontmatter carries a numeric `number:` field. This is
+///    the form `issuectl new` produced before the slug migration.
+/// 2. **Implicit:** the number lives only in the dirname (`<NN>-<slug>/`)
+///    and frontmatter has neither `number:` nor `slug:`. Repos that
+///    pre-date the `number:` field at all (early grooveserve issues) look
+///    like this.
+///
+/// A user-supplied slug like `--slug 100-things-to-fix` matches the
+/// dirname pattern but carries `slug:` in frontmatter — so requiring the
+/// absence of `slug:` keeps us from migrating those.
+fn legacy_number(item_path: &Path, dir_name: &str) -> Option<u32> {
+    // Try to parse frontmatter; treat missing/malformed frontmatter as
+    // "no fields" rather than bailing out — pre-`number:` repos sometimes
+    // have item.md without YAML at all.
+    let fm: parser::Frontmatter = std::fs::read_to_string(item_path)
+        .ok()
+        .and_then(|text| {
+            let trimmed = text.trim_start();
+            let rest = trimmed.strip_prefix("---")?;
+            let end = rest.find("\n---")?;
+            serde_yaml::from_str(&rest[..end]).ok()
+        })
+        .unwrap_or_default();
+    if let Some(n) = fm.number {
+        return Some(n);
+    }
+    if fm.slug.is_some() {
+        return None;
+    }
+    parser::parse_legacy_dir(dir_name).map(|(n, _)| n)
 }
 
 #[derive(Debug, Clone)]
@@ -92,13 +114,9 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
                 continue;
             }
 
-            // A directory is "legacy" only when its item.md frontmatter
-            // contains a numeric `number:` field. The dirname pattern
-            // `<NN>-<slug>` alone is not enough — a user-supplied
-            // `--slug 100-things-to-fix` would match the pattern but is
-            // not legacy and must not be migrated.
+            // See `legacy_number` for the detection rules.
             let item_path = path.join("item.md");
-            if let Some(number) = legacy_number_from_frontmatter(&item_path) {
+            if let Some(number) = legacy_number(&item_path, &dir_name) {
                 let new_slug = slug::generate_unique(repo_root);
                 let new_path = issues_dir.join(folder).join(&new_slug);
                 report.legacy_dirs.push(LegacyMigration {
@@ -625,14 +643,37 @@ mod tests {
     #[test]
     fn scan_does_not_migrate_user_slug_starting_with_digits() {
         // Regression: a user-overridden slug `100-things-to-fix` looks like
-        // legacy `<NN>-<slug>` but lacks `number:` in frontmatter — must
-        // not be migrated.
+        // legacy `<NN>-<slug>` but is a legitimate new-format issue. The
+        // presence of `slug:` in frontmatter is the discriminator —
+        // `issuectl new` always writes it for new issues.
         let tmp = fresh_repo();
         let dir = tmp.path().join("issues/open/100-things-to-fix");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("item.md"), "---\nstatus: open\n---\n# T\n").unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\nslug: 100-things-to-fix\nstatus: open\n---\n# T\n",
+        )
+        .unwrap();
         let r = scan(tmp.path()).unwrap();
         assert!(r.legacy_dirs.is_empty(), "should not detect as legacy");
+    }
+
+    #[test]
+    fn scan_detects_legacy_when_only_dirname_carries_number() {
+        // Pre-`number:` repos (early grooveserve issues) had the number
+        // only in the dirname; frontmatter has neither `number:` nor
+        // `slug:`. These must still migrate.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/open/42-old-style");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\nstatus: open\ntype: feature\n---\n# Old\n",
+        )
+        .unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert_eq!(r.legacy_dirs.len(), 1);
+        assert_eq!(r.legacy_dirs[0].old_number, 42);
     }
 
     #[test]
