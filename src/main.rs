@@ -643,37 +643,6 @@ fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
 
     let related = normalize_related_refs(&args.related)?;
 
-    let slug = match &args.slug {
-        Some(s) => {
-            // `slugify` is permissive (Unicode + digits, any segment count).
-            // Tighten to the canonical slug shape so the override is
-            // round-trippable through `parse_slug_arg` later.
-            let normalized = write::slugify(s, 10);
-            if !slug::is_valid(&normalized) {
-                bail!(
-                    "--slug {:?} normalized to {:?}, which is not a valid slug \
-                     (need ≥2 lowercase ASCII kebab segments, optional digits)",
-                    s,
-                    normalized
-                );
-            }
-            normalized
-        }
-        None => slug::generate_unique(root),
-    };
-
-    let dir = write::issue_dir(root, "open", &slug);
-    if dir.exists() {
-        bail!("target directory already exists: {}", dir.display());
-    }
-    let closed_dir = write::issue_dir(root, "closed", &slug);
-    if closed_dir.exists() {
-        bail!(
-            "slug {slug} already used by closed issue at {}",
-            closed_dir.display()
-        );
-    }
-
     let render = write::render_new_item(&write::NewIssueArgs {
         title: &args.title,
         issue_type: &args.issue_type,
@@ -688,16 +657,91 @@ fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
         description: args.description.as_deref(),
     });
 
-    fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let open_parent = root.join("issues").join("open");
+    fs::create_dir_all(&open_parent)
+        .with_context(|| format!("cannot create {}", open_parent.display()))?;
+
+    // Pick a slug atomically: try `fs::create_dir` (which fails on
+    // EEXIST) so two concurrent `issuectl new` invocations cannot race
+    // through `dir.exists()` then both call `fs::create_dir_all` (the
+    // latter is idempotent and does not detect a pre-existing dir).
+    // Returns the slug actually claimed and the open path.
+    let (slug, dir) = match &args.slug {
+        Some(s) => {
+            let normalized = write::slugify(s, 10);
+            if !slug::is_valid(&normalized) {
+                bail!(
+                    "--slug {:?} normalized to {:?}, which is not a valid slug \
+                     (need ≥2 lowercase ASCII kebab segments, optional digits)",
+                    s,
+                    normalized
+                );
+            }
+            // Detect a pre-existing closed issue with the same slug
+            // before attempting `create_dir` in open/, so the error
+            // message is precise.
+            let closed_dir = write::issue_dir(root, "closed", &normalized);
+            if closed_dir.exists() {
+                bail!(
+                    "slug {normalized} already used by closed issue at {}",
+                    closed_dir.display()
+                );
+            }
+            let dir = open_parent.join(&normalized);
+            match fs::create_dir(&dir) {
+                Ok(()) => (normalized, dir),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    bail!("target directory already exists: {}", dir.display())
+                }
+                Err(e) => return Err(anyhow::Error::from(e)
+                    .context(format!("cannot create {}", dir.display()))),
+            }
+        }
+        None => claim_random_slug(root, &open_parent)?,
+    };
+
     let item_path = dir.join("item.md");
-    fs::write(&item_path, render)
-        .with_context(|| format!("cannot write {}", item_path.display()))?;
+    // `create_new(true)` is belt-and-braces here: the directory is
+    // already exclusively ours, but if a caller somehow seeds an
+    // `item.md` between the rename and write, we fail loudly.
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&item_path)
+            .with_context(|| format!("cannot create {}", item_path.display()))?;
+        f.write_all(render.as_bytes())
+            .with_context(|| format!("cannot write {}", item_path.display()))?;
+    }
 
     Ok(NewOutcome {
         slug,
         title: args.title,
         item_path,
     })
+}
+
+/// Generate a random slug and atomically claim its open/ directory.
+/// Loops on `EEXIST` so that two concurrent processes that happen to
+/// pick the same slug both retry rather than silently overwriting.
+fn claim_random_slug(root: &Path, open_parent: &Path) -> Result<(String, PathBuf)> {
+    for _ in 0..16 {
+        let candidate = slug::generate();
+        // Cheap pre-check: skip slugs that already exist on disk to
+        // avoid burning a random pick when the answer is obvious.
+        if write::issue_dir(root, "closed", &candidate).exists() {
+            continue;
+        }
+        let dir = open_parent.join(&candidate);
+        match fs::create_dir(&dir) {
+            Ok(()) => return Ok((candidate, dir)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(anyhow::Error::from(e)
+                .context(format!("cannot create {}", dir.display()))),
+        }
+    }
+    bail!("could not claim a unique slug after 16 attempts; wordlist exhausted?")
 }
 
 #[derive(Default)]
