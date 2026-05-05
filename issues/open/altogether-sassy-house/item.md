@@ -7,6 +7,9 @@ assignee: jari
 status: in-progress
 priority: normal
 slug: altogether-sassy-house
+commits:
+- hash: f73bdda
+  summary: replace sequential numbers with random slugs (phases 1-4 + docs)
 ---
 
 # Replace sequential issue numbers with random word slugs
