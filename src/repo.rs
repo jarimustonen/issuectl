@@ -1,9 +1,70 @@
 use std::path::{Path, PathBuf};
 
+use anyhow::{Result, bail};
+use serde::Serialize;
+
 use crate::models::Issue;
 use crate::parser;
 
 const ISSUES_DIR: &str = "issues";
+
+/// Slimmer projection of `Issue` for list endpoints — same fields minus the
+/// markdown body. The web board renders cards from frontmatter + title, so
+/// shipping bodies in `/api/issues` is wasted bandwidth and parse cost.
+#[derive(Debug, Clone, Serialize)]
+pub struct IssueSummary {
+    pub slug: String,
+    pub folder: String,
+    pub created: Option<String>,
+    pub status: String,
+    pub updated: Option<String>,
+    pub priority: String,
+    #[serde(rename = "type")]
+    pub issue_type: String,
+    pub reporter: Option<String>,
+    pub assignee: Option<String>,
+    pub owner: Option<String>,
+    pub epic: Option<String>,
+    pub related: Option<Vec<String>>,
+    pub labels: Option<Vec<String>>,
+    pub closed: Option<String>,
+    pub commits: Option<Vec<crate::models::Commit>>,
+    pub title: String,
+}
+
+impl From<Issue> for IssueSummary {
+    fn from(i: Issue) -> Self {
+        IssueSummary {
+            slug: i.slug,
+            folder: i.folder,
+            created: i.created,
+            status: i.status,
+            updated: i.updated,
+            priority: i.priority,
+            issue_type: i.issue_type,
+            reporter: i.reporter,
+            assignee: i.assignee,
+            owner: i.owner,
+            epic: i.epic,
+            related: i.related,
+            labels: i.labels,
+            closed: i.closed,
+            commits: i.commits,
+            title: i.title,
+        }
+    }
+}
+
+/// Per-file warning collected during a load (e.g., malformed frontmatter).
+/// The CLI still emits these to stderr; the web API surfaces them in the
+/// listing payload so the UI can flag broken issues rather than silently
+/// rendering zombies with default fields.
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadWarning {
+    pub slug: String,
+    pub folder: String,
+    pub message: String,
+}
 
 /// Walk up from start (default: cwd) to find repo root.
 /// Looks for `issues/` directory first, then falls back to `.git`.
@@ -25,10 +86,9 @@ pub fn find_repo_root(start: Option<&Path>) -> PathBuf {
 
 /// Load all issues from open/ and closed/ directories.
 ///
-/// Each subdirectory is treated as a slug-named issue. Legacy `<NN>-<slug>`
-/// directories are still loaded (their slug becomes the full directory name)
-/// so that `issuectl doctor` can detect and migrate them. The `slug` field
-/// for legacy dirs reflects the on-disk dirname verbatim.
+/// Each subdirectory is treated as a slug-named issue. Directories whose
+/// names don't pass `slug::is_valid` are still loaded (so `issuectl doctor`
+/// can flag them) but the web/CLI surfaces only canonical slugs in URLs.
 pub fn load_issues(repo_root: &Path) -> Vec<Issue> {
     let issues_dir = repo_root.join(ISSUES_DIR);
     let mut result = Vec::new();
@@ -60,6 +120,94 @@ pub fn load_issues(repo_root: &Path) -> Vec<Issue> {
 
     result.sort_by(|a, b| a.slug.cmp(&b.slug));
     result
+}
+
+/// Load all issues plus per-file parse warnings. Mirrors `load_issues` but
+/// returns warnings instead of printing to stderr — the web API surfaces
+/// these in the response so users see broken issues rather than silently
+/// rendering zombies.
+pub fn load_issues_with_warnings(repo_root: &Path) -> (Vec<Issue>, Vec<LoadWarning>) {
+    let issues_dir = repo_root.join(ISSUES_DIR);
+    let mut issues = Vec::new();
+    let mut warnings = Vec::new();
+
+    for folder in &["open", "closed"] {
+        let folder_path = issues_dir.join(folder);
+        if !folder_path.is_dir() {
+            continue;
+        }
+        let mut entries: Vec<_> = match std::fs::read_dir(&folder_path) {
+            Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+            Err(e) => {
+                warnings.push(LoadWarning {
+                    slug: String::new(),
+                    folder: folder.to_string(),
+                    message: format!("cannot read {}: {}", folder_path.display(), e),
+                });
+                continue;
+            }
+        };
+        entries.sort_by_key(|e| e.file_name());
+
+        for entry in entries {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let slug = entry.file_name().to_string_lossy().to_string();
+            let item_path = entry.path().join("item.md");
+            if !item_path.is_file() {
+                warnings.push(LoadWarning {
+                    slug: slug.clone(),
+                    folder: folder.to_string(),
+                    message: format!("missing {}", item_path.display()),
+                });
+                continue;
+            }
+            let parsed = parser::parse_item_md_with_warnings(&item_path, &slug, folder);
+            for w in parsed.warnings {
+                warnings.push(LoadWarning {
+                    slug: slug.clone(),
+                    folder: folder.to_string(),
+                    message: w,
+                });
+            }
+            issues.push(parsed.issue);
+        }
+    }
+
+    issues.sort_by(|a, b| a.slug.cmp(&b.slug));
+    (issues, warnings)
+}
+
+/// Load only frontmatter + title summaries for every issue. Used by the web
+/// list endpoint so card metadata can be served without allocating or
+/// shipping markdown bodies.
+pub fn load_issue_summaries(repo_root: &Path) -> (Vec<IssueSummary>, Vec<LoadWarning>) {
+    let (issues, warnings) = load_issues_with_warnings(repo_root);
+    (issues.into_iter().map(IssueSummary::from).collect(), warnings)
+}
+
+/// Locate a single issue's `item.md` by slug. Returns `(folder, item_path)`.
+/// Mirrors the previous CLI-side helper but lives in `repo.rs` so the web
+/// server can reuse it without depending on `main.rs`.
+pub fn locate_issue(repo_root: &Path, slug: &str) -> Result<(String, PathBuf)> {
+    for folder in &["open", "closed"] {
+        let folder_path = repo_root.join(ISSUES_DIR).join(folder).join(slug);
+        if folder_path.is_dir() {
+            let item = folder_path.join("item.md");
+            if !item.is_file() {
+                bail!("{slug} directory has no item.md: {}", item.display());
+            }
+            return Ok((folder.to_string(), item));
+        }
+    }
+    bail!("issue {slug} not found in issues/open/ or issues/closed/")
+}
+
+/// Load a single issue by slug. O(1) instead of O(N).
+pub fn load_issue(repo_root: &Path, slug: &str) -> Result<Issue> {
+    let (folder, item_path) = locate_issue(repo_root, slug)?;
+    Ok(parser::parse_item_md(&item_path, slug, &folder))
 }
 
 #[cfg(test)]
@@ -114,17 +262,4 @@ mod tests {
         assert_eq!(issues[0].slug, "amber-loud-fox");
     }
 
-    #[test]
-    fn load_issues_includes_legacy_numbered_dirs() {
-        let tmp = fresh_repo();
-        fs::create_dir_all(tmp.path().join("issues/open/1-old-style")).unwrap();
-        fs::write(
-            tmp.path().join("issues/open/1-old-style/item.md"),
-            "---\nstatus: open\n---\n\n# Old\n",
-        )
-        .unwrap();
-        let issues = load_issues(tmp.path());
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].slug, "1-old-style");
-    }
 }

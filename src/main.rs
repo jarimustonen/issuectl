@@ -50,7 +50,6 @@ Examples:
   issuectl update <slug> --status testing  Change status
   issuectl close <slug> --status fixed     Move to closed/ with closing status
   issuectl doctor                          Health-check the repo
-  issuectl doctor --fix                    Migrate legacy numbered issues
   issuectl skill install                   Install /issue skill in current repo
   issuectl serve                           Run a local Trello-style web board
 ";
@@ -283,12 +282,8 @@ enum Command {
         commits: Vec<String>,
     },
 
-    /// Health-check the repo and (with --fix) migrate legacy numbered issues to slugs
-    Doctor {
-        /// Apply migrations and fixes (otherwise read-only report)
-        #[arg(long)]
-        fix: bool,
-    },
+    /// Health-check the repo (read-only)
+    Doctor,
 
     /// Install or preview the /issue skill template (Claude Code or Codex)
     Skill {
@@ -424,7 +419,7 @@ fn main() -> Result<()> {
             status,
             commits,
         } => cmd_close(json_output, &slug, status, commits),
-        Command::Doctor { fix } => doctor::run(&find_root(), fix, json_output),
+        Command::Doctor => doctor::run(&find_root(), json_output),
         Command::Skill { action } => match action {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
             SkillAction::Print { agent } => cmd_skill_print(&agent),
@@ -985,25 +980,14 @@ fn parse_commit_spec(spec: &str) -> Result<(String, String)> {
     Ok((hash.to_string(), summary.to_string()))
 }
 
-/// Normalize a `--related`/`--add-related` reference. Accepts `@slug`, bare
-/// `slug`, or legacy `#NN`. Output is canonical `@slug` form (or `#NN` if the
-/// input was numeric — preserved verbatim so doctor can detect and migrate).
+/// Normalize a `--related`/`--add-related` reference. Accepts `@slug` or
+/// bare `slug`. Output is canonical `@slug` form.
 fn normalize_related_refs(refs: &[String]) -> Result<Vec<String>> {
     let mut out = Vec::with_capacity(refs.len());
     for r in refs {
         let trimmed = r.trim();
         if trimmed.is_empty() {
             bail!("related reference cannot be empty");
-        }
-        if let Some(rest) = trimmed.strip_prefix('#') {
-            if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
-                bail!(
-                    "related reference {:?} looks like #NN but isn't numeric",
-                    r
-                );
-            }
-            out.push(format!("#{rest}"));
-            continue;
         }
         let stripped = trimmed.strip_prefix('@').unwrap_or(trimmed);
         if !slug::is_valid(stripped) {
@@ -1301,16 +1285,6 @@ mod tests {
     }
 
     #[test]
-    fn new_preserves_legacy_numeric_related() {
-        let tmp = fresh_repo();
-        let mut args = new_args("bug", "B");
-        args.related = vec!["#7".into()];
-        let out = do_new(tmp.path(), args).unwrap();
-        let content = read(&out.item_path);
-        assert!(content.contains("'#7'") || content.contains("\"#7\""));
-    }
-
-    #[test]
     fn update_sets_status_and_bumps_updated() {
         let tmp = fresh_repo();
         let mut a = new_args("bug", "Bug");
@@ -1474,18 +1448,10 @@ mod tests {
     }
 
     #[test]
-    fn normalize_related_preserves_legacy_numeric() {
-        assert_eq!(
-            normalize_related_refs(&["#7".to_string()]).unwrap(),
-            vec!["#7".to_string()]
-        );
-    }
-
-    #[test]
     fn normalize_related_rejects_garbage() {
         assert!(normalize_related_refs(&["not a slug".to_string()]).is_err());
         assert!(normalize_related_refs(&["@".to_string()]).is_err());
-        assert!(normalize_related_refs(&["#abc".to_string()]).is_err());
+        assert!(normalize_related_refs(&["#7".to_string()]).is_err()); // legacy numeric form removed
         assert!(normalize_related_refs(&["foo".to_string()]).is_err()); // no hyphen
     }
 

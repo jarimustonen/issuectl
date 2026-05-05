@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Frontmatter {
@@ -13,81 +13,56 @@ pub struct Frontmatter {
     pub owner: Option<String>,
     pub status: Option<String>,
     pub priority: Option<String>,
-    /// Epic reference. Accepts either a slug string or a legacy numeric value
-    /// (the latter is retained only so that `issuectl doctor --fix` can read
-    /// pre-migration files).
-    #[serde(default, deserialize_with = "deser_epic")]
     pub epic: Option<String>,
     pub related: Option<Vec<String>>,
     pub labels: Option<Vec<String>>,
     pub closed: Option<String>,
     pub commits: Option<Vec<super::models::Commit>>,
-    /// Slug stored in frontmatter (post-migration files). Authoritative
-    /// identifier is still the directory name; this is mirrored for clarity.
+    /// Slug stored in frontmatter; mirrors the directory name. Authoritative
+    /// identifier is still the directory name; this is just informational.
     #[allow(dead_code)]
     pub slug: Option<String>,
-    /// Legacy numeric id; preserved only so doctor can read pre-migration files.
-    #[allow(dead_code)]
-    pub number: Option<u32>,
 }
 
-fn deser_epic<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
-    let v = Option::<serde_yaml::Value>::deserialize(d)?;
-    Ok(v.and_then(|val| match val {
-        serde_yaml::Value::String(s) => Some(s),
-        serde_yaml::Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    }))
+/// Issue together with any non-fatal parse warnings (unreadable file,
+/// malformed YAML). Callers that want strict behavior — e.g., the web API
+/// surfacing per-issue parse errors — should consult `warnings`; the CLI
+/// continues to print to stderr and use the lossy `parse_item_md` wrapper.
+pub struct ParsedItem {
+    pub issue: crate::models::Issue,
+    pub warnings: Vec<String>,
 }
 
-pub fn parse_item_md(path: &Path, slug: &str, folder: &str) -> crate::models::Issue {
+pub fn parse_item_md_with_warnings(path: &Path, slug: &str, folder: &str) -> ParsedItem {
+    let mut warnings = Vec::new();
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("Warning: cannot read {}: {}", path.display(), e);
-            return crate::models::Issue {
-                slug: slug.to_string(),
-                folder: folder.to_string(),
-                created: None,
-                status: "open".to_string(),
-                updated: None,
-                priority: "normal".to_string(),
-                issue_type: "bug".to_string(),
-                reporter: None,
-                assignee: None,
-                owner: None,
-                epic: None,
-                related: None,
-                labels: None,
-                closed: None,
-                commits: None,
-                title: String::new(),
-                body: String::new(),
+            warnings.push(format!("cannot read {}: {}", path.display(), e));
+            return ParsedItem {
+                issue: default_issue(slug, folder),
+                warnings,
             };
         }
     };
 
     let (frontmatter, body) = split_frontmatter(&text);
-    let fm: Frontmatter = frontmatter
-        .and_then(|yaml_text| serde_yaml::from_str(yaml_text).ok())
-        .unwrap_or_default();
+    let fm = match frontmatter {
+        Some(yaml_text) => match serde_yaml::from_str::<Frontmatter>(yaml_text) {
+            Ok(fm) => fm,
+            Err(e) => {
+                warnings.push(format!("invalid YAML frontmatter in {}: {}", path.display(), e));
+                Frontmatter::default()
+            }
+        },
+        None => {
+            warnings.push(format!("missing YAML frontmatter in {}", path.display()));
+            Frontmatter::default()
+        }
+    };
 
     let title = extract_title(body);
-
-    // Warn once per load when an issue still carries a legacy numeric epic
-    // reference. After `issuectl doctor --fix` these should not exist; an
-    // explicit nudge is more helpful than silent acceptance.
-    if let Some(ref e) = fm.epic {
-        if !e.is_empty() && e.chars().all(|c| c.is_ascii_digit()) {
-            eprintln!(
-                "warning: {}: epic: {} is a legacy numeric ref — run `issuectl doctor --fix`",
-                path.display(),
-                e
-            );
-        }
-    }
-
-    crate::models::Issue {
+    let issue = crate::models::Issue {
         slug: slug.to_string(),
         folder: folder.to_string(),
         created: fm.created,
@@ -105,7 +80,38 @@ pub fn parse_item_md(path: &Path, slug: &str, folder: &str) -> crate::models::Is
         commits: fm.commits,
         title,
         body: body.unwrap_or_default().trim().to_string(),
+    };
+    ParsedItem { issue, warnings }
+}
+
+fn default_issue(slug: &str, folder: &str) -> crate::models::Issue {
+    crate::models::Issue {
+        slug: slug.to_string(),
+        folder: folder.to_string(),
+        created: None,
+        status: "open".to_string(),
+        updated: None,
+        priority: "normal".to_string(),
+        issue_type: "bug".to_string(),
+        reporter: None,
+        assignee: None,
+        owner: None,
+        epic: None,
+        related: None,
+        labels: None,
+        closed: None,
+        commits: None,
+        title: String::new(),
+        body: String::new(),
     }
+}
+
+pub fn parse_item_md(path: &Path, slug: &str, folder: &str) -> crate::models::Issue {
+    let parsed = parse_item_md_with_warnings(path, slug, folder);
+    for w in &parsed.warnings {
+        eprintln!("Warning: {w}");
+    }
+    parsed.issue
 }
 
 fn split_frontmatter(text: &str) -> (Option<&str>, Option<&str>) {
@@ -131,30 +137,8 @@ fn extract_title(body: Option<&str>) -> String {
     for line in body.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("# ") {
-            return strip_legacy_title_number(rest).trim().to_string();
+            return rest.trim().to_string();
         }
     }
     String::new()
-}
-
-fn strip_legacy_title_number(title: &str) -> &str {
-    let title = title.strip_prefix('E').unwrap_or(title);
-    let Some((number, rest)) = title.split_once(". ") else {
-        return title;
-    };
-    if number.chars().all(|ch| ch.is_ascii_digit()) {
-        rest
-    } else {
-        title
-    }
-}
-
-/// Parse a legacy `<NN>-<slug>` directory name into its numeric prefix and
-/// trailing slug. Used only by `issuectl doctor` for migration.
-pub fn parse_legacy_dir(dirname: &str) -> Option<(u32, String)> {
-    let hyphen = dirname.find('-')?;
-    let num_part = &dirname[..hyphen];
-    let number: u32 = num_part.parse().ok()?;
-    let slug = dirname[hyphen + 1..].to_string();
-    Some((number, slug))
 }
