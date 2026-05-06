@@ -17,10 +17,10 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::{EventKind, RecursiveMode};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, DebouncedEvent};
+use notify_debouncer_full::{DebounceEventResult, DebouncedEvent};
 use tokio::sync::mpsc;
 
 use super::events::{EventHub, EventPayload};
@@ -46,43 +46,60 @@ pub fn spawn(hub: Arc<EventHub>, cfg: WatcherConfig) -> tokio::task::JoinHandle<
 }
 
 async fn supervisor(hub: Arc<EventHub>, cfg: WatcherConfig) {
-    let max_attempts: u32 = 3;
-    let mut attempt: u32 = 0;
-    loop {
-        attempt += 1;
-        // Always emit Resync on a (re)start so clients drop their
-        // per-issue cache and refetch — events emitted while we were
-        // down can otherwise create silent divergence.
-        hub.publish(EventPayload::Resync {
-            reason: if attempt == 1 {
-                "watcher_start".to_string()
-            } else {
-                "watcher_restart".to_string()
-            },
-        });
+    const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+    /// Minimum healthy runtime before failures are considered "consecutive".
+    /// A watcher that ran successfully for ≥ this duration before failing
+    /// has earned a fresh failure budget — months of uptime should not
+    /// accumulate a Degraded.
+    const HEALTHY_THRESHOLD: Duration = Duration::from_secs(30);
 
-        let result = run_once(hub.clone(), cfg.clone()).await;
-        match result {
-            Ok(()) => {
-                // Clean shutdown (the input channel closed). Stop.
+    let mut consecutive_failures: u32 = 0;
+    loop {
+        let started_at = Instant::now();
+        // F5: spawn run_once as a child task so panics surface as
+        // JoinError instead of unwinding the supervisor itself.
+        let result = tokio::spawn(run_once(hub.clone(), cfg.clone())).await;
+
+        let ran_healthy = started_at.elapsed() >= HEALTHY_THRESHOLD;
+        if ran_healthy {
+            consecutive_failures = 0;
+        }
+
+        let err_msg = match result {
+            Ok(Ok(())) => {
+                // F4: run_once returns Ok(()) only on graceful shutdown
+                // (currently never — the loop only exits via Err). If we
+                // ever add an explicit shutdown signal the path is here.
                 return;
             }
-            Err(err) => {
-                tracing_warn(&format!("watcher attempt {attempt} failed: {err}"));
-                if attempt >= max_attempts {
-                    hub.publish(EventPayload::Degraded {
-                        reason: "watcher_unavailable".to_string(),
-                    });
+            Ok(Err(err)) => err,
+            Err(join_err) => {
+                if join_err.is_cancelled() {
+                    // Task aborted (server shutdown). Stop cleanly.
                     return;
                 }
-                let backoff = Duration::from_millis(200 * (1u64 << (attempt - 1)));
-                tokio::time::sleep(backoff).await;
+                format!("watcher panicked: {join_err}")
             }
+        };
+
+        consecutive_failures += 1;
+        log_warn(&format!(
+            "watcher attempt failed (consecutive={consecutive_failures}): {err_msg}"
+        ));
+
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+            hub.publish(EventPayload::Degraded {
+                reason: "watcher_unavailable".to_string(),
+            });
+            return;
         }
+
+        let backoff = Duration::from_millis(200 * (1u64 << (consecutive_failures - 1)));
+        tokio::time::sleep(backoff).await;
     }
 }
 
-fn tracing_warn(msg: &str) {
+fn log_warn(msg: &str) {
     eprintln!("issuectl[watcher]: {msg}");
 }
 
@@ -96,39 +113,80 @@ async fn run_once(hub: Arc<EventHub>, cfg: WatcherConfig) -> Result<(), String> 
     // brief stall must not drop events.
     let (tx, mut rx) = mpsc::unbounded_channel::<DebounceEventResult>();
 
-    let mut debouncer = new_debouncer(cfg.debounce, None, move |res: DebounceEventResult| {
-        // tokio mpsc unbounded send is sync; ignore failures (receiver
-        // dropped == we're shutting down).
-        let _ = tx.send(res);
-    })
+    // F12: explicit notify config. Symlinks must NOT be followed —
+    // otherwise `ln -s /etc issues/open/foo` makes the watcher observe
+    // /etc, violating §5.1/§9.5.
+    let notify_config = notify::Config::default().with_follow_symlinks(false);
+    let mut debouncer = notify_debouncer_full::new_debouncer_opt::<
+        _,
+        notify::RecommendedWatcher,
+        notify_debouncer_full::RecommendedCache,
+    >(
+        cfg.debounce,
+        None,
+        move |res: DebounceEventResult| {
+            let _ = tx.send(res);
+        },
+        notify_debouncer_full::RecommendedCache::new(),
+        notify_config,
+    )
     .map_err(|e| format!("debouncer init: {e}"))?;
 
     debouncer
         .watch(&issues_root_canon, RecursiveMode::Recursive)
         .map_err(|e| format!("watch {}: {}", issues_root_canon.display(), e))?;
 
-    // Pump events until the channel closes (debouncer drop).
+    // F10: publish (re)start Resync only AFTER the watch is hooked.
+    // F11: always "watcher_restart" — spec only enumerates this reason
+    // for both first start and subsequent restarts.
+    hub.publish(EventPayload::Resync {
+        reason: "watcher_restart".to_string(),
+    });
+
+    // Pump events until the channel closes (F4: closure means failure,
+    // not graceful shutdown — debouncer thread death drops `tx`).
     while let Some(res) = rx.recv().await {
         match res {
             Ok(events) => {
                 handle_batch(&hub, &cfg, &issues_root_canon, events).await;
             }
             Err(errs) => {
-                for e in errs {
-                    tracing_warn(&format!("notify error: {e}"));
+                for e in &errs {
+                    log_warn(&format!("notify error: {e}"));
                 }
-                // Some errors (e.g. inotify queue overflow) signal that
-                // we may have missed events — emit Resync defensively.
+                // F18: classify. Watch-removal/backend death → restart.
+                // Transient errors (queue overflow, IO blip) → Resync
+                // and keep running.
+                if errs.iter().any(is_fatal_notify_error) {
+                    return Err(format!("notify backend failed: {} errors", errs.len()));
+                }
                 hub.publish(EventPayload::Resync {
-                    reason: "watcher_error".to_string(),
+                    reason: "gap".to_string(),
                 });
             }
         }
     }
 
-    // Channel closed cleanly.
+    // F4: receiver returned None means tx side dropped without us
+    // dropping the debouncer first. The debouncer is still owned here,
+    // so its callback closure shouldn't have dropped — yet rx is empty.
+    // Treat as failure so supervisor retries. Actual graceful shutdown
+    // happens via task abort, not via this path.
     drop(debouncer);
-    Ok(())
+    Err("watcher event channel closed unexpectedly".to_string())
+}
+
+/// Classify notify errors. Fatal kinds require a watcher restart;
+/// non-fatal kinds (overflow, transient IO) only warrant a Resync.
+fn is_fatal_notify_error(err: &notify::Error) -> bool {
+    use notify::ErrorKind;
+    matches!(
+        err.kind,
+        ErrorKind::PathNotFound
+            | ErrorKind::WatchNotFound
+            | ErrorKind::MaxFilesWatch
+            | ErrorKind::InvalidConfig(_)
+    )
 }
 
 /// One debounced batch. Resolves every relevant path to a slug, then
