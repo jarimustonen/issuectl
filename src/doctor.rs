@@ -69,6 +69,10 @@ struct DoctorReport {
     duplicate_slugs: Vec<String>,
     missing_item_md: Vec<String>,
     orphan_epic_refs: Vec<(String, String)>,
+    /// Per-issue parse warnings (malformed YAML, unreadable file, ...).
+    /// Keeps `doctor` consistent with the web `/api/issues` response,
+    /// which already surfaces the same warnings.
+    parse_errors: Vec<(String, String)>,
     fix_applied: bool,
     files_rewritten: usize,
 }
@@ -109,14 +113,17 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
             let dir_name = entry.file_name().to_string_lossy().to_string();
             let path = entry.path();
 
-            if !path.join("item.md").is_file() {
-                report.missing_item_md.push(format!("{folder}/{dir_name}"));
-                continue;
-            }
+            let item_path = path.join("item.md");
+            let item_present = item_path.is_file();
 
             // See `legacy_number` for the detection rules.
-            let item_path = path.join("item.md");
-            if let Some(number) = legacy_number(&item_path, &dir_name) {
+            let legacy = if item_present {
+                legacy_number(&item_path, &dir_name)
+            } else {
+                None
+            };
+
+            if let Some(number) = legacy {
                 let new_slug = slug::generate_unique(repo_root);
                 let new_path = issues_dir.join(folder).join(&new_slug);
                 report.legacy_dirs.push(LegacyMigration {
@@ -129,10 +136,32 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
                 });
                 *all_slugs.entry(new_slug).or_insert(0) += 1;
             } else {
+                // Report invalid slug + duplicate even when item.md is missing —
+                // the directory is still a problem worth flagging in one pass.
                 if !slug::is_valid(&dir_name) {
                     report.invalid_slugs.push(format!("{folder}/{dir_name}"));
                 }
                 *all_slugs.entry(dir_name.clone()).or_insert(0) += 1;
+            }
+
+            if !item_present {
+                report.missing_item_md.push(format!("{folder}/{dir_name}"));
+                continue;
+            }
+
+            // Surface parse warnings without printing them to stderr (the
+            // CLI report includes them at the end). Skip for legacy dirs:
+            // the migration pass rewrites their frontmatter anyway, and a
+            // missing slug/number combo would be flagged as a parse warning
+            // for every legacy issue otherwise.
+            if legacy.is_none() {
+                let parsed =
+                    parser::parse_item_md_with_warnings(&item_path, &dir_name, folder);
+                for w in parsed.warnings {
+                    report
+                        .parse_errors
+                        .push((format!("{folder}/{dir_name}"), w));
+                }
             }
         }
     }
@@ -181,7 +210,11 @@ fn detect_orphan_epic_refs(repo_root: &Path, report: &mut DoctorReport) -> Resul
                 continue;
             }
             let slug_id = entry.file_name().to_string_lossy().to_string();
-            let issue = parser::parse_item_md(&item, &slug_id, folder);
+            // Use the warning-collecting variant here too — the scan() pass
+            // already accounted for parse warnings; this second pass is just
+            // for epic-ref resolution and shouldn't double-print.
+            let issue =
+                parser::parse_item_md_with_warnings(&item, &slug_id, folder).issue;
             if let Some(epic) = issue.epic.as_deref() {
                 let stripped = epic.strip_prefix('@').unwrap_or(epic);
                 let exists = existing_slugs.contains(stripped) || stripped.parse::<u32>().is_ok();
@@ -507,6 +540,7 @@ fn render_text(report: &DoctorReport, fix: bool) {
         && report.duplicate_slugs.is_empty()
         && report.missing_item_md.is_empty()
         && report.orphan_epic_refs.is_empty()
+        && report.parse_errors.is_empty()
     {
         println!("Repository OK — no migrations or fixes needed.");
         return;
@@ -555,6 +589,13 @@ fn render_text(report: &DoctorReport, fix: bool) {
         }
         println!();
     }
+    if !report.parse_errors.is_empty() {
+        println!("Parse warnings:");
+        for (location, msg) in &report.parse_errors {
+            println!("  {location}: {msg}");
+        }
+        println!();
+    }
     if fix {
         println!(
             "Applied. {} dir(s) migrated, {} markdown file(s) rewritten.",
@@ -586,6 +627,12 @@ fn render_json(report: &DoctorReport, fix: bool) -> serde_json::Value {
         .map(|(s, e)| serde_json::json!({"slug": s, "epic": e}))
         .collect();
 
+    let parse_errors: Vec<serde_json::Value> = report
+        .parse_errors
+        .iter()
+        .map(|(loc, msg)| serde_json::json!({"location": loc, "message": msg}))
+        .collect();
+
     serde_json::json!({
         "fix_applied": fix && report.fix_applied,
         "migrations": migrations,
@@ -593,6 +640,7 @@ fn render_json(report: &DoctorReport, fix: bool) -> serde_json::Value {
         "duplicate_slugs": report.duplicate_slugs,
         "missing_item_md": report.missing_item_md,
         "orphan_epic_refs": orphans,
+        "parse_errors": parse_errors,
         "files_rewritten": report.files_rewritten,
     })
 }
