@@ -3,7 +3,7 @@ created: 2026-05-06
 updated: 2026-05-06
 type: epic
 owner: jari
-status: open
+status: in-progress
 priority: high
 labels: [release-v0.5.0]
 ---
@@ -36,8 +36,31 @@ quality-of-life improvements are deferred to v0.6.0.
   (status only in YAML). Eliminates §3.4 of the web-edit-sync design.
 
 ### M1 — web edit/sync
-- [ ] (worktree `web-edit-sync-design`) — Implement bidirectional web ↔ file
-  sync per `docs/design/web-edit-sync.md`. M1 user-facing surface = drag-and-drop:
+
+The web-edit-sync design doc (`docs/design/web-edit-sync.md`) phases the
+work internally as design-M0 → design-M3. Tracking those sub-phases here
+to keep the epic in sync with the worktree:
+
+- [x] **design-M0: live read-side updates** (worktree `web-edit-sync-design`,
+  commits `ed9094d` + cluster fixes `2806f3f` … `cf632b0`).
+  EventHub (parking_lot mutex covering seq+ring), notify-debouncer-full
+  watcher with consecutive-failure backoff and notify-error
+  classification, `/events` SSE with race-free subscribe-since handoff,
+  Last-Event-ID + omit-id-on-synthetic + scan-stream-on-lagged
+  semantics, `Arc<BoardEvent>` ring/broadcast for cheap M1 critical
+  section, `canonical_hash` shared module so M0 watcher and M1
+  `mutate.rs` produce identical version strings. 25 fixes from
+  `/llm-review` + `/assess-findings` (report:
+  `history/review-m0-implementation.md`, gitignored). 136/136 tests,
+  end-to-end SSE smoke verified.
+- [ ] **design-M1: writes** — `mutate.rs` shared by CLI and server,
+  flock on `.issuectl/write.lock`, PATCH/PUT/POST routes, CSRF +
+  Host-header validation, `expected_version` optimistic concurrency,
+  CLI `--expected-version` requirement on `--json`. Next worktree.
+- [ ] **design-M2: body editor** — `PUT /body`, textarea + preview,
+  localStorage draft, conflict UX.
+- [ ] **design-M3: robustness** — `--watch-poll-ms` (re-add removed in
+  cluster 1), `Degraded` banner, three-way merge UI.
 - [ ] @needlessly-fluffy-decision — Drag-and-drop write-back on the kanban.
 - [ ] (worktree) @amazingly-scattered-month — Startup reconciliation
   (subsumed by @slightly-finicky-heart; link when worktree merges).
@@ -86,9 +109,9 @@ quality-of-life improvements are deferred to v0.6.0.
   - Agent artefacts: stdout default; gitignored if written; only durable
     `plan.md` / `handoff.md` committed beside the issue.
 - The web-edit-sync worktree spin-offs (@amazingly-scattered-month,
-  @supremely-accurate-body) live on branch `web-edit-sync-design` and are
-  not yet linked to this epic. Link with `--epic` after the worktree
-  merges, or amend the worktree branch.
+  @supremely-accurate-body) come in via the design-M0 merge. Link with
+  `--epic` once that worktree lands. @amazingly-scattered-month
+  remains a spin-off; @supremely-accurate-body is M2-conditional.
 - The v0.6.0 candidate pool (@hugely-exciting-spiders) holds the
   deferred items: dependencies, DoD validation, commit trailers, activity
   reports, QoL bundle, kanban UX polish, multi-board, Claude-launch
