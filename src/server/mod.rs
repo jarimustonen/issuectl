@@ -19,11 +19,37 @@ use axum::Router;
 use tokio::net::TcpListener;
 
 mod api;
+pub(crate) mod events;
 mod render;
+pub(crate) mod watcher;
+
+use events::EventHub;
+
+/// Options governing the optional filesystem watcher. `serve()` builds a
+/// `WatcherConfig` from these and spawns `watcher::spawn(...)`. Set
+/// `enabled=false` to drop the watcher entirely (read-only board, manual
+/// refresh).
+#[derive(Debug, Clone)]
+pub struct ServeOptions {
+    pub watch_enabled: bool,
+    pub watch_poll_ms: Option<u64>,
+    pub watch_bulk_threshold: usize,
+}
+
+impl Default for ServeOptions {
+    fn default() -> Self {
+        ServeOptions {
+            watch_enabled: true,
+            watch_poll_ms: None,
+            watch_bulk_threshold: 50,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
     pub root: Arc<PathBuf>,
+    pub event_hub: Arc<EventHub>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -40,6 +66,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/issues", get(api::list_issues))
         .route("/api/issues/{slug}", get(api::get_issue))
         .route("/api/issues/{slug}/docs/{name}", get(api::get_doc))
+        .route("/events", get(api::events_stream))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }
@@ -74,18 +101,36 @@ async fn security_headers(req: Request<axum::body::Body>, next: Next) -> Respons
     response
 }
 
-pub fn run(root: PathBuf, host: String, port: u16) -> Result<()> {
+pub fn run(root: PathBuf, host: String, port: u16, options: ServeOptions) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("cannot build tokio runtime")?;
-    runtime.block_on(serve(root, host, port))
+    runtime.block_on(serve(root, host, port, options))
 }
 
-async fn serve(root: PathBuf, host: String, port: u16) -> Result<()> {
+async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) -> Result<()> {
+    let event_hub = Arc::new(EventHub::new());
     let state = AppState {
-        root: Arc::new(root),
+        root: Arc::new(root.clone()),
+        event_hub: event_hub.clone(),
     };
+
+    // Watcher: a separate tokio task. If --no-watch is set or the issues
+    // tree doesn't exist yet, skip — the board still serves but no live
+    // updates will arrive until the user reloads.
+    let watcher_handle = if options.watch_enabled && root.join("issues").is_dir() {
+        let cfg = watcher::WatcherConfig {
+            root: root.clone(),
+            debounce: std::time::Duration::from_millis(150),
+            poll: options.watch_poll_ms.map(std::time::Duration::from_millis),
+            bulk_threshold: options.watch_bulk_threshold,
+        };
+        Some(watcher::spawn(event_hub.clone(), cfg))
+    } else {
+        None
+    };
+
     let addr = format!("{host}:{port}");
     let listener = TcpListener::bind(&addr)
         .await
@@ -104,6 +149,9 @@ async fn serve(root: PathBuf, host: String, port: u16) -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
+    if let Some(h) = watcher_handle {
+        h.abort();
+    }
     eprintln!("shutdown complete");
     Ok(())
 }
@@ -130,6 +178,7 @@ mod tests {
     fn make_router(root: &Path) -> axum::Router {
         router(AppState {
             root: Arc::new(root.to_path_buf()),
+            event_hub: Arc::new(EventHub::new()),
         })
     }
 
@@ -178,6 +227,9 @@ mod tests {
         assert!(fox.get("body").is_none(), "summary should not include body");
         // Warnings array is always present, empty when nothing's wrong.
         assert_eq!(json["warnings"], serde_json::json!([]));
+        // Cursor + instance_id are required for the SSE handoff.
+        assert!(json["snapshot_seq"].is_u64());
+        assert!(json["instance_id"].is_string());
     }
 
     #[tokio::test]

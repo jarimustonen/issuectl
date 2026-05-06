@@ -1,9 +1,16 @@
+use std::convert::Infallible;
+use std::time::Duration;
+
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
+    response::sse::{Event, KeepAlive, Sse},
     Json,
 };
-use serde::Serialize;
+use futures_util::stream::{Stream, StreamExt};
+use serde::{Deserialize, Serialize};
+use tokio_stream::wrappers::BroadcastStream;
+use uuid::Uuid;
 
 /// Distinct failure modes for the docs endpoint. Mapping to status codes
 /// from a single match keeps "I/O error", "doc missing", and "you tried to
@@ -28,6 +35,7 @@ impl From<DocError> for StatusCode {
 use crate::repo::{self, IssueSummary, LoadWarning};
 use crate::slug;
 
+use super::events::{BoardEvent, EventPayload, Replay};
 use super::render::sanitize_markdown;
 use super::AppState;
 
@@ -37,6 +45,14 @@ pub struct IssueListResponse {
     /// Per-file parse warnings (e.g., malformed YAML, missing item.md).
     /// Empty when nothing is wrong; UI can flag broken issues from this list.
     pub warnings: Vec<LoadWarning>,
+    /// Highest event seq observed *before* this scan ran. Clients connect
+    /// to `/events?since=<snapshot_seq>` to fill the gap between scan
+    /// completion and live-stream subscription. See design doc §5.5.1.
+    pub snapshot_seq: u64,
+    /// Server-instance UUID; flips on every `serve` restart so a client
+    /// reconnecting with a stale `since` from a prior process can detect
+    /// it instead of skipping events.
+    pub instance_id: Uuid,
 }
 
 #[derive(Serialize)]
@@ -52,12 +68,23 @@ pub struct IssueDetailResponse {
 pub async fn list_issues(
     State(state): State<AppState>,
 ) -> Result<Json<IssueListResponse>, StatusCode> {
+    // Snapshot BEFORE scan so any event published while the scan runs is
+    // captured by `/events?since=snapshot_seq` rather than lost. The
+    // mutation protocol (M1, §3.1 step 8) guarantees seq=N's disk state
+    // is visible to scans that begin after current_seq() ≥ N.
+    let snapshot_seq = state.event_hub.current_seq();
+    let instance_id = state.event_hub.instance_id();
     let root = state.root.clone();
     let (issues, warnings) =
         tokio::task::spawn_blocking(move || repo::load_issue_summaries(root.as_path()))
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(IssueListResponse { issues, warnings }))
+    Ok(Json(IssueListResponse {
+        issues,
+        warnings,
+        snapshot_seq,
+        instance_id,
+    }))
 }
 
 pub async fn get_issue(
@@ -188,6 +215,92 @@ pub(super) fn is_safe_doc_name(name: &str) -> bool {
     }
     name.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+#[derive(Deserialize)]
+pub struct EventsQuery {
+    /// Last seq the client already has. `0` (or omitted) means "stream
+    /// from now"; any other value triggers replay from the EventHub
+    /// ring. Out-of-range values yield `Resync { reason: "future_seq"
+    /// | "gap" }` instead of silent skip.
+    #[serde(default)]
+    pub since: Option<u64>,
+    /// Server `instance_id` the client believes it's still talking to.
+    /// If it differs from the current instance, the stream opens with a
+    /// `Resync { reason: "instance_changed" }` so the client invalidates
+    /// its cache.
+    #[serde(default)]
+    pub instance: Option<Uuid>,
+}
+
+/// Stream board events as Server-Sent Events.
+///
+/// The first frame is always a `Resync` if the client's cursor is too
+/// old or its `instance_id` doesn't match this process; otherwise the
+/// stream opens with replayed ring events (closing the gap between
+/// `/api/issues` snapshot and now), then forwards live events with
+/// `seq > drop_through` to suppress the duplicate of the last replay
+/// frame. See design doc §5.5.
+pub async fn events_stream(
+    State(state): State<AppState>,
+    Query(q): Query<EventsQuery>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let since = q.since.unwrap_or(0);
+    let stream_handle = state.event_hub.subscribe_since(since);
+
+    // Build the prefix: a synthetic `instance_changed` Resync if needed,
+    // then either the replay events or a `TooOld` Resync.
+    let mut prefix: Vec<BoardEvent> = Vec::new();
+    let drop_through = stream_handle.drop_through;
+    let server_instance = stream_handle.instance_id;
+
+    if let Some(client_instance) = q.instance {
+        if client_instance != server_instance {
+            // Synthetic event with seq=0 so it never collides with real
+            // ones — clients treat any Resync as "drop everything".
+            prefix.push(BoardEvent {
+                seq: 0,
+                payload: EventPayload::Resync {
+                    reason: "instance_changed".to_string(),
+                },
+            });
+        }
+    }
+    match stream_handle.replay {
+        Replay::Events(v) => prefix.extend(v),
+        Replay::TooOld { reason } => prefix.push(BoardEvent {
+            seq: 0,
+            payload: EventPayload::Resync {
+                reason: reason.to_string(),
+            },
+        }),
+    }
+
+    let live = BroadcastStream::new(stream_handle.rx).filter_map(move |res| async move {
+        match res {
+            Ok(evt) if evt.seq > drop_through => Some(evt),
+            Ok(_) => None, // duplicate already covered by replay
+            Err(_lag) => Some(BoardEvent {
+                seq: 0,
+                payload: EventPayload::Resync {
+                    reason: "lagged".to_string(),
+                },
+            }),
+        }
+    });
+
+    let prefix_stream = futures_util::stream::iter(prefix);
+    let combined = prefix_stream.chain(live).map(|evt: BoardEvent| {
+        let id = if evt.seq == 0 {
+            String::new()
+        } else {
+            evt.seq.to_string()
+        };
+        let json = serde_json::to_string(&evt).unwrap_or_else(|_| "{}".to_string());
+        Ok::<Event, Infallible>(Event::default().id(id).data(json))
+    });
+
+    Sse::new(combined).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
 #[cfg(test)]

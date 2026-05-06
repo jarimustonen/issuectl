@@ -315,6 +315,24 @@ enum Command {
         /// Host/interface to bind to (default: 127.0.0.1, local-only)
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+
+        /// Disable the filesystem watcher (no live updates; manual page
+        /// reload only). Useful when running over a filesystem where
+        /// `notify` is unreliable, or for read-only diagnostics.
+        #[arg(long)]
+        no_watch: bool,
+
+        /// Force the watcher into polling mode at the given interval in
+        /// milliseconds. Required on most network filesystems (NFS,
+        /// SMB) where inotify/FSEvents events are not delivered.
+        #[arg(long, value_name = "MS")]
+        watch_poll_ms: Option<u64>,
+
+        /// Number of distinct slugs touched in a single debounce window
+        /// above which per-issue events collapse into a single Resync
+        /// (e.g. `git checkout` of a feature branch). Default: 50.
+        #[arg(long, default_value_t = 50)]
+        watch_bulk_threshold: usize,
     },
 }
 
@@ -440,7 +458,22 @@ fn main() -> Result<()> {
             SkillAction::Print { agent } => cmd_skill_print(&agent),
         },
         Command::Docs { topic } => docs::run(topic),
-        Command::Serve { port, host } => server::run(find_root(), host, port),
+        Command::Serve {
+            port,
+            host,
+            no_watch,
+            watch_poll_ms,
+            watch_bulk_threshold,
+        } => server::run(
+            find_root(),
+            host,
+            port,
+            server::ServeOptions {
+                watch_enabled: !no_watch,
+                watch_poll_ms,
+                watch_bulk_threshold,
+            },
+        ),
     }
 }
 
