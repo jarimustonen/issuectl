@@ -1,11 +1,10 @@
-//! Read-only web board for the current `issues/` directory.
+//! Web board for the current `issues/` directory.
 //!
-//! Reads the filesystem on every request — `parser.rs`/`models.rs` remain the
-//! single source of truth. A future iteration will add POST/PATCH endpoints
-//! that delegate to `write.rs`; for now everything is GET.
-//!
-//! Realtime updates would slot in here as an SSE endpoint hung off `Router`,
-//! reusing `repo::load_issues` per tick.
+//! Reads the filesystem on every request — `parser.rs`/`models.rs`
+//! remain the single source of truth. The board pushes filesystem
+//! changes live via the SSE `/events` endpoint backed by `events.rs`
+//! and `watcher.rs` (M0). M1 will add POST/PATCH/PUT endpoints that
+//! delegate to a future `mutate.rs`; for now everything is GET.
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -119,6 +119,15 @@ impl EventHub {
         evt
     }
 
+    /// Subscribe to the broadcast channel only, without snapshotting the
+    /// replay ring. Test-only helper: production code uses
+    /// `subscribe_since` so the subscriber sees both replay and live
+    /// events with the race-free handoff.
+    #[cfg(test)]
+    pub fn tx_subscribe_for_test(&self) -> broadcast::Receiver<BoardEvent> {
+        self.tx.subscribe()
+    }
+
     /// Subscribe to live events and snapshot the replay ring atomically
     /// w.r.t. concurrent `publish` calls. The caller forwards `replay`
     /// events first, then forwards `rx` events with `seq > drop_through`.

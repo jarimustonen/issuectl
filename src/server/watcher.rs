@@ -326,10 +326,9 @@ fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
                 warnings: vec![crate::repo::LoadWarning {
                     slug: slug.to_string(),
                     folder: "open+closed".to_string(),
-                    message: format!(
-                        "ambiguous slug: present in both open/ and closed/ — \
+                    message: "ambiguous slug: present in both open/ and closed/ — \
                          resolve manually before issuectl serve will trust this issue"
-                    ),
+                        .to_string(),
                 }],
             };
         }
@@ -401,14 +400,16 @@ fn is_relevant_kind(kind: &EventKind) -> bool {
 /// path is irrelevant (outside the issues tree, a tempfile, an unknown
 /// folder, an invalid slug shape).
 pub fn issue_slug_from_event(issues_root: &Path, path: &Path) -> Option<String> {
-    // Filter our own atomic-write tempfiles (§3.3) and any nested temp.
-    for c in path.components() {
-        let name = c.as_os_str().to_string_lossy();
+    let rel = path.strip_prefix(issues_root).ok()?;
+    // F17: filter atomic-write tempfiles by basename (final component
+    // *of the path*, after strip_prefix). Filtering all components
+    // before strip_prefix would over-filter when the repo path itself
+    // contains `.issuectl-tmp-…` (e.g. `/tmp/.issuectl-tmp-test/`).
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         if name.starts_with(".issuectl-tmp-") {
             return None;
         }
     }
-    let rel = path.strip_prefix(issues_root).ok()?;
     let mut comps = rel.components();
     let folder = comps.next()?.as_os_str().to_str()?;
     if folder != "open" && folder != "closed" {
@@ -471,5 +472,86 @@ mod tests {
         let root = Path::new("/repo/issues");
         let p = Path::new("/elsewhere/file.md");
         assert!(issue_slug_from_event(root, p).is_none());
+    }
+
+    #[test]
+    fn slug_resolver_unaffected_by_temp_components_in_repo_path() {
+        // F17: the tempfile filter must not over-match when the repo
+        // root itself contains a `.issuectl-tmp-` component.
+        let root = Path::new("/tmp/.issuectl-tmp-test/issues");
+        let p = Path::new("/tmp/.issuectl-tmp-test/issues/open/quiet-brave-otter/item.md");
+        assert_eq!(
+            issue_slug_from_event(root, p).as_deref(),
+            Some("quiet-brave-otter")
+        );
+    }
+
+    /// End-to-end: spawn the watcher against a tempdir, create an
+    /// `item.md` on disk, and assert an `IssueUpserted` arrives via
+    /// the EventHub broadcast within a few debounce windows. Catches
+    /// regressions in debouncer integration, slug resolution, parse
+    /// path, and publish ordering.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_publishes_issue_upserted_for_new_file() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("issues/closed")).unwrap();
+
+        let hub = std::sync::Arc::new(EventHub::new());
+        let mut rx = hub.tx_subscribe_for_test();
+
+        let cfg = WatcherConfig {
+            root: tmp.path().to_path_buf(),
+            debounce: Duration::from_millis(50),
+            bulk_threshold: 50,
+        };
+        let handle = spawn(hub.clone(), cfg);
+
+        // First wait out the synthetic Resync{watcher_restart} the
+        // watcher emits once it hooks the watch.
+        let first = timeout(Duration::from_secs(2), rx.recv()).await;
+        assert!(matches!(first, Ok(Ok(_))), "expected Resync, got {first:?}");
+
+        // Now drop a real issue on disk and watch for the event.
+        let issue_dir = tmp.path().join("issues/open/quiet-brave-otter");
+        std::fs::create_dir_all(&issue_dir).unwrap();
+        std::fs::write(
+            issue_dir.join("item.md"),
+            "---\ntype: bug\nstatus: open\npriority: high\n---\n\n# It works\n",
+        )
+        .unwrap();
+
+        // We may receive other events first (e.g. Resync from any
+        // notify error during temp-dir setup); loop until we see the
+        // expected IssueUpserted or run out of patience.
+        let upserted = timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(evt) => {
+                        if let EventPayload::IssueUpserted { ref slug, .. } = evt.payload {
+                            if slug == "quiet-brave-otter" {
+                                return evt;
+                            }
+                        }
+                    }
+                    Err(e) => panic!("broadcast recv error: {e}"),
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for IssueUpserted");
+
+        if let EventPayload::IssueUpserted { version, issue, .. } = upserted.payload {
+            assert!(version.starts_with("sha256:"), "version: {version}");
+            assert_eq!(issue.title, "It works");
+        } else {
+            unreachable!()
+        }
+
+        handle.abort();
+        let _ = handle.await;
     }
 }
