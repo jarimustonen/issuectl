@@ -206,6 +206,21 @@ into the issue directory. Reference them in item.md with relative paths.
 
 Show the created issue/epic path and a brief summary.
 
+### Action: View visually (kanban board)
+
+If the user wants to **see** issues — "show me the board", "open the
+kanban", "let me browse them visually" — start the read-only web board
+and hand them the URL:
+
+```
+issuectl serve
+# then open http://127.0.0.1:7878
+```
+
+The board is read-only; keep using the CLI for any create / update /
+close action. For details (port/host flags, security model, routes),
+run `issuectl docs kanban`.
+
 ### Action: Doctor (repository health-check + migration)
 
 If the user asks to "check the repo" or "migrate legacy issues", use

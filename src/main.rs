@@ -1,3 +1,4 @@
+mod docs;
 mod doctor;
 mod models;
 mod parser;
@@ -52,6 +53,8 @@ Examples:
   issuectl doctor                          Health-check the repo
   issuectl skill install                   Install /issue skill in current repo
   issuectl serve                           Run a local Trello-style web board
+  issuectl docs                            List bundled documentation topics
+  issuectl docs kanban                     Print the kanban / web-board doc
 ";
 
 #[derive(Parser)]
@@ -291,6 +294,13 @@ enum Command {
         action: SkillAction,
     },
 
+    /// Print bundled long-form documentation. Run without an argument to
+    /// list available topics.
+    Docs {
+        /// Topic name (e.g. `kanban`). Omit to list topics.
+        topic: Option<String>,
+    },
+
     /// Run a local read-only web board (Trello-style) for the current repo
     Serve {
         /// Port to listen on
@@ -424,6 +434,7 @@ fn main() -> Result<()> {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
             SkillAction::Print { agent } => cmd_skill_print(&agent),
         },
+        Command::Docs { topic } => docs::run(topic),
         Command::Serve { port, host } => server::run(find_root(), host, port),
     }
 }
