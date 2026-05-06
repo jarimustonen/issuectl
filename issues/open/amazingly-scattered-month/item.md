@@ -23,4 +23,32 @@ Extend 'issuectl doctor' (and 'doctor --fix') to detect and repair:
 
 Reuses existing repo::LoadWarning shape so the web UI surfaces these in the existing #warnings strip without new UI.
 
+## Inconsistent states the reconciler must handle
+
+(Expanded from focused review pass 2 — these are the states `locate_issue`/the reconciler must define behavior for. Without these rules `locate_issue(slug)` becomes nondeterministic.)
+
+| State on disk | Likely cause | Reconciler action |
+| --- | --- | --- |
+| `closed/<slug>` with active `status:` (open/in-progress/testing) | crash after rename before write; manual edit | rewrite `status: done`; if `closed:` absent, set to today; emit `LoadWarning` |
+| `open/<slug>` with closing `status:` (done/fixed/wontfix/...) | external writer wrote file before rename; manual edit | rewrite `status: open`; remove `closed:`; emit `LoadWarning` |
+| Both `open/<slug>` and `closed/<slug>` exist | failed external rename target; merge conflict | DO NOT pick a side; emit `LoadWarning code: "ambiguous_slug"`; `locate_issue` returns `Err(AmbiguousSlug)` until human resolves |
+| `<folder>/<slug>/` exists without `item.md` | partial external write; `mkdir` without write | emit `LoadWarning`; exclude from listings |
+| `item.md` is invalid YAML | merge conflict; partial editor save | emit `IssueInvalid` event; never auto-rewrite |
+| `item.md` contains git merge markers (`<<<<<<<`, `=======`, `>>>>>>>`) | unresolved `git merge` | emit `LoadWarning` with prominent error; do not auto-fix |
+| `closed/<slug>` with closing status but no `closed:` date | manual close via vim | with `--fix`: synthesize `closed:` from directory mtime if available, else today; warn |
+| `open/<slug>` with stale `closed:` date | reopened via folder move only | with `--fix`: remove `closed:`; warn |
+| Symlinked issue dir (e.g. `issues/open/foo` → external path) | filesystem-level escape attempt | refuse to follow (existing `repo::locate_issue` check); emit `LoadWarning code: "symlink_escape"` |
+| Orphan `.issuectl-tmp-*` files in `issues/**` | SIGKILL during atomic write | with `--fix`: delete; without: report count |
+
+The reconciler runs in two modes:
+
+- `issuectl doctor` (read-only): walk and report all findings, exit 0.
+- `issuectl doctor --fix`: apply the actions above for self-healing
+  cases; never auto-fix `IssueInvalid` or `ambiguous_slug` (require
+  human attention).
+
+Web server runs the read-only path on every `serve` startup before
+opening the watcher, so transient warnings appear in `#warnings`
+immediately and don't propagate as misleading `IssueUpserted` events.
+
 Depends on the M1 mutation protocol (flock, canonical hash) being stable. Implement after M1 ships.

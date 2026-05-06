@@ -1,11 +1,20 @@
 # Web ↔ File bidirectional sync — design
 
-Status: **revision 2** after multi-LLM panel review. Implementation lives in a
-separate worktree; this doc is a contract for that work, not code.
+Status: **revision 3** after two multi-LLM panel review passes. Implementation
+lives in a separate worktree; this doc is a contract for that work, not code.
 
-Round-1 + round-2 reviewer findings are synthesized in
-`history/review-web-edit-sync.md`. Decisions on disputed/discussion items are
-recorded in §13 below.
+- Pass 1 (full document) findings synthesized in
+  `history/review-web-edit-sync.md`.
+- Pass 2 (focused on the new §3 mutation protocol and §5.5 EventHub) led
+  to the corrections in this revision: in-lock seq advancement (§5.5),
+  publish-before-flock-release (§3.1 step 8), `subscribe_since` race-free
+  handoff (§5.5), `instance_id` for server-restart detection,
+  algorithmic canonical-hash spec (§3.2), CRLF-aware body normalisation,
+  removal of the per-slug async mutex (§2), tightened `Patch<T>` serde
+  semantics (§3.5), and dropping the false `flock`-as-symlink-defence
+  claim (§9.5).
+
+Decisions on disputed/discussion items are recorded in §12.
 
 ## 1. Goals & non-goals
 
@@ -69,17 +78,21 @@ recorded in §13 below.
    └─── re-render ◀─────────── /events SSE ◀── EventHub ◀────┘
 ```
 
-`AppState` (today: `{ root: Arc<PathBuf> }`) grows three things:
+`AppState` (today: `{ root: Arc<PathBuf> }`) grows two things:
 
 ```rust
 // illustrative, not final
 pub struct AppState {
     pub root: Arc<PathBuf>,
-    pub event_hub: Arc<EventHub>,                       // §5
-    pub slug_locks: Arc<DashMap<String, Arc<Mutex<()>>>>, // per-issue serialisation
-    pub csrf_token: Arc<str>,                            // generated at startup; §9
+    pub event_hub: Arc<EventHub>,                  // §5
+    pub csrf_token: Arc<str>,                      // generated at startup; §9
 }
 ```
+
+The repo-wide `flock` (§3.1) serialises all writes for a single user's
+local tool; a per-slug `tokio::sync::Mutex` would add zero concurrency
+on top of it. If profiling later shows contention, switch the `flock`
+to per-issue lock files instead of layering an async mutex on top.
 
 Two new long-running tokio tasks alongside `axum::serve`:
 
@@ -92,34 +105,84 @@ Two new long-running tokio tasks alongside `axum::serve`:
 
 ## 3. Mutation protocol
 
-This is the **single contract** every writer must follow. The CLI
-(`issuectl update`, `close`, `new`) and the web server both go through it.
+This is the **single contract** every issuectl-mediated writer must follow.
+The CLI (`issuectl update`, `close`, `new`) and the web server both go
+through it.
+
+**Precondition / scope:** this protocol prevents silent loss only among
+writers that take `<root>/.issuectl/write.lock`. External writers that do
+not — `$EDITOR`, `git pull`, `git checkout`, hand-applied patches,
+arbitrary scripts — can still race. A concurrent `$EDITOR` save between
+this protocol's read and rename can be overwritten. Documented as
+unavoidable for the local-FS-as-source-of-truth model; mitigation is
+optimistic concurrency surfacing the conflict to the user (§6.3) and
+startup reconciliation (§13 spin-off).
 
 ### 3.1 Sequence
 
-For any mutation:
+For any mutation, all blocking I/O runs inside `tokio::task::spawn_blocking`
+(server side); CLI runs synchronously. The sequence:
 
 ```
 1. acquire flock(LOCK_EX) on <root>/.issuectl/write.lock
-2. locate_issue(slug)              ← canonical-path symlink check
+2. locate_issue(slug)              ← see 3.1.1
 3. read item.md, compute canonical_hash (§3.2)
 4. if request supplied expected_version: compare; mismatch → 409
 5. apply mutation in memory (mutate.rs)
-6. atomic write (§3.3)
-7. if status change crossed open↔closed: rename dir (§3.4)
-8. compute new canonical_hash
+6. if status change crosses open↔closed: rename dir then write (§3.4);
+   else: write_item_atomic (§3.3) in place
+7. compute new canonical_hash from final on-disk content
+8. event_hub.publish(IssueUpserted { version: V_new, ... })
+   ← still holding flock, before release; closes the reorder window in §5.5
 9. release flock
-10. return { version: new_canonical_hash, ... }
+10. return { version: V_new, ... } to caller
 ```
 
-The `flock` is the cross-process barrier shared between CLI and server. The
-**per-slug `tokio::sync::Mutex`** inside the server handles intra-process
-serialisation without serialising unrelated issues.
+Step 8 (publish-before-release) closes the reorder window described in
+§5.5 — without it, two writers that release their locks before
+publishing can land their events at clients in opposite order, breaking
+the dedup-by-version invariant in §6.4.
 
-The lock file `<root>/.issuectl/write.lock` is created on demand (mode
-0600). The `.issuectl/` directory is excluded from the issues tree by
-construction; if the user adds it to `.gitignore` is their call (default:
-yes — issue `init-project` / `doctor` should add it).
+The lock guard is RAII-bound: any panic or `tokio::task` cancellation
+between 1 and 9 unwinds and drops the file handle, releasing the lock.
+After-the-fact recovery (e.g. cancelled mid-§3.4 between rename and
+write) is the startup reconciler's job (§13 spin-off).
+
+**Lock acquisition order** is documented as: only one lock — the repo
+`flock`. There is no second lock to deadlock against. CLI and server
+both acquire only `flock`, so no inversion possible.
+
+The lock file `<root>/.issuectl/write.lock` is created with mode `0o600`
+on Unix:
+
+```rust
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
+let file = OpenOptions::new()
+    .read(true).write(true).create(true)
+    .mode(0o600)             // explicit; create(true) alone honours umask
+    .open(lock_path)?;
+fs2::FileExt::lock_exclusive(&file)?;
+```
+
+The `.issuectl/` directory is excluded from the issues tree by
+construction; `doctor --fix` adds it to `.gitignore` if missing.
+
+#### 3.1.1 `locate_issue(slug)` semantics
+
+Returns:
+
+- `Ok(folder)` — exactly one of `issues/open/<slug>` or `issues/closed/<slug>`
+  exists, is a directory (not a symlink — verified by `symlink_metadata`
+  + canonical-path-prefix check), and contains `item.md`.
+- `Err(NotFound)` — neither exists. Mutation handlers map to 404.
+- `Err(AmbiguousSlug)` — both `open/<slug>` and `closed/<slug>` exist
+  (e.g. mid-merge, manual chaos). Mutation handlers map to 409 with
+  `code: "ambiguous_slug"`. The reconciler (§13 spin-off) surfaces this
+  and refuses to silently pick a side.
+- `Err(Symlink | Invalid)` — symlink escape attempt or non-directory at
+  the slug path. 403 / 400 as today's `repo::locate_issue`.
 
 ### 3.2 Canonical hash
 
@@ -129,25 +192,70 @@ rewrites both `updated:` (today's date) and `labels:` (block→flow style), so
 raw-byte hashes diverge between read and write — they would 409 on every
 PATCH.
 
-Canonical form:
-
 ```rust
-fn canonical_hash(item: &ItemFile) -> String {
+fn canonical_hash(item: &Item) -> String {
+    let json = canonical_frontmatter_value(&item.frontmatter);
     let mut h = Sha256::new();
-    h.update(canonical_frontmatter_json(&item.frontmatter)); // sorted keys, normalised types
+    h.update(serde_json_canonical::to_vec(&json).unwrap()); // sorted keys, no whitespace
     h.update(b"\n---\n");
-    h.update(item.body.trim_end().as_bytes());               // strip trailing whitespace
+    h.update(normalize_body(&item.body).as_bytes());
     format!("sha256:{}", hex::encode(h.finalize()))           // full 64-char hex
+}
+
+/// Deterministic projection of frontmatter into a `serde_json::Value`.
+/// `updated:` is excluded — it is bumped on every save and would re-introduce
+/// false-409s. Unknown keys preserved by the loader are included so
+/// undocumented user fields participate in concurrency control.
+fn canonical_frontmatter_value(fm: &Frontmatter) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    m.insert("type".into(),     fm.issue_type.clone().into());
+    m.insert("status".into(),   directory_authoritative_status(fm).into()); // §6.2
+    m.insert("priority".into(), fm.priority.clone().into());
+    if let Some(v) = &fm.created   { m.insert("created".into(),   v.clone().into()); }
+    if let Some(v) = &fm.closed    { m.insert("closed".into(),    v.clone().into()); }
+    if let Some(v) = &fm.reporter  { m.insert("reporter".into(),  v.clone().into()); }
+    if let Some(v) = &fm.assignee  { m.insert("assignee".into(),  v.clone().into()); }
+    if let Some(v) = &fm.owner     { m.insert("owner".into(),     v.clone().into()); }
+    if let Some(v) = &fm.epic      { m.insert("epic".into(),      v.clone().into()); }
+    if let Some(v) = &fm.labels    { m.insert("labels".into(),    v.clone().into()); }
+    if let Some(v) = &fm.related   { m.insert("related".into(),   v.clone().into()); }
+    if let Some(v) = &fm.commits   { m.insert("commits".into(),   serde_json::to_value(v).unwrap()); }
+    for (k, v) in &fm.unknown {     m.insert(k.clone(),           v.clone()); }
+    // deliberately omitted: updated
+    serde_json::Value::Object(m)
+}
+
+/// Normalize CRLF→LF and trim only trailing newlines (NOT arbitrary
+/// Unicode whitespace — `trim_end()` would strip nbsp / U+2028 / etc.
+/// which can be legitimate body content).
+fn normalize_body(body: &str) -> Cow<'_, str> {
+    let crlf_normalized = if body.contains('\r') {
+        Cow::Owned(body.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(body)
+    };
+    Cow::Owned(crlf_normalized.trim_end_matches('\n').to_owned())
 }
 ```
 
-`canonical_frontmatter_json` is a deterministic projection: keys sorted,
-strings unquoted-where-safe, sequences as JSON arrays. Independent of YAML
-formatting choices made by `serde_yaml` round-trip.
+Notes on the projection:
 
-`updated:` is **excluded** from the canonical hash. `do_update` bumps it on
-every save, but that's metadata about the write, not user-meaningful content.
-Including it would re-introduce the false-409 problem.
+- **Computed over directory-authoritative status** (§6.2). If `closed/foo`
+  has frontmatter `status: open`, the hash uses `done` (or whichever
+  default the reconciler picks), not the on-disk `open`. This keeps the
+  hash consistent with the issue shape clients see in API responses.
+- **Sorted keys + no whitespace**: use `serde_json_canonical` (RFC 8785
+  JCS) or equivalent. Two correct implementations must produce identical
+  bytes for identical content.
+- **`updated:` excluded** — `do_update` bumps it on every save. Two
+  files differing only in `updated:` are treated as equal. This is fine
+  because `updated:` is generated, not user-authored.
+- **Unknown fields included** — `Frontmatter::unknown: BTreeMap<String,
+  Value>` (loader preserves them). Without this, a rewrite would silently
+  drop user-added fields without 409, which is data loss.
+- **`canonical_hash` is computed in `mutate.rs`** so CLI and server use
+  the same function. The CLI exposes it via `issuectl show --json`
+  (`version` field).
 
 ### 3.3 Atomic write
 
@@ -160,7 +268,12 @@ fn write_item_atomic(target: &Path, content: &str) -> Result<()> {
     tf.write_all(content.as_bytes())?;
     tf.as_file().sync_all()?;          // fsync(file)
     tf.persist(target)?;                // atomic rename within same fs
-    #[cfg(unix)] fsync_dir(dir)?;       // best-effort, swallow errors
+    #[cfg(unix)]
+    if let Err(err) = fsync_dir(dir) {
+        tracing::warn!(?err, path = %dir.display(), "fsync issue dir failed");
+        // best-effort: rename succeeded; on crash the rename may not be
+        // durable but the file content is. Acceptable for issue metadata.
+    }
     Ok(())
 }
 ```
@@ -180,36 +293,64 @@ rule: **directory wins.** Frontmatter `status:` follows folder.
 Sequence inside the lock:
 
 ```
-1. preflight: target dir <other_folder>/<slug> must not exist; else error
-2. update frontmatter in memory (status, closed: date, etc.)
-3. fs::rename(<this_folder>/<slug>, <other_folder>/<slug>)
-4. write_item_atomic(<other_folder>/<slug>/item.md, new_content)
+1. update frontmatter in memory (new status, closed: today if closing)
+2. on Linux: fs::rename + RENAME_NOREPLACE, fail if target exists
+   on others: fs::rename, then check via fs::metadata that we created
+              the dir (rename to existing-non-empty fails ENOTEMPTY,
+              which is fine; rename overwriting an empty dir is the
+              edge case we accept and let the reconciler resolve)
+3. write_item_atomic(<new_folder>/<slug>/item.md, content)
+4. on Unix: fsync_dir(<root>/issues/<old_folder>) and
+            fsync_dir(<root>/issues/<new_folder>) — both best-effort,
+            warn on failure (durability of the rename across both
+            directory entries)
 ```
 
-Crash gap between (3) and (4) leaves a renamed directory with stale
-frontmatter content. The startup reconciler (spin-off, §11) detects
-this on next `serve` and silently corrects the frontmatter to match the
-folder, emitting a `LoadWarning`. Web UI surfaces the warning in the
-existing `#warnings` strip.
+The preflight check from the previous design is removed — it was
+TOCTOU-vulnerable. Rely on the rename failure mode instead:
+`renameat2(RENAME_NOREPLACE)` on Linux is atomic; on macOS the
+existing-target case fails with `ENOTEMPTY` for non-empty dirs.
+
+**Crash gap between (2) and (3)** leaves a renamed directory with stale
+frontmatter content. The startup reconciler (§13 spin-off) detects this
+on next `serve` and corrects the frontmatter to match the folder.
+Specific reconciliation rules:
+
+| State on disk | Reconciler action |
+| --- | --- |
+| `closed/<slug>` with `status:` = active value (`open`, `in-progress`, `testing`) | Rewrite `status: done`. If `closed:` absent, set to today's date. Emit `LoadWarning`. |
+| `open/<slug>` with `status:` = closing value (`done`, `fixed`, …) | Rewrite `status: open`. Remove `closed:` field. Emit `LoadWarning`. |
+| Both `open/<slug>` and `closed/<slug>` exist | Don't pick a side. Emit `LoadWarning` with `code: "ambiguous_slug"`. `locate_issue` returns `Err(AmbiguousSlug)` until human resolves. |
+| `<folder>/<slug>/` exists with no `item.md` | `LoadWarning`, exclude from listings. |
+| `item.md` is invalid YAML or has merge markers (`<<<<<<<`) | `IssueInvalid` event, never auto-rewrite — user resolves. |
+
+`closed:` date for the auto-rewrite case: today's date (when reconciler
+runs). Documented as approximate; the actual close moment is lost. If
+the user cares, they can set it manually.
+
+Web UI surfaces these warnings in the existing `#warnings` strip — no
+new UI surface needed.
 
 ### 3.5 Shared mutation DTO
 
 `mutate.rs` exports one request type. Both clap and serde derive into it:
 
 ```rust
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateIssueRequest {
     pub slug: Slug,
-    pub expected_version: Option<String>,
-    pub status: Patch<String>,
-    pub priority: Patch<String>,
-    pub assignee: Patch<String>,
-    pub owner: Patch<String>,
-    pub epic: Patch<String>,
-    pub add_labels: Vec<String>,
-    pub remove_labels: Vec<String>,
-    pub add_related: Vec<String>,
-    pub remove_related: Vec<String>,
-    pub add_commits: Vec<CommitSpec>,
+    #[serde(default)] pub expected_version: Option<String>,
+    #[serde(default)] pub status:   Patch<String>,
+    #[serde(default)] pub priority: Patch<String>,
+    #[serde(default)] pub assignee: Patch<String>,
+    #[serde(default)] pub owner:    Patch<String>,
+    #[serde(default)] pub epic:     Patch<String>,
+    #[serde(default)] pub add_labels:     Vec<String>,
+    #[serde(default)] pub remove_labels:  Vec<String>,
+    #[serde(default)] pub add_related:    Vec<String>,
+    #[serde(default)] pub remove_related: Vec<String>,
+    #[serde(default)] pub add_commits:    Vec<CommitSpec>,
 }
 
 #[derive(Debug, Default)]
@@ -220,12 +361,39 @@ pub enum Patch<T> {
 }
 ```
 
-`Patch<T>` distinguishes "field omitted" (`Unspecified` — leave alone),
-"field present as null" (`Clear` — delete it), and "field present with
-value" (`Set(T)`). `Option<T>` cannot represent this; ad-hoc handling
-silently confuses callers. Custom serde for JSON (`null` ↔ `Clear`,
-absent ↔ `Unspecified`); clap maps `--no-epic` to `Clear`, `--epic foo`
-to `Set("foo")`, omission to `Unspecified`.
+`Patch<T>` distinguishes:
+
+| Source | Variant |
+| --- | --- |
+| JSON: field absent | `Unspecified` (leave alone) |
+| JSON: `"epic": null` | `Clear` |
+| JSON: `"epic": "foo"` | `Set("foo")` |
+| JSON: `"epic": ""` | **400 validation** (empty-string set is rejected; use `null` to clear) |
+| JSON: `"epic": 123` | **400 validation** (no type coercion) |
+| clap: `--no-epic` | `Clear` |
+| clap: `--epic foo` | `Set("foo")` |
+| clap: `--epic ""` | **CLI error** (clap's `parse_non_empty` already rejects this) |
+| clap: omitted | `Unspecified` |
+
+`#[serde(default)]` on every field is mandatory — without it, omitting
+a field deserialises as an error instead of `Unspecified`.
+`#[serde(deny_unknown_fields)]` catches typos like `"priorty": "high"`
+that would otherwise silently parse as `Unspecified`.
+
+Validation runs once after both clap and serde conversion via
+`UpdateIssueRequest::validate()`:
+
+- `add_X` and `remove_X` cannot share a value → 400 `conflicting_intent`.
+- `add_X`/`remove_X` cannot contain duplicates within themselves.
+- Removing an absent value → no-op (idempotent).
+- `status`, `priority`, `type` must be in the enum value sets.
+- Slug-shaped fields validate against `slug::is_valid`.
+
+**Immutable fields** not in the request type: `slug` (identity),
+`created` (set at `new` time only), `reporter` (currently — could be
+added if the use case appears). `closed:` is set/cleared automatically
+by the status-change logic; not user-settable via PATCH. `updated:` is
+set by every successful mutation.
 
 The current `do_new`, `do_update`, `do_close` move into `mutate.rs`
 exporting structured `Result` types; both `cmd_*` and the axum handlers
@@ -325,9 +493,15 @@ shared with body PUT. CSRF-protected like other state-changing routes
 ```
 
 `code` is stable; `title`/`detail` are human strings. Concrete codes:
-`version_mismatch` (409), `validation` (400), `conflicting_intent` (400),
-`not_found` (404), `forbidden` (403), `rate_limited` (429),
-`storage_full` (507), `internal` (500).
+`version_mismatch` (409), `ambiguous_slug` (409), `validation` (400),
+`conflicting_intent` (400), `not_found` (404), `forbidden` (403),
+`rate_limited` (429), `storage_full` (507), `internal` (500).
+
+For `version_mismatch` (and only for it), the response includes
+`issue: IssueDetailResponse` — same shape as `GET /api/issues/{slug}`,
+i.e. full frontmatter + `body_markdown` + `body_html` + new `version`.
+Clients use it directly without a follow-up GET. Other error codes do
+not include `issue`.
 
 ### 4.4 Server-internal call vs CLI shell-out
 
@@ -413,60 +587,154 @@ Decision unchanged: SSE wins for one-way push. axum's `Sse` plus
 
 The original §2 sketch used `events: broadcast::Sender<BoardEvent>` plus
 a separate "ring buffer of 256 events" — two contradictory mechanisms.
-Replaced with one explicit type:
+Replaced with one explicit type. **All seq advancement and ring writes
+happen inside one critical section** so seq order matches ring order;
+splitting them across an `AtomicU64` and a separate mutex creates an
+out-of-order publish bug.
 
 ```rust
 pub struct EventHub {
-    seq: AtomicU64,
+    inner: parking_lot::Mutex<EventHubInner>,
     tx: broadcast::Sender<BoardEvent>,
-    ring: Mutex<VecDeque<BoardEvent>>,   // bounded, e.g. 1024
+    capacity: usize,           // assert > 0; e.g. 1024
+    instance_id: Uuid,         // generated at startup; shipped to clients
+}
+
+struct EventHubInner {
+    next_seq: u64,
+    ring: VecDeque<BoardEvent>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct BoardEvent {
+    pub seq: u64,
+    #[serde(flatten)] pub payload: EventPayload,
+    // Note: no Instant timestamp on the wire. Instant is not Serialize
+    // and has no cross-process meaning. If a timestamp is needed for
+    // diagnostics, add `chrono::DateTime<Utc>` later.
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum EventPayload {
+    IssueUpserted { slug: String, version: String, issue: IssueSummary },
+    IssueRemoved  { slug: String },
+    IssueInvalid  { slug: String, warnings: Vec<LoadWarning> },
+    Resync        { reason: String },
+    Degraded      { reason: String },
 }
 
 impl EventHub {
-    pub fn current_seq(&self) -> u64 { self.seq.load(Ordering::Acquire) }
-
     pub fn publish(&self, payload: EventPayload) -> BoardEvent {
-        let seq = self.seq.fetch_add(1, Ordering::AcqRel) + 1;
-        let evt = BoardEvent { seq, payload, ts: Instant::now() };
-        {
-            let mut r = self.ring.lock();
-            if r.len() == r.capacity() { r.pop_front(); }
-            r.push_back(evt.clone());
-        }
+        let evt = {
+            let mut g = self.inner.lock();
+            g.next_seq += 1;
+            let evt = BoardEvent { seq: g.next_seq, payload };
+            while g.ring.len() >= self.capacity { g.ring.pop_front(); }
+            g.ring.push_back(evt.clone());
+            evt
+        };                       // lock dropped before send
         let _ = self.tx.send(evt.clone());
         evt
     }
 
-    pub fn replay_since(&self, since: u64) -> Replay { /* … */ }
+    pub fn current_seq(&self) -> u64 { self.inner.lock().next_seq }
+
+    /// Subscribe AND replay in one operation, atomic w.r.t. publish.
+    /// The caller must drop live broadcast events with seq <= drop_through
+    /// to avoid duplicates that bridge the subscribe→replay window.
+    pub fn subscribe_since(&self, since: u64) -> ReplayStream {
+        let rx = self.tx.subscribe();          // 1. subscribe FIRST
+        let g = self.inner.lock();             // 2. lock the hub
+        let current = g.next_seq;
+        let replay = if since > current {
+            // Future seq → previous server instance, or stale client.
+            Replay::TooOld { reason: "future_seq" }
+        } else if since == current {
+            Replay::Events(vec![])
+        } else if g.ring.is_empty() || g.ring.front().unwrap().seq > since + 1 {
+            Replay::TooOld { reason: "gap" }
+        } else {
+            let evts: Vec<_> = g.ring.iter()
+                .filter(|e| e.seq > since)
+                .cloned().collect();
+            Replay::Events(evts)
+        };
+        let drop_through = match &replay {
+            Replay::Events(v) => v.last().map(|e| e.seq).unwrap_or(since),
+            Replay::TooOld { .. } => current,
+        };
+        ReplayStream { replay, rx, drop_through, instance_id: self.instance_id }
+    }
+}
+
+pub struct ReplayStream {
+    pub replay: Replay,
+    pub rx: broadcast::Receiver<BoardEvent>,
+    pub drop_through: u64,
+    pub instance_id: Uuid,
 }
 
 pub enum Replay {
     Events(Vec<BoardEvent>),
-    TooOld,                  // gap; client should resync
+    TooOld { reason: &'static str },
 }
 ```
 
-Initial-load cursor handoff (closes the REST↔SSE race the original doc
-introduced):
+Notable invariants:
+
+- `next_seq` and the ring share one mutex. `current_seq()` is a snapshot
+  of "the highest seq the ring contains". Because mutate.rs publishes
+  inside the repo `flock` (§3.1 step 8), seq order matches the order in
+  which mutations land on disk.
+- `subscribe_since` subscribes to the broadcast **before** snapshotting
+  the ring under the same lock. Any event published after the lock is
+  released arrives via `rx`; duplicates with seq ≤ `drop_through` are
+  dropped at the SSE handler. Without this ordering, an event published
+  between `replay_since` and `subscribe()` would be lost.
+- `since > current_seq` returns `TooOld { reason: "future_seq" }`, never
+  empty events. After a server restart, `next_seq` resets to 0, so a
+  client reconnecting with `Last-Event-ID: 500` gets `TooOld` → full
+  resync. `instance_id` (returned in every SSE handshake) lets the
+  client detect server restart even when seqs happen to overlap.
+- `since` exactly at `current_seq` returns `Events(vec![])` — client is
+  caught up, no resync needed.
+- Ring boundary: `since < oldest - 1` (strictly less; `since == oldest - 1`
+  is replayable because `oldest` is the first event after the gap).
+- `parking_lot::Mutex` (sync, not `tokio::sync::Mutex`). The critical
+  section never `.await`s. Holding it across send is unnecessary — send
+  goes after the lock drops.
+
+#### 5.5.1 Initial-load cursor handoff
 
 ```
 GET /api/issues
-  → captures snapshot_seq = event_hub.current_seq() BEFORE scan
-  → scans filesystem
-  → returns { snapshot_seq, issues, warnings }
+  → snapshot_seq = event_hub.current_seq()         (BEFORE filesystem scan)
+  → scan filesystem
+  → return { snapshot_seq, instance_id, issues, warnings }
 
-client opens /events?since=<snapshot_seq>
-  → server returns Replay::Events(buffered) then live stream
-  → if Replay::TooOld → server sends Resync immediately
+client opens /events?since=<snapshot_seq>&instance=<instance_id>
+  → server: ReplayStream = hub.subscribe_since(snapshot_seq)
+  → if response.instance_id != client.instance_id → emit Resync first
+  → send ring replay events
+  → forward broadcast events with seq > drop_through
 ```
 
-For reconnects, the standard `Last-Event-ID` header works the same way
-on top of the same `replay_since` mechanism. Browsers can't set
-`Last-Event-ID` on the *initial* `EventSource` connection, so the
-`?since=` query param is required for that one case.
+**Invariant supporting the cursor:** every mutation that changes disk
+state publishes its event before releasing `flock` (§3.1 step 8). If
+event seq=N exists, the filesystem state corresponding to N is already
+visible to scans that begin after `current_seq() ≥ N`.
 
-`broadcast::error::RecvError::Lagged(_)` → server emits `Resync` to that
-subscriber and resets its cursor.
+`broadcast::error::RecvError::Lagged(_)` → server emits
+`Resync { reason: "lagged" }` to that subscriber and reconnects them
+behind the scenes (or the SSE handler drops the connection and lets
+`EventSource` reconnect).
+
+For reconnects, the standard `Last-Event-ID` header works on top of the
+same mechanism. Browsers can't set `Last-Event-ID` on the *initial*
+`EventSource` connection, which is why `?since=` and `?instance=` query
+params exist — first connect uses them, subsequent reconnects use
+`Last-Event-ID`.
 
 ### 5.6 Event types
 
@@ -518,6 +786,14 @@ If more than ~50 distinct slugs change within a single debounce window
 (e.g. `git checkout` switching feature branches), the watcher emits one
 `Resync { reason: "bulk_change" }` instead of fanning out per-issue
 events. Threshold tunable via `--watch-bulk-threshold`.
+
+The `Resync` event carries a `seq` like any other event (allocated
+inside the EventHub mutex). On receipt, clients **discard all
+per-issue local_version state**, refetch `/api/issues`, capture the new
+`snapshot_seq` from that response, and continue consuming the SSE stream
+with `seq > snapshot_seq`. The `Resync` itself is the only event a
+client treats as "drop everything"; per-issue events between two
+`Resync`s remain individually applicable.
 
 ### 5.8 Watcher restart
 
@@ -751,8 +1027,12 @@ This is a future feature; M0–M3 stays loopback-only for writes.
 - Request size limits per route: PATCH metadata 64 KiB, PUT body
   1 MiB, POST preview 1 MiB.
 - Atomic-write target re-canonicalised inside `locate_issue`-style
-  guard before persist; symlink swap between validation and write
-  is prevented by holding `flock` across the whole sequence.
+  guard before persist (`symlink_metadata` + canonical-prefix check).
+  Note: `flock` is *not* a symlink-swap defence — it's advisory and
+  only excludes other `flock`-holding processes. A non-cooperating
+  attacker can still race a swap. Threat model is local-trusted
+  filesystem, so this is acceptable; harden via `*at` syscalls
+  (`openat(O_NOFOLLOW)`, `renameat2`) only if the threat model changes.
 - Watcher does not follow symlinks (`with_follow_symlinks(false)`).
 - `NamedTempFile` placement inside the watched dir is fine because
   the tempfile prefix is filtered (§5.1).
@@ -761,7 +1041,7 @@ This is a future feature; M0–M3 stays loopback-only for writes.
 
 | Phase | Scope | Ship value |
 | --- | --- | --- |
-| **M0** | `EventHub` + `notify-debouncer-full` watcher + `/events` SSE + `replay_from_seq` cursor in `/api/issues`. No writes. | Live read-side updates: `$EDITOR` saves, `git pull`, agent edits all show up in the board immediately. |
+| **M0** | `EventHub` (single-mutex seq+ring), `notify-debouncer-full` watcher, `/events` SSE with `subscribe_since` race-free handoff, `snapshot_seq` + `instance_id` in `/api/issues`. No writes. | Live read-side updates: `$EDITOR` saves, `git pull`, agent edits all show up in the board immediately. |
 | **M1** | `mutate.rs` refactor with `Patch<T>` + `UpdateIssueRequest` + `flock` + per-slug mutex + canonical hash. CSRF token + `Host` validation. PATCH metadata routes. CLI: `--expected-version`, `version` field in `--json` output. Drag-to-move in UI. | Status drag, label/assignee edits — most-requested ergonomic gap. |
 | **M2** | `PUT /body` + textarea + `POST /api/preview` + `localStorage` draft + body conflict UX. `IssueInvalid` event surfacing. CLI: `issuectl body set`. | Full edit-in-place. |
 | **M3** | `--watch-poll-ms`, `--no-watch`, `Degraded` banner, three-way merge UI for body conflicts. | Robustness for real multi-client use. |
@@ -845,36 +1125,36 @@ These are genuine open questions, not deferred decisions:
 
 ## Appendix A — illustrative event types
 
+The wire format is a `BoardEvent` envelope wrapping a tagged
+`EventPayload`. `seq` lives on the envelope so every event has a
+uniform `seq` accessor (avoids duplicating it across each variant).
+
 ```rust
 // pseudocode — final shapes belong in events.rs
 
-#[derive(Serialize, Clone)]
-#[serde(tag = "type")]
-pub enum BoardEvent {
-    IssueUpserted {
-        seq: u64,
-        slug: String,
-        version: String,
-        issue: IssueSummary,    // no body_html
-    },
-    IssueRemoved {
-        seq: u64,
-        slug: String,
-    },
-    IssueInvalid {
-        seq: u64,
-        slug: String,
-        warnings: Vec<LoadWarning>,
-    },
-    Resync {
-        seq: u64,
-        reason: String,
-    },
-    Degraded {
-        seq: u64,
-        reason: String,
-    },
+#[derive(Clone, Serialize)]
+pub struct BoardEvent {
+    pub seq: u64,
+    #[serde(flatten)]
+    pub payload: EventPayload,
 }
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum EventPayload {
+    IssueUpserted { slug: String, version: String, issue: IssueSummary },
+    IssueRemoved  { slug: String },
+    IssueInvalid  { slug: String, warnings: Vec<LoadWarning> },
+    Resync        { reason: String },
+    Degraded      { reason: String },
+}
+```
+
+JSON wire shape (with `#[serde(flatten)]`):
+
+```json
+{ "seq": 42, "type": "IssueUpserted",
+  "slug": "foo", "version": "sha256:…", "issue": { ... } }
 ```
 
 ## Appendix B — illustrative PATCH flow
@@ -905,14 +1185,15 @@ client                              server
   |    status: "in-progress" }       |
   |  -------------------------->     |
   |                                  |  flock(LOCK_EX)
-  |                                  |  per-slug mutex
   |                                  |  read item.md, hash
   |                                  |  check expected_version
-  |                                  |  apply mutation
-  |                                  |  write_item_atomic
+  |                                  |  apply mutation in memory
+  |                                  |  write_item_atomic (or rename+write)
   |                                  |  recompute hash → V_new
-  |                                  |  release locks
   |                                  |  hub.publish(IssueUpserted{V_new})
+  |                                  |    — STILL holding flock so seq
+  |                                  |      order matches disk order
+  |                                  |  release flock
   |  200 { version: V_new, issue }   |
   |  <--------------------------     |
   |  client stores local_version = V_new
@@ -930,6 +1211,6 @@ client                              server
 
 ---
 
-*Last revised: 2026-05-06 after multi-LLM panel review. Implementation
-starts in a separate worktree once spin-off issues for reconciliation
-and field-level merge are filed.*
+*Last revised: 2026-05-06 after two multi-LLM panel review passes (full
+doc, then focused on §3 + §5.5). Implementation starts in a separate
+worktree.*
