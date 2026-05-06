@@ -161,7 +161,6 @@ impl EventHub {
             replay,
             rx,
             drop_through,
-            instance_id: self.instance_id,
         }
     }
 }
@@ -182,7 +181,6 @@ pub struct ReplayStream {
     pub replay: Replay,
     pub rx: broadcast::Receiver<BoardEvent>,
     pub drop_through: u64,
-    pub instance_id: Uuid,
 }
 
 #[cfg(test)]

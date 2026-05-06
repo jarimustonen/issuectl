@@ -322,17 +322,11 @@ enum Command {
         #[arg(long)]
         no_watch: bool,
 
-        /// Force the watcher into polling mode at the given interval in
-        /// milliseconds. Required on most network filesystems (NFS,
-        /// SMB) where inotify/FSEvents events are not delivered.
-        #[arg(long, value_name = "MS")]
-        watch_poll_ms: Option<u64>,
-
         /// Number of distinct slugs touched in a single debounce window
         /// above which per-issue events collapse into a single Resync
-        /// (e.g. `git checkout` of a feature branch). Default: 50.
-        #[arg(long, default_value_t = 50)]
-        watch_bulk_threshold: usize,
+        /// (e.g. `git checkout` of a feature branch).
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
+        watch_bulk_threshold: u32,
     },
 }
 
@@ -462,7 +456,6 @@ fn main() -> Result<()> {
             port,
             host,
             no_watch,
-            watch_poll_ms,
             watch_bulk_threshold,
         } => server::run(
             find_root(),
@@ -470,8 +463,7 @@ fn main() -> Result<()> {
             port,
             server::ServeOptions {
                 watch_enabled: !no_watch,
-                watch_poll_ms,
-                watch_bulk_threshold,
+                watch_bulk_threshold: watch_bulk_threshold as usize,
             },
         ),
     }

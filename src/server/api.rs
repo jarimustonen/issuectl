@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
     Json,
 };
@@ -219,88 +219,132 @@ pub(super) fn is_safe_doc_name(name: &str) -> bool {
 
 #[derive(Deserialize)]
 pub struct EventsQuery {
-    /// Last seq the client already has. `0` (or omitted) means "stream
-    /// from now"; any other value triggers replay from the EventHub
-    /// ring. Out-of-range values yield `Resync { reason: "future_seq"
-    /// | "gap" }` instead of silent skip.
+    /// Last seq the client already has. Omitted means "stream from now"
+    /// (no replay). When `Last-Event-ID` is present on a reconnect the
+    /// header takes precedence over this query parameter.
     #[serde(default)]
     pub since: Option<u64>,
     /// Server `instance_id` the client believes it's still talking to.
     /// If it differs from the current instance, the stream opens with a
-    /// `Resync { reason: "instance_changed" }` so the client invalidates
-    /// its cache.
+    /// single `Resync { reason: "instance_changed" }` and forwards only
+    /// new live events; no stale replay from a prior process is sent.
     #[serde(default)]
     pub instance: Option<Uuid>,
 }
 
+/// Read `Last-Event-ID`. Empty values are ignored (per SSE spec, an
+/// empty header means the client has no remembered cursor — likely the
+/// initial connect). Non-numeric values are also ignored rather than
+/// erroring; the worst case is the client gets streamed from "now".
+fn parse_last_event_id(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
 /// Stream board events as Server-Sent Events.
 ///
-/// The first frame is always a `Resync` if the client's cursor is too
-/// old or its `instance_id` doesn't match this process; otherwise the
-/// stream opens with replayed ring events (closing the gap between
-/// `/api/issues` snapshot and now), then forwards live events with
-/// `seq > drop_through` to suppress the duplicate of the last replay
-/// frame. See design doc §5.5.
+/// Reconnect cursor resolution order: `Last-Event-ID` header > `?since=`
+/// query > "from now" (current_seq).
+///
+/// On instance mismatch the stream emits one `Resync { instance_changed
+/// }` and forwards only events the new instance produces — no stale
+/// replay from a prior process. On `Lagged` the stream emits `Resync {
+/// lagged }` and ends, prompting `EventSource` to reconnect cleanly.
+/// See design doc §5.5.
 pub async fn events_stream(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<EventsQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let since = q.since.unwrap_or(0);
-    let stream_handle = state.event_hub.subscribe_since(since);
+    let server_instance = state.event_hub.instance_id();
+    let instance_mismatch = q.instance.is_some_and(|id| id != server_instance);
 
-    // Build the prefix: a synthetic `instance_changed` Resync if needed,
-    // then either the replay events or a `TooOld` Resync.
-    let mut prefix: Vec<BoardEvent> = Vec::new();
-    let drop_through = stream_handle.drop_through;
-    let server_instance = stream_handle.instance_id;
+    // F3: omitted/0 since → stream-from-now. Otherwise replay.
+    // F1: Last-Event-ID overrides ?since= on reconnect.
+    let since = parse_last_event_id(&headers)
+        .or(q.since)
+        .filter(|&v| v != 0)
+        .unwrap_or_else(|| state.event_hub.current_seq());
 
-    if let Some(client_instance) = q.instance {
-        if client_instance != server_instance {
-            // Synthetic event with seq=0 so it never collides with real
-            // ones — clients treat any Resync as "drop everything".
-            prefix.push(BoardEvent {
-                seq: 0,
-                payload: EventPayload::Resync {
-                    reason: "instance_changed".to_string(),
-                },
-            });
-        }
-    }
-    match stream_handle.replay {
-        Replay::Events(v) => prefix.extend(v),
-        Replay::TooOld { reason } => prefix.push(BoardEvent {
+    // D2: instance mismatch — short-circuit. Old cursor is meaningless
+    // in this process; subscribe at current_seq, send only the Resync,
+    // and forward only live events from this point onward.
+    let (mut prefix, stream_handle) = if instance_mismatch {
+        let handle = state
+            .event_hub
+            .subscribe_since(state.event_hub.current_seq());
+        let prefix = vec![BoardEvent {
             seq: 0,
             payload: EventPayload::Resync {
-                reason: reason.to_string(),
+                reason: "instance_changed".to_string(),
             },
-        }),
-    }
-
-    let live = BroadcastStream::new(stream_handle.rx).filter_map(move |res| async move {
-        match res {
-            Ok(evt) if evt.seq > drop_through => Some(evt),
-            Ok(_) => None, // duplicate already covered by replay
-            Err(_lag) => Some(BoardEvent {
+        }];
+        (prefix, handle)
+    } else {
+        let handle = state.event_hub.subscribe_since(since);
+        let mut prefix = Vec::new();
+        match &handle.replay {
+            Replay::Events(v) => prefix.extend(v.iter().cloned()),
+            Replay::TooOld { reason } => prefix.push(BoardEvent {
                 seq: 0,
                 payload: EventPayload::Resync {
-                    reason: "lagged".to_string(),
+                    reason: reason.to_string(),
                 },
             }),
         }
-    });
+        (prefix, handle)
+    };
 
-    let prefix_stream = futures_util::stream::iter(prefix);
+    let drop_through = stream_handle.drop_through;
+
+    // F14: after Lagged, terminate the stream so EventSource reconnects.
+    // `take_while` ends as soon as we yield the synthetic Resync.
+    let live = BroadcastStream::new(stream_handle.rx)
+        .scan(false, move |ended, res| {
+            let item = if *ended {
+                None
+            } else {
+                match res {
+                    Ok(evt) if evt.seq > drop_through => Some(Some(evt)),
+                    Ok(_) => Some(None), // duplicate covered by replay
+                    Err(_lag) => {
+                        *ended = true;
+                        Some(Some(BoardEvent {
+                            seq: 0,
+                            payload: EventPayload::Resync {
+                                reason: "lagged".to_string(),
+                            },
+                        }))
+                    }
+                }
+            };
+            std::future::ready(item)
+        })
+        .filter_map(|opt| async move { opt });
+
+    // Drain the prefix vec into a stream once.
+    let prefix_stream = futures_util::stream::iter(std::mem::take(&mut prefix));
     let combined = prefix_stream.chain(live).map(|evt: BoardEvent| {
-        let id = if evt.seq == 0 {
-            String::new()
-        } else {
-            evt.seq.to_string()
-        };
-        let json = serde_json::to_string(&evt).unwrap_or_else(|_| "{}".to_string());
-        Ok::<Event, Infallible>(Event::default().id(id).data(json))
+        let mut event = Event::default()
+            .data(serde_json::to_string(&evt).expect("BoardEvent serialization cannot fail"));
+        // F2: only attach `id:` for real events. Empty `id:` per SSE
+        // spec sets lastEventId to empty, breaking reconnect cursor.
+        if evt.seq != 0 {
+            event = event.id(evt.seq.to_string());
+        }
+        Ok::<Event, Infallible>(event)
     });
 
-    Sse::new(combined).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+    Sse::new(combined).keep_alive(
+        // 15 s is well under typical reverse-proxy/browser idle timeouts
+        // (30–60 s) so loopback users with no events pending still see
+        // the connection stay alive.
+        KeepAlive::new().interval(Duration::from_secs(15)),
+    )
 }
 
 #[cfg(test)]

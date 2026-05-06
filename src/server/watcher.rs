@@ -34,9 +34,6 @@ pub struct WatcherConfig {
     pub root: PathBuf,
     /// Debounce window. Design doc range: 100–200 ms.
     pub debounce: Duration,
-    /// Optional poll interval for filesystems where notify falls back to
-    /// polling (NFS). Surfaced as `--watch-poll-ms`.
-    pub poll: Option<Duration>,
     /// Distinct slug count within a single debounce window above which
     /// per-issue events collapse into one `Resync`.
     pub bulk_threshold: usize,
@@ -99,7 +96,7 @@ async fn run_once(hub: Arc<EventHub>, cfg: WatcherConfig) -> Result<(), String> 
     // brief stall must not drop events.
     let (tx, mut rx) = mpsc::unbounded_channel::<DebounceEventResult>();
 
-    let mut debouncer = new_debouncer(cfg.debounce, cfg.poll, move |res: DebounceEventResult| {
+    let mut debouncer = new_debouncer(cfg.debounce, None, move |res: DebounceEventResult| {
         // tokio mpsc unbounded send is sync; ignore failures (receiver
         // dropped == we're shutting down).
         let _ = tx.send(res);

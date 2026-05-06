@@ -32,7 +32,6 @@ use events::EventHub;
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
     pub watch_enabled: bool,
-    pub watch_poll_ms: Option<u64>,
     pub watch_bulk_threshold: usize,
 }
 
@@ -40,7 +39,6 @@ impl Default for ServeOptions {
     fn default() -> Self {
         ServeOptions {
             watch_enabled: true,
-            watch_poll_ms: None,
             watch_bulk_threshold: 50,
         }
     }
@@ -116,17 +114,31 @@ async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) ->
         event_hub: event_hub.clone(),
     };
 
-    // Watcher: a separate tokio task. If --no-watch is set or the issues
-    // tree doesn't exist yet, skip — the board still serves but no live
-    // updates will arrive until the user reloads.
-    let watcher_handle = if options.watch_enabled && root.join("issues").is_dir() {
-        let cfg = watcher::WatcherConfig {
-            root: root.clone(),
-            debounce: std::time::Duration::from_millis(150),
-            poll: options.watch_poll_ms.map(std::time::Duration::from_millis),
-            bulk_threshold: options.watch_bulk_threshold,
-        };
-        Some(watcher::spawn(event_hub.clone(), cfg))
+    // Watcher: a separate tokio task. We materialise `issues/open` and
+    // `issues/closed` at startup so the watcher always has something to
+    // hook — without this, `issuectl serve` in a fresh repo followed by
+    // `issuectl new` from the CLI never lights up the board.
+    let watcher_handle = if options.watch_enabled {
+        for sub in &["open", "closed"] {
+            let p = root.join("issues").join(sub);
+            if let Err(e) = std::fs::create_dir_all(&p) {
+                eprintln!(
+                    "issuectl[serve]: cannot create {}: {} — watcher disabled",
+                    p.display(),
+                    e
+                );
+            }
+        }
+        if root.join("issues").is_dir() {
+            let cfg = watcher::WatcherConfig {
+                root: root.clone(),
+                debounce: std::time::Duration::from_millis(150),
+                bulk_threshold: options.watch_bulk_threshold,
+            };
+            Some(watcher::spawn(event_hub.clone(), cfg))
+        } else {
+            None
+        }
     } else {
         None
     };
