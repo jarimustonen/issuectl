@@ -51,6 +51,19 @@ pub enum EventPayload {
     IssueRemoved {
         slug: String,
     },
+    /// Status crossing (open ↔ closed) emitted by the mutate layer as
+    /// a single atomic event. Avoids the two-event Remove+Upsert race
+    /// where a lagged client sees only the Remove and treats the
+    /// issue as deleted. Carries the new `version` for echo
+    /// suppression and the new `IssueSummary` so clients can re-place
+    /// the card without a follow-up GET.
+    IssueMoved {
+        slug: String,
+        from_folder: String,
+        to_folder: String,
+        version: String,
+        issue: Box<IssueSummary>,
+    },
     IssueInvalid {
         slug: String,
         warnings: Vec<LoadWarning>,

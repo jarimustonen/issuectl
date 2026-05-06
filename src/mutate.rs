@@ -130,6 +130,18 @@ impl UpdateIssueRequest {
             }
         }
 
+        for (name, list) in [
+            ("add_labels", &self.add_labels),
+            ("remove_labels", &self.remove_labels),
+            ("add_related", &self.add_related),
+            ("remove_related", &self.remove_related),
+        ] {
+            if list.iter().any(|s| s.is_empty()) {
+                return Err(MutateError::Validation(format!(
+                    "{name} contains an empty string element"
+                )));
+            }
+        }
         if let Some(dup) = first_duplicate(&self.add_labels) {
             return Err(MutateError::Validation(format!(
                 "add_labels contains duplicate {dup:?}"
@@ -186,7 +198,9 @@ fn first_overlap<'a>(a: &'a [String], b: &[String]) -> Option<&'a String> {
 pub struct UpdateOutcome {
     pub issue: Issue,
     pub version: String,
-    pub final_dir: PathBuf,
+    /// Directory containing the issue's `item.md` after the mutation
+    /// (changes when the mutation crosses `open/` ↔ `closed/`).
+    pub issue_dir: PathBuf,
     pub moved_to_closed: bool,
     pub moved_to_open: bool,
 }
@@ -205,6 +219,13 @@ pub enum MutateError {
         current: Issue,
         version: String,
     },
+    /// On-disk content has parser warnings (malformed YAML, missing
+    /// fields, merge markers). We refuse to mutate a corrupt file
+    /// rather than silently overwriting recovered defaults — the user
+    /// must fix the source before mutating it (§8.6).
+    Corrupt {
+        warnings: Vec<String>,
+    },
     Validation(String),
     ConflictingIntent(String),
     Io(anyhow::Error),
@@ -219,6 +240,9 @@ impl std::fmt::Display for MutateError {
             }
             MutateError::VersionMismatch { version, .. } => {
                 write!(f, "version mismatch (current: {version})")
+            }
+            MutateError::Corrupt { warnings } => {
+                write!(f, "corrupt issue: {}", warnings.join("; "))
             }
             MutateError::Validation(s) => write!(f, "validation: {s}"),
             MutateError::ConflictingIntent(s) => write!(f, "conflicting intent: {s}"),
@@ -259,6 +283,16 @@ impl WriteLock {
         let f = opts
             .open(&path)
             .with_context(|| format!("cannot open lock file {}", path.display()))?;
+        // `OpenOptions::mode(0o600)` only fires on creation. If the
+        // file already exists with looser permissions (older issuectl,
+        // permissive umask, fork), reopen does not retighten — so we
+        // unconditionally `set_permissions` after open.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("cannot chmod {}", path.display()))?;
+        }
         FileExt::lock_exclusive(&f)
             .with_context(|| format!("cannot acquire flock on {}", path.display()))?;
         Ok(WriteLock { _file: f })
@@ -285,6 +319,19 @@ pub fn update_issue(
             "invalid slug shape: {slug:?}"
         )));
     }
+
+    // Normalize related-ref shapes BEFORE validate() so a typo'd ref
+    // like `add_related: ["123"]` + `remove_related: ["#123"]`
+    // (which both normalize to `#123`) is caught by the overlap check.
+    let normalized_add_related = crate::normalize_related_refs_pub(&req.add_related)
+        .map_err(|e| MutateError::Validation(e.to_string()))?;
+    let normalized_remove_related = crate::normalize_related_refs_pub(&req.remove_related)
+        .map_err(|e| MutateError::Validation(e.to_string()))?;
+    let mut req_normalized = req;
+    req_normalized.add_related = normalized_add_related.clone();
+    req_normalized.remove_related = normalized_remove_related.clone();
+    let req = req_normalized;
+
     req.validate()?;
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
@@ -292,8 +339,15 @@ pub fn update_issue(
     // 1) locate
     let (folder, item_path) = locate_for_mutation(root, slug)?;
 
-    // 2) read + parse + hash
+    // 2) read + parse + hash. Refuse to mutate a corrupt file —
+    // overwriting parser fallback defaults would silently destroy the
+    // user's real (but malformed) on-disk content (§8.6 / M7).
     let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, &folder);
+    if !parsed.warnings.is_empty() {
+        return Err(MutateError::Corrupt {
+            warnings: parsed.warnings,
+        });
+    }
     let current_issue = parsed.issue;
     let current_version = canonical_hash(&current_issue);
 
@@ -346,14 +400,11 @@ pub fn update_issue(
             .map_err(MutateError::Io)?;
     }
 
-    let add_related = crate::normalize_related_refs_pub(&req.add_related)
-        .map_err(|e| MutateError::Validation(e.to_string()))?;
-    let remove_related = crate::normalize_related_refs_pub(&req.remove_related)
-        .map_err(|e| MutateError::Validation(e.to_string()))?;
-    for r in &add_related {
+    // related refs were normalized before validate(), so use them as-is.
+    for r in &req.add_related {
         write::add_to_string_list(&mut item.frontmatter, "related", r).map_err(MutateError::Io)?;
     }
-    for r in &remove_related {
+    for r in &req.remove_related {
         write::remove_from_string_list(&mut item.frontmatter, "related", r)
             .map_err(MutateError::Io)?;
     }
@@ -370,7 +421,14 @@ pub fn update_issue(
 
     write::set_string(&mut item.frontmatter, "updated", &write::today());
 
-    // 5) directory rename if crossing open↔closed (rename first, then write)
+    // 5+6) write-then-rename. The reviewers all flagged the original
+    // "rename first" order (per design doc §3.4) as crash-unsafe: a
+    // panic between rename and write would leave new-folder + old
+    // content. Writing first means a crash between write and rename
+    // leaves `status: <closing>` content at `open/<slug>/` — which
+    // the startup reconciler can resolve cleanly from frontmatter
+    // alone. Net: no torn states across folder/content axes.
+    write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
     let final_path = if new_folder != folder {
         rename_status_dir(root, slug, &folder, &new_folder).map_err(MutateError::Io)?;
         write::issue_dir(root, &new_folder, slug).join("item.md")
@@ -378,38 +436,38 @@ pub fn update_issue(
         item_path.clone()
     };
 
-    // 6) atomic write
-    write_item_atomic(&final_path, &item).map_err(MutateError::Io)?;
-
     // 7) recompute canonical hash from final on-disk content
     let after = crate::parser::parse_item_md_with_warnings(&final_path, slug, &new_folder);
     let new_issue = after.issue;
     let new_version = canonical_hash(&new_issue);
 
-    // 8) publish synthetic IssueUpserted while still inside the lock
-    //    so seq order matches disk order. The watcher will also fire,
-    //    but its event has the same `version`, so clients dedupe.
+    // 8) publish while still inside the lock so seq order matches
+    //    disk order. Cross-folder moves emit a single atomic
+    //    `IssueMoved` event (one seq, one client-side handler) — no
+    //    Remove+Upsert race window. The watcher will also fire on
+    //    the rename; clients dedupe by `version`.
     if let Some(hub) = hub {
         if folder != new_folder {
-            // Old folder no longer hosts the slug — surface as Removed
-            // so any client that still has the card under the old
-            // folder drops it. Strictly the slug is the same, but the
-            // §5.3 contract emits Remove+Upsert for cross-folder moves.
-            hub.publish(EventPayload::IssueRemoved {
+            hub.publish(EventPayload::IssueMoved {
                 slug: slug.to_string(),
+                from_folder: folder.clone(),
+                to_folder: new_folder.clone(),
+                version: new_version.clone(),
+                issue: Box::new(IssueSummary::from(new_issue.clone())),
+            });
+        } else {
+            hub.publish(EventPayload::IssueUpserted {
+                slug: slug.to_string(),
+                version: new_version.clone(),
+                issue: Box::new(IssueSummary::from(new_issue.clone())),
             });
         }
-        hub.publish(EventPayload::IssueUpserted {
-            slug: slug.to_string(),
-            version: new_version.clone(),
-            issue: Box::new(IssueSummary::from(new_issue.clone())),
-        });
     }
 
     Ok(UpdateOutcome {
         issue: new_issue,
         version: new_version,
-        final_dir: final_path
+        issue_dir: final_path
             .parent()
             .expect("written file has a parent")
             .to_path_buf(),
@@ -562,7 +620,7 @@ fn default_priority() -> String {
 pub struct NewOutcome {
     pub issue: Issue,
     pub version: String,
-    pub final_dir: PathBuf,
+    pub issue_dir: PathBuf,
 }
 
 pub fn new_issue(
@@ -586,8 +644,8 @@ pub fn new_issue(
         )));
     }
 
-    let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-
+    // `do_new` itself acquires the WriteLock (M1 contract: every
+    // writer holds the repo flock). Don't double-acquire here.
     let outcome = crate::do_new(
         root,
         crate::NewArgs {
@@ -628,7 +686,7 @@ pub fn new_issue(
     }
 
     Ok(NewOutcome {
-        final_dir: outcome.item_path.parent().unwrap().to_path_buf(),
+        issue_dir: outcome.item_path.parent().unwrap().to_path_buf(),
         issue,
         version,
     })
@@ -675,7 +733,7 @@ mod tests {
         };
         let out = update_issue(tmp.path(), "test-slug-one", req, None).unwrap();
         assert!(out.version.starts_with("sha256:"));
-        let after = fs::read_to_string(out.final_dir.join("item.md")).unwrap();
+        let after = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
         assert!(after.contains("priority: high"));
     }
 
@@ -709,7 +767,7 @@ mod tests {
         let out = update_issue(tmp.path(), "close-me-now", req, None).unwrap();
         assert!(out.moved_to_closed);
         assert!(out
-            .final_dir
+            .issue_dir
             .to_string_lossy()
             .contains("/closed/close-me-now"));
         assert!(!tmp.path().join("issues/open/close-me-now").exists());
@@ -797,22 +855,35 @@ mod tests {
     }
 
     #[test]
-    fn write_lock_excludes_concurrent_attempt() {
-        // Acquiring twice in the same process: fs2's flock is
-        // process-scoped — a second OS-level attempt from this same
-        // process succeeds rather than blocking. Verify via a forked
-        // child if you need cross-process coverage; here we just
-        // assert acquire returns Ok.
+    fn write_lock_file_has_strict_permissions() {
+        // The flock itself is exercised by every other test in this
+        // module (each `update_issue` / `new_issue` call acquires it).
+        // Cross-process exclusion would need `std::process::Command`
+        // and is out of scope here; this test just asserts the
+        // on-disk lock file gets `0o600` on Unix even when it
+        // pre-exists with looser permissions.
         let tmp = fresh_repo();
+        // Pre-create with permissive mode to verify the unconditional
+        // chmod path (M1 reviewer flag C3).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tmp.path().join(".issuectl");
+            fs::create_dir_all(&dir).unwrap();
+            let lock = dir.join("write.lock");
+            fs::write(&lock, b"").unwrap();
+            fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+        }
         let _l1 = WriteLock::acquire(tmp.path()).unwrap();
-        // The structural test is that we hold an exclusive flock; the
-        // only assertion is that the lock file gets created with mode
-        // 0o600 on Unix.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let m = fs::metadata(tmp.path().join(".issuectl/write.lock")).unwrap();
-            assert_eq!(m.permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                m.permissions().mode() & 0o777,
+                0o600,
+                "lock file should be 0o600 even if it pre-existed at 0o644"
+            );
         }
     }
 }

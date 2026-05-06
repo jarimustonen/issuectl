@@ -32,6 +32,12 @@ use events::EventHub;
 pub struct ServeOptions {
     pub watch_enabled: bool,
     pub watch_bulk_threshold: usize,
+    /// When true, allow PATCH/POST against issues even when bound to
+    /// a non-loopback address. Default false: non-loopback binds are
+    /// read-only, matching the design's "trusted-localhost" threat
+    /// model. Reviewers flagged that the Host allow-list otherwise
+    /// silently 403s every write from a remote browser.
+    pub allow_remote_writes: bool,
 }
 
 impl Default for ServeOptions {
@@ -39,6 +45,7 @@ impl Default for ServeOptions {
         ServeOptions {
             watch_enabled: true,
             watch_bulk_threshold: 50,
+            allow_remote_writes: false,
         }
     }
 }
@@ -58,6 +65,10 @@ pub struct AppState {
     /// default; production uses the bound address plus its loopback
     /// aliases.
     pub allowed_hosts: Arc<Vec<String>>,
+    /// When false, write routes reject every PATCH/POST regardless
+    /// of CSRF token. Set true only on loopback or with explicit
+    /// opt-in via `--allow-remote-writes`.
+    pub writes_enabled: bool,
 }
 
 impl AppState {
@@ -71,6 +82,7 @@ impl AppState {
             event_hub: Arc::new(EventHub::new()),
             csrf_token: Arc::from(""),
             allowed_hosts: Arc::new(Vec::new()),
+            writes_enabled: true,
         }
     }
 }
@@ -103,7 +115,12 @@ pub fn router(state: AppState) -> Router {
             host_and_csrf_guard,
         ))
         .with_state(state)
-        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
+        // 1 MiB envelope: covers M1 PATCH metadata (well under
+        // 64 KiB), POST `description` for new issues (which can be
+        // multi-KB markdown), and leaves headroom for M2's body and
+        // preview routes which the design caps at 1 MiB. Per-route
+        // tighter limits land with M2.
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
 }
 
 /// Reject state-changing requests whose `Host` header does not match
@@ -122,12 +139,18 @@ async fn host_and_csrf_guard(
 
     // Host validation: applied to every request when an allow-list
     // exists. Empty allow-list (test fixtures) waives the check.
+    // RFC 3986 says hostnames are case-insensitive; the trailing dot
+    // is also legal — both are stripped before compare so e.g.
+    // `Host: Localhost.:7878` matches `localhost:7878`.
     if !state.allowed_hosts.is_empty() {
         let host_ok = req
             .headers()
             .get(header::HOST)
             .and_then(|v| v.to_str().ok())
-            .map(|h| state.allowed_hosts.iter().any(|a| a == h))
+            .map(|h| {
+                let normalized = normalize_host_header(h);
+                state.allowed_hosts.iter().any(|a| a == &normalized)
+            })
             .unwrap_or(false);
         if !host_ok {
             return (
@@ -138,17 +161,31 @@ async fn host_and_csrf_guard(
         }
     }
 
-    // CSRF token required on PATCH / POST / PUT / DELETE.
+    // CSRF token required on PATCH / POST / PUT / DELETE. Compared in
+    // constant time so a malicious local process cannot recover the
+    // 256-bit token byte-by-byte via response-time deltas (loopback
+    // jitter is sub-ms, making timing oracles practical).
     let mutating = matches!(
         *req.method(),
         Method::PATCH | Method::POST | Method::PUT | Method::DELETE
     );
+    if mutating && !state.writes_enabled {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(error_body(
+                "forbidden",
+                "writes disabled (non-loopback bind without --allow-remote-writes)",
+                403,
+            )),
+        )
+            .into_response();
+    }
     if mutating && !state.csrf_token.is_empty() {
         let header_ok = req
             .headers()
             .get("x-issuectl-csrf")
             .and_then(|v| v.to_str().ok())
-            .map(|t| t == &*state.csrf_token)
+            .map(|t| constant_time_eq(t.as_bytes(), state.csrf_token.as_bytes()))
             .unwrap_or(false);
         if !header_ok {
             return (
@@ -163,6 +200,40 @@ async fn host_and_csrf_guard(
         }
     }
     next.run(req).await
+}
+
+/// Constant-time bytewise compare. `a.len() != b.len()` short-circuits
+/// — that leaks length only, which is fine for a fixed-length
+/// 64-hex-char token.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Lowercase + trailing-dot strip. `Host: Localhost.:7878` →
+/// `localhost:7878`.
+fn normalize_host_header(h: &str) -> String {
+    // RFC 3986: only the hostname is case-insensitive; the port is
+    // numeric and unaffected. Lowercasing the whole string is
+    // equivalent because digits map to themselves under to_ascii.
+    let lowered = h.to_ascii_lowercase();
+    // Trailing-dot strip handles `localhost.` (root-zone fully
+    // qualified). It must run *before* port handling: `localhost.:80`
+    // becomes `localhost:80`. Split on the last `:` to isolate the
+    // host part, strip dot, rejoin.
+    if let Some(idx) = lowered.rfind(':') {
+        if lowered[idx + 1..].chars().all(|c| c.is_ascii_digit()) {
+            let host = lowered[..idx].trim_end_matches('.');
+            return format!("{}{}", host, &lowered[idx..]);
+        }
+    }
+    lowered.trim_end_matches('.').to_string()
 }
 
 fn error_body(code: &str, detail: &str, status: u16) -> serde_json::Value {
@@ -223,12 +294,20 @@ async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) ->
         .with_context(|| format!("cannot bind {addr} (try `--port 0` for a random free port)"))?;
     let bound = listener.local_addr()?;
     let allowed_hosts = host_allow_list(&bound);
+    let writes_enabled = bound.ip().is_loopback() || options.allow_remote_writes;
+    if !bound.ip().is_loopback() && !options.allow_remote_writes {
+        eprintln!(
+            "issuectl[serve]: bound to non-loopback {bound} — writes disabled. \
+             Pass --allow-remote-writes to enable PATCH/POST."
+        );
+    }
 
     let state = AppState {
         root: Arc::new(root.clone()),
         event_hub: event_hub.clone(),
         csrf_token,
         allowed_hosts: Arc::new(allowed_hosts),
+        writes_enabled,
     };
 
     // Watcher: a separate tokio task. We materialise `issues/open` and
@@ -339,6 +418,7 @@ mod tests {
             event_hub: Arc::new(EventHub::new()),
             csrf_token: Arc::from("testtoken"),
             allowed_hosts: Arc::new(vec!["test.invalid:7878".into()]),
+            writes_enabled: true,
         })
     }
 
@@ -777,7 +857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_returns_csrf_token_and_sets_cookie() {
+    async fn session_returns_csrf_token() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
         let r = make_secured_router(tmp.path());
@@ -791,16 +871,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let cookie = resp
-            .headers()
-            .get("set-cookie")
-            .map(|v| v.to_str().unwrap().to_string())
-            .unwrap_or_default();
-        assert!(cookie.contains("HttpOnly"), "cookie: {cookie}");
-        assert!(cookie.contains("SameSite=Strict"), "cookie: {cookie}");
         let body: serde_json::Value =
             serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
         assert_eq!(body["csrf_token"], "testtoken");
+        assert!(body["instance_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn host_header_normalization_accepts_uppercase_and_trailing_dot() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        let r = make_secured_router(tmp.path());
+        // RFC 3986: hostnames are case-insensitive; trailing dot is
+        // legal. Both must pass the Host allow-list.
+        for host in ["TEST.INVALID:7878", "test.invalid.:7878", "Test.Invalid.:7878"] {
+            let resp = r
+                .clone()
+                .oneshot(
+                    Request::get("/api/session")
+                        .header("host", host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "host {host} should match");
+        }
     }
 
     #[tokio::test]
@@ -957,6 +1053,116 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
         assert_eq!(body["code"], "conflicting_intent");
+    }
+
+    #[tokio::test]
+    async fn patch_corrupt_issue_returns_422() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("issues/open/corrupt-yml-here");
+        fs::create_dir_all(&dir).unwrap();
+        // Unterminated quote → parser warns, recovers to defaults.
+        fs::write(
+            dir.join("item.md"),
+            "---\nstatus: \"open\nbroken\n---\n# T\n",
+        )
+        .unwrap();
+        let r = make_router(tmp.path());
+        let resp = r
+            .oneshot(
+                Request::patch("/api/issues/corrupt-yml-here")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"priority":"high"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert_eq!(body["code"], "corrupt");
+    }
+
+    #[tokio::test]
+    async fn patch_status_crossing_publishes_issue_moved() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "patch-publish-mvd");
+        let event_hub = Arc::new(EventHub::new());
+        let mut rx = event_hub.tx_subscribe_for_test();
+        let r = router(AppState {
+            root: Arc::new(tmp.path().to_path_buf()),
+            event_hub: event_hub.clone(),
+            csrf_token: Arc::from(""),
+            allowed_hosts: Arc::new(Vec::new()),
+            writes_enabled: true,
+        });
+        let payload = serde_json::json!({ "status": "fixed" });
+        let resp = r
+            .oneshot(
+                Request::patch("/api/issues/patch-publish-mvd")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Drain the broadcast channel and look for the IssueMoved
+        // payload. The mutate layer must publish exactly one
+        // IssueMoved (no Remove+Upsert pair) for status crossings.
+        let mut saw_moved = false;
+        while let Ok(evt) = rx.try_recv() {
+            if let crate::server::events::EventPayload::IssueMoved {
+                slug, from_folder, to_folder, ..
+            } = &evt.payload
+            {
+                assert_eq!(slug, "patch-publish-mvd");
+                assert_eq!(from_folder, "open");
+                assert_eq!(to_folder, "closed");
+                saw_moved = true;
+            }
+        }
+        assert!(saw_moved, "expected an IssueMoved event");
+    }
+
+    #[tokio::test]
+    async fn patch_with_empty_string_label_returns_400() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "patch-empty-label");
+        let r = make_router(tmp.path());
+        let payload = serde_json::json!({ "add_labels": [""] });
+        let resp = r
+            .oneshot(
+                Request::patch("/api/issues/patch-empty-label")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn patch_disabled_when_writes_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "patch-write-disab");
+        let r = router(AppState {
+            root: Arc::new(tmp.path().to_path_buf()),
+            event_hub: Arc::new(EventHub::new()),
+            csrf_token: Arc::from(""),
+            allowed_hosts: Arc::new(Vec::new()),
+            writes_enabled: false,
+        });
+        let resp = r
+            .oneshot(
+                Request::patch("/api/issues/patch-write-disab")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"priority":"high"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

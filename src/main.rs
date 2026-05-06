@@ -348,6 +348,12 @@ enum Command {
         /// (e.g. `git checkout` of a feature branch).
         #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
         watch_bulk_threshold: u32,
+
+        /// Enable PATCH/POST writes when bound to a non-loopback
+        /// address. Default off: non-loopback binds are read-only.
+        /// Loopback binds always allow writes.
+        #[arg(long)]
+        allow_remote_writes: bool,
     },
 }
 
@@ -481,6 +487,7 @@ fn main() -> Result<()> {
             host,
             no_watch,
             watch_bulk_threshold,
+            allow_remote_writes,
         } => server::run(
             find_root(),
             host,
@@ -488,6 +495,7 @@ fn main() -> Result<()> {
             server::ServeOptions {
                 watch_enabled: !no_watch,
                 watch_bulk_threshold: watch_bulk_threshold as usize,
+                allow_remote_writes,
             },
         ),
     }
@@ -727,6 +735,11 @@ fn cmd_new(json: bool, args: NewArgs) -> Result<()> {
 }
 
 pub(crate) fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
+    // M1 contract: every issuectl-mediated writer holds the repo
+    // `flock`. Without this acquire, concurrent `issuectl new` from
+    // the terminal would race against server-side mutations and
+    // bypass the protocol's serialization guarantee.
+    let _lock = mutate::WriteLock::acquire(root)?;
     if args.issue_type == "epic" {
         if args.assignee.is_some() || args.reporter.is_some() {
             bail!("epics use --owner, not --reporter/--assignee");
@@ -939,7 +952,7 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
     let outcome = mutate::update_issue(root, &args.slug, req, None)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(UpdateOutcome {
-        final_dir: outcome.final_dir,
+        final_dir: outcome.issue_dir,
         moved_to_closed: outcome.moved_to_closed,
         moved_to_open: outcome.moved_to_open,
         version: outcome.version,

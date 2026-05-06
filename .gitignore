@@ -3,3 +3,6 @@ Cargo.lock.bak
 .DS_Store
 /history
 .claude/scheduled_tasks.lock
+
+# Per-process advisory lock for mutate.rs (recreated on every serve/CLI run)
+.issuectl/
