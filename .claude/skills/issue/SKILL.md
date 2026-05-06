@@ -24,6 +24,16 @@ terminal users only. All examples below already include `--json`.
 when a command fails — the error message names the offending value and
 the valid alternatives.
 
+## Install `issuectl` if needed
+
+Assume `issuectl` but if it is not (the repo uses it but the user hasn't
+installed it yet), suggest one of:
+
+- **Homebrew** (macOS/Linux): `brew install jarimustonen/issuectl/issuectl`
+- **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
+- **Shell installer** (no toolchain):
+  `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
+
 ## Identifiers
 
 Issues are identified by random `intensifier-adjective-noun` slugs (e.g.

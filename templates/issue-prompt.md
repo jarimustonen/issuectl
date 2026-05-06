@@ -20,6 +20,16 @@ terminal users only. All examples below already include `--json`.
 when a command fails — the error message names the offending value and
 the valid alternatives.
 
+## Install `issuectl` if needed
+
+Assume `issuectl` but if it is not (the repo uses it but the user hasn't
+installed it yet), suggest one of:
+
+- **Homebrew** (macOS/Linux): `brew install jarimustonen/issuectl/issuectl`
+- **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
+- **Shell installer** (no toolchain):
+  `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
+
 ## Identifiers
 
 Issues are identified by random `intensifier-adjective-noun` slugs (e.g.
@@ -201,6 +211,21 @@ into the issue directory. Reference them in item.md with relative paths.
 #### 5. Confirm
 
 Show the created issue/epic path and a brief summary.
+
+### Action: View visually (kanban board)
+
+If the user wants to **see** issues — "show me the board", "open the
+kanban", "let me browse them visually" — start the read-only web board
+and hand them the URL:
+
+```
+issuectl serve
+# then open http://127.0.0.1:7878
+```
+
+The board is read-only; keep using the CLI for any create / update /
+close action. For details (port/host flags, security model, routes),
+run `issuectl docs kanban`.
 
 ### Action: Doctor (repository health-check + migration)
 
