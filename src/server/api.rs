@@ -62,6 +62,9 @@ pub struct IssueDetailResponse {
     #[serde(flatten)]
     pub issue: crate::models::Issue,
     pub body_html: String,
+    /// Canonical version token (M1 §3.2). Required by the M2 body
+    /// editor as `expected_version` for `PUT /body`.
+    pub version: String,
     /// Slugs of additional `*.md` files in the issue directory (excluding
     /// `item.md`). Fetched on demand via `/api/issues/<slug>/docs/<name>`.
     pub docs: Vec<String>,
@@ -109,9 +112,11 @@ pub async fn get_issue(
     .map_err(|_| StatusCode::NOT_FOUND)?;
 
     let body_html = sanitize_markdown(&issue.body);
+    let version = crate::canonical::canonical_hash(&issue);
     Ok(Json(IssueDetailResponse {
         issue,
         body_html,
+        version,
         docs,
     }))
 }
@@ -482,6 +487,123 @@ pub async fn create_issue(
             "task panicked",
         ),
     }
+}
+
+/// `PUT /api/issues/{slug}/body` — replace the markdown body with
+/// optimistic-concurrency control. Body and preview share the §6.6
+/// rate-limit bucket; 429 is returned with `Retry-After` when the
+/// caller blows past 4 req/sec, burst 10 on this slug.
+pub async fn put_body(
+    State(state): State<super::AppState>,
+    Path(slug_param): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    if !slug::is_valid(&slug_param) {
+        return error_response(StatusCode::BAD_REQUEST, "validation", "invalid slug shape");
+    }
+    let decision = state.body_limiter.check(&format!("body:{slug_param}"));
+    if !decision.allowed {
+        return rate_limited_response(decision.retry_after_secs);
+    }
+
+    let req: BodyPutRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "validation",
+                &format!("invalid JSON body: {e}"),
+            );
+        }
+    };
+
+    let root = state.root.clone();
+    let hub = state.event_hub.clone();
+    let slug_owned = slug_param.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        mutate::update_body(
+            root.as_path(),
+            &slug_owned,
+            req.expected_version,
+            req.body,
+            Some(&hub),
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(out)) => {
+            // Same shape as PATCH. Issue body is included so the
+            // originating tab can echo-suppress via `version` and
+            // refresh state without a follow-up GET.
+            let body_html = super::render::sanitize_markdown(&out.issue.body);
+            let resp = serde_json::json!({
+                "slug": slug_param,
+                "version": out.version,
+                "issue": &out.issue,
+                "body_html": body_html,
+            });
+            Json(resp).into_response()
+        }
+        Ok(Err(err)) => mutate_error_to_response(err),
+        Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal", "task panicked"),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct BodyPutRequest {
+    #[serde(default)]
+    pub expected_version: Option<String>,
+    pub body: String,
+}
+
+#[derive(Deserialize)]
+pub struct PreviewRequest {
+    pub body: String,
+}
+
+/// `POST /api/preview` — render markdown to sanitised HTML without
+/// touching disk. Shares the body bucket; CSRF + Host gates apply via
+/// the global guard layer (it's a POST, so `mutating == true`).
+pub async fn preview(
+    State(state): State<super::AppState>,
+    body: axum::body::Bytes,
+) -> Response {
+    let decision = state.body_limiter.check("preview");
+    if !decision.allowed {
+        return rate_limited_response(decision.retry_after_secs);
+    }
+    let req: PreviewRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "validation",
+                &format!("invalid JSON body: {e}"),
+            );
+        }
+    };
+    // Sanitisation runs on the request thread — pulldown + ammonia on
+    // a 1 MiB body is ~tens of ms, well under blocking thresholds for
+    // the local-only board. `spawn_blocking` would only matter if we
+    // start serving large numbers of remote clients.
+    let body_html = super::render::sanitize_markdown(&req.body);
+    Json(serde_json::json!({ "body_html": body_html })).into_response()
+}
+
+fn rate_limited_response(retry_after_secs: u64) -> Response {
+    let body = serde_json::json!({
+        "type": "https://issuectl/errors/rate_limited",
+        "title": "Rate limited",
+        "status": 429,
+        "code": "rate_limited",
+        "detail": format!("too many requests; retry after {retry_after_secs}s"),
+    });
+    let mut resp = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from(retry_after_secs),
+    );
+    resp
 }
 
 fn mutate_error_to_response(err: MutateError) -> Response {

@@ -19,10 +19,12 @@ use tokio::net::TcpListener;
 
 mod api;
 pub(crate) mod events;
+pub(crate) mod ratelimit;
 mod render;
 pub(crate) mod watcher;
 
 use events::EventHub;
+use ratelimit::TokenBucketLimiter;
 
 /// Options governing the optional filesystem watcher. `serve()` builds a
 /// `WatcherConfig` from these and spawns `watcher::spawn(...)`. Set
@@ -69,6 +71,10 @@ pub struct AppState {
     /// of CSRF token. Set true only on loopback or with explicit
     /// opt-in via `--allow-remote-writes`.
     pub writes_enabled: bool,
+    /// Shared bucket for `PUT /body` and `POST /preview` (§6.6).
+    /// 4 req/sec, burst 10. Keyed per-slug for body, single bucket
+    /// for preview.
+    pub body_limiter: Arc<TokenBucketLimiter>,
 }
 
 impl AppState {
@@ -83,6 +89,7 @@ impl AppState {
             csrf_token: Arc::from(""),
             allowed_hosts: Arc::new(Vec::new()),
             writes_enabled: true,
+            body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
         }
     }
 }
@@ -107,7 +114,9 @@ pub fn router(state: AppState) -> Router {
             "/api/issues/{slug}",
             get(api::get_issue).patch(api::patch_issue),
         )
+        .route("/api/issues/{slug}/body", axum::routing::put(api::put_body))
         .route("/api/issues/{slug}/docs/{name}", get(api::get_doc))
+        .route("/api/preview", axum::routing::post(api::preview))
         .route("/events", get(api::events_stream))
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn_with_state(
@@ -308,6 +317,7 @@ async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) ->
         csrf_token,
         allowed_hosts: Arc::new(allowed_hosts),
         writes_enabled,
+        body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
     };
 
     // Watcher: a separate tokio task. We materialise `issues/open` and
@@ -419,6 +429,7 @@ mod tests {
             csrf_token: Arc::from("testtoken"),
             allowed_hosts: Arc::new(vec!["test.invalid:7878".into()]),
             writes_enabled: true,
+            body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
         })
     }
 
@@ -1094,6 +1105,7 @@ mod tests {
             csrf_token: Arc::from(""),
             allowed_hosts: Arc::new(Vec::new()),
             writes_enabled: true,
+            body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
         });
         let payload = serde_json::json!({ "status": "fixed" });
         let resp = r
@@ -1152,6 +1164,7 @@ mod tests {
             csrf_token: Arc::from(""),
             allowed_hosts: Arc::new(Vec::new()),
             writes_enabled: false,
+            body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
         });
         let resp = r
             .oneshot(
@@ -1230,5 +1243,218 @@ mod tests {
             js.headers().get("content-type").unwrap(),
             "application/javascript; charset=utf-8"
         );
+    }
+
+    // ── M2: body + preview + rate limit ────────────────────────────
+
+    #[tokio::test]
+    async fn put_body_with_fresh_version_succeeds_and_advances() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "body-fresh-vers1");
+        let v0 = version_on_disk(tmp.path(), "body-fresh-vers1");
+        let r = make_router(tmp.path());
+        let payload = serde_json::json!({
+            "expected_version": v0,
+            "body": "# New title\n\nfresh content."
+        });
+        let resp = r
+            .oneshot(
+                Request::put("/api/issues/body-fresh-vers1/body")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        let v_new = body["version"].as_str().unwrap();
+        assert!(v_new.starts_with("sha256:"));
+        // version advanced compared to the pre-write hash
+        assert_ne!(v_new, v0);
+        // and matches what we just wrote on disk
+        assert_eq!(v_new, version_on_disk(tmp.path(), "body-fresh-vers1"));
+        // post-condition: version field also matches what we just wrote
+        let on_disk = std::fs::read_to_string(
+            tmp.path().join("issues/open/body-fresh-vers1/item.md"),
+        )
+        .unwrap();
+        assert!(on_disk.contains("fresh content."));
+    }
+
+    #[tokio::test]
+    async fn put_body_with_stale_version_returns_409_with_issue() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "body-stale-vers1");
+        let r = make_router(tmp.path());
+        let payload = serde_json::json!({
+            "expected_version": "sha256:deadbeef",
+            "body": "# stale\n",
+        });
+        let resp = r
+            .oneshot(
+                Request::put("/api/issues/body-stale-vers1/body")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert_eq!(body["code"], "version_mismatch");
+        assert_eq!(body["issue"]["slug"], "body-stale-vers1");
+    }
+
+    #[tokio::test]
+    async fn put_body_rejects_invalid_slug_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        let r = make_router(tmp.path());
+        let resp = r
+            .oneshot(
+                Request::put("/api/issues/UPPER/body")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"body":"x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn put_body_over_one_mib_rejected_under_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "body-size-limit1");
+        let r = make_router(tmp.path());
+        // 1 MiB + 1 raw bytes; well over the global 1 MiB envelope.
+        let oversize = "a".repeat(1024 * 1024 + 256);
+        let payload = serde_json::json!({ "body": oversize });
+        let resp = r
+            .clone()
+            .oneshot(
+                Request::put("/api/issues/body-size-limit1/body")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // axum's DefaultBodyLimit returns 413 for over-cap requests.
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        // ~512 KiB body — well under cap, must succeed.
+        let small = "b".repeat(512 * 1024);
+        let payload = serde_json::json!({ "body": small });
+        let resp = r
+            .oneshot(
+                Request::put("/api/issues/body-size-limit1/body")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn put_body_rate_limit_fires_with_retry_after() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "body-rate-limit1");
+        let r = make_router(tmp.path());
+        let mut last = None;
+        // Burst capacity is 10 in the default limiter; the 11th in
+        // rapid succession on the same slug should trip 429.
+        for _ in 0..12 {
+            let payload =
+                serde_json::json!({ "body": "# rate test\n\nmore content here.\n" });
+            let resp = r
+                .clone()
+                .oneshot(
+                    Request::put("/api/issues/body-rate-limit1/body")
+                        .header("content-type", "application/json")
+                        .body(Body::from(payload.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            last = Some(resp);
+            if last.as_ref().unwrap().status() == StatusCode::TOO_MANY_REQUESTS {
+                break;
+            }
+        }
+        let resp = last.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "expected 429 after burst"
+        );
+        assert!(resp.headers().get("retry-after").is_some());
+    }
+
+    #[tokio::test]
+    async fn preview_renders_and_sanitises_xss() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        let r = make_router(tmp.path());
+        let payload = serde_json::json!({
+            "body": "# Hello\n\n<script>alert(1)</script>\n[x](javascript:alert(1))"
+        });
+        let resp = r
+            .oneshot(
+                Request::post("/api/preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        let html = body["body_html"].as_str().unwrap();
+        assert!(html.contains("<h1>"));
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("javascript:"));
+    }
+
+    #[tokio::test]
+    async fn preview_without_csrf_rejected_when_token_required() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        let r = make_secured_router(tmp.path());
+        let resp = r
+            .oneshot(
+                Request::post("/api/preview")
+                    .header("host", "test.invalid:7878")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"body":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn issue_detail_includes_version_for_body_editor() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "detail-vers-here");
+        let r = make_router(tmp.path());
+        let resp = r
+            .oneshot(
+                Request::get("/api/issues/detail-vers-here")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert!(body["version"].as_str().unwrap().starts_with("sha256:"));
     }
 }

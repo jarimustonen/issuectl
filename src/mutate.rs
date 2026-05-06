@@ -476,6 +476,85 @@ pub fn update_issue(
     })
 }
 
+/// PUT-style replacement of an issue's body markdown. Same lock and
+/// optimistic-concurrency contract as `update_issue`, but only the body
+/// (and `updated:`) change. Status/folder are untouched, so this never
+/// causes a directory rename. `hub` follows the same `Some` server /
+/// `None` CLI convention as `update_issue`.
+pub fn update_body(
+    root: &Path,
+    slug: &str,
+    expected_version: Option<String>,
+    body: String,
+    hub: Option<&Arc<EventHub>>,
+) -> Result<UpdateOutcome, MutateError> {
+    if !crate::slug::is_valid(slug) {
+        return Err(MutateError::Validation(format!(
+            "invalid slug shape: {slug:?}"
+        )));
+    }
+
+    let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
+
+    let (folder, item_path) = locate_for_mutation(root, slug)?;
+
+    let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, &folder);
+    if !parsed.warnings.is_empty() {
+        return Err(MutateError::Corrupt {
+            warnings: parsed.warnings,
+        });
+    }
+    let current_version = canonical_hash(&parsed.issue);
+
+    if let Some(ref expected) = expected_version {
+        if expected != &current_version {
+            return Err(MutateError::VersionMismatch {
+                current: parsed.issue,
+                version: current_version,
+            });
+        }
+    }
+
+    let mut item = write::read_item(&item_path).map_err(MutateError::Io)?;
+    // Clients send a plain markdown body. Preserve the read_item
+    // convention of one leading newline so the on-disk layout stays
+    // `---\n<fm>\n---\n\n<body>` rather than `---<body>` — without
+    // this, every web save would collapse the blank separator line
+    // and parse_item still works but readers see a slightly different
+    // file each round-trip.
+    item.body = if body.starts_with('\n') {
+        body
+    } else {
+        format!("\n{body}")
+    };
+    write::set_string(&mut item.frontmatter, "updated", &write::today());
+
+    write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
+
+    let after = crate::parser::parse_item_md_with_warnings(&item_path, slug, &folder);
+    let new_issue = after.issue;
+    let new_version = canonical_hash(&new_issue);
+
+    if let Some(hub) = hub {
+        hub.publish(EventPayload::IssueUpserted {
+            slug: slug.to_string(),
+            version: new_version.clone(),
+            issue: Box::new(IssueSummary::from(new_issue.clone())),
+        });
+    }
+
+    Ok(UpdateOutcome {
+        issue: new_issue,
+        version: new_version,
+        issue_dir: item_path
+            .parent()
+            .expect("item.md has a parent")
+            .to_path_buf(),
+        moved_to_closed: false,
+        moved_to_open: false,
+    })
+}
+
 /// Apply a `Patch<String>` onto a frontmatter mapping. `Unspecified`
 /// is a no-op; `Clear` removes the key; `Set(v)` sets the key.
 fn apply_string_patch(item: &mut ItemFile, key: &str, p: &Patch<String>) {
@@ -852,6 +931,39 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(req.validate(), Err(MutateError::Validation(_))));
+    }
+
+    #[test]
+    fn update_body_roundtrip_advances_version() {
+        let tmp = fresh_repo();
+        let v0 = seed_issue(tmp.path(), "open", "body-roundtrip-x", "open");
+        let out = update_body(
+            tmp.path(),
+            "body-roundtrip-x",
+            Some(v0.clone()),
+            "# rewrite\n\nnew body".into(),
+            None,
+        )
+        .unwrap();
+        assert!(out.version.starts_with("sha256:"));
+        assert_ne!(out.version, v0);
+        let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("new body"));
+    }
+
+    #[test]
+    fn update_body_stale_version_returns_409() {
+        let tmp = fresh_repo();
+        let _ = seed_issue(tmp.path(), "open", "body-stale-here", "open");
+        let err = update_body(
+            tmp.path(),
+            "body-stale-here",
+            Some("sha256:deadbeef".into()),
+            "x".into(),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, MutateError::VersionMismatch { .. }));
     }
 
     #[test]

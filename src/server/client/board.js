@@ -5,6 +5,16 @@
 // Clicking a card opens a <dialog> with the rendered markdown body fetched
 // from /api/issues/<slug>; additional `*.md` files in the issue directory
 // are listed alongside item.md and fetched on demand.
+//
+// M2 adds an in-place body editor: the detail dialog can flip between
+// "view" and "edit" modes. Edit mode is a <textarea> with a live preview
+// pane (POST /api/preview, debounced) plus a `localStorage` draft keyed
+// by `(slug, started_editing_at)`. Saves go through PUT /body with an
+// `expected_version` token; 409 surfaces a split-pane "your draft vs.
+// current on disk" with three resolution actions, never overwriting the
+// textarea (the user's typing is the authoritative draft until they
+// explicitly discard it). The originating tab dedupes its own SSE echo
+// by version equality so no flash on save.
 
 (function () {
   // Status taxonomy mirrors src/main.rs ACTIVE_STATUSES + CLOSING_STATUSES.
@@ -27,7 +37,16 @@
   var state = {
     issues: [],
     warnings: [],
+    invalid: {},          // slug -> [LoadWarning]; surfaced from IssueInvalid SSE
     filters: { search: '', type: '', assignee: '', epic: '', label: '' },
+    snapshot_seq: 0,
+    instance_id: null,
+    csrf_token: null,
+    // local_versions tracks the canonical version this tab last *wrote*
+    // for each slug. The originating tab uses this to silently
+    // reconcile its own SSE echo (§6.4); without it every save would
+    // re-render the dialog and clobber the textarea with stale state.
+    local_versions: {},
   };
 
   var els = {
@@ -47,6 +66,20 @@
 
   function effectiveAssignee(i) { return i.assignee || i.owner || ''; }
 
+  // === Session bootstrap ===
+
+  function fetchSession() {
+    return fetch('/api/session', { headers: { Accept: 'application/json' } })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (s) {
+        state.csrf_token = s.csrf_token || '';
+        state.instance_id = s.instance_id || null;
+      })
+      .catch(function () { /* best-effort: writes will 403 */ });
+  }
+
+  // === Data load ===
+
   function load() {
     els.board.setAttribute('aria-busy', 'true');
     fetch('/api/issues', { headers: { Accept: 'application/json' } })
@@ -57,18 +90,15 @@
       .then(function (data) {
         state.issues = data.issues || [];
         state.warnings = data.warnings || [];
+        state.snapshot_seq = data.snapshot_seq || 0;
+        if (data.instance_id) state.instance_id = data.instance_id;
         renderWarnings();
         populateFilters();
-        // populateFilters rebuilds <option> lists from the loaded data; a
-        // URL-supplied filter value (e.g. `?epic=stale-slug` from a
-        // bookmark) might point at a value the data no longer contains.
-        // Drop those before re-applying — otherwise the <select> shows
-        // "all" while state.filters still has the stale value, and the
-        // board renders zero matches with no UI affordance to recover.
         normalizeFiltersToOptions();
         applyFiltersToInputs();
         syncFiltersToUrl();
         render();
+        openSse();
       })
       .catch(function (err) {
         els.board.innerHTML = '<p class="empty">Failed to load: ' + escapeHtml(String(err)) + '</p>';
@@ -77,21 +107,28 @@
   }
 
   function renderWarnings() {
-    if (!state.warnings || state.warnings.length === 0) {
+    var parseWarnings = state.warnings || [];
+    var invalidSlugs = Object.keys(state.invalid);
+    if (parseWarnings.length === 0 && invalidSlugs.length === 0) {
       els.warnings.hidden = true;
       els.warnings.innerHTML = '';
       return;
     }
     els.warnings.hidden = false;
+    var lines = [];
+    parseWarnings.forEach(function (w) {
+      var label = w.slug ? (w.folder + '/' + w.slug) : (w.folder || '?');
+      lines.push('<li><code>' + escapeHtml(label) + '</code> — ' + escapeHtml(w.message) + '</li>');
+    });
+    invalidSlugs.forEach(function (slug) {
+      var ws = state.invalid[slug] || [];
+      var msg = ws.map(function (w) { return w.message; }).join('; ') || 'invalid';
+      lines.push('<li><code>' + escapeHtml(slug) + '</code> — ' + escapeHtml(msg) + '</li>');
+    });
+    var total = parseWarnings.length + invalidSlugs.length;
     els.warnings.innerHTML =
-      '<h2>' + state.warnings.length + ' parse warning' +
-        (state.warnings.length === 1 ? '' : 's') + '</h2>' +
-      '<ul>' +
-      state.warnings.map(function (w) {
-        var label = w.slug ? (w.folder + '/' + w.slug) : (w.folder || '?');
-        return '<li><code>' + escapeHtml(label) + '</code> — ' + escapeHtml(w.message) + '</li>';
-      }).join('') +
-      '</ul>';
+      '<h2>' + total + ' parse warning' + (total === 1 ? '' : 's') + '</h2>' +
+      '<ul>' + lines.join('') + '</ul>';
   }
 
   function populateFilters() {
@@ -147,8 +184,6 @@
     els.count.textContent = visible.length + ' of ' + state.issues.length + ' issue' + (state.issues.length === 1 ? '' : 's');
     els.board.innerHTML = '';
     byCol.forEach(function (group) {
-      // Hide the "Other" catchall when empty so it doesn't always sit at the
-      // end of the board taking up a slot.
       if (group.col.id === 'other' && group.items.length === 0) return;
       var col = document.createElement('section');
       col.className = 'column';
@@ -169,6 +204,7 @@
     var card = document.createElement('button');
     card.type = 'button';
     card.className = 'card';
+    if (state.invalid[issue.slug]) card.classList.add('card-invalid');
     card.setAttribute('data-slug', issue.slug);
     var assignee = effectiveAssignee(issue);
     var meta = [];
@@ -176,15 +212,12 @@
     if (issue.priority && issue.priority !== 'normal') {
       meta.push('<span class="tag tag-priority-' + classSuffix(issue.priority) + '">' + escapeHtml(issue.priority) + '</span>');
     }
-    // For closed issues, show the actual closing status ("fixed" vs "wontfix"
-    // matters at a glance, even though we collapse them into one column).
     if (['done', 'fixed', 'wontfix', 'duplicate', 'cannot-reproduce', 'obsolete'].indexOf(issue.status) >= 0) {
       meta.push('<span class="tag tag-status-' + classSuffix(issue.status) + '">' + escapeHtml(issue.status) + '</span>');
     }
     if (assignee) meta.push('<span>@' + escapeHtml(assignee) + '</span>');
     if (issue.epic) meta.push('<span>📌 ' + escapeHtml(issue.epic) + '</span>');
-    // <button> can't legally contain block-level elements; use <span>s and
-    // style them as blocks in CSS.
+    if (state.invalid[issue.slug]) meta.push('<span class="tag tag-invalid">invalid</span>');
     card.innerHTML =
       '<span class="card-title">' + escapeHtml(issue.title || issue.slug) + '</span>' +
       '<span class="card-meta">' +
@@ -194,6 +227,16 @@
     card.addEventListener('click', function () { openDetail(issue.slug); });
     return card;
   }
+
+  // === Detail dialog ===
+
+  // The detail dialog has two modes:
+  //   - "view"  : rendered markdown + meta table (existing behaviour)
+  //   - "edit"  : <textarea> + side-by-side preview + autosave
+  // Edit state lives on the dialog DOM element so closing/reopening clears
+  // it; the localStorage draft keyed by (slug, started_editing_at) is the
+  // crash-safe backup that survives reload.
+  var editor = null; // populated while dialog is in edit mode
 
   function openDetail(slug) {
     els.detailBody.innerHTML = '<p class="empty">Loading…</p>';
@@ -207,8 +250,18 @@
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
       })
-      .then(function (d) { els.detailBody.innerHTML = renderDetail(d); wireDocLinks(d); })
+      .then(function (d) {
+        renderDetailView(d);
+      })
       .catch(function (e) { els.detailBody.innerHTML = '<p class="empty">' + escapeHtml(String(e)) + '</p>'; });
+  }
+
+  function renderDetailView(d) {
+    editor = null;
+    els.detailBody.innerHTML = renderDetail(d);
+    wireDocLinks(d);
+    var editBtn = els.detailBody.querySelector('#edit-body');
+    if (editBtn) editBtn.addEventListener('click', function () { enterEditMode(d); });
   }
 
   function renderDetail(d) {
@@ -255,6 +308,9 @@
     return '<h2 class="detail-title">' + escapeHtml(d.title || d.slug) + '</h2>' +
       '<dl class="detail-meta">' + rows.join('') + '</dl>' +
       docsNav +
+      '<div class="detail-actions">' +
+        '<button type="button" id="edit-body">Edit body</button>' +
+      '</div>' +
       '<div class="markdown-body" id="doc-body">' + (d.body_html || '') + '</div>';
   }
 
@@ -281,10 +337,303 @@
     });
   }
 
+  // === Edit mode ===
+
+  function draftKey(slug, startedAt) {
+    return 'issuectl-draft:' + slug + ':' + startedAt;
+  }
+
+  function enterEditMode(detail) {
+    var startedAt = Date.now();
+    var key = draftKey(detail.slug, startedAt);
+    var initialBody = detail.body_markdown != null ? detail.body_markdown : (detail.body || '');
+    editor = {
+      slug: detail.slug,
+      startedAt: startedAt,
+      key: key,
+      // expected_version is the version we read at edit-start. Each
+      // successful PUT advances it to the server's response.
+      expected_version: detail.version || null,
+      saving: false,
+      previewTimer: null,
+      autosaveTimer: null,
+      lastSavedBody: initialBody,
+      // theirs is the on-disk body we last fetched; updated on 409 so
+      // the user can see what changed externally without re-clicking.
+      theirs: null,
+    };
+    els.detailBody.innerHTML = renderEditMode(detail, initialBody);
+    wireEditMode(initialBody);
+    schedulePreview(initialBody);
+  }
+
+  function renderEditMode(detail, initialBody) {
+    return '<h2 class="detail-title">Editing ' + escapeHtml(detail.title || detail.slug) + '</h2>' +
+      '<p class="description"><code>' + escapeHtml(detail.slug) + '</code> · v' +
+      escapeHtml(String(detail.version || '?').slice(0, 16)) + '…</p>' +
+      '<div class="edit-toolbar">' +
+        '<button type="button" id="save-body">Save</button>' +
+        '<button type="button" id="cancel-edit">Cancel</button>' +
+        '<span id="save-status" class="save-status"></span>' +
+      '</div>' +
+      '<div class="editor-pane">' +
+        '<textarea id="body-editor" spellcheck="false">' + escapeHtml(initialBody) + '</textarea>' +
+        '<div id="body-preview" class="markdown-body"></div>' +
+      '</div>' +
+      '<div id="conflict-pane" hidden></div>';
+  }
+
+  function wireEditMode(initialBody) {
+    var ta = els.detailBody.querySelector('#body-editor');
+    var saveBtn = els.detailBody.querySelector('#save-body');
+    var cancelBtn = els.detailBody.querySelector('#cancel-edit');
+
+    function onInput() {
+      if (!editor) return;
+      var body = ta.value;
+      // localStorage write on every keystroke is the crash-safe
+      // backup (§6.3). It's synchronous and small, so the cost is
+      // negligible — and worth it because losing a draft to a tab
+      // crash is the worst-case UX failure.
+      try { localStorage.setItem(editor.key, body); } catch (e) { /* quota / private mode */ }
+      schedulePreview(body);
+      scheduleAutosave();
+    }
+    ta.addEventListener('input', onInput);
+    ta.addEventListener('blur', function () { if (editor) saveNow(false); });
+    ta.addEventListener('keydown', function (ev) {
+      // Ctrl+S / Cmd+S — manual save. Without preventDefault the
+      // browser would offer to save the page itself.
+      if ((ev.ctrlKey || ev.metaKey) && ev.key === 's') {
+        ev.preventDefault();
+        saveNow(true);
+      }
+    });
+    saveBtn.addEventListener('click', function () { saveNow(true); });
+    cancelBtn.addEventListener('click', function () {
+      // Cancel discards both the in-memory and localStorage drafts.
+      // Without clearing localStorage the next reload would silently
+      // resurrect the abandoned draft on top of fresh on-disk state.
+      if (editor) { try { localStorage.removeItem(editor.key); } catch (e) {} }
+      editor = null;
+      openDetail(state.lastDetailSlug || ta.getAttribute('data-slug') || '');
+    });
+
+    // Restore an existing draft if the user reloaded mid-edit. The key
+    // includes started_editing_at so reloads start a *new* session;
+    // we fall back to scanning for any draft for this slug.
+    var existing = scanLatestDraft(editor.slug);
+    if (existing && existing.key !== editor.key) {
+      ta.value = existing.body;
+      editor.key = existing.key;
+      editor.startedAt = existing.startedAt;
+      schedulePreview(existing.body);
+    }
+
+    state.lastDetailSlug = editor.slug;
+  }
+
+  function scanLatestDraft(slug) {
+    var prefix = 'issuectl-draft:' + slug + ':';
+    var best = null;
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (!k || k.indexOf(prefix) !== 0) continue;
+        var startedAt = parseInt(k.slice(prefix.length), 10);
+        if (!startedAt) continue;
+        if (!best || startedAt > best.startedAt) {
+          best = { key: k, startedAt: startedAt, body: localStorage.getItem(k) || '' };
+        }
+      }
+    } catch (e) { return null; }
+    return best;
+  }
+
+  function schedulePreview(body) {
+    if (!editor) return;
+    if (editor.previewTimer) clearTimeout(editor.previewTimer);
+    editor.previewTimer = setTimeout(function () {
+      fetch('/api/preview', {
+        method: 'POST',
+        headers: csrfJson(),
+        body: JSON.stringify({ body: body }),
+      })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(function (d) {
+          var pane = els.detailBody.querySelector('#body-preview');
+          if (pane) pane.innerHTML = d.body_html || '';
+        })
+        .catch(function () { /* preview is best-effort */ });
+    }, 250);
+  }
+
+  function scheduleAutosave() {
+    if (!editor) return;
+    if (editor.autosaveTimer) clearTimeout(editor.autosaveTimer);
+    // 5 s debounce per design D3=C. Avoids 409 storms while a user
+    // is mid-keystroke.
+    editor.autosaveTimer = setTimeout(function () { saveNow(false); }, 5000);
+  }
+
+  function saveNow(manual) {
+    if (!editor || editor.saving) return;
+    var ta = els.detailBody.querySelector('#body-editor');
+    if (!ta) return;
+    var body = ta.value;
+    if (!manual && body === editor.lastSavedBody) return;
+    editor.saving = true;
+    setSaveStatus('Saving…');
+    fetch('/api/issues/' + encodeURIComponent(editor.slug) + '/body', {
+      method: 'PUT',
+      headers: csrfJson(),
+      body: JSON.stringify({ expected_version: editor.expected_version, body: body }),
+    })
+      .then(function (r) {
+        return r.json().then(function (d) { return { status: r.status, body: d }; });
+      })
+      .then(function (res) {
+        editor.saving = false;
+        if (res.status >= 200 && res.status < 300) {
+          editor.expected_version = res.body.version;
+          editor.lastSavedBody = body;
+          state.local_versions[editor.slug] = res.body.version;
+          // Drop the localStorage draft on confirmed save — once the
+          // server has the bytes the client-side backup is no longer
+          // load-bearing.
+          try { localStorage.removeItem(editor.key); } catch (e) {}
+          setSaveStatus('Saved');
+          var pane = els.detailBody.querySelector('#body-preview');
+          if (pane && res.body.body_html) pane.innerHTML = res.body.body_html;
+        } else if (res.status === 409 && res.body && res.body.code === 'version_mismatch') {
+          showConflict(res.body.issue || {});
+        } else if (res.status === 429) {
+          setSaveStatus('Rate limited; retrying soon');
+        } else {
+          var detail = (res.body && res.body.detail) || ('HTTP ' + res.status);
+          setSaveStatus('Save failed: ' + detail);
+        }
+      })
+      .catch(function (e) {
+        editor.saving = false;
+        setSaveStatus('Save failed: ' + e);
+      });
+  }
+
+  function setSaveStatus(msg) {
+    var s = els.detailBody.querySelector('#save-status');
+    if (s) s.textContent = msg;
+  }
+
+  function showConflict(theirs) {
+    if (!editor) return;
+    editor.theirs = theirs;
+    var pane = els.detailBody.querySelector('#conflict-pane');
+    if (!pane) return;
+    pane.hidden = false;
+    var theirBody = (theirs && (theirs.body_markdown != null ? theirs.body_markdown : theirs.body)) || '';
+    pane.innerHTML =
+      '<h3>Conflict — body changed on disk</h3>' +
+      '<p>Your draft is in the textarea above. The current on-disk body is shown below. Pick one:</p>' +
+      '<div class="conflict-actions">' +
+        '<button type="button" id="conflict-keep-mine">Keep mine (overwrite theirs)</button>' +
+        '<button type="button" id="conflict-keep-theirs">Keep theirs (discard my draft)</button>' +
+        '<button type="button" id="conflict-dismiss">Manual merge in textarea</button>' +
+      '</div>' +
+      '<pre class="conflict-theirs">' + escapeHtml(theirBody) + '</pre>';
+    pane.querySelector('#conflict-keep-mine').addEventListener('click', function () {
+      // Re-read the freshly-fetched on-disk version so the next PUT
+      // proceeds — without this we'd 409 again with the same data.
+      editor.expected_version = (theirs && theirs.version) || editor.expected_version;
+      pane.hidden = true;
+      saveNow(true);
+    });
+    pane.querySelector('#conflict-keep-theirs').addEventListener('click', function () {
+      var ta = els.detailBody.querySelector('#body-editor');
+      ta.value = theirBody;
+      editor.expected_version = (theirs && theirs.version) || editor.expected_version;
+      editor.lastSavedBody = theirBody;
+      try { localStorage.removeItem(editor.key); } catch (e) {}
+      pane.hidden = true;
+      setSaveStatus('Discarded local draft');
+    });
+    pane.querySelector('#conflict-dismiss').addEventListener('click', function () {
+      // Stay in textarea so the user can hand-merge. Do NOT advance
+      // expected_version — the next save will conflict again until
+      // the user explicitly chooses a side.
+      pane.hidden = true;
+    });
+  }
+
+  function csrfJson() {
+    var h = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    if (state.csrf_token) h['X-Issuectl-CSRF'] = state.csrf_token;
+    return h;
+  }
+
   function closeDetail() {
     if (typeof els.detail.close === 'function') els.detail.close();
     else els.detail.removeAttribute('open');
+    editor = null;
   }
+
+  // === SSE ===
+
+  function openSse() {
+    if (typeof EventSource === 'undefined') return;
+    if (state.sse) { try { state.sse.close(); } catch (e) {} }
+    var url = '/events?since=' + encodeURIComponent(state.snapshot_seq || 0) +
+      (state.instance_id ? '&instance=' + encodeURIComponent(state.instance_id) : '');
+    var es = new EventSource(url);
+    state.sse = es;
+    es.onmessage = function (ev) {
+      var evt;
+      try { evt = JSON.parse(ev.data); } catch (e) { return; }
+      handleEvent(evt);
+    };
+    es.onerror = function () { /* EventSource auto-reconnects */ };
+  }
+
+  function handleEvent(evt) {
+    if (!evt || !evt.type) return;
+    switch (evt.type) {
+      case 'IssueUpserted':
+      case 'IssueMoved': {
+        // Echo suppression: if this version matches what *this* tab
+        // last wrote for this slug, we already have the up-to-date
+        // state from the PUT/PATCH 200 response. Don't re-fetch — it
+        // would clobber the textarea mid-edit.
+        if (state.local_versions[evt.slug] === evt.version) return;
+        // Other tabs' edits still propagate via a refetch.
+        load();
+        // Clear stale invalid marker if the issue is now valid.
+        if (state.invalid[evt.slug]) {
+          delete state.invalid[evt.slug];
+          renderWarnings();
+        }
+        return;
+      }
+      case 'IssueRemoved': {
+        state.issues = state.issues.filter(function (i) { return i.slug !== evt.slug; });
+        if (state.invalid[evt.slug]) { delete state.invalid[evt.slug]; renderWarnings(); }
+        render();
+        return;
+      }
+      case 'IssueInvalid': {
+        state.invalid[evt.slug] = evt.warnings || [];
+        renderWarnings();
+        render();
+        return;
+      }
+      case 'Resync':
+      case 'Degraded': {
+        load();
+        return;
+      }
+    }
+  }
+
+  // === Helpers ===
 
   function escapeHtml(s) {
     return String(s)
@@ -292,10 +641,6 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
-  /// Reduce a frontmatter value to a CSS-class-token-safe suffix. Today's
-  /// type/priority/status values are all enum-validated, but board.js can
-  /// also receive hand-edited or future values — keep the class tokens
-  /// well-formed instead of trusting the input.
   function classSuffix(s) {
     return String(s).toLowerCase().replace(/[^a-z0-9_-]/g, '-');
   }
@@ -356,5 +701,5 @@
     if (e.target === els.detail) closeDetail();
   });
 
-  load();
+  fetchSession().then(load);
 })();

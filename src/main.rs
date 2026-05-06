@@ -307,6 +307,12 @@ enum Command {
         expected_version: Option<String>,
     },
 
+    /// Edit issue body markdown
+    Body {
+        #[command(subcommand)]
+        action: BodyAction,
+    },
+
     /// Health-check the repo and (with --fix) migrate legacy numbered issues to slugs
     Doctor {
         /// Apply migrations and fixes (otherwise read-only report)
@@ -354,6 +360,31 @@ enum Command {
         /// Loopback binds always allow writes.
         #[arg(long)]
         allow_remote_writes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum BodyAction {
+    /// Replace the markdown body of an issue. Read content from stdin
+    /// (`--stdin`) or a file (`--from-file PATH`). With `--json`,
+    /// `--expected-version` is required (D4=B). Without `--json`,
+    /// `flock` still prevents corruption but blind clobber is allowed.
+    Set {
+        /// Issue slug
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+
+        /// Read body from stdin
+        #[arg(long, conflicts_with = "from_file")]
+        stdin: bool,
+
+        /// Read body from this file
+        #[arg(long = "from-file", value_name = "PATH", conflicts_with = "stdin")]
+        from_file: Option<PathBuf>,
+
+        /// Optimistic-concurrency token; required with --json
+        #[arg(long = "expected-version", value_parser = parse_non_empty)]
+        expected_version: Option<String>,
     },
 }
 
@@ -476,6 +507,14 @@ fn main() -> Result<()> {
             commits,
             expected_version,
         } => cmd_close(json_output, &slug, status, commits, expected_version),
+        Command::Body { action } => match action {
+            BodyAction::Set {
+                slug,
+                stdin,
+                from_file,
+                expected_version,
+            } => cmd_body_set(json_output, &slug, stdin, from_file, expected_version),
+        },
         Command::Doctor { fix } => doctor::run(&find_root(), fix, json_output),
         Command::Skill { action } => match action {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
@@ -1081,6 +1120,48 @@ fn normalize_related_refs(refs: &[String]) -> Result<Vec<String>> {
         out.push(format!("@{stripped}"));
     }
     Ok(out)
+}
+
+fn cmd_body_set(
+    json: bool,
+    slug: &str,
+    stdin: bool,
+    from_file: Option<PathBuf>,
+    expected_version: Option<String>,
+) -> Result<()> {
+    if json && expected_version.is_none() {
+        bail!(
+            "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
+        );
+    }
+    if !stdin && from_file.is_none() {
+        bail!("specify exactly one of --stdin or --from-file");
+    }
+    let body = if let Some(path) = from_file {
+        fs::read_to_string(&path)
+            .with_context(|| format!("cannot read body from {}", path.display()))?
+    } else {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("cannot read body from stdin")?;
+        buf
+    };
+    let root = find_root();
+    let outcome = mutate::update_body(&root, slug, expected_version, body, None)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if json {
+        let report = serde_json::json!({
+            "slug": slug,
+            "version": outcome.version,
+            "issue_dir": outcome.issue_dir.to_string_lossy(),
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("Updated body of {slug}");
+    }
+    Ok(())
 }
 
 fn cmd_skill_install(agent: &str, force: bool) -> Result<()> {
