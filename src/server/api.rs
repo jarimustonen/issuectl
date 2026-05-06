@@ -1,7 +1,7 @@
 use axum::{
-    Json,
     extract::{Path, State},
     http::StatusCode,
+    Json,
 };
 use serde::Serialize;
 
@@ -28,8 +28,8 @@ impl From<DocError> for StatusCode {
 use crate::repo::{self, IssueSummary, LoadWarning};
 use crate::slug;
 
-use super::AppState;
 use super::render::sanitize_markdown;
+use super::AppState;
 
 #[derive(Serialize)]
 pub struct IssueListResponse {
@@ -71,10 +71,7 @@ pub async fn get_issue(
     let slug_for_load = slug_param.clone();
     let (issue, docs) = tokio::task::spawn_blocking(move || {
         let issue = repo::load_issue(root.as_path(), &slug_for_load)?;
-        let dir = root
-            .join("issues")
-            .join(&issue.folder)
-            .join(&issue.slug);
+        let dir = root.join("issues").join(&issue.folder).join(&issue.slug);
         let docs = list_extra_docs(&dir);
         anyhow::Ok((issue, docs))
     })
@@ -110,8 +107,8 @@ pub async fn get_doc(
     let slug_owned = slug_param.clone();
     let doc_owned = doc_name.clone();
     let body = tokio::task::spawn_blocking(move || -> Result<String, DocError> {
-        let (folder, _item) = repo::locate_issue(root.as_path(), &slug_owned)
-            .map_err(|_| DocError::NotFound)?;
+        let (folder, _item) =
+            repo::locate_issue(root.as_path(), &slug_owned).map_err(|_| DocError::NotFound)?;
         let path = root
             .join("issues")
             .join(&folder)
@@ -125,9 +122,8 @@ pub async fn get_doc(
             std::io::ErrorKind::NotFound => DocError::NotFound,
             _ => DocError::Internal,
         })?;
-        let issue_dir =
-            std::fs::canonicalize(root.join("issues").join(&folder).join(&slug_owned))
-                .map_err(|_| DocError::Internal)?;
+        let issue_dir = std::fs::canonicalize(root.join("issues").join(&folder).join(&slug_owned))
+            .map_err(|_| DocError::Internal)?;
         if !canon.starts_with(&issue_dir) {
             return Err(DocError::Forbidden);
         }

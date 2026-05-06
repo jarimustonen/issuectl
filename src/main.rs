@@ -505,11 +505,11 @@ fn cmd_list(
     if let Some(l) = label {
         let l_lower = l.to_lowercase();
         filtered.retain(|i| {
-                i.labels
-                    .as_ref()
-                    .map(|lbs| lbs.iter().any(|lb| lb.to_lowercase() == l_lower))
-                    .unwrap_or(false)
-            });
+            i.labels
+                .as_ref()
+                .map(|lbs| lbs.iter().any(|lb| lb.to_lowercase() == l_lower))
+                .unwrap_or(false)
+        });
     }
 
     if json {
@@ -718,8 +718,11 @@ fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     bail!("target directory already exists: {}", dir.display())
                 }
-                Err(e) => return Err(anyhow::Error::from(e)
-                    .context(format!("cannot create {}", dir.display()))),
+                Err(e) => {
+                    return Err(
+                        anyhow::Error::from(e).context(format!("cannot create {}", dir.display()))
+                    )
+                }
             }
         }
         None => claim_random_slug(root, &open_parent)?,
@@ -762,8 +765,11 @@ fn claim_random_slug(root: &Path, open_parent: &Path) -> Result<(String, PathBuf
         match fs::create_dir(&dir) {
             Ok(()) => return Ok((candidate, dir)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(anyhow::Error::from(e)
-                .context(format!("cannot create {}", dir.display()))),
+            Err(e) => {
+                return Err(
+                    anyhow::Error::from(e).context(format!("cannot create {}", dir.display()))
+                )
+            }
         }
     }
     bail!("could not claim a unique slug after 16 attempts; wordlist exhausted?")
@@ -1008,10 +1014,7 @@ fn normalize_related_refs(refs: &[String]) -> Result<Vec<String>> {
         }
         if let Some(rest) = trimmed.strip_prefix('#') {
             if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
-                bail!(
-                    "related reference {:?} looks like #NN but isn't numeric",
-                    r
-                );
+                bail!("related reference {:?} looks like #NN but isn't numeric", r);
             }
             out.push(format!("#{rest}"));
             continue;
@@ -1232,7 +1235,11 @@ mod tests {
         args.reporter = Some("alice".into());
         args.assignee = Some("bob".into());
         let out = do_new(tmp.path(), args).unwrap();
-        assert!(slug::is_valid(&out.slug), "{} should be valid slug", out.slug);
+        assert!(
+            slug::is_valid(&out.slug),
+            "{} should be valid slug",
+            out.slug
+        );
         assert!(out.item_path.exists());
         let content = read(&out.item_path);
         assert!(content.contains("type: bug"));
@@ -1449,11 +1456,7 @@ mod tests {
     fn locate_issue_finds_in_open_and_closed() {
         let tmp = fresh_repo();
         fs::create_dir_all(tmp.path().join("issues/open/foo-bar")).unwrap();
-        fs::write(
-            tmp.path().join("issues/open/foo-bar/item.md"),
-            "---\n---\n",
-        )
-        .unwrap();
+        fs::write(tmp.path().join("issues/open/foo-bar/item.md"), "---\n---\n").unwrap();
         let (folder, _) = locate_issue(tmp.path(), "foo-bar").unwrap();
         assert_eq!(folder, "open");
         assert!(locate_issue(tmp.path(), "missing").is_err());

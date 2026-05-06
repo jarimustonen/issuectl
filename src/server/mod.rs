@@ -11,11 +11,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::Router;
-use axum::http::{HeaderName, HeaderValue, Request, header};
+use axum::http::{header, HeaderName, HeaderValue, Request};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::get;
+use axum::Router;
 use tokio::net::TcpListener;
 
 mod api;
@@ -33,7 +33,10 @@ pub fn router(state: AppState) -> Router {
         .route("/assets/board.css", get(render::board_css))
         .route("/assets/board.js", get(render::board_js))
         .route("/assets/theme-toggle.js", get(render::theme_toggle_js))
-        .route("/assets/theme-bootstrap.js", get(render::theme_bootstrap_js))
+        .route(
+            "/assets/theme-bootstrap.js",
+            get(render::theme_bootstrap_js),
+        )
         .route("/api/issues", get(api::list_issues))
         .route("/api/issues/{slug}", get(api::get_issue))
         .route("/api/issues/{slug}/docs/{name}", get(api::get_doc))
@@ -93,9 +96,7 @@ async fn serve(root: PathBuf, host: String, port: u16) -> Result<()> {
         eprintln!(
             "WARNING: bound to a non-loopback address — issue contents are reachable on this network."
         );
-        eprintln!(
-            "         There is no authentication. Use only on trusted networks."
-        );
+        eprintln!("         There is no authentication. Use only on trusted networks.");
     }
     eprintln!("Ctrl-C to stop");
 
@@ -316,7 +317,10 @@ mod tests {
         // characters render as literals; "onerror=alert" appears as text but
         // is harmless). Body is the rendered+sanitized markdown — there
         // ammonia must strip the live onerror attribute.
-        assert!(!body.contains("<img src=x onerror"), "live img tag survived: {body}");
+        assert!(
+            !body.contains("<img src=x onerror"),
+            "live img tag survived: {body}"
+        );
         // The escaped form must be present in the title — proves we didn't
         // emit the raw payload anywhere structural.
         assert!(body.contains("&lt;img src=x onerror=alert(1)&gt;"));
@@ -426,17 +430,14 @@ mod tests {
             let resp = make_router(tmp.path())
                 .clone()
                 .oneshot(
-                    Request::get(format!(
-                        "/api/issues/loud-spicy-fox/docs/{evil}"
-                    ))
-                    .body(Body::empty())
-                    .unwrap(),
+                    Request::get(format!("/api/issues/loud-spicy-fox/docs/{evil}"))
+                        .body(Body::empty())
+                        .unwrap(),
                 )
                 .await
                 .unwrap();
             assert!(
-                resp.status() == StatusCode::BAD_REQUEST
-                    || resp.status() == StatusCode::NOT_FOUND,
+                resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::NOT_FOUND,
                 "expected 400/404 for {evil}, got {}",
                 resp.status()
             );
@@ -469,10 +470,7 @@ mod tests {
         // can't be canonicalized; both are acceptable as long as the body
         // never leaks.
         assert_ne!(resp.status(), StatusCode::OK);
-        assert!(
-            resp.status() == StatusCode::FORBIDDEN
-                || resp.status() == StatusCode::NOT_FOUND
-        );
+        assert!(resp.status() == StatusCode::FORBIDDEN || resp.status() == StatusCode::NOT_FOUND);
     }
 
     #[cfg(unix)]
@@ -482,7 +480,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
-        fs::write(outside.path().join("item.md"), "---\nstatus: open\n---\n# leaked\n").unwrap();
+        fs::write(
+            outside.path().join("item.md"),
+            "---\nstatus: open\n---\n# leaked\n",
+        )
+        .unwrap();
         symlink(
             outside.path(),
             tmp.path().join("issues/open/escaped-not-otter"),

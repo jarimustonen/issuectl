@@ -111,7 +111,10 @@ pub fn is_valid(s: &str) -> bool {
         if p.is_empty() {
             return false;
         }
-        if !p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+        if !p
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        {
             return false;
         }
     }
@@ -193,6 +196,10 @@ mod tests {
         for _ in 0..50 {
             set.insert(generate());
         }
-        assert!(set.len() > 40, "expected highly diverse slugs, got {} unique", set.len());
+        assert!(
+            set.len() > 40,
+            "expected highly diverse slugs, got {} unique",
+            set.len()
+        );
     }
 }

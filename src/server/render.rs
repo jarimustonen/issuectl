@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     response::{Html, IntoResponse, Response},
 };
 use pulldown_cmark::{Event, Options, Parser};
@@ -58,10 +58,11 @@ pub async fn issue_html(
     }
     let root = state.root.clone();
     let slug_for_load = slug_param.clone();
-    let issue = tokio::task::spawn_blocking(move || repo::load_issue(root.as_path(), &slug_for_load))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let issue =
+        tokio::task::spawn_blocking(move || repo::load_issue(root.as_path(), &slug_for_load))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|_| StatusCode::NOT_FOUND)?;
     Ok(Html(render_issue_page(&issue)))
 }
 
@@ -169,9 +170,8 @@ pub fn sanitize_markdown(md: &str) -> String {
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_FOOTNOTES);
-    let parser = Parser::new_ext(md, opts).filter(|ev| {
-        !matches!(ev, Event::Html(_) | Event::InlineHtml(_))
-    });
+    let parser =
+        Parser::new_ext(md, opts).filter(|ev| !matches!(ev, Event::Html(_) | Event::InlineHtml(_)));
     let mut raw = String::new();
     pulldown_cmark::html::push_html(&mut raw, parser);
 
@@ -237,7 +237,10 @@ mod tests {
         // pulldown-cmark uses bare digits as anchor ids: <div ... id="1">.
         let html = sanitize_markdown("see[^1]\n\n[^1]: details");
         assert!(html.contains("id=\"1\""), "footnote id stripped: {html}");
-        assert!(html.contains("href=\"#1\""), "footnote ref stripped: {html}");
+        assert!(
+            html.contains("href=\"#1\""),
+            "footnote ref stripped: {html}"
+        );
     }
 
     #[test]
@@ -257,9 +260,8 @@ mod tests {
         // the filter, the entire block — open tag, inner text, close tag — is
         // dropped, which is fine because pulldown also drops the text inside a
         // raw-HTML block.
-        let html = sanitize_markdown(
-            r#"<div id="theme-toggle" class="card detail-dialog">spoof</div>"#,
-        );
+        let html =
+            sanitize_markdown(r#"<div id="theme-toggle" class="card detail-dialog">spoof</div>"#);
         assert!(!html.contains("theme-toggle"));
         assert!(!html.contains("detail-dialog"));
         assert!(!html.contains("<div"));

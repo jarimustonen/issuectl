@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::models::Issue;
@@ -184,7 +184,10 @@ pub fn load_issues_with_warnings(repo_root: &Path) -> (Vec<Issue>, Vec<LoadWarni
 /// shipping markdown bodies.
 pub fn load_issue_summaries(repo_root: &Path) -> (Vec<IssueSummary>, Vec<LoadWarning>) {
     let (issues, warnings) = load_issues_with_warnings(repo_root);
-    (issues.into_iter().map(IssueSummary::from).collect(), warnings)
+    (
+        issues.into_iter().map(IssueSummary::from).collect(),
+        warnings,
+    )
 }
 
 /// Locate a single issue's `item.md` by slug. Returns `(folder, item_path)`.
@@ -197,9 +200,8 @@ pub fn load_issue_summaries(repo_root: &Path) -> (Vec<IssueSummary>, Vec<LoadWar
 /// via direct `/api/issues/<slug>` lookups — escape-by-asymmetry.
 pub fn locate_issue(repo_root: &Path, slug: &str) -> Result<(String, PathBuf)> {
     let issues_root = repo_root.join(ISSUES_DIR);
-    let issues_root_canon = std::fs::canonicalize(&issues_root).with_context(|| {
-        format!("cannot canonicalize {}", issues_root.display())
-    })?;
+    let issues_root_canon = std::fs::canonicalize(&issues_root)
+        .with_context(|| format!("cannot canonicalize {}", issues_root.display()))?;
 
     for folder in &["open", "closed"] {
         let dir = issues_root.join(folder).join(slug);
@@ -229,10 +231,7 @@ pub fn locate_issue(repo_root: &Path, slug: &str) -> Result<(String, PathBuf)> {
         let item_meta = std::fs::symlink_metadata(&item)
             .with_context(|| format!("{slug} directory has no item.md: {}", item.display()))?;
         if item_meta.file_type().is_symlink() || !item_meta.is_file() {
-            bail!(
-                "{slug} item.md is missing or symlinked: {}",
-                item.display()
-            );
+            bail!("{slug} item.md is missing or symlinked: {}", item.display());
         }
         return Ok((folder.to_string(), item));
     }
@@ -288,7 +287,11 @@ mod tests {
         use std::os::unix::fs::symlink;
         let tmp = fresh_repo();
         let outside = tempfile::tempdir().unwrap();
-        fs::write(outside.path().join("item.md"), "---\nstatus: open\n---\n# x\n").unwrap();
+        fs::write(
+            outside.path().join("item.md"),
+            "---\nstatus: open\n---\n# x\n",
+        )
+        .unwrap();
         symlink(
             outside.path(),
             tmp.path().join("issues/open/escaped-not-otter"),
@@ -297,10 +300,7 @@ mod tests {
         let r = locate_issue(tmp.path(), "escaped-not-otter");
         assert!(r.is_err(), "symlinked issue dir must be rejected");
         let msg = r.unwrap_err().to_string();
-        assert!(
-            msg.contains("symlink"),
-            "error should explain why: {msg}"
-        );
+        assert!(msg.contains("symlink"), "error should explain why: {msg}");
     }
 
     #[test]
@@ -317,5 +317,4 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].slug, "amber-loud-fox");
     }
-
 }

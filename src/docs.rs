@@ -10,11 +10,8 @@ const KANBAN: &str = include_str!("../templates/docs/kanban.md");
 
 /// (topic name, one-line summary, body). The summary is shown by the
 /// topic-list output; the body is what `issuectl docs <topic>` prints.
-const TOPICS: &[(&str, &str, &str)] = &[(
-    "kanban",
-    "Read-only web board (`issuectl serve`)",
-    KANBAN,
-)];
+const TOPICS: &[(&str, &str, &str)] =
+    &[("kanban", "Read-only web board (`issuectl serve`)", KANBAN)];
 
 pub fn run(topic: Option<String>) -> Result<()> {
     match topic {
@@ -28,9 +25,7 @@ pub fn run(topic: Option<String>) -> Result<()> {
                 Ok(())
             }
             None => {
-                eprintln!(
-                    "Error: unknown docs topic {t:?}. Run `issuectl docs` to list topics."
-                );
+                eprintln!("Error: unknown docs topic {t:?}. Run `issuectl docs` to list topics.");
                 std::process::exit(1);
             }
         },

@@ -85,7 +85,10 @@ pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
     }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&render_json(&report, fix))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&render_json(&report, fix))?
+        );
     } else {
         render_text(&report, fix);
     }
@@ -155,8 +158,7 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
             // missing slug/number combo would be flagged as a parse warning
             // for every legacy issue otherwise.
             if legacy.is_none() {
-                let parsed =
-                    parser::parse_item_md_with_warnings(&item_path, &dir_name, folder);
+                let parsed = parser::parse_item_md_with_warnings(&item_path, &dir_name, folder);
                 for w in parsed.warnings {
                     report
                         .parse_errors
@@ -213,8 +215,7 @@ fn detect_orphan_epic_refs(repo_root: &Path, report: &mut DoctorReport) -> Resul
             // Use the warning-collecting variant here too — the scan() pass
             // already accounted for parse warnings; this second pass is just
             // for epic-ref resolution and shouldn't double-print.
-            let issue =
-                parser::parse_item_md_with_warnings(&item, &slug_id, folder).issue;
+            let issue = parser::parse_item_md_with_warnings(&item, &slug_id, folder).issue;
             if let Some(epic) = issue.epic.as_deref() {
                 let stripped = epic.strip_prefix('@').unwrap_or(epic);
                 let exists = existing_slugs.contains(stripped) || stripped.parse::<u32>().is_ok();
@@ -409,8 +410,7 @@ fn rewrite_markdown_in_scopes(
             }
             let original = fs::read_to_string(&path)
                 .with_context(|| format!("cannot read {}", path.display()))?;
-            let rewritten =
-                rewrite_text(&original, number_to_slug, dir_to_slug, ambiguous_numbers);
+            let rewritten = rewrite_text(&original, number_to_slug, dir_to_slug, ambiguous_numbers);
             if rewritten != original {
                 fs::write(&path, rewritten)
                     .with_context(|| format!("cannot write {}", path.display()))?;

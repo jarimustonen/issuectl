@@ -67,7 +67,11 @@ pub fn parse_item_md_with_warnings(path: &Path, slug: &str, folder: &str) -> Par
         Some(yaml_text) => match serde_yaml::from_str::<Frontmatter>(yaml_text) {
             Ok(fm) => fm,
             Err(e) => {
-                warnings.push(format!("invalid YAML frontmatter in {}: {}", path.display(), e));
+                warnings.push(format!(
+                    "invalid YAML frontmatter in {}: {}",
+                    path.display(),
+                    e
+                ));
                 Frontmatter::default()
             }
         },
