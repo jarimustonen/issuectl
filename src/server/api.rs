@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
+    response::{IntoResponse, Response},
     Json,
 };
 use futures_util::stream::{Stream, StreamExt};
@@ -32,6 +33,7 @@ impl From<DocError> for StatusCode {
     }
 }
 
+use crate::mutate::{self, MutateError, NewIssueRequest, UpdateIssueRequest};
 use crate::repo::{self, IssueSummary, LoadWarning};
 use crate::slug;
 
@@ -347,6 +349,216 @@ pub async fn events_stream(
         // the connection stay alive.
         KeepAlive::new().interval(Duration::from_secs(15)),
     )
+}
+
+// ── M1: write endpoints ────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct SessionResponse {
+    pub csrf_token: String,
+    pub instance_id: Uuid,
+}
+
+/// Bootstrap endpoint. Returns the per-process CSRF token plus the
+/// server `instance_id`. The HTML shell loads this once on page load
+/// and stashes the token in memory; subsequent state-changing requests
+/// echo it back in `X-Issuectl-CSRF`. Set-Cookie carries the same
+/// token under a strict same-site cookie so `EventSource` can reach
+/// `/events` (which can't set custom headers) — the cookie is the SSE
+/// auth gate, the header is the PATCH/POST auth gate.
+pub async fn session(State(state): State<super::AppState>) -> Response {
+    let token = state.csrf_token.to_string();
+    let cookie = format!(
+        "issuectl_sid={token}; Path=/; HttpOnly; SameSite=Strict"
+    );
+    let mut response = Json(SessionResponse {
+        csrf_token: token,
+        instance_id: state.event_hub.instance_id(),
+    })
+    .into_response();
+    if let Ok(v) = HeaderValue::from_str(&cookie) {
+        response.headers_mut().insert(axum::http::header::SET_COOKIE, v);
+    }
+    response
+}
+
+#[derive(Serialize)]
+pub struct UpdateIssueResponse {
+    pub slug: String,
+    pub version: String,
+    pub final_dir: String,
+    pub moved_to_closed: bool,
+    pub moved_to_open: bool,
+    pub issue: crate::models::Issue,
+}
+
+#[derive(Serialize)]
+pub struct CreateIssueResponse {
+    pub slug: String,
+    pub version: String,
+    pub final_dir: String,
+    pub issue: crate::models::Issue,
+}
+
+pub async fn patch_issue(
+    State(state): State<super::AppState>,
+    Path(slug_param): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    if !slug::is_valid(&slug_param) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "validation",
+            "invalid slug shape",
+            None,
+        );
+    }
+    let req: UpdateIssueRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "validation",
+                &format!("invalid JSON body: {e}"),
+                None,
+            );
+        }
+    };
+    let root = state.root.clone();
+    let hub = state.event_hub.clone();
+    let slug_owned = slug_param.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        mutate::update_issue(root.as_path(), &slug_owned, req, Some(&hub))
+    })
+    .await;
+    match result {
+        Ok(Ok(out)) => Json(UpdateIssueResponse {
+            slug: slug_param,
+            version: out.version,
+            final_dir: out.final_dir.to_string_lossy().into_owned(),
+            moved_to_closed: out.moved_to_closed,
+            moved_to_open: out.moved_to_open,
+            issue: out.issue,
+        })
+        .into_response(),
+        Ok(Err(err)) => mutate_error_to_response(err),
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "task panicked",
+            None,
+        ),
+    }
+}
+
+pub async fn create_issue(
+    State(state): State<super::AppState>,
+    body: axum::body::Bytes,
+) -> Response {
+    let req: NewIssueRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "validation",
+                &format!("invalid JSON body: {e}"),
+                None,
+            );
+        }
+    };
+    let root = state.root.clone();
+    let hub = state.event_hub.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        mutate::new_issue(root.as_path(), req, Some(&hub))
+    })
+    .await;
+    match result {
+        Ok(Ok(out)) => {
+            let slug = out.issue.slug.clone();
+            let mut resp = Json(CreateIssueResponse {
+                slug,
+                version: out.version,
+                final_dir: out.final_dir.to_string_lossy().into_owned(),
+                issue: out.issue,
+            })
+            .into_response();
+            *resp.status_mut() = StatusCode::CREATED;
+            resp
+        }
+        Ok(Err(err)) => mutate_error_to_response(err),
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "task panicked",
+            None,
+        ),
+    }
+}
+
+fn mutate_error_to_response(err: MutateError) -> Response {
+    match err {
+        MutateError::NotFound => error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "issue not found",
+            None,
+        ),
+        MutateError::AmbiguousSlug => error_response(
+            StatusCode::CONFLICT,
+            "ambiguous_slug",
+            "slug exists in both open/ and closed/ — resolve manually",
+            None,
+        ),
+        MutateError::VersionMismatch { current, version } => {
+            // Build a 409 with the full current issue so the client can
+            // refresh without an extra GET roundtrip (§4.3).
+            let body = serde_json::json!({
+                "type": "https://issuectl/errors/version_mismatch",
+                "title": "Version mismatch",
+                "status": 409,
+                "code": "version_mismatch",
+                "detail": format!("expected version did not match current: {version}"),
+                "issue": current,
+                "version": version,
+            });
+            (StatusCode::CONFLICT, Json(body)).into_response()
+        }
+        MutateError::Validation(msg) => {
+            error_response(StatusCode::BAD_REQUEST, "validation", &msg, None)
+        }
+        MutateError::ConflictingIntent(msg) => {
+            error_response(StatusCode::BAD_REQUEST, "conflicting_intent", &msg, None)
+        }
+        MutateError::Io(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            &format!("{e}"),
+            None,
+        ),
+    }
+}
+
+fn error_response(
+    status: StatusCode,
+    code: &str,
+    detail: &str,
+    extra: Option<serde_json::Value>,
+) -> Response {
+    let mut body = serde_json::json!({
+        "type": format!("https://issuectl/errors/{code}"),
+        "title": code.replace('_', " "),
+        "status": status.as_u16(),
+        "code": code,
+        "detail": detail,
+    });
+    if let (Some(serde_json::Value::Object(extra_map)), serde_json::Value::Object(ref mut m)) =
+        (extra, &mut body)
+    {
+        for (k, v) in extra_map {
+            m.insert(k, v);
+        }
+    }
+    (status, Json(body)).into_response()
 }
 
 #[cfg(test)]

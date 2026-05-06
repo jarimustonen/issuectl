@@ -2,6 +2,7 @@ mod canonical;
 mod docs;
 mod doctor;
 mod models;
+mod mutate;
 mod parser;
 mod repo;
 mod server;
@@ -17,10 +18,11 @@ use anyhow::{bail, Context, Result};
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
 
-const ISSUE_TYPES: &[&str] = &["bug", "task", "feature", "improvement", "chore", "epic"];
-const PRIORITIES: &[&str] = &["normal", "high"];
-const ACTIVE_STATUSES: &[&str] = &["open", "in-progress", "testing"];
-const CLOSING_STATUSES: &[&str] = &[
+pub(crate) const ISSUE_TYPES: &[&str] =
+    &["bug", "task", "feature", "improvement", "chore", "epic"];
+pub(crate) const PRIORITIES: &[&str] = &["normal", "high"];
+pub(crate) const ACTIVE_STATUSES: &[&str] = &["open", "in-progress", "testing"];
+pub(crate) const CLOSING_STATUSES: &[&str] = &[
     "done",
     "fixed",
     "wontfix",
@@ -29,7 +31,7 @@ const CLOSING_STATUSES: &[&str] = &[
     "obsolete",
 ];
 
-fn all_statuses() -> Vec<&'static str> {
+pub(crate) fn all_statuses() -> Vec<&'static str> {
     ACTIVE_STATUSES
         .iter()
         .chain(CLOSING_STATUSES.iter())
@@ -37,8 +39,15 @@ fn all_statuses() -> Vec<&'static str> {
         .collect()
 }
 
-fn is_closing_status(status: &str) -> bool {
+pub(crate) fn is_closing_status(status: &str) -> bool {
     CLOSING_STATUSES.contains(&status)
+}
+
+/// Public re-export of `normalize_related_refs` for the mutate module
+/// so it can validate `add_related` / `remove_related` exactly the way
+/// the CLI does, without duplicating the logic.
+pub(crate) fn normalize_related_refs_pub(refs: &[String]) -> anyhow::Result<Vec<String>> {
+    normalize_related_refs(refs)
 }
 
 const TOP_LEVEL_HELP: &str = "\
@@ -270,6 +279,13 @@ enum Command {
         /// Record a commit, format HASH:summary (repeatable)
         #[arg(long = "add-commit", value_parser = parse_non_empty)]
         add_commits: Vec<String>,
+
+        /// Optimistic-concurrency token from a prior `show`/`list --json`.
+        /// Required when `--json` is in effect (the `--json` channel is the
+        /// AI-agent surface, where blind clobber is unacceptable). Optional
+        /// for human invocations — `flock` still prevents corruption.
+        #[arg(long = "expected-version", value_parser = parse_non_empty)]
+        expected_version: Option<String>,
     },
 
     /// Set a closing status and move the issue to closed/
@@ -285,6 +301,10 @@ enum Command {
         /// Record a commit, format HASH:summary (repeatable)
         #[arg(long = "commit", value_parser = parse_non_empty)]
         commits: Vec<String>,
+
+        /// Optimistic-concurrency token; same semantics as `update`.
+        #[arg(long = "expected-version", value_parser = parse_non_empty)]
+        expected_version: Option<String>,
     },
 
     /// Health-check the repo and (with --fix) migrate legacy numbered issues to slugs
@@ -425,6 +445,7 @@ fn main() -> Result<()> {
             add_related,
             remove_related,
             add_commits,
+            expected_version,
         } => cmd_update(
             json_output,
             UpdateArgs {
@@ -440,13 +461,15 @@ fn main() -> Result<()> {
                 add_related,
                 remove_related,
                 add_commits,
+                expected_version,
             },
         ),
         Command::Close {
             slug,
             status,
             commits,
-        } => cmd_close(json_output, &slug, status, commits),
+            expected_version,
+        } => cmd_close(json_output, &slug, status, commits, expected_version),
         Command::Doctor { fix } => doctor::run(&find_root(), fix, json_output),
         Command::Skill { action } => match action {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
@@ -539,7 +562,20 @@ fn cmd_list(
     }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&filtered)?);
+        let with_version: Vec<_> = filtered
+            .iter()
+            .map(|i| {
+                let mut v = serde_json::to_value(i).expect("Issue serializes");
+                if let serde_json::Value::Object(ref mut m) = v {
+                    m.insert(
+                        "version".into(),
+                        serde_json::Value::String(canonical::canonical_hash(i)),
+                    );
+                }
+                v
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&with_version)?);
     } else {
         print_issue_table(&filtered);
     }
@@ -554,7 +590,14 @@ fn cmd_show(json: bool, slug: &str) -> Result<()> {
     match issue {
         Some(i) => {
             if json {
-                println!("{}", serde_json::to_string_pretty(i)?);
+                let mut v = serde_json::to_value(i).expect("Issue serializes");
+                if let serde_json::Value::Object(ref mut m) = v {
+                    m.insert(
+                        "version".into(),
+                        serde_json::Value::String(canonical::canonical_hash(i)),
+                    );
+                }
+                println!("{}", serde_json::to_string_pretty(&v)?);
             } else {
                 print_issue_detail(i);
             }
@@ -641,25 +684,25 @@ fn cmd_stats(json: bool) -> Result<()> {
     Ok(())
 }
 
-struct NewArgs {
-    issue_type: String,
-    title: String,
-    slug: Option<String>,
-    reporter: Option<String>,
-    assignee: Option<String>,
-    owner: Option<String>,
-    priority: String,
-    epic: Option<String>,
-    labels: Vec<String>,
-    related: Vec<String>,
-    source: Option<String>,
-    description: Option<String>,
+pub(crate) struct NewArgs {
+    pub issue_type: String,
+    pub title: String,
+    pub slug: Option<String>,
+    pub reporter: Option<String>,
+    pub assignee: Option<String>,
+    pub owner: Option<String>,
+    pub priority: String,
+    pub epic: Option<String>,
+    pub labels: Vec<String>,
+    pub related: Vec<String>,
+    pub source: Option<String>,
+    pub description: Option<String>,
 }
 
-struct NewOutcome {
-    slug: String,
-    title: String,
-    item_path: PathBuf,
+pub(crate) struct NewOutcome {
+    pub slug: String,
+    pub title: String,
+    pub item_path: PathBuf,
 }
 
 fn cmd_new(json: bool, args: NewArgs) -> Result<()> {
@@ -683,7 +726,7 @@ fn cmd_new(json: bool, args: NewArgs) -> Result<()> {
     Ok(())
 }
 
-fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
+pub(crate) fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
     if args.issue_type == "epic" {
         if args.assignee.is_some() || args.reporter.is_some() {
             bail!("epics use --owner, not --reporter/--assignee");
@@ -802,28 +845,33 @@ fn claim_random_slug(root: &Path, open_parent: &Path) -> Result<(String, PathBuf
 }
 
 #[derive(Default)]
-struct UpdateArgs {
-    slug: String,
-    status: Option<String>,
-    assignee: Option<String>,
-    owner: Option<String>,
-    priority: Option<String>,
-    epic: Option<String>,
-    no_epic: bool,
-    add_labels: Vec<String>,
-    remove_labels: Vec<String>,
-    add_related: Vec<String>,
-    remove_related: Vec<String>,
-    add_commits: Vec<String>,
+pub(crate) struct UpdateArgs {
+    pub slug: String,
+    pub status: Option<String>,
+    pub assignee: Option<String>,
+    pub owner: Option<String>,
+    pub priority: Option<String>,
+    pub epic: Option<String>,
+    pub no_epic: bool,
+    pub add_labels: Vec<String>,
+    pub remove_labels: Vec<String>,
+    pub add_related: Vec<String>,
+    pub remove_related: Vec<String>,
+    pub add_commits: Vec<String>,
+    pub expected_version: Option<String>,
 }
 
-struct UpdateOutcome {
-    final_dir: PathBuf,
-    moved_to_closed: bool,
-    moved_to_open: bool,
+pub(crate) struct UpdateOutcome {
+    pub final_dir: PathBuf,
+    pub moved_to_closed: bool,
+    pub moved_to_open: bool,
+    pub version: String,
 }
 
 fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
+    if json && args.expected_version.is_none() {
+        bail!("--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`");
+    }
     let root = find_root();
     let slug = args.slug.clone();
     let out = do_update(&root, args)?;
@@ -833,6 +881,7 @@ fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
             "final_dir": out.final_dir.to_string_lossy(),
             "moved_to_closed": out.moved_to_closed,
             "moved_to_open": out.moved_to_open,
+            "version": out.version,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -851,108 +900,70 @@ fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
     Ok(())
 }
 
-fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> {
-    let (folder, item_path) = locate_issue(root, &args.slug)?;
-    let mut item = write::read_item(&item_path)?;
-
-    let mut new_folder = folder.clone();
-    let mut moved_to_closed = false;
-    let mut moved_to_open = false;
-
-    if let Some(ref status) = args.status {
-        write::set_string(&mut item.frontmatter, "status", status);
-        if is_closing_status(status) {
-            new_folder = "closed".to_string();
-            write::set_string(&mut item.frontmatter, "closed", &write::today());
-            if folder == "open" {
-                moved_to_closed = true;
-            }
-        } else if folder == "closed" {
-            write::remove_key(&mut item.frontmatter, "closed");
-            new_folder = "open".to_string();
-            moved_to_open = true;
-        }
+pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> {
+    use mutate::Patch;
+    let mut req = mutate::UpdateIssueRequest {
+        expected_version: args.expected_version,
+        ..Default::default()
+    };
+    if let Some(s) = args.status {
+        req.status = Patch::Set(s);
     }
-
     if let Some(a) = args.assignee {
-        write::set_string(&mut item.frontmatter, "assignee", &a);
+        req.assignee = Patch::Set(a);
     }
     if let Some(o) = args.owner {
-        write::set_string(&mut item.frontmatter, "owner", &o);
+        req.owner = Patch::Set(o);
     }
     if let Some(p) = args.priority {
-        write::set_string(&mut item.frontmatter, "priority", &p);
+        req.priority = Patch::Set(p);
     }
     if let Some(e) = args.epic {
-        write::set_string(&mut item.frontmatter, "epic", &e);
+        req.epic = Patch::Set(e);
     } else if args.no_epic {
-        write::remove_key(&mut item.frontmatter, "epic");
+        req.epic = Patch::Clear;
     }
+    req.add_labels = args.add_labels;
+    req.remove_labels = args.remove_labels;
+    req.add_related = args.add_related;
+    req.remove_related = args.remove_related;
+    req.add_commits = args
+        .add_commits
+        .iter()
+        .map(|spec| {
+            let (hash, summary) = parse_commit_spec(spec)?;
+            Ok::<_, anyhow::Error>(mutate::CommitSpec { hash, summary })
+        })
+        .collect::<Result<_, _>>()?;
 
-    for label in &args.add_labels {
-        write::add_to_string_list(&mut item.frontmatter, "labels", label)?;
-    }
-    for label in &args.remove_labels {
-        write::remove_from_string_list(&mut item.frontmatter, "labels", label)?;
-    }
-
-    let add_related = normalize_related_refs(&args.add_related)?;
-    let remove_related = normalize_related_refs(&args.remove_related)?;
-    for r in &add_related {
-        write::add_to_string_list(&mut item.frontmatter, "related", r)?;
-    }
-    for r in &remove_related {
-        write::remove_from_string_list(&mut item.frontmatter, "related", r)?;
-    }
-
-    for spec in &args.add_commits {
-        let (hash, summary) = parse_commit_spec(spec)?;
-        write::add_commit(&mut item.frontmatter, &hash, &summary)?;
-    }
-
-    write::set_string(&mut item.frontmatter, "updated", &write::today());
-
-    write::write_item(&item_path, &item)?;
-
-    let final_dir = if new_folder != folder {
-        let new_dir = write::issue_dir(root, &new_folder, &args.slug);
-        let old_dir = item_path
-            .parent()
-            .expect("item.md must have a parent")
-            .to_path_buf();
-        if new_dir.exists() {
-            bail!("target directory already exists: {}", new_dir.display());
-        }
-        if let Some(parent) = new_dir.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("cannot create {}", parent.display()))?;
-        }
-        fs::rename(&old_dir, &new_dir).with_context(|| {
-            format!("cannot move {} to {}", old_dir.display(), new_dir.display())
-        })?;
-        new_dir
-    } else {
-        item_path
-            .parent()
-            .expect("item.md must have a parent")
-            .to_path_buf()
-    };
-
+    let outcome = mutate::update_issue(root, &args.slug, req, None)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(UpdateOutcome {
-        final_dir,
-        moved_to_closed,
-        moved_to_open,
+        final_dir: outcome.final_dir,
+        moved_to_closed: outcome.moved_to_closed,
+        moved_to_open: outcome.moved_to_open,
+        version: outcome.version,
     })
 }
 
-fn cmd_close(json: bool, slug: &str, status: Option<String>, commits: Vec<String>) -> Result<()> {
+fn cmd_close(
+    json: bool,
+    slug: &str,
+    status: Option<String>,
+    commits: Vec<String>,
+    expected_version: Option<String>,
+) -> Result<()> {
+    if json && expected_version.is_none() {
+        bail!("--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`");
+    }
     let root = find_root();
-    let out = do_close(&root, slug, status, commits)?;
+    let out = do_close(&root, slug, status, commits, expected_version)?;
     if json {
         let report = serde_json::json!({
             "slug": slug,
             "final_dir": out.final_dir.to_string_lossy(),
             "moved_to_closed": out.moved_to_closed,
+            "version": out.version,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -965,11 +976,12 @@ fn cmd_close(json: bool, slug: &str, status: Option<String>, commits: Vec<String
     Ok(())
 }
 
-fn do_close(
+pub(crate) fn do_close(
     root: &Path,
     slug: &str,
     status: Option<String>,
     commits: Vec<String>,
+    expected_version: Option<String>,
 ) -> Result<UpdateOutcome> {
     let (folder, item_path) = locate_issue(root, slug)?;
     if folder == "closed" {
@@ -996,6 +1008,7 @@ fn do_close(
             slug: slug.to_string(),
             status: Some(resolved_status),
             add_commits: commits,
+            expected_version,
             ..Default::default()
         },
     )
@@ -1447,7 +1460,7 @@ mod tests {
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
         let n = do_new(tmp.path(), a).unwrap();
-        let outcome = do_close(tmp.path(), &n.slug, None, vec![]).unwrap();
+        let outcome = do_close(tmp.path(), &n.slug, None, vec![], None).unwrap();
         assert!(outcome.moved_to_closed);
         let content = read(&outcome.final_dir.join("item.md"));
         assert!(content.contains("status: fixed"));
@@ -1461,7 +1474,7 @@ mod tests {
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
         let n = do_new(tmp.path(), a).unwrap();
-        let outcome = do_close(tmp.path(), &n.slug, None, vec![]).unwrap();
+        let outcome = do_close(tmp.path(), &n.slug, None, vec![], None).unwrap();
         let content = read(&outcome.final_dir.join("item.md"));
         assert!(content.contains("status: done"));
     }
@@ -1474,8 +1487,8 @@ mod tests {
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
         let n = do_new(tmp.path(), a).unwrap();
-        do_close(tmp.path(), &n.slug, None, vec![]).unwrap();
-        assert!(do_close(tmp.path(), &n.slug, None, vec![]).is_err());
+        do_close(tmp.path(), &n.slug, None, vec![], None).unwrap();
+        assert!(do_close(tmp.path(), &n.slug, None, vec![], None).is_err());
     }
 
     #[test]

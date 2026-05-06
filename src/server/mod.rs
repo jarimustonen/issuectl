@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::http::{header, HeaderName, HeaderValue, Request};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use tokio::net::TcpListener;
@@ -47,6 +47,32 @@ impl Default for ServeOptions {
 pub struct AppState {
     pub root: Arc<PathBuf>,
     pub event_hub: Arc<EventHub>,
+    /// Per-process random token (32 hex chars). Required in
+    /// `X-Issuectl-CSRF` on every state-changing route. Bootstrap via
+    /// `GET /api/session`. Restart → new token; `localStorage` from a
+    /// prior process is invalidated.
+    pub csrf_token: Arc<str>,
+    /// `host:port` strings the server will accept as `Host` headers.
+    /// Populated from the actual bound socket so DNS rebinding cannot
+    /// reach the write surface (§9.2). Test routers use a permissive
+    /// default; production uses the bound address plus its loopback
+    /// aliases.
+    pub allowed_hosts: Arc<Vec<String>>,
+}
+
+impl AppState {
+    /// Test-only constructor with permissive Host allow-list and a
+    /// fixed CSRF token. Production code uses `serve()` which builds
+    /// the same struct with values derived from the bound socket.
+    #[cfg(test)]
+    pub fn for_test(root: PathBuf) -> Self {
+        AppState {
+            root: Arc::new(root),
+            event_hub: Arc::new(EventHub::new()),
+            csrf_token: Arc::from(""),
+            allowed_hosts: Arc::new(Vec::new()),
+        }
+    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -60,12 +86,93 @@ pub fn router(state: AppState) -> Router {
             "/assets/theme-bootstrap.js",
             get(render::theme_bootstrap_js),
         )
-        .route("/api/issues", get(api::list_issues))
-        .route("/api/issues/{slug}", get(api::get_issue))
+        .route("/api/session", get(api::session))
+        .route(
+            "/api/issues",
+            get(api::list_issues).post(api::create_issue),
+        )
+        .route(
+            "/api/issues/{slug}",
+            get(api::get_issue).patch(api::patch_issue),
+        )
         .route("/api/issues/{slug}/docs/{name}", get(api::get_doc))
         .route("/events", get(api::events_stream))
         .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            host_and_csrf_guard,
+        ))
         .with_state(state)
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
+}
+
+/// Reject state-changing requests whose `Host` header does not match
+/// the bound socket, or that lack a valid `X-Issuectl-CSRF` token. The
+/// `Host` check defeats DNS rebinding (§9.1); the CSRF check defeats
+/// ambient-authority CSRF from a malicious local process or browser
+/// tab on another origin (§9.2). Read endpoints are allowed through
+/// host-checked but token-free so the SSE handshake works without a
+/// header (cookies cover its auth).
+async fn host_and_csrf_guard(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    use axum::http::{Method, StatusCode};
+
+    // Host validation: applied to every request when an allow-list
+    // exists. Empty allow-list (test fixtures) waives the check.
+    if !state.allowed_hosts.is_empty() {
+        let host_ok = req
+            .headers()
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .map(|h| state.allowed_hosts.iter().any(|a| a == h))
+            .unwrap_or(false);
+        if !host_ok {
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(error_body("forbidden", "Host header not allowed", 403)),
+            )
+                .into_response();
+        }
+    }
+
+    // CSRF token required on PATCH / POST / PUT / DELETE.
+    let mutating = matches!(
+        *req.method(),
+        Method::PATCH | Method::POST | Method::PUT | Method::DELETE
+    );
+    if mutating && !state.csrf_token.is_empty() {
+        let header_ok = req
+            .headers()
+            .get("x-issuectl-csrf")
+            .and_then(|v| v.to_str().ok())
+            .map(|t| t == &*state.csrf_token)
+            .unwrap_or(false);
+        if !header_ok {
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(error_body(
+                    "forbidden",
+                    "missing or invalid X-Issuectl-CSRF token",
+                    403,
+                )),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
+fn error_body(code: &str, detail: &str, status: u16) -> serde_json::Value {
+    serde_json::json!({
+        "type": format!("https://issuectl/errors/{code}"),
+        "title": code.replace('_', " "),
+        "status": status,
+        "code": code,
+        "detail": detail,
+    })
 }
 
 /// Inject a defense-in-depth security header set on every response. The CSP
@@ -108,9 +215,20 @@ pub fn run(root: PathBuf, host: String, port: u16, options: ServeOptions) -> Res
 
 async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) -> Result<()> {
     let event_hub = Arc::new(EventHub::new());
+    let csrf_token: Arc<str> = Arc::from(generate_csrf_token());
+
+    let addr = format!("{host}:{port}");
+    let listener = TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("cannot bind {addr} (try `--port 0` for a random free port)"))?;
+    let bound = listener.local_addr()?;
+    let allowed_hosts = host_allow_list(&bound);
+
     let state = AppState {
         root: Arc::new(root.clone()),
         event_hub: event_hub.clone(),
+        csrf_token,
+        allowed_hosts: Arc::new(allowed_hosts),
     };
 
     // Watcher: a separate tokio task. We materialise `issues/open` and
@@ -142,11 +260,6 @@ async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) ->
         None
     };
 
-    let addr = format!("{host}:{port}");
-    let listener = TcpListener::bind(&addr)
-        .await
-        .with_context(|| format!("cannot bind {addr} (try `--port 0` for a random free port)"))?;
-    let bound = listener.local_addr()?;
     eprintln!("issuectl serving on http://{bound}");
     if !bound.ip().is_loopback() {
         eprintln!(
@@ -171,6 +284,33 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+/// 256-bit hex token. Used as the per-process CSRF gate. Reusing
+/// `Uuid::new_v4` would also work and pulls no new deps; explicit hex
+/// of `rand::random::<[u8;32]>()` makes the entropy budget obvious.
+fn generate_csrf_token() -> String {
+    use rand::RngCore;
+    let mut buf = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
+/// Host allow-list for the loopback bind. Includes the bound socket
+/// plus the standard loopback aliases at the same port. A non-loopback
+/// bind only allows the literal bound `host:port` (no aliases) — the
+/// network case is documented as trusted-network-only.
+fn host_allow_list(bound: &std::net::SocketAddr) -> Vec<String> {
+    let port = bound.port();
+    let mut out = vec![format!("{}", bound)];
+    if bound.ip().is_loopback() {
+        out.push(format!("127.0.0.1:{port}"));
+        out.push(format!("localhost:{port}"));
+        out.push(format!("[::1]:{port}"));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,9 +327,18 @@ mod tests {
     }
 
     fn make_router(root: &Path) -> axum::Router {
+        router(AppState::for_test(root.to_path_buf()))
+    }
+
+    /// Router with CSRF + Host enforcement turned on, for the M1
+    /// security-gate tests. The token and host list are well-known so
+    /// tests can either supply them (and pass) or omit them (and 403).
+    fn make_secured_router(root: &Path) -> axum::Router {
         router(AppState {
             root: Arc::new(root.to_path_buf()),
             event_hub: Arc::new(EventHub::new()),
+            csrf_token: Arc::from("testtoken"),
+            allowed_hosts: Arc::new(vec!["test.invalid:7878".into()]),
         })
     }
 
@@ -604,6 +753,243 @@ mod tests {
         assert_eq!(h.get("x-content-type-options").unwrap(), "nosniff");
         assert_eq!(h.get("referrer-policy").unwrap(), "no-referrer");
         assert_eq!(h.get("x-frame-options").unwrap(), "DENY");
+    }
+
+    // ── M1: write surface ─────────────────────────────────────────
+
+    fn seed_open_issue(root: &Path, slug: &str) {
+        let dir = root.join("issues/open").join(slug);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\npriority: normal\n---\n\n# T\n",
+        )
+        .unwrap();
+    }
+
+    /// Compute the canonical version directly from disk for a seeded
+    /// issue.
+    fn version_on_disk(root: &Path, slug: &str) -> String {
+        let p = root.join("issues/open").join(slug).join("item.md");
+        let parsed =
+            crate::parser::parse_item_md_with_warnings(&p, slug, "open");
+        crate::canonical::canonical_hash(&parsed.issue)
+    }
+
+    #[tokio::test]
+    async fn session_returns_csrf_token_and_sets_cookie() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        let r = make_secured_router(tmp.path());
+        let resp = r
+            .oneshot(
+                Request::get("/api/session")
+                    .header("host", "test.invalid:7878")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cookie = resp
+            .headers()
+            .get("set-cookie")
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        assert!(cookie.contains("HttpOnly"), "cookie: {cookie}");
+        assert!(cookie.contains("SameSite=Strict"), "cookie: {cookie}");
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert_eq!(body["csrf_token"], "testtoken");
+    }
+
+    #[tokio::test]
+    async fn patch_without_csrf_token_is_forbidden() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "patch-without-token");
+        let r = make_secured_router(tmp.path());
+        let resp = r
+            .oneshot(
+                Request::patch("/api/issues/patch-without-token")
+                    .header("host", "test.invalid:7878")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"priority":"high"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn patch_with_wrong_host_is_forbidden() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "patch-wrong-host");
+        let r = make_secured_router(tmp.path());
+        let resp = r
+            .oneshot(
+                Request::patch("/api/issues/patch-wrong-host")
+                    .header("host", "evil.example:80")
+                    .header("x-issuectl-csrf", "testtoken")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"priority":"high"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn patch_with_fresh_version_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "patch-fresh-vers");
+        let v = version_on_disk(tmp.path(), "patch-fresh-vers");
+        let r = make_router(tmp.path());
+        let payload = serde_json::json!({
+            "expected_version": v,
+            "priority": "high",
+        });
+        let resp = r
+            .oneshot(
+                Request::patch("/api/issues/patch-fresh-vers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert!(body["version"].as_str().unwrap().starts_with("sha256:"));
+    }
+
+    #[tokio::test]
+    async fn patch_with_stale_version_returns_409_with_issue() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "patch-stale-vers");
+        let r = make_router(tmp.path());
+        let payload = serde_json::json!({
+            "expected_version": "sha256:deadbeef",
+            "priority": "high",
+        });
+        let resp = r
+            .oneshot(
+                Request::patch("/api/issues/patch-stale-vers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert_eq!(body["code"], "version_mismatch");
+        assert_eq!(body["issue"]["slug"], "patch-stale-vers");
+        assert!(body["version"].as_str().unwrap().starts_with("sha256:"));
+    }
+
+    #[tokio::test]
+    async fn patch_status_to_closing_renames_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "patch-close-dir");
+        let r = make_router(tmp.path());
+        let payload = serde_json::json!({ "status": "fixed" });
+        let resp = r
+            .oneshot(
+                Request::patch("/api/issues/patch-close-dir")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert!(body["moved_to_closed"].as_bool().unwrap());
+        assert!(tmp
+            .path()
+            .join("issues/closed/patch-close-dir/item.md")
+            .exists());
+        assert!(!tmp.path().join("issues/open/patch-close-dir").exists());
+    }
+
+    #[tokio::test]
+    async fn patch_with_unknown_field_returns_400() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "patch-typo-fld");
+        let r = make_router(tmp.path());
+        let payload = r#"{"priorty": "high"}"#;
+        let resp = r
+            .oneshot(
+                Request::patch("/api/issues/patch-typo-fld")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn patch_with_overlapping_add_remove_returns_400() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "patch-overlap-lbl");
+        let r = make_router(tmp.path());
+        let payload = serde_json::json!({
+            "add_labels": ["x"],
+            "remove_labels": ["x"],
+        });
+        let resp = r
+            .oneshot(
+                Request::patch("/api/issues/patch-overlap-lbl")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert_eq!(body["code"], "conflicting_intent");
+    }
+
+    #[tokio::test]
+    async fn post_creates_new_issue() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        let r = make_router(tmp.path());
+        let payload = serde_json::json!({
+            "type": "bug",
+            "title": "API created",
+            "slug": "api-create-test",
+            "reporter": "alice",
+            "assignee": "bob",
+            "priority": "high",
+        });
+        let resp = r
+            .oneshot(
+                Request::post("/api/issues")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert_eq!(body["slug"], "api-create-test");
+        assert!(body["version"].as_str().unwrap().starts_with("sha256:"));
+        assert!(tmp
+            .path()
+            .join("issues/open/api-create-test/item.md")
+            .exists());
     }
 
     #[tokio::test]

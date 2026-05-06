@@ -59,6 +59,16 @@ pub fn read_item(path: &Path) -> Result<ItemFile> {
 }
 
 pub fn write_item(path: &Path, item: &ItemFile) -> Result<()> {
+    let out = serialize_item(item)?;
+    fs::write(path, out).with_context(|| format!("cannot write {}", path.display()))?;
+    Ok(())
+}
+
+/// Serialize an `ItemFile` into the on-disk byte sequence (frontmatter +
+/// body), without writing it. Used by `mutate::write_item_atomic` so the
+/// serialized bytes can be staged in a `.issuectl-tmp-*` file and
+/// rename-persisted under the repo `flock`.
+pub fn serialize_item(item: &ItemFile) -> Result<String> {
     let yaml = serialize_frontmatter(&item.frontmatter)?;
     let mut out = String::new();
     out.push_str("---\n");
@@ -71,8 +81,7 @@ pub fn write_item(path: &Path, item: &ItemFile) -> Result<()> {
     if !item.body.ends_with('\n') {
         out.push('\n');
     }
-    fs::write(path, out).with_context(|| format!("cannot write {}", path.display()))?;
-    Ok(())
+    Ok(out)
 }
 
 fn split_text(text: &str) -> (Option<&str>, Option<&str>) {
