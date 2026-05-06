@@ -1,11 +1,14 @@
 use std::cell::Cell;
 use std::hash::{BuildHasher, RandomState};
+use std::path::Path;
 
 pub mod wordlists;
 
 use wordlists::adjectives::ADJECTIVES;
 use wordlists::intensifiers::INTENSIFIERS;
 use wordlists::nouns::NOUNS;
+
+const COLLISION_RETRY_CAP: usize = 8;
 
 thread_local! {
     /// Per-thread xorshift state. Seeded from the standard library's
@@ -54,6 +57,36 @@ pub fn generate() -> String {
 }
 
 /// Generate a slug that does not collide with an existing directory under
+/// `issues/{open,closed}/<slug>/`. Loops up to [`COLLISION_RETRY_CAP`]
+/// times. With ~105M combinations (1094 intensifiers' worth ≈ 99 ×
+/// 1094 adjectives × 978 nouns), the birthday-paradox 50% mark sits
+/// around 12 000 issues — eight retries against any realistic
+/// half-full namespace gives ample headroom. If even that fails, the
+/// caller must regenerate (the atomic claim loop in `do_new` does
+/// exactly that).
+pub fn generate_unique(repo_root: &Path) -> String {
+    for _ in 0..COLLISION_RETRY_CAP {
+        let s = generate();
+        if !slug_exists(repo_root, &s) {
+            return s;
+        }
+    }
+    // Last-resort: return a fresh slug without re-checking. The caller
+    // (`do_new`'s atomic claim loop) will detect the collision via
+    // `fs::create_dir`'s EEXIST and try again — so we don't need a
+    // hex-suffixed fallback that would itself fail `is_valid`.
+    generate()
+}
+
+fn slug_exists(repo_root: &Path, slug: &str) -> bool {
+    for folder in &["open", "closed"] {
+        if repo_root.join("issues").join(folder).join(slug).exists() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Validate that `s` is a usable slug. The canonical slug shape:
 /// - At least two `-`-separated segments (single-word slugs would collide
 ///   with random `intensifier-adjective-noun` slugs unintentionally).
