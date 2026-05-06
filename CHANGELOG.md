@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-06
+
+The 0.3.0 release pipeline published binaries built from the
+pre-restoration commit (missing the doctor parse-warnings surfacing
+shipped on top). 0.3.1 republishes from the actual head with all
+intended changes included; no behavior changes vs. the source tree
+that 0.3.0 was supposed to ship.
+
+### Fixed
+- `issuectl doctor` now surfaces YAML parse warnings in both the text
+  report (new "Parse warnings:" section) and JSON output (new
+  `parse_errors` field), instead of silently printing to stderr while
+  the summary claimed "Repository OK". Skipped for legacy `<NN>-slug`
+  dirs since the migration pass rewrites their frontmatter.
+
 ## [0.3.0] - 2026-05-06
 
 This release adds a local web board for browsing issues visually and a
