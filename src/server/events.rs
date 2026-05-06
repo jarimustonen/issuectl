@@ -6,8 +6,17 @@
 //! broadcast channel *before* snapshotting the ring under the same lock,
 //! so events landing during the handoff arrive via the live stream and
 //! are de-duplicated by `drop_through` at the SSE handler.
+//!
+//! Events live on the wire as `Arc<BoardEvent>` (D1): in M1, `publish`
+//! is invoked while holding the repo `flock` (§3.1 step 8), so the
+//! critical section under `EventHub.inner` must stay cheap. With Arc,
+//! `subscribe_since`'s ring snapshot only clones pointer counts —
+//! never the heavyweight `IssueSummary` payload — keeping flock-hold
+//! time O(ring_size) pointer-bumps instead of O(ring_size) string +
+//! vec deep-copies.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -56,14 +65,14 @@ pub enum EventPayload {
 
 pub struct EventHub {
     inner: Mutex<EventHubInner>,
-    tx: broadcast::Sender<BoardEvent>,
+    tx: broadcast::Sender<Arc<BoardEvent>>,
     capacity: usize,
     instance_id: Uuid,
 }
 
 struct EventHubInner {
     next_seq: u64,
-    ring: VecDeque<BoardEvent>,
+    ring: VecDeque<Arc<BoardEvent>>,
 }
 
 impl EventHub {
@@ -100,21 +109,22 @@ impl EventHub {
     /// Allocate a seq, push to ring, and broadcast. Returns the published
     /// event so callers can log/inspect. Callers in `mutate.rs` (M1) must
     /// invoke this *before* releasing the repo `flock`.
-    pub fn publish(&self, payload: EventPayload) -> BoardEvent {
+    pub fn publish(&self, payload: EventPayload) -> Arc<BoardEvent> {
         let evt = {
             let mut g = self.inner.lock();
             g.next_seq += 1;
-            let evt = BoardEvent {
+            let evt = Arc::new(BoardEvent {
                 seq: g.next_seq,
                 payload,
-            };
+            });
             while g.ring.len() >= self.capacity {
                 g.ring.pop_front();
             }
-            g.ring.push_back(evt.clone());
+            g.ring.push_back(evt.clone()); // Arc clone — pointer bump only
             evt
         };
-        // Drop lock before send so a slow subscriber can't stall publishers.
+        // Drop lock before send so a slow subscriber can't stall
+        // publishers (and so flock hold time stays bounded in M1).
         let _ = self.tx.send(evt.clone());
         evt
     }
@@ -124,7 +134,7 @@ impl EventHub {
     /// `subscribe_since` so the subscriber sees both replay and live
     /// events with the race-free handoff.
     #[cfg(test)]
-    pub fn tx_subscribe_for_test(&self) -> broadcast::Receiver<BoardEvent> {
+    pub fn tx_subscribe_for_test(&self) -> broadcast::Receiver<Arc<BoardEvent>> {
         self.tx.subscribe()
     }
 
@@ -157,7 +167,7 @@ impl EventHub {
             if oldest_seq > since + 1 {
                 Replay::TooOld { reason: "gap" }
             } else {
-                let evts: Vec<BoardEvent> =
+                let evts: Vec<Arc<BoardEvent>> =
                     g.ring.iter().filter(|e| e.seq > since).cloned().collect();
                 Replay::Events(evts)
             }
@@ -182,13 +192,13 @@ impl Default for EventHub {
 
 #[derive(Debug)]
 pub enum Replay {
-    Events(Vec<BoardEvent>),
+    Events(Vec<Arc<BoardEvent>>),
     TooOld { reason: &'static str },
 }
 
 pub struct ReplayStream {
     pub replay: Replay,
-    pub rx: broadcast::Receiver<BoardEvent>,
+    pub rx: broadcast::Receiver<Arc<BoardEvent>>,
     pub drop_through: u64,
 }
 

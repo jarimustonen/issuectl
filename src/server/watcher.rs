@@ -544,7 +544,7 @@ mod tests {
         .await
         .expect("timed out waiting for IssueUpserted");
 
-        if let EventPayload::IssueUpserted { version, issue, .. } = upserted.payload {
+        if let EventPayload::IssueUpserted { version, issue, .. } = &upserted.payload {
             assert!(version.starts_with("sha256:"), "version: {version}");
             assert_eq!(issue.title, "It works");
         } else {

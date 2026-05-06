@@ -273,28 +273,28 @@ pub async fn events_stream(
     // D2: instance mismatch — short-circuit. Old cursor is meaningless
     // in this process; subscribe at current_seq, send only the Resync,
     // and forward only live events from this point onward.
-    let (mut prefix, stream_handle) = if instance_mismatch {
+    let (mut prefix, stream_handle): (Vec<std::sync::Arc<BoardEvent>>, _) = if instance_mismatch {
         let handle = state
             .event_hub
             .subscribe_since(state.event_hub.current_seq());
-        let prefix = vec![BoardEvent {
+        let prefix = vec![std::sync::Arc::new(BoardEvent {
             seq: 0,
             payload: EventPayload::Resync {
                 reason: "instance_changed".to_string(),
             },
-        }];
+        })];
         (prefix, handle)
     } else {
         let handle = state.event_hub.subscribe_since(since);
         let mut prefix = Vec::new();
         match &handle.replay {
             Replay::Events(v) => prefix.extend(v.iter().cloned()),
-            Replay::TooOld { reason } => prefix.push(BoardEvent {
+            Replay::TooOld { reason } => prefix.push(std::sync::Arc::new(BoardEvent {
                 seq: 0,
                 payload: EventPayload::Resync {
                     reason: reason.to_string(),
                 },
-            }),
+            })),
         }
         (prefix, handle)
     };
@@ -313,12 +313,12 @@ pub async fn events_stream(
                     Ok(_) => Some(None), // duplicate covered by replay
                     Err(_lag) => {
                         *ended = true;
-                        Some(Some(BoardEvent {
+                        Some(Some(std::sync::Arc::new(BoardEvent {
                             seq: 0,
                             payload: EventPayload::Resync {
                                 reason: "lagged".to_string(),
                             },
-                        }))
+                        })))
                     }
                 }
             };
@@ -328,16 +328,18 @@ pub async fn events_stream(
 
     // Drain the prefix vec into a stream once.
     let prefix_stream = futures_util::stream::iter(std::mem::take(&mut prefix));
-    let combined = prefix_stream.chain(live).map(|evt: BoardEvent| {
-        let mut event = Event::default()
-            .data(serde_json::to_string(&evt).expect("BoardEvent serialization cannot fail"));
-        // F2: only attach `id:` for real events. Empty `id:` per SSE
-        // spec sets lastEventId to empty, breaking reconnect cursor.
-        if evt.seq != 0 {
-            event = event.id(evt.seq.to_string());
-        }
-        Ok::<Event, Infallible>(event)
-    });
+    let combined = prefix_stream
+        .chain(live)
+        .map(|evt: std::sync::Arc<BoardEvent>| {
+            let mut event = Event::default()
+                .data(serde_json::to_string(&*evt).expect("BoardEvent serialization cannot fail"));
+            // F2: only attach `id:` for real events. Empty `id:` per SSE
+            // spec sets lastEventId to empty, breaking reconnect cursor.
+            if evt.seq != 0 {
+                event = event.id(evt.seq.to_string());
+            }
+            Ok::<Event, Infallible>(event)
+        });
 
     Sse::new(combined).keep_alive(
         // 15 s is well under typical reverse-proxy/browser idle timeouts
