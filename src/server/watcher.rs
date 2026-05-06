@@ -24,7 +24,7 @@ use notify_debouncer_full::{DebounceEventResult, DebouncedEvent};
 use tokio::sync::mpsc;
 
 use super::events::{EventHub, EventPayload};
-use crate::repo::{self, IssueSummary};
+use crate::repo::IssueSummary;
 use crate::slug;
 
 /// Watcher configuration. All defaults match the design doc §5–§5.7.
@@ -222,119 +222,172 @@ async fn handle_batch(
         return;
     }
 
+    // F16: parse all slugs concurrently via spawn_blocking, then
+    // publish in a deterministic order. Sequential await would stall
+    // a 49-slug batch on 49 disk reads in a row.
+    let root = cfg.root.clone();
+    let mut tasks = Vec::with_capacity(affected.len());
     for slug in affected {
-        let root = cfg.root.clone();
-        let parsed = tokio::task::spawn_blocking(move || parse_slug_state(&root, &slug))
-            .await
-            .unwrap_or_else(|_| ParseOutcome::Vanished {
-                slug: String::new(),
-            });
-        match parsed {
-            ParseOutcome::Loaded {
-                slug,
-                summary,
-                version,
-            } => {
-                hub.publish(EventPayload::IssueUpserted {
-                    slug,
-                    version,
-                    issue: summary,
+        let r = root.clone();
+        tasks.push((
+            slug.clone(),
+            tokio::task::spawn_blocking(move || parse_slug_state(&r, &slug)),
+        ));
+    }
+
+    let mut removed = Vec::new();
+    let mut invalid = Vec::new();
+    let mut upserted = Vec::new();
+    for (slug, task) in tasks {
+        match task.await {
+            Ok(ParseOutcome::Vanished) => removed.push(slug),
+            Ok(ParseOutcome::Invalid { warnings }) => invalid.push((slug, warnings)),
+            Ok(ParseOutcome::Loaded { summary, version }) => {
+                upserted.push((slug, summary, version))
+            }
+            Err(join_err) => {
+                // F8: A panic in parse_slug_state lands here. Don't
+                // silently drop the slug — log and emit a Resync so the
+                // client refetches authoritative state.
+                log_warn(&format!("parse task failed for {slug}: {join_err}"));
+                hub.publish(EventPayload::Resync {
+                    reason: "parse_task_failed".to_string(),
                 });
+                return;
             }
-            ParseOutcome::Invalid { slug, warnings } => {
-                hub.publish(EventPayload::IssueInvalid { slug, warnings });
-            }
-            ParseOutcome::Vanished { slug } if !slug.is_empty() => {
-                hub.publish(EventPayload::IssueRemoved { slug });
-            }
-            ParseOutcome::Vanished { .. } => {}
         }
+    }
+
+    // F20: publish Removed before Upserted so a slug rename (Remove
+    // old + Upsert new in one batch) lands in the right order on the
+    // client. Within each class we sort by slug so that interleaving
+    // is also deterministic across runs (helps testing).
+    removed.sort();
+    invalid.sort_by(|a, b| a.0.cmp(&b.0));
+    upserted.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for slug in removed {
+        hub.publish(EventPayload::IssueRemoved { slug });
+    }
+    for (slug, warnings) in invalid {
+        hub.publish(EventPayload::IssueInvalid { slug, warnings });
+    }
+    for (slug, summary, version) in upserted {
+        hub.publish(EventPayload::IssueUpserted {
+            slug,
+            version,
+            issue: summary,
+        });
     }
 }
 
 enum ParseOutcome {
     Loaded {
-        slug: String,
         summary: Box<IssueSummary>,
         version: String,
     },
     Invalid {
-        slug: String,
         warnings: Vec<crate::repo::LoadWarning>,
     },
-    Vanished {
-        slug: String,
-    },
+    Vanished,
 }
 
 /// Re-derive the on-disk state of one slug. Runs in `spawn_blocking`.
+///
+/// The returned outcome distinguishes three filesystem states:
+/// - **Vanished**: neither `issues/open/<slug>/` nor `issues/closed/<slug>/`
+///   exists, or the slug shape is invalid. Watcher emits `IssueRemoved`.
+/// - **Invalid**: the issue dir exists but `item.md` cannot be parsed
+///   cleanly (missing, invalid YAML, both folders contain it). Watcher
+///   emits `IssueInvalid` so the card stays visible with an error
+///   badge — never silently disappear (§5.6, §8.6).
+/// - **Loaded**: parsed successfully. Watcher emits `IssueUpserted`.
+///
+/// Read-once-then-parse so the published `IssueSummary` and `version`
+/// always describe the same byte image of `item.md` (no TOCTOU between
+/// a "read for parse" and "read for hash" pair of syscalls).
 fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
     if !slug::is_valid(slug) {
-        return ParseOutcome::Vanished {
-            slug: slug.to_string(),
-        };
+        return ParseOutcome::Vanished;
     }
-    let issue = match repo::load_issue(root, slug) {
-        Ok(i) => i,
-        Err(_) => {
-            return ParseOutcome::Vanished {
-                slug: slug.to_string(),
+
+    let open_dir = root.join("issues").join("open").join(slug);
+    let closed_dir = root.join("issues").join("closed").join(slug);
+    let open_exists = is_real_dir(&open_dir);
+    let closed_exists = is_real_dir(&closed_dir);
+
+    let folder = match (open_exists, closed_exists) {
+        (false, false) => return ParseOutcome::Vanished,
+        (true, true) => {
+            // Both folders present is the "ambiguous slug" state from
+            // §3.4. Don't pick a side here; surface as Invalid so the
+            // user is forced to resolve it.
+            return ParseOutcome::Invalid {
+                warnings: vec![crate::repo::LoadWarning {
+                    slug: slug.to_string(),
+                    folder: "open+closed".to_string(),
+                    message: format!(
+                        "ambiguous slug: present in both open/ and closed/ — \
+                         resolve manually before issuectl serve will trust this issue"
+                    ),
+                }],
+            };
+        }
+        (true, false) => "open",
+        (false, true) => "closed",
+    };
+
+    let dir = if folder == "open" {
+        open_dir
+    } else {
+        closed_dir
+    };
+    let item_path = dir.join("item.md");
+    let text = match std::fs::read_to_string(&item_path) {
+        Ok(t) => t,
+        Err(e) => {
+            // Folder exists but item.md doesn't (or is unreadable):
+            // partial-write or `mkdir` without a save. Surface as
+            // Invalid, not Vanished — operator should see the error.
+            return ParseOutcome::Invalid {
+                warnings: vec![crate::repo::LoadWarning {
+                    slug: slug.to_string(),
+                    folder: folder.to_string(),
+                    message: format!("cannot read {}: {}", item_path.display(), e),
+                }],
             };
         }
     };
 
-    // Read item.md raw to (a) detect parse-warning issues and (b) compute
-    // a content hash that uniquely identifies this on-disk state for
-    // client-side echo suppression once writes ship in M1.
-    let item_path = root
-        .join("issues")
-        .join(&issue.folder)
-        .join(&issue.slug)
-        .join("item.md");
-    let raw = match std::fs::read(&item_path) {
-        Ok(b) => b,
-        Err(_) => {
-            return ParseOutcome::Vanished {
-                slug: slug.to_string(),
-            };
-        }
-    };
-
-    // Re-run the warning-collecting parser; if anything is malformed
-    // surface IssueInvalid rather than Upserted with default fields.
-    let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, &issue.folder);
+    let parsed = crate::parser::parse_item_md_text_with_warnings(&text, slug, folder, &item_path);
     if !parsed.warnings.is_empty() {
         let warnings = parsed
             .warnings
             .into_iter()
             .map(|w| crate::repo::LoadWarning {
                 slug: slug.to_string(),
-                folder: issue.folder.clone(),
+                folder: folder.to_string(),
                 message: w,
             })
             .collect();
-        return ParseOutcome::Invalid {
-            slug: slug.to_string(),
-            warnings,
-        };
+        return ParseOutcome::Invalid { warnings };
     }
 
-    let version = content_version(&raw);
+    let version = crate::canonical::canonical_hash(&parsed.issue);
     ParseOutcome::Loaded {
-        slug: slug.to_string(),
-        summary: Box::new(IssueSummary::from(issue)),
+        summary: Box::new(IssueSummary::from(parsed.issue)),
         version,
     }
 }
 
-/// Quick file-bytes SHA-256 used as the M0 version. M1 replaces this
-/// with `mutate.rs::canonical_hash` so that no-op edits don't churn the
-/// version. For now clients only use it as an opaque equality token.
-fn content_version(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(bytes);
-    format!("sha256:{}", hex::encode(h.finalize()))
+/// Real (non-symlink) directory check. Mirrors `repo::locate_issue`'s
+/// stance: a symlinked entry is treated as not-a-real-dir to keep
+/// notify-driven watching consistent with the read path.
+fn is_real_dir(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) => m.is_dir() && !m.file_type().is_symlink(),
+        Err(_) => false,
+    }
 }
 
 fn is_relevant_kind(kind: &EventKind) -> bool {

@@ -1,3 +1,4 @@
+mod canonical;
 mod docs;
 mod doctor;
 mod models;

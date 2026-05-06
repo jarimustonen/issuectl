@@ -50,26 +50,37 @@ pub struct ParsedItem {
 }
 
 pub fn parse_item_md_with_warnings(path: &Path, slug: &str, folder: &str) -> ParsedItem {
-    let mut warnings = Vec::new();
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
-            warnings.push(format!("cannot read {}: {}", path.display(), e));
             return ParsedItem {
                 issue: default_issue(slug, folder),
-                warnings,
+                warnings: vec![format!("cannot read {}: {}", path.display(), e)],
             };
         }
     };
+    parse_item_md_text_with_warnings(&text, slug, folder, path)
+}
 
-    let (frontmatter, body) = split_frontmatter(&text);
+/// Variant of `parse_item_md_with_warnings` that takes already-loaded
+/// text. The watcher uses this so a single read of `item.md` produces
+/// both the parsed `Issue` and the canonical hash, eliminating TOCTOU
+/// between separate read syscalls.
+pub fn parse_item_md_text_with_warnings(
+    text: &str,
+    slug: &str,
+    folder: &str,
+    source: &Path,
+) -> ParsedItem {
+    let mut warnings = Vec::new();
+    let (frontmatter, body) = split_frontmatter(text);
     let fm = match frontmatter {
         Some(yaml_text) => match serde_yaml::from_str::<Frontmatter>(yaml_text) {
             Ok(fm) => fm,
             Err(e) => {
                 warnings.push(format!(
                     "invalid YAML frontmatter in {}: {}",
-                    path.display(),
+                    source.display(),
                     e
                 ));
                 Frontmatter::default()
@@ -85,7 +96,7 @@ pub fn parse_item_md_with_warnings(path: &Path, slug: &str, folder: &str) -> Par
         if !e.is_empty() && e.chars().all(|c| c.is_ascii_digit()) {
             warnings.push(format!(
                 "{}: epic: {} is a legacy numeric ref — run `issuectl doctor --fix`",
-                path.display(),
+                source.display(),
                 e
             ));
         }
