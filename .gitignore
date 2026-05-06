@@ -2,3 +2,4 @@
 Cargo.lock.bak
 .DS_Store
 /history
+.claude/scheduled_tasks.lock
