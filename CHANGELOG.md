@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-06
+
+This release adds a local web board for browsing issues visually and a
+bundled docs command. `issuectl doctor --fix` is preserved as the
+upgrade path for repos still on the legacy `<NN>-<slug>` layout.
+
+### Added
+- `issuectl serve` — a local, read-only web board (Trello-style) for
+  the current repo's `issues/`. Open + closed columns, issue detail
+  view with rendered markdown, and side docs from any sibling `*.md`
+  files in the issue directory. Defaults to `127.0.0.1:7878`;
+  `--host`/`--port` flags available, with a warning when bound to a
+  non-loopback address. JSON API under `/api/issues[/...]` for
+  programmatic use. Defense-in-depth security headers (CSP,
+  X-Content-Type-Options, Referrer-Policy, X-Frame-Options) on every
+  response, slug validation before any filesystem access, and rejection
+  of symlinks that escape an issue directory.
+- `issuectl docs [topic]` — bundled long-form documentation. First
+  topic `kanban` covers the web board (usage, scope, security, routes).
+  New topics drop into `templates/docs/` and register in `src/docs.rs`.
+- `/issue` skill: install instructions for teammates who land in a
+  repo using issuectl but haven't installed it yet (Homebrew, Cargo,
+  shell installer); pointer to `issuectl serve` + `issuectl docs
+  kanban` for visual browsing.
+
+### Fixed
+- `issuectl serve`: hardened against XSS via raw HTML in markdown
+  bodies (ammonia sanitization), tightened CSP, and rejected symlink
+  escape attempts in the side-docs endpoint.
+
 ## [0.2.0] - 2026-05-05
 
 This release replaces sequential issue numbering with random word slugs.
