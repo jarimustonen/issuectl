@@ -75,6 +75,8 @@ cargo test -- --nocapture        # see println! output
 - Run `cargo fmt --all` before committing.
 - Run `cargo clippy --all-targets` and resolve any new warnings in code
   you touched (pre-existing warnings can be addressed in a separate PR).
+- Optional: enable the tracked pre-push hook that mirrors CI's lint job
+  with `git config core.hooksPath .githooks` (one-off per clone).
 - Prefer dedicated tools over shelling out (use `fs::rename` rather than
   `git mv`; the user's commit captures renames anyway).
 - Don't add backwards-compat shims unless the change is a breaking one

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Mirror of CI lint job. Enable per-clone with:
+#   git config core.hooksPath .githooks
+set -euo pipefail
+
+echo "pre-push: cargo fmt --all -- --check"
+cargo fmt --all -- --check
+
+echo "pre-push: cargo clippy --all-targets"
+cargo clippy --all-targets
