@@ -33,6 +33,16 @@ pub enum WatcherBackend {
     Poll(Duration),
 }
 
+/// `run_once` failure modes. `Transient` failures retry with backoff
+/// up to `MAX_CONSECUTIVE_FAILURES`; `Terminal` failures skip retry
+/// and Degrade immediately. The classic Terminal case is
+/// `MaxFilesWatch` — burning 3 retries against an exhausted inotify
+/// limit is pointless and just delays the user-visible banner.
+enum RunFailure {
+    Transient(String),
+    Terminal(String),
+}
+
 use super::events::{EventHub, EventPayload};
 use crate::repo::IssueSummary;
 use crate::slug;
@@ -52,13 +62,23 @@ pub struct WatcherConfig {
     pub backend: WatcherBackend,
 }
 
+/// Latched degradation reason. Shared between the supervisor (writer
+/// on terminal Degraded) and the `/api/session` handler (reader). Lets
+/// fresh clients connecting after the SSE Degraded event aged out of
+/// replay still see the banner.
+pub type WatchDegraded = Arc<parking_lot::Mutex<Option<String>>>;
+
 /// Spawn the watcher supervisor. The returned handle lives for as long
 /// as the server; aborting it stops the watcher.
-pub fn spawn(hub: Arc<EventHub>, cfg: WatcherConfig) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move { supervisor(hub, cfg).await })
+pub fn spawn(
+    hub: Arc<EventHub>,
+    watch_degraded: WatchDegraded,
+    cfg: WatcherConfig,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move { supervisor(hub, watch_degraded, cfg).await })
 }
 
-async fn supervisor(hub: Arc<EventHub>, cfg: WatcherConfig) {
+async fn supervisor(hub: Arc<EventHub>, watch_degraded: WatchDegraded, cfg: WatcherConfig) {
     const MAX_CONSECUTIVE_FAILURES: u32 = 3;
     /// Minimum healthy runtime before failures are considered "consecutive".
     /// A watcher that ran successfully for ≥ this duration before failing
@@ -78,29 +98,36 @@ async fn supervisor(hub: Arc<EventHub>, cfg: WatcherConfig) {
             consecutive_failures = 0;
         }
 
-        let err_msg = match result {
+        let (err_msg, terminal) = match result {
             Ok(Ok(())) => {
                 // F4: run_once returns Ok(()) only on graceful shutdown
                 // (currently never — the loop only exits via Err). If we
                 // ever add an explicit shutdown signal the path is here.
                 return;
             }
-            Ok(Err(err)) => err,
+            Ok(Err(RunFailure::Transient(m))) => (m, false),
+            Ok(Err(RunFailure::Terminal(m))) => (m, true),
             Err(join_err) => {
                 if join_err.is_cancelled() {
                     // Task aborted (server shutdown). Stop cleanly.
                     return;
                 }
-                format!("watcher panicked: {join_err}")
+                (format!("watcher panicked: {join_err}"), false)
             }
         };
 
         consecutive_failures += 1;
         log_warn(&format!(
-            "watcher attempt failed (consecutive={consecutive_failures}): {err_msg}"
+            "watcher attempt failed (consecutive={consecutive_failures}, terminal={terminal}): {err_msg}"
         ));
 
-        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+        // M8: a Terminal classification short-circuits the retry budget.
+        // For inotify watch-limit exhaustion (`MaxFilesWatch`) further
+        // retries cannot succeed without operator action; emit Degraded
+        // immediately rather than burning ~600ms of useless backoff
+        // while the board sits silent.
+        if terminal || consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+            *watch_degraded.lock() = Some("watcher_unavailable".to_string());
             hub.publish(EventPayload::Degraded {
                 reason: "watcher_unavailable".to_string(),
             });
@@ -116,10 +143,11 @@ fn log_warn(msg: &str) {
     eprintln!("issuectl[watcher]: {msg}");
 }
 
-async fn run_once(hub: Arc<EventHub>, cfg: WatcherConfig) -> Result<(), String> {
+async fn run_once(hub: Arc<EventHub>, cfg: WatcherConfig) -> Result<(), RunFailure> {
     let issues_root = cfg.root.join("issues");
-    let issues_root_canon = std::fs::canonicalize(&issues_root)
-        .map_err(|e| format!("cannot canonicalize {}: {e}", issues_root.display()))?;
+    let issues_root_canon = std::fs::canonicalize(&issues_root).map_err(|e| {
+        RunFailure::Transient(format!("cannot canonicalize {}: {e}", issues_root.display()))
+    })?;
 
     // Channel from the (sync) debouncer callback into our async loop.
     // Unbounded: the debouncer already coalesces into windows, and a
@@ -169,7 +197,7 @@ async fn run_once(hub: Arc<EventHub>, cfg: WatcherConfig) -> Result<(), String> 
                 notify_debouncer_full::RecommendedCache::new(),
                 notify_config,
             )
-            .map_err(|e| format!("debouncer init: {e}"))?;
+            .map_err(|e| RunFailure::Transient(format!("debouncer init: {e}")))?;
             AnyDebouncer::Recommended(d)
         }
         WatcherBackend::Poll(interval) => {
@@ -185,18 +213,29 @@ async fn run_once(hub: Arc<EventHub>, cfg: WatcherConfig) -> Result<(), String> 
                 notify_debouncer_full::RecommendedCache::new(),
                 notify_config,
             )
-            .map_err(|e| format!("poll debouncer init: {e}"))?;
+            .map_err(|e| RunFailure::Transient(format!("poll debouncer init: {e}")))?;
             AnyDebouncer::Poll(d)
         }
     };
 
+    let watch_err_map = |e: notify::Error| {
+        // Hand back a Terminal so the supervisor stops burning the
+        // retry budget on cases where the next attempt cannot succeed
+        // without operator intervention.
+        let msg = format!("watch {}: {}", issues_root_canon.display(), e);
+        if is_terminal_notify_error(&e) {
+            RunFailure::Terminal(msg)
+        } else {
+            RunFailure::Transient(msg)
+        }
+    };
     match &mut debouncer {
         AnyDebouncer::Recommended(d) => d
             .watch(&issues_root_canon, RecursiveMode::Recursive)
-            .map_err(|e| format!("watch {}: {}", issues_root_canon.display(), e))?,
+            .map_err(watch_err_map)?,
         AnyDebouncer::Poll(d) => d
             .watch(&issues_root_canon, RecursiveMode::Recursive)
-            .map_err(|e| format!("watch {}: {}", issues_root_canon.display(), e))?,
+            .map_err(watch_err_map)?,
     }
 
     // F10: publish (re)start Resync only AFTER the watch is hooked.
@@ -220,8 +259,13 @@ async fn run_once(hub: Arc<EventHub>, cfg: WatcherConfig) -> Result<(), String> 
                 // F18: classify. Watch-removal/backend death → restart.
                 // Transient errors (queue overflow, IO blip) → Resync
                 // and keep running.
-                if errs.iter().any(is_fatal_notify_error) {
-                    return Err(format!("notify backend failed: {} errors", errs.len()));
+                if let Some(err) = errs.iter().find(|e| is_fatal_notify_error(e)) {
+                    let msg = format!("notify backend failed: {} errors", errs.len());
+                    return Err(if is_terminal_notify_error(err) {
+                        RunFailure::Terminal(msg)
+                    } else {
+                        RunFailure::Transient(msg)
+                    });
                 }
                 hub.publish(EventPayload::Resync {
                     reason: "gap".to_string(),
@@ -236,7 +280,9 @@ async fn run_once(hub: Arc<EventHub>, cfg: WatcherConfig) -> Result<(), String> 
     // Treat as failure so supervisor retries. Actual graceful shutdown
     // happens via task abort, not via this path.
     drop(debouncer);
-    Err("watcher event channel closed unexpectedly".to_string())
+    Err(RunFailure::Transient(
+        "watcher event channel closed unexpectedly".to_string(),
+    ))
 }
 
 /// Classify notify errors. Fatal kinds require a watcher restart;
@@ -249,6 +295,20 @@ fn is_fatal_notify_error(err: &notify::Error) -> bool {
             | ErrorKind::WatchNotFound
             | ErrorKind::MaxFilesWatch
             | ErrorKind::InvalidConfig(_)
+    )
+}
+
+/// Subset of fatal kinds where a retry can never succeed without
+/// operator action. The supervisor short-circuits the retry budget on
+/// these and Degrades immediately. `MaxFilesWatch` (inotify limit
+/// exhausted) and `InvalidConfig` (programmer error) are the canonical
+/// cases. `PathNotFound` / `WatchNotFound` stay transient — the watch
+/// dir might come back (e.g. brief unmount/remount).
+fn is_terminal_notify_error(err: &notify::Error) -> bool {
+    use notify::ErrorKind;
+    matches!(
+        err.kind,
+        ErrorKind::MaxFilesWatch | ErrorKind::InvalidConfig(_)
     )
 }
 
@@ -572,7 +632,8 @@ mod tests {
             bulk_threshold: 50,
             backend: WatcherBackend::Recommended,
         };
-        let handle = spawn(hub.clone(), cfg);
+        let watch_degraded: WatchDegraded = std::sync::Arc::new(parking_lot::Mutex::new(None));
+        let handle = spawn(hub.clone(), watch_degraded, cfg);
 
         // First wait out the synthetic Resync{watcher_restart} the
         // watcher emits once it hooks the watch.
@@ -620,11 +681,12 @@ mod tests {
     }
 
     /// Same end-to-end probe as `watcher_publishes_issue_upserted_for_new_file`,
-    /// but with the polling backend. Verifies that `--watch-poll-ms`
-    /// (`WatcherBackend::Poll`) produces a working watcher on every
-    /// platform — not just the ones whose native backend would also pick
-    /// up the create event. The poll interval is short so the test
-    /// completes within the same timeout budget as the native test.
+    /// but with the polling backend. A tempfs smoke test — proves the
+    /// `WatcherBackend::Poll` plumbing produces events end-to-end, not
+    /// that polling is robust on NFS/SMB / coarse-mtime filesystems
+    /// (those need separate environment-specific testing). The poll
+    /// interval is short so the test completes within the same
+    /// timeout budget as the native test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn watcher_poll_backend_publishes_issue_upserted() {
         use std::time::Duration;
@@ -643,7 +705,8 @@ mod tests {
             bulk_threshold: 50,
             backend: WatcherBackend::Poll(Duration::from_millis(100)),
         };
-        let handle = spawn(hub.clone(), cfg);
+        let watch_degraded: WatchDegraded = std::sync::Arc::new(parking_lot::Mutex::new(None));
+        let handle = spawn(hub.clone(), watch_degraded, cfg);
 
         let first = timeout(Duration::from_secs(2), rx.recv()).await;
         assert!(matches!(first, Ok(Ok(_))), "expected Resync, got {first:?}");
@@ -681,5 +744,67 @@ mod tests {
 
         handle.abort();
         let _ = handle.await;
+    }
+
+    /// C4: lock the supervisor's actually-load-bearing M3 behaviour.
+    /// Pointing the watcher at a non-existent root makes
+    /// `canonicalize` fail in `run_once` on every attempt; after 3
+    /// transient failures the supervisor must publish exactly one
+    /// `Degraded`, latch the reason into `watch_degraded`, and
+    /// terminate. Without this test the failure-budget logic and the
+    /// `WatchDegraded` plumbing rely on manual verification.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn supervisor_emits_degraded_after_three_start_failures() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Path doesn't contain `issues/`, so canonicalize fails.
+        let nonexistent_root = tmp.path().join("not-a-repo");
+
+        let hub = std::sync::Arc::new(EventHub::new());
+        let mut rx = hub.tx_subscribe_for_test();
+        let watch_degraded: WatchDegraded = std::sync::Arc::new(parking_lot::Mutex::new(None));
+
+        let cfg = WatcherConfig {
+            root: nonexistent_root,
+            debounce: Duration::from_millis(50),
+            bulk_threshold: 50,
+            backend: WatcherBackend::Recommended,
+        };
+        let handle = spawn(hub.clone(), watch_degraded.clone(), cfg);
+
+        let evt = timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(evt) => {
+                        if matches!(evt.payload, EventPayload::Degraded { .. }) {
+                            return evt;
+                        }
+                    }
+                    Err(e) => panic!("recv: {e}"),
+                }
+            }
+        })
+        .await
+        .expect("Degraded never arrived after 3 failed starts");
+
+        if let EventPayload::Degraded { reason } = &evt.payload {
+            assert_eq!(reason, "watcher_unavailable");
+        } else {
+            unreachable!()
+        }
+
+        // Supervisor must terminate after publishing Degraded.
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("supervisor should exit after Degraded")
+            .ok();
+
+        // The latched reason is what the /api/session handler reads.
+        assert_eq!(
+            watch_degraded.lock().clone(),
+            Some("watcher_unavailable".to_string())
+        );
     }
 }

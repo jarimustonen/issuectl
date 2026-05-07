@@ -410,16 +410,28 @@ button.card { font: inherit; text-align: left; width: 100%; }
   text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--gp-text-muted);
 }
-@media (max-width: 900px) {
+/* M9: at 900–1200px three columns are too narrow to be useful;
+   collapse to one column up to 1200px. */
+@media (max-width: 1200px) {
   .three-way-merge { grid-template-columns: 1fr; }
 }
 
 /* M3: degraded / no-watch banner. Distinct hue from the red parse
    warnings strip so the two surfaces don't visually merge when both
-   appear at once. */
+   appear at once. The amber tint is themed: dark mode needs more
+   saturation / opacity than light mode to read as a warning rather
+   than a tooltip. */
+:root, [data-theme="light"] {
+  --gp-warn-bg: rgba(234, 179, 8, 0.10);
+  --gp-warn-border: rgba(234, 179, 8, 0.45);
+}
+[data-theme="dark"] {
+  --gp-warn-bg: rgba(234, 179, 8, 0.18);
+  --gp-warn-border: rgba(234, 179, 8, 0.55);
+}
 .degraded-banner {
-  background: rgba(234, 179, 8, 0.10);
-  border: 1px solid rgba(234, 179, 8, 0.45);
+  background: var(--gp-warn-bg);
+  border: 1px solid var(--gp-warn-border);
   color: var(--gp-text);
   border-radius: 10px;
   padding: 0.75rem 1rem;

@@ -34,9 +34,9 @@ use ratelimit::TokenBucketLimiter;
 pub struct ServeOptions {
     pub watch_enabled: bool,
     pub watch_bulk_threshold: usize,
-    /// When `Some(ms)`, force the polling watcher backend (the documented
-    /// network-FS workaround per design §8.1). `None` → recommended
-    /// platform backend (inotify/FSEvents/ReadDirectoryChanges).
+    /// When `Some(interval)`, force the polling watcher backend (the
+    /// documented network-FS workaround per design §8.1). `None` →
+    /// recommended platform backend (inotify/FSEvents/ReadDirectoryChanges).
     pub watch_poll_interval: Option<std::time::Duration>,
     /// When true, allow PATCH/POST against issues even when bound to
     /// a non-loopback address. Default false: non-loopback binds are
@@ -80,11 +80,21 @@ pub struct AppState {
     /// 4 req/sec, burst 10. Keyed per-slug for body, single bucket
     /// for preview.
     pub body_limiter: Arc<TokenBucketLimiter>,
-    /// Reflects `--no-watch`. When false, the server runs without a
-    /// filesystem watcher (read-only board updates; SSE only carries
-    /// write-originated events). Surfaced to clients via `/api/session`
-    /// so the UI can promote the manual refresh button.
+    /// Reflects whether the watcher is *actually* running. False when
+    /// `--no-watch` was passed, when `issues/` doesn't exist on
+    /// startup, or when watcher spawn failed. Surfaced via
+    /// `/api/session` so the UI can promote the manual refresh button
+    /// and skip "live updates" affordances. Write-originated SSE
+    /// events still flow regardless.
     pub watch_enabled: bool,
+    /// Latched terminal degradation reason: `Some(...)` after the
+    /// supervisor has given up on the watcher (3 failed restarts per
+    /// §8.5). Read by `/api/session` so a client connecting *after*
+    /// the SSE `Degraded` event aged out of replay still sees the
+    /// banner. Writer is the watcher supervisor; readers are the
+    /// session handler. parking_lot::Mutex for cheap uncontended
+    /// access from the request thread.
+    pub watch_degraded: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 impl AppState {
@@ -101,6 +111,7 @@ impl AppState {
             writes_enabled: true,
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: true,
+            watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 }
@@ -322,15 +333,8 @@ async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) ->
         );
     }
 
-    let state = AppState {
-        root: Arc::new(root.clone()),
-        event_hub: event_hub.clone(),
-        csrf_token,
-        allowed_hosts: Arc::new(allowed_hosts),
-        writes_enabled,
-        body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
-        watch_enabled: options.watch_enabled,
-    };
+    let watch_degraded: Arc<parking_lot::Mutex<Option<String>>> =
+        Arc::new(parking_lot::Mutex::new(None));
 
     // Watcher: a separate tokio task. We materialise `issues/open` and
     // `issues/closed` at startup so the watcher always has something to
@@ -352,18 +356,53 @@ async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) ->
                 Some(interval) => watcher::WatcherBackend::Poll(interval),
                 None => watcher::WatcherBackend::Recommended,
             };
+            // M3 log: confirm to the operator which backend is active —
+            // hard to debug "polling didn't take effect" without it.
+            match backend {
+                watcher::WatcherBackend::Poll(interval) => eprintln!(
+                    "issuectl[serve]: watcher = polling backend, interval {}ms",
+                    interval.as_millis()
+                ),
+                watcher::WatcherBackend::Recommended => eprintln!(
+                    "issuectl[serve]: watcher = native backend"
+                ),
+            }
             let cfg = watcher::WatcherConfig {
                 root: root.clone(),
                 debounce: std::time::Duration::from_millis(150),
                 bulk_threshold: options.watch_bulk_threshold,
                 backend,
             };
-            Some(watcher::spawn(event_hub.clone(), cfg))
+            Some(watcher::spawn(event_hub.clone(), watch_degraded.clone(), cfg))
         } else {
+            eprintln!(
+                "issuectl[serve]: {} is not a directory — watcher disabled",
+                root.join("issues").display()
+            );
             None
         }
     } else {
+        eprintln!(
+            "issuectl[serve]: --no-watch — filesystem watcher disabled. \
+             External edits won't propagate; use the manual refresh button."
+        );
         None
+    };
+    // H1: AppState.watch_enabled reflects *actual* watcher state, not
+    // the user's intent. If `--no-watch` was passed, or the issues dir
+    // could not be created, or `is_dir()` was false, the watcher
+    // didn't spawn and clients should see the manual-refresh banner.
+    let actual_watch_enabled = watcher_handle.is_some();
+
+    let state = AppState {
+        root: Arc::new(root.clone()),
+        event_hub: event_hub.clone(),
+        csrf_token,
+        allowed_hosts: Arc::new(allowed_hosts),
+        writes_enabled,
+        body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
+        watch_enabled: actual_watch_enabled,
+        watch_degraded,
     };
 
     eprintln!("issuectl serving on http://{bound}");
@@ -448,6 +487,7 @@ mod tests {
             writes_enabled: true,
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: true,
+            watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
         })
     }
 
@@ -902,6 +942,7 @@ mod tests {
             writes_enabled: true,
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: false,
+            watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
         });
         let resp = r
             .oneshot(
@@ -914,13 +955,12 @@ mod tests {
         assert_eq!(body["watch_enabled"], false);
     }
 
-    /// The Degraded payload variant must round-trip through the SSE
-    /// publish path so the client can latch its banner. We don't drive
-    /// the watcher's 3-failure path (timing-sensitive); we publish the
-    /// payload directly and assert subscribers see it. The watcher's
-    /// "3 failed restarts → Degraded" sequence is exercised by the
-    /// supervisor logic itself; the wire-format coverage here pins the
-    /// contract independently.
+    /// The Degraded `EventPayload` variant must round-trip through the
+    /// broadcast channel. The supervisor's "3 failed restarts →
+    /// Degraded" sequence is exercised end-to-end by
+    /// `server::watcher::tests::supervisor_emits_degraded_after_three_start_failures`
+    /// (the actually-load-bearing path); this test only locks the
+    /// publish/recv contract independently.
     #[tokio::test]
     async fn degraded_event_propagates_to_subscribers() {
         let hub = Arc::new(EventHub::new());
@@ -935,6 +975,35 @@ mod tests {
             }
             other => panic!("expected Degraded, got {other:?}"),
         }
+    }
+
+    /// H1: `/api/session.degraded_reason` lets a client connecting
+    /// *after* the SSE Degraded event aged out of replay still
+    /// surface the banner. Without this, fresh tabs would silently
+    /// see "live updates on" while the watcher is dead.
+    #[tokio::test]
+    async fn session_surfaces_latched_degraded_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        let watch_degraded: Arc<parking_lot::Mutex<Option<String>>> =
+            Arc::new(parking_lot::Mutex::new(Some("watcher_unavailable".to_string())));
+        let r = router(AppState {
+            root: Arc::new(tmp.path().to_path_buf()),
+            event_hub: Arc::new(EventHub::new()),
+            csrf_token: Arc::from(""),
+            allowed_hosts: Arc::new(Vec::new()),
+            writes_enabled: true,
+            body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
+            watch_enabled: false,
+            watch_degraded,
+        });
+        let resp = r
+            .oneshot(Request::get("/api/session").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert_eq!(body["degraded_reason"], "watcher_unavailable");
     }
 
     #[tokio::test]
@@ -1177,6 +1246,7 @@ mod tests {
             writes_enabled: true,
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: true,
+            watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
         });
         let payload = serde_json::json!({ "status": "fixed" });
         let resp = r
@@ -1237,6 +1307,7 @@ mod tests {
             writes_enabled: false,
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: true,
+            watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
         });
         let resp = r
             .oneshot(

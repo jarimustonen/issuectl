@@ -359,7 +359,18 @@ enum Command {
         /// milliseconds. Use this on network filesystems (NFS/SMB)
         /// where `notify`'s native backend misses events. Default off:
         /// the platform-native backend is used.
-        #[arg(long, value_name = "MS", value_parser = clap::value_parser!(u64).range(50..))]
+        ///
+        /// Floor 500ms because the advertised use case is network
+        /// filesystems, where aggressive polling is exactly the wrong
+        /// default — recursive 50ms stat()s over NFS would make the
+        /// board itself the source of filesystem load. Upper bound
+        /// 60s prevents typos like `--watch-poll-ms 6000000` from
+        /// silently disabling polling. Tests build `WatcherBackend::
+        /// Poll` directly without going through clap, so this floor
+        /// does not affect test runtime.
+        #[arg(long, value_name = "MS",
+              conflicts_with = "no_watch",
+              value_parser = clap::value_parser!(u64).range(500..=60_000))]
         watch_poll_ms: Option<u64>,
 
         /// Enable PATCH/POST writes when bound to a non-loopback

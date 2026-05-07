@@ -97,6 +97,14 @@
         // predates M3 keeps the previous behaviour. --no-watch flips
         // this to false; the banner makes the implication visible.
         state.watch_enabled = s.watch_enabled !== false;
+        // M3: a fresh client connecting *after* the server already
+        // emitted Degraded over SSE would otherwise miss the banner —
+        // the event is past their replay window. Bootstrap reads the
+        // latched reason from /api/session so the banner appears
+        // immediately on page load if the watcher is already down.
+        if (typeof s.degraded_reason === 'string' && s.degraded_reason) {
+          state.degraded_reason = s.degraded_reason;
+        }
         renderDegradedBanner();
       })
       .catch(function () { /* best-effort: writes will 403 */ });
@@ -146,10 +154,16 @@
       );
     }
     if (state.degraded_reason) {
+      // The supervisor exits permanently after 3 failed restarts, so
+      // there is no in-process recovery — only a server restart re-
+      // enables live updates. Earlier copy promised "until the server
+      // recovers" which trapped users into refreshing forever.
+      // `degraded_reason` is server-supplied; escape defensively.
       parts.push(
         '<p><strong>Watcher unavailable.</strong> Reason: <code>' +
         escapeHtml(state.degraded_reason) +
-        '</code>. Use the refresh button until the server recovers.</p>'
+        '</code>. Restart <code>issuectl serve</code> to re-enable ' +
+        'live updates. Manual refresh still works.</p>'
       );
     }
     if (parts.length === 0) {
@@ -411,8 +425,13 @@
     // M2 review F2: drafts must round-trip the version they were started
     // against, otherwise a reload pairs an old body with the *current*
     // server version and silently overwrites whatever changed in the
-    // gap. Tolerate legacy plain-string drafts so a newly-deployed
-    // build doesn't lose drafts written by the previous version.
+    // gap. M3 adds `base_body` (the body that pairs with `base_version`)
+    // so the three-way merge UI can show the *real* base after a
+    // reload — without it, the "Base" pane silently shows the current
+    // on-disk body and lies to the user. Tolerate legacy plain-string
+    // and pre-M3 JSON drafts so newly-deployed builds don't lose work
+    // written by older versions; the conflict UI's "approximate" copy
+    // fires when `base_body` is null.
     if (rawValue == null) return null;
     if (rawValue.charAt && rawValue.charAt(0) === '{') {
       try {
@@ -420,18 +439,20 @@
         return {
           body: parsed.body || '',
           base_version: parsed.base_version || null,
+          base_body: typeof parsed.base_body === 'string' ? parsed.base_body : null,
           started_at: parsed.started_at || null,
         };
       } catch (e) { /* fall through to legacy string handling */ }
     }
-    return { body: String(rawValue), base_version: null, started_at: null };
+    return { body: String(rawValue), base_version: null, base_body: null, started_at: null };
   }
 
-  function writeDraft(key, body, base_version, started_at) {
+  function writeDraft(key, body, base_version, base_body, started_at) {
     try {
       localStorage.setItem(key, JSON.stringify({
         body: body,
         base_version: base_version,
+        base_body: base_body,
         started_at: started_at,
       }));
     } catch (e) { /* quota / private mode */ }
@@ -531,7 +552,7 @@
       // Crash-safe backup (§6.3). Includes base_version so a reload
       // restores the *correct* expected_version, not whatever happens
       // to be on disk now (M2 review F2).
-      writeDraft(editor.key, body, editor.base_version, editor.startedAt);
+      writeDraft(editor.key, body, editor.base_version, editor.base_body, editor.startedAt);
       if (editor.saving) editor.dirty_during_save = true;
       schedulePreview(body);
       scheduleAutosave();
@@ -573,6 +594,12 @@
         editor.base_version = existing.base_version;
         editor.expected_version = existing.base_version;
       }
+      // M3: pair base_version with the body that was on disk at the
+      // time. If the draft predates the M3 base_body field, set null
+      // explicitly — the conflict UI's "approximate" copy fires only
+      // for null, so leaving it as the current on-disk body would
+      // silently lie about what the base actually was.
+      editor.base_body = existing.base_body != null ? existing.base_body : null;
       editor.lastSavedBody = existing.body;
       schedulePreview(existing.body);
     }
@@ -595,6 +622,7 @@
             startedAt: startedAt,
             body: draft.body,
             base_version: draft.base_version,
+            base_body: draft.base_body,
             started_at: draft.started_at || startedAt,
           };
         }
@@ -677,10 +705,19 @@
         editor.saving = false;
         setSaveBusy(false);
         if (res.status >= 200 && res.status < 300) {
+          // C5: server canonicalises the body before hashing (CRLF→LF,
+          // trailing-newline trim per design §3.2). Use the post-write
+          // body the server returned as the new base — without this,
+          // a Windows user's CRLF draft and the canonical disk body
+          // diverge, and the next conflict's "Base" pane shows
+          // newlines that exist nowhere on disk.
+          var canonicalBody =
+            res.body && res.body.issue && typeof res.body.issue.body === 'string'
+              ? res.body.issue.body : body;
           editor.expected_version = res.body.version;
           editor.base_version = res.body.version;
-          editor.base_body = body;
-          editor.lastSavedBody = body;
+          editor.base_body = canonicalBody;
+          editor.lastSavedBody = canonicalBody;
           state.local_versions[editor.slug] = res.body.version;
           // Drop the localStorage draft on confirmed save — once the
           // server has the bytes the client-side backup is no longer
@@ -821,6 +858,24 @@
         '<div class="three-way-pane"><h4>Theirs (on disk)</h4>' +
           '<pre class="conflict-theirs">' + escapeHtml(theirBody) + '</pre></div>' +
       '</div>';
+    // H2: synchronise vertical scroll across the three panes.
+    // Without this the panes drift apart as the user scrolls one and
+    // the side-by-side comparison becomes useless. Re-entrancy guard
+    // (`syncing`) prevents an event-storm cascade between the three
+    // listeners.
+    var prePanes = pane.querySelectorAll('.three-way-pane pre');
+    var syncing = false;
+    prePanes.forEach(function (p) {
+      p.addEventListener('scroll', function () {
+        if (syncing) return;
+        syncing = true;
+        prePanes.forEach(function (q) {
+          if (q !== p) q.scrollTop = p.scrollTop;
+        });
+        syncing = false;
+      });
+    });
+
     pane.querySelector('#conflict-keep-mine').addEventListener('click', function () {
       // M2 review F1: pull the *new* version from the server-supplied
       // top-level field; the embedded issue object lacked it pre-fix
@@ -854,14 +909,27 @@
       setSaveStatus('Discarded local draft');
     });
     pane.querySelector('#conflict-dismiss').addEventListener('click', function () {
-      // Manual merge: keep the conflict pane visible so the user can
-      // copy/paste from "theirs" while editing the textarea (M2 review
-      // F9 — hiding it before merging defeated the purpose). Just hide
-      // the action buttons; leave the rendered diff/pane in place.
+      // M3: manual merge is a real third resolution path. Advance
+      // expected_version onto the server's current version so the
+      // user's hand-merged save lands on the next click; without
+      // this, save 409s again with the same `theirs` and the user
+      // is forced to click "Keep mine" anyway, defeating the
+      // purpose of the manual-merge button. If a *third* writer
+      // lands during the merge, the next save will still 409
+      // correctly. base_body advances to theirs because the user is
+      // rebasing their textarea on top of the server's body.
+      if (currentVersion) {
+        editor.expected_version = currentVersion;
+        editor.base_version = currentVersion;
+        editor.base_body = theirBody;
+      }
+      // Keep the rendered base/ours/theirs panes visible so the user
+      // can copy/paste from "theirs" while editing the textarea
+      // (M2 review F9 — hiding the diff before merging defeated the
+      // purpose). Hide only the action buttons.
       var actions = pane.querySelector('.conflict-actions');
       if (actions) actions.hidden = true;
-      // Do NOT advance expected_version — the next save will conflict
-      // again until the user explicitly chooses a side.
+      setSaveStatus('Edit the textarea, then Save to write your merged version');
     });
   }
 

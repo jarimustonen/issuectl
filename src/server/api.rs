@@ -362,11 +362,21 @@ pub async fn events_stream(
 pub struct SessionResponse {
     pub csrf_token: String,
     pub instance_id: Uuid,
-    /// Mirrors `ServeOptions::watch_enabled`. When false the client
-    /// shows the manual refresh button prominently and skips any
-    /// "live updates" affordance — write-originated SSE still flows
-    /// because the mutate layer publishes regardless of watcher state.
+    /// Reflects whether the watcher is *actually* running on the
+    /// server (false when `--no-watch`, when `issues/` is missing, or
+    /// when watcher spawn failed). The client uses this to promote
+    /// the manual refresh button. Write-originated SSE still flows
+    /// because the mutate layer publishes regardless of watcher
+    /// state.
     pub watch_enabled: bool,
+    /// Latched terminal degradation reason. `Some(...)` once the
+    /// supervisor has given up on the watcher (3 failed restarts per
+    /// §8.5). Sent here so a client connecting *after* the SSE
+    /// `Degraded` event aged out of replay still surfaces the banner
+    /// — without this, fresh tabs would silently see "live updates
+    /// on" while the server has no watcher running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_reason: Option<String>,
 }
 
 /// Bootstrap endpoint. Returns the per-process CSRF token plus the
@@ -379,10 +389,12 @@ pub struct SessionResponse {
 /// design's earlier "cookie auth on /events" plan was scrapped after
 /// the user confirmed the trust boundary. No cookie is set.
 pub async fn session(State(state): State<super::AppState>) -> Response {
+    let degraded_reason = state.watch_degraded.lock().clone();
     Json(SessionResponse {
         csrf_token: state.csrf_token.to_string(),
         instance_id: state.event_hub.instance_id(),
         watch_enabled: state.watch_enabled,
+        degraded_reason,
     })
     .into_response()
 }
