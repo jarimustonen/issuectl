@@ -2,13 +2,13 @@
 created: 2026-05-06
 updated: 2026-05-06
 type: task
-reporter: jari
-assignee: jari
 status: open
 priority: normal
-labels: [kanban, web-ui, research]
-related: ['@fiercely-juicy-kettle']
+reporter: jari
+assignee: jari
 epic: hugely-exciting-spiders
+related: ['@fiercely-juicy-kettle']
+labels: [kanban, research, web-ui]
 ---
 
 # Investigate launching Claude Code with a prompt for 'start implementation' button on cards

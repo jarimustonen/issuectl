@@ -2,12 +2,12 @@
 created: 2026-05-06
 updated: 2026-05-06
 type: feature
-reporter: jari
-assignee: jari
 status: open
 priority: high
-labels: [kanban, web-ui, breaking]
+reporter: jari
+assignee: jari
 epic: exorbitantly-ill-apples
+labels: [breaking, kanban, web-ui]
 ---
 
 # Drag-and-drop issues between kanban columns with write-back to item.md

@@ -2,12 +2,12 @@
 created: 2026-05-06
 updated: 2026-05-06
 type: feature
-reporter: jari
-assignee: jari
 status: open
 priority: normal
+reporter: jari
+assignee: jari
 epic: hugely-exciting-spiders
-labels: [git-native, automation]
+labels: [automation, git-native]
 ---
 
 # Git-native commit linking: trailers (Refs-Issue / Fixes-Issue) + sync-commits + branch-name detection

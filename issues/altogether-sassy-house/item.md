@@ -2,11 +2,10 @@
 created: 2026-05-05
 updated: 2026-05-05
 type: feature
-reporter: jari
-assignee: jari
 status: in-progress
 priority: normal
-slug: altogether-sassy-house
+reporter: jari
+assignee: jari
 commits:
 - hash: f73bdda
   summary: replace sequential numbers with random slugs (phases 1-4 + docs)
@@ -18,6 +17,7 @@ commits:
   summary: scope doctor rewrites to issues/, drop two-phase rename
 - hash: '95523e1'
   summary: RandomState PRNG seeding, drop broken fallback
+slug: altogether-sassy-house
 ---
 
 # Replace sequential issue numbers with random word slugs

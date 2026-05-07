@@ -2,12 +2,12 @@
 created: 2026-05-06
 updated: 2026-05-06
 type: feature
-reporter: jari
-assignee: jari
 status: open
 priority: normal
+reporter: jari
+assignee: jari
 epic: hugely-exciting-spiders
-labels: [v0.6.0-candidate, agent-friendly, schema]
+labels: [agent-friendly, schema, v0.6.0-candidate]
 ---
 
 # Schema-driven agent instructions (custom fields → context bundle constraints)

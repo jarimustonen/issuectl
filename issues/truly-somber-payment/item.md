@@ -2,13 +2,13 @@
 created: 2026-05-06
 updated: 2026-05-06
 type: feature
-reporter: jari
-assignee: jari
 status: open
 priority: normal
-labels: [kanban, web-ui]
-related: ['@almost-homely-decision']
+reporter: jari
+assignee: jari
 epic: hugely-exciting-spiders
+related: ['@almost-homely-decision']
+labels: [kanban, web-ui]
 ---
 
 # Sort kanban columns by priority (default: high + assigned to me)

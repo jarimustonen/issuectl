@@ -2,12 +2,12 @@
 created: 2026-05-06
 updated: 2026-05-06
 type: feature
-reporter: jari
-assignee: jari
 status: open
 priority: normal
-labels: [kanban, web-ui, config]
+reporter: jari
+assignee: jari
 epic: hugely-exciting-spiders
+labels: [config, kanban, web-ui]
 ---
 
 # Multiple named kanban boards with per-board configuration

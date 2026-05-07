@@ -2,12 +2,12 @@
 created: 2026-05-06
 updated: 2026-05-06
 type: feature
-reporter: jari
-assignee: jari
 status: open
 priority: normal
+reporter: jari
+assignee: jari
 epic: hugely-exciting-spiders
-labels: [v0.6.0-candidate, cli, maintenance]
+labels: [cli, maintenance, v0.6.0-candidate]
 ---
 
 # issuectl rename <old-slug> <new-slug> with reference updates

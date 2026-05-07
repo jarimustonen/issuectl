@@ -2,12 +2,12 @@
 created: 2026-05-06
 updated: 2026-05-06
 type: feature
-reporter: jari
-assignee: jari
 status: open
 priority: normal
-labels: [schema, config]
+reporter: jari
+assignee: jari
 epic: exorbitantly-ill-apples
+labels: [config, schema]
 ---
 
 # Issues schema file describing fields (required + optional), auto-write defaults

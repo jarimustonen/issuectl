@@ -2,9 +2,9 @@
 created: 2026-05-06
 updated: 2026-05-06
 type: epic
-owner: jari
 status: in-progress
 priority: high
+owner: jari
 labels: [release-v0.5.0]
 ---
 

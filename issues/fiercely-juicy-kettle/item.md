@@ -2,13 +2,13 @@
 created: 2026-05-06
 updated: 2026-05-06
 type: feature
-reporter: jari
-assignee: jari
 status: open
 priority: normal
-labels: [kanban, web-ui]
-related: ['@excessively-beneficial-owner']
+reporter: jari
+assignee: jari
 epic: hugely-exciting-spiders
+related: ['@excessively-beneficial-owner']
+labels: [kanban, web-ui]
 ---
 
 # Copy-to-clipboard buttons on kanban cards (issue slug + prompt text)

@@ -2,13 +2,13 @@
 created: 2026-05-06
 updated: 2026-05-06
 type: feature
-reporter: jari
-assignee: jari
 status: open
 priority: normal
-labels: [kanban, web-ui]
-related: ['@truly-somber-payment']
+reporter: jari
+assignee: jari
 epic: hugely-exciting-spiders
+related: ['@truly-somber-payment']
+labels: [kanban, web-ui]
 ---
 
 # Per-user kanban view config that remembers last state

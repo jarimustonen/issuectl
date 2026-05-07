@@ -2,10 +2,10 @@
 created: 2026-05-06
 updated: 2026-05-06
 type: epic
-owner: jari
 status: open
 priority: normal
-labels: [release-v0.6.0, backlog]
+owner: jari
+labels: [backlog, release-v0.6.0]
 ---
 
 # v0.6.0: Backlog candidates (rank when v0.6.0 starts)
