@@ -543,6 +543,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_issues_q_param_filters_via_query_engine() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+
+        write_issue(
+            tmp.path(),
+            "open",
+            "amber-loud-fox",
+            "type: bug\nstatus: in-progress\npriority: high\nassignee: alice\n",
+            "# Login is broken\n",
+        );
+        write_issue(
+            tmp.path(),
+            "open",
+            "calm-bright-newt",
+            "type: feature\nstatus: open\npriority: normal\nassignee: bob\n",
+            "# Add export\n",
+        );
+
+        let resp = make_router(tmp.path())
+            .oneshot(
+                Request::get("/api/issues?q=status:in-progress")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        let issues = json["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0]["slug"], "amber-loud-fox");
+
+        // Bareword text search hits the body.
+        let resp = make_router(tmp.path())
+            .oneshot(
+                Request::get("/api/issues?q=export")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        let issues = json["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0]["slug"], "calm-bright-newt");
+
+        // Malformed query → 400.
+        let resp = make_router(tmp.path())
+            .oneshot(
+                Request::get("/api/issues?q=bogus:value")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn api_issue_detail_returns_rendered_html_body() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("issues")).unwrap();

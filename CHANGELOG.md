@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Shared query engine (`src/query.rs`) used by `issuectl ls`, `issuectl
+  search`, and the web `/api/issues?q=` endpoint. Syntax: `field:value`,
+  `-field:value` (negation), `text:"phrase"`, bareword (treated as
+  `text:`), `field:any`/`field:none`, and relative dates
+  (`updated:<-14d`, `created:>=-30d`, anchor: today UTC, inclusive).
+  Multiple terms AND together; no OR/parens in v1. The existing
+  flag-based `ls` invocations remain backwards-compatible — flags
+  translate to query terms internally.
 - Web kanban: cards are draggable between status columns. Dropping on an
   active column (Open / In progress / Testing) issues a status PATCH
   immediately; dropping on Closed opens a small picker so the user

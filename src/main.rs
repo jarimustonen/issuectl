@@ -8,6 +8,7 @@ mod merge_driver;
 mod models;
 mod mutate;
 mod parser;
+mod query;
 mod repo;
 mod server;
 mod skill;
@@ -128,6 +129,15 @@ enum Command {
     /// List or query issues by frontmatter fields
     #[command(alias = "ls")]
     List {
+        /// Optional query string. Same syntax as `search` and the web
+        /// `?q=` filter (e.g. `status:in-progress -label:wontfix`).
+        /// When supplied, the implicit "open only" default is disabled
+        /// — combine with `--all` / `--closed` or an explicit
+        /// `folder:`/`status:` term as needed. Pass leading-hyphen
+        /// negations as a single quoted argument: `ls "-label:wontfix"`.
+        #[arg(value_parser = parse_non_empty, allow_hyphen_values = true)]
+        query: Option<String>,
+
         /// Filter by assignee (or owner for epics)
         #[arg(short = 'a', long, value_parser = parse_non_empty)]
         assignee: Option<String>,
@@ -497,6 +507,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::List {
+            query,
             assignee,
             issue_type,
             priority,
@@ -507,6 +518,7 @@ fn main() -> Result<()> {
             closed,
         } => cmd_list(
             json_output,
+            query,
             assignee,
             issue_type,
             priority,
@@ -732,6 +744,7 @@ fn load() -> Vec<models::Issue> {
 #[allow(clippy::too_many_arguments)]
 fn cmd_list(
     json: bool,
+    query_str: Option<String>,
     assignee: Option<String>,
     issue_type: Option<String>,
     priority: Option<String>,
@@ -741,40 +754,81 @@ fn cmd_list(
     all: bool,
     closed: bool,
 ) -> Result<()> {
-    let issues = load();
-    let mut filtered = issues;
+    let mut q = match query_str.as_deref() {
+        Some(s) => query::parse(s).context("parsing positional query")?,
+        None => query::Query::default(),
+    };
 
-    if closed && !all {
-        filtered.retain(|i| i.folder == "closed");
-    } else if !all && !closed {
-        filtered.retain(|i| i.folder == "open");
-    }
-
+    // Translate flag filters into query terms. Flag values are
+    // pre-validated by clap (PossibleValuesParser) so they can't
+    // smuggle in `:`/`-` syntax that would re-enter the parser.
     if let Some(a) = assignee {
-        let a_lower = a.to_lowercase();
-        filtered.retain(|i| i.effective_assignee().to_lowercase() == a_lower);
-    }
-    if let Some(t) = issue_type {
-        filtered.retain(|i| i.issue_type == t);
-    }
-    if let Some(p) = priority {
-        filtered.retain(|i| i.priority == p);
-    }
-    if let Some(s) = status {
-        filtered.retain(|i| i.status == s);
-    }
-    if let Some(e) = epic {
-        filtered.retain(|i| i.epic.as_deref() == Some(e.as_str()));
-    }
-    if let Some(l) = label {
-        let l_lower = l.to_lowercase();
-        filtered.retain(|i| {
-            i.labels
-                .as_ref()
-                .map(|lbs| lbs.iter().any(|lb| lb.to_lowercase() == l_lower))
-                .unwrap_or(false)
+        q.push(query::Term::Field {
+            field: query::FieldName::Assignee,
+            m: query::FieldMatch::Equals(a),
+            negated: false,
         });
     }
+    if let Some(t) = issue_type {
+        q.push(query::Term::Field {
+            field: query::FieldName::Type,
+            m: query::FieldMatch::Equals(t),
+            negated: false,
+        });
+    }
+    if let Some(p) = priority {
+        q.push(query::Term::Field {
+            field: query::FieldName::Priority,
+            m: query::FieldMatch::Equals(p),
+            negated: false,
+        });
+    }
+    if let Some(s) = status {
+        q.push(query::Term::Field {
+            field: query::FieldName::Status,
+            m: query::FieldMatch::Equals(s),
+            negated: false,
+        });
+    }
+    if let Some(e) = epic {
+        q.push(query::Term::Field {
+            field: query::FieldName::Epic,
+            m: query::FieldMatch::Equals(e),
+            negated: false,
+        });
+    }
+    if let Some(l) = label {
+        q.push(query::Term::Field {
+            field: query::FieldName::Label,
+            m: query::FieldMatch::Equals(l),
+            negated: false,
+        });
+    }
+
+    // Apply the implicit folder default unless the caller already
+    // expressed a scope (positional query, --all, --closed, or an
+    // explicit folder:/status: term).
+    let folder_filter: Option<&'static str> = if all {
+        None
+    } else if closed {
+        Some("closed")
+    } else if query_str.is_none()
+        && !q.mentions_field(query::FieldName::Folder)
+        && !q.mentions_field(query::FieldName::Status)
+    {
+        Some("open")
+    } else {
+        None
+    };
+
+    let issues = load();
+    let mut filtered: Vec<_> = issues
+        .into_iter()
+        .filter(|i| {
+            folder_filter.map(|f| i.folder == f).unwrap_or(true) && query::matches(&q, i)
+        })
+        .collect();
+    filtered.sort_by(|a, b| a.slug.cmp(&b.slug));
 
     if json {
         let with_version: Vec<_> = filtered
@@ -825,19 +879,21 @@ fn cmd_show(json: bool, slug: &str) -> Result<()> {
     }
 }
 
-fn cmd_search(json: bool, query: &str, all: bool) -> Result<()> {
+fn cmd_search(json: bool, query_str: &str, all: bool) -> Result<()> {
+    let q = query::parse(query_str).context("parsing search query")?;
     let issues = load();
-    let query_lower = query.to_lowercase();
 
     let mut filtered: Vec<_> = issues
         .into_iter()
         .filter(|i| {
-            if !all && i.folder != "open" {
+            if !all
+                && i.folder != "open"
+                && !q.mentions_field(query::FieldName::Folder)
+                && !q.mentions_field(query::FieldName::Status)
+            {
                 return false;
             }
-            i.title.to_lowercase().contains(&query_lower)
-                || i.slug.to_lowercase().contains(&query_lower)
-                || i.body.to_lowercase().contains(&query_lower)
+            query::matches(&q, i)
         })
         .collect();
 
@@ -2010,5 +2066,75 @@ mod tests {
         for s in ACTIVE_STATUSES {
             assert!(!is_closing_status(s));
         }
+    }
+
+    fn write_raw_issue(root: &Path, slug: &str, fm: &str, body: &str) {
+        let dir = root.join("issues").join(slug);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            format!("---\n{fm}---\n{body}"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ls_query_filters_by_status_and_label() {
+        let tmp = fresh_repo();
+        write_raw_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: in-progress\npriority: high\nassignee: alice\nlabels: [frontend]\n",
+            "# Login is broken\n",
+        );
+        write_raw_issue(
+            tmp.path(),
+            "calm-bright-newt",
+            "type: feature\nstatus: open\npriority: normal\nassignee: bob\nlabels: [wontfix]\n",
+            "# Add export\n",
+        );
+
+        let issues = repo::load_issues(tmp.path());
+        let q = query::parse("status:in-progress assignee:alice").unwrap();
+        let hits: Vec<_> = issues
+            .iter()
+            .filter(|i| query::matches(&q, i))
+            .map(|i| i.slug.clone())
+            .collect();
+        assert_eq!(hits, vec!["amber-loud-fox".to_string()]);
+
+        let q = query::parse("-label:wontfix").unwrap();
+        let hits: Vec<_> = issues
+            .iter()
+            .filter(|i| query::matches(&q, i))
+            .map(|i| i.slug.clone())
+            .collect();
+        assert_eq!(hits, vec!["amber-loud-fox".to_string()]);
+    }
+
+    #[test]
+    fn search_query_combines_text_and_field() {
+        let tmp = fresh_repo();
+        write_raw_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\n",
+            "# Login deadlock\n\nUser hits flock contention.",
+        );
+        write_raw_issue(
+            tmp.path(),
+            "calm-bright-newt",
+            "type: feature\nstatus: open\n",
+            "# Just a deadlock-themed feature note.",
+        );
+
+        let issues = repo::load_issues(tmp.path());
+        let q = query::parse("deadlock text:flock").unwrap();
+        let hits: Vec<_> = issues
+            .iter()
+            .filter(|i| query::matches(&q, i))
+            .map(|i| i.slug.clone())
+            .collect();
+        assert_eq!(hits, vec!["amber-loud-fox".to_string()]);
     }
 }

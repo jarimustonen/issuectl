@@ -70,9 +70,25 @@ pub struct IssueDetailResponse {
     pub docs: Vec<String>,
 }
 
+#[derive(Deserialize)]
+pub struct ListQuery {
+    /// Optional shared-query-engine string. Same syntax as `issuectl ls`
+    /// and `issuectl search` — `field:value`, `-field:value`,
+    /// `text:"phrase"`, `field:any|none`, relative dates `<-14d`. Omitted
+    /// (or empty) means "no filter": every issue is returned.
+    #[serde(default)]
+    pub q: Option<String>,
+}
+
 pub async fn list_issues(
     State(state): State<AppState>,
+    Query(params): Query<ListQuery>,
 ) -> Result<Json<IssueListResponse>, StatusCode> {
+    let parsed_query = match params.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => Some(crate::query::parse(s).map_err(|_| StatusCode::BAD_REQUEST)?),
+        None => None,
+    };
+
     // Snapshot BEFORE scan so any event published while the scan runs is
     // captured by `/events?since=snapshot_seq` rather than lost. The
     // mutation protocol (M1, §3.1 step 8) guarantees seq=N's disk state
@@ -80,10 +96,20 @@ pub async fn list_issues(
     let snapshot_seq = state.event_hub.current_seq();
     let instance_id = state.event_hub.instance_id();
     let root = state.root.clone();
-    let (issues, warnings) =
-        tokio::task::spawn_blocking(move || repo::load_issue_summaries(root.as_path()))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (issues, warnings) = tokio::task::spawn_blocking(move || {
+        // We filter on full Issue (need body for text: matching), then
+        // project to the lighter IssueSummary the web client expects.
+        let (issues, warnings) = repo::load_issues_with_warnings(root.as_path());
+        let filtered: Vec<crate::models::Issue> = match parsed_query {
+            Some(q) => issues.into_iter().filter(|i| crate::query::matches(&q, i)).collect(),
+            None => issues,
+        };
+        let summaries: Vec<repo::IssueSummary> =
+            filtered.into_iter().map(repo::IssueSummary::from).collect();
+        (summaries, warnings)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(IssueListResponse {
         issues,
         warnings,
