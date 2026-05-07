@@ -34,6 +34,10 @@ use ratelimit::TokenBucketLimiter;
 pub struct ServeOptions {
     pub watch_enabled: bool,
     pub watch_bulk_threshold: usize,
+    /// When `Some(ms)`, force the polling watcher backend (the documented
+    /// network-FS workaround per design §8.1). `None` → recommended
+    /// platform backend (inotify/FSEvents/ReadDirectoryChanges).
+    pub watch_poll_interval: Option<std::time::Duration>,
     /// When true, allow PATCH/POST against issues even when bound to
     /// a non-loopback address. Default false: non-loopback binds are
     /// read-only, matching the design's "trusted-localhost" threat
@@ -47,6 +51,7 @@ impl Default for ServeOptions {
         ServeOptions {
             watch_enabled: true,
             watch_bulk_threshold: 50,
+            watch_poll_interval: None,
             allow_remote_writes: false,
         }
     }
@@ -75,6 +80,11 @@ pub struct AppState {
     /// 4 req/sec, burst 10. Keyed per-slug for body, single bucket
     /// for preview.
     pub body_limiter: Arc<TokenBucketLimiter>,
+    /// Reflects `--no-watch`. When false, the server runs without a
+    /// filesystem watcher (read-only board updates; SSE only carries
+    /// write-originated events). Surfaced to clients via `/api/session`
+    /// so the UI can promote the manual refresh button.
+    pub watch_enabled: bool,
 }
 
 impl AppState {
@@ -90,6 +100,7 @@ impl AppState {
             allowed_hosts: Arc::new(Vec::new()),
             writes_enabled: true,
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
+            watch_enabled: true,
         }
     }
 }
@@ -318,6 +329,7 @@ async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) ->
         allowed_hosts: Arc::new(allowed_hosts),
         writes_enabled,
         body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
+        watch_enabled: options.watch_enabled,
     };
 
     // Watcher: a separate tokio task. We materialise `issues/open` and
@@ -336,10 +348,15 @@ async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) ->
             }
         }
         if root.join("issues").is_dir() {
+            let backend = match options.watch_poll_interval {
+                Some(interval) => watcher::WatcherBackend::Poll(interval),
+                None => watcher::WatcherBackend::Recommended,
+            };
             let cfg = watcher::WatcherConfig {
                 root: root.clone(),
                 debounce: std::time::Duration::from_millis(150),
                 bulk_threshold: options.watch_bulk_threshold,
+                backend,
             };
             Some(watcher::spawn(event_hub.clone(), cfg))
         } else {
@@ -430,6 +447,7 @@ mod tests {
             allowed_hosts: Arc::new(vec!["test.invalid:7878".into()]),
             writes_enabled: true,
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
+            watch_enabled: true,
         })
     }
 
@@ -867,6 +885,58 @@ mod tests {
         crate::canonical::canonical_hash(&parsed.issue)
     }
 
+    /// `--no-watch` flips `AppState.watch_enabled`; `/api/session`
+    /// must surface that so the client can show the manual-refresh
+    /// affordance and skip "live updates" UI. The default-true case is
+    /// covered implicitly by other session tests; lock the false case
+    /// explicitly because it's the one the M3 banner depends on.
+    #[tokio::test]
+    async fn session_reports_watch_disabled_when_no_watch() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        let r = router(AppState {
+            root: Arc::new(tmp.path().to_path_buf()),
+            event_hub: Arc::new(EventHub::new()),
+            csrf_token: Arc::from(""),
+            allowed_hosts: Arc::new(Vec::new()),
+            writes_enabled: true,
+            body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
+            watch_enabled: false,
+        });
+        let resp = r
+            .oneshot(
+                Request::get("/api/session").body(Body::empty()).unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert_eq!(body["watch_enabled"], false);
+    }
+
+    /// The Degraded payload variant must round-trip through the SSE
+    /// publish path so the client can latch its banner. We don't drive
+    /// the watcher's 3-failure path (timing-sensitive); we publish the
+    /// payload directly and assert subscribers see it. The watcher's
+    /// "3 failed restarts → Degraded" sequence is exercised by the
+    /// supervisor logic itself; the wire-format coverage here pins the
+    /// contract independently.
+    #[tokio::test]
+    async fn degraded_event_propagates_to_subscribers() {
+        let hub = Arc::new(EventHub::new());
+        let mut rx = hub.tx_subscribe_for_test();
+        hub.publish(crate::server::events::EventPayload::Degraded {
+            reason: "watcher_unavailable".to_string(),
+        });
+        let evt = rx.try_recv().expect("subscriber receives Degraded");
+        match &evt.payload {
+            crate::server::events::EventPayload::Degraded { reason } => {
+                assert_eq!(reason, "watcher_unavailable");
+            }
+            other => panic!("expected Degraded, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn session_returns_csrf_token() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1106,6 +1176,7 @@ mod tests {
             allowed_hosts: Arc::new(Vec::new()),
             writes_enabled: true,
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
+            watch_enabled: true,
         });
         let payload = serde_json::json!({ "status": "fixed" });
         let resp = r
@@ -1165,6 +1236,7 @@ mod tests {
             allowed_hosts: Arc::new(Vec::new()),
             writes_enabled: false,
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
+            watch_enabled: true,
         });
         let resp = r
             .oneshot(

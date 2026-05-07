@@ -23,6 +23,16 @@ use notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, DebouncedEvent};
 use tokio::sync::mpsc;
 
+/// Backend selection for the watcher. `Recommended` picks the platform's
+/// native backend (inotify/FSEvents/etc.); `Poll(interval)` forces the
+/// polling backend, the documented workaround for network filesystems
+/// where `notify` events are unreliable. See design doc §8.1.
+#[derive(Debug, Clone, Copy)]
+pub enum WatcherBackend {
+    Recommended,
+    Poll(Duration),
+}
+
 use super::events::{EventHub, EventPayload};
 use crate::repo::IssueSummary;
 use crate::slug;
@@ -37,6 +47,9 @@ pub struct WatcherConfig {
     /// Distinct slug count within a single debounce window above which
     /// per-issue events collapse into one `Resync`.
     pub bulk_threshold: usize,
+    /// Backend selection. Defaults to `Recommended`; `Poll` forces the
+    /// polling backend when `--watch-poll-ms` is passed.
+    pub backend: WatcherBackend,
 }
 
 /// Spawn the watcher supervisor. The returned handle lives for as long
@@ -116,25 +129,75 @@ async fn run_once(hub: Arc<EventHub>, cfg: WatcherConfig) -> Result<(), String> 
     // F12: explicit notify config. Symlinks must NOT be followed —
     // otherwise `ln -s /etc issues/open/foo` makes the watcher observe
     // /etc, violating §5.1/§9.5.
-    let notify_config = notify::Config::default().with_follow_symlinks(false);
-    let mut debouncer = notify_debouncer_full::new_debouncer_opt::<
-        _,
-        notify::RecommendedWatcher,
-        notify_debouncer_full::RecommendedCache,
-    >(
-        cfg.debounce,
-        None,
-        move |res: DebounceEventResult| {
-            let _ = tx.send(res);
-        },
-        notify_debouncer_full::RecommendedCache::new(),
-        notify_config,
-    )
-    .map_err(|e| format!("debouncer init: {e}"))?;
+    let mut notify_config = notify::Config::default().with_follow_symlinks(false);
+    let cb = move |res: DebounceEventResult| {
+        let _ = tx.send(res);
+    };
 
-    debouncer
-        .watch(&issues_root_canon, RecursiveMode::Recursive)
-        .map_err(|e| format!("watch {}: {}", issues_root_canon.display(), e))?;
+    // The debouncer is generic over the watcher type. Forced polling
+    // (network FS workaround per §8.1) uses `notify::PollWatcher` and
+    // applies the configured tick interval; the recommended backend
+    // (inotify/FSEvents/ReadDirectoryChanges) handles the common case.
+    // Two parallel ownership types are unavoidable because of the
+    // generic parameter; we drive each through the same event-pump
+    // loop afterwards.
+    enum AnyDebouncer {
+        Recommended(
+            notify_debouncer_full::Debouncer<
+                notify::RecommendedWatcher,
+                notify_debouncer_full::RecommendedCache,
+            >,
+        ),
+        Poll(
+            notify_debouncer_full::Debouncer<
+                notify::PollWatcher,
+                notify_debouncer_full::RecommendedCache,
+            >,
+        ),
+    }
+
+    let mut debouncer = match cfg.backend {
+        WatcherBackend::Recommended => {
+            let d = notify_debouncer_full::new_debouncer_opt::<
+                _,
+                notify::RecommendedWatcher,
+                notify_debouncer_full::RecommendedCache,
+            >(
+                cfg.debounce,
+                None,
+                cb,
+                notify_debouncer_full::RecommendedCache::new(),
+                notify_config,
+            )
+            .map_err(|e| format!("debouncer init: {e}"))?;
+            AnyDebouncer::Recommended(d)
+        }
+        WatcherBackend::Poll(interval) => {
+            notify_config = notify_config.with_poll_interval(interval);
+            let d = notify_debouncer_full::new_debouncer_opt::<
+                _,
+                notify::PollWatcher,
+                notify_debouncer_full::RecommendedCache,
+            >(
+                cfg.debounce,
+                None,
+                cb,
+                notify_debouncer_full::RecommendedCache::new(),
+                notify_config,
+            )
+            .map_err(|e| format!("poll debouncer init: {e}"))?;
+            AnyDebouncer::Poll(d)
+        }
+    };
+
+    match &mut debouncer {
+        AnyDebouncer::Recommended(d) => d
+            .watch(&issues_root_canon, RecursiveMode::Recursive)
+            .map_err(|e| format!("watch {}: {}", issues_root_canon.display(), e))?,
+        AnyDebouncer::Poll(d) => d
+            .watch(&issues_root_canon, RecursiveMode::Recursive)
+            .map_err(|e| format!("watch {}: {}", issues_root_canon.display(), e))?,
+    }
 
     // F10: publish (re)start Resync only AFTER the watch is hooked.
     // F11: always "watcher_restart" — spec only enumerates this reason
@@ -507,6 +570,7 @@ mod tests {
             root: tmp.path().to_path_buf(),
             debounce: Duration::from_millis(50),
             bulk_threshold: 50,
+            backend: WatcherBackend::Recommended,
         };
         let handle = spawn(hub.clone(), cfg);
 
@@ -547,6 +611,70 @@ mod tests {
         if let EventPayload::IssueUpserted { version, issue, .. } = &upserted.payload {
             assert!(version.starts_with("sha256:"), "version: {version}");
             assert_eq!(issue.title, "It works");
+        } else {
+            unreachable!()
+        }
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    /// Same end-to-end probe as `watcher_publishes_issue_upserted_for_new_file`,
+    /// but with the polling backend. Verifies that `--watch-poll-ms`
+    /// (`WatcherBackend::Poll`) produces a working watcher on every
+    /// platform — not just the ones whose native backend would also pick
+    /// up the create event. The poll interval is short so the test
+    /// completes within the same timeout budget as the native test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_poll_backend_publishes_issue_upserted() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("issues/closed")).unwrap();
+
+        let hub = std::sync::Arc::new(EventHub::new());
+        let mut rx = hub.tx_subscribe_for_test();
+
+        let cfg = WatcherConfig {
+            root: tmp.path().to_path_buf(),
+            debounce: Duration::from_millis(100),
+            bulk_threshold: 50,
+            backend: WatcherBackend::Poll(Duration::from_millis(100)),
+        };
+        let handle = spawn(hub.clone(), cfg);
+
+        let first = timeout(Duration::from_secs(2), rx.recv()).await;
+        assert!(matches!(first, Ok(Ok(_))), "expected Resync, got {first:?}");
+
+        let issue_dir = tmp.path().join("issues/open/poll-brave-otter");
+        std::fs::create_dir_all(&issue_dir).unwrap();
+        std::fs::write(
+            issue_dir.join("item.md"),
+            "---\ntype: bug\nstatus: open\npriority: high\n---\n\n# Polled\n",
+        )
+        .unwrap();
+
+        let upserted = timeout(Duration::from_secs(8), async {
+            loop {
+                match rx.recv().await {
+                    Ok(evt) => {
+                        if let EventPayload::IssueUpserted { ref slug, .. } = evt.payload {
+                            if slug == "poll-brave-otter" {
+                                return evt;
+                            }
+                        }
+                    }
+                    Err(e) => panic!("broadcast recv error: {e}"),
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for IssueUpserted on poll backend");
+
+        if let EventPayload::IssueUpserted { issue, .. } = &upserted.payload {
+            assert_eq!(issue.title, "Polled");
         } else {
             unreachable!()
         }

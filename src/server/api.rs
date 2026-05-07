@@ -362,6 +362,11 @@ pub async fn events_stream(
 pub struct SessionResponse {
     pub csrf_token: String,
     pub instance_id: Uuid,
+    /// Mirrors `ServeOptions::watch_enabled`. When false the client
+    /// shows the manual refresh button prominently and skips any
+    /// "live updates" affordance — write-originated SSE still flows
+    /// because the mutate layer publishes regardless of watcher state.
+    pub watch_enabled: bool,
 }
 
 /// Bootstrap endpoint. Returns the per-process CSRF token plus the
@@ -377,6 +382,7 @@ pub async fn session(State(state): State<super::AppState>) -> Response {
     Json(SessionResponse {
         csrf_token: state.csrf_token.to_string(),
         instance_id: state.event_hub.instance_id(),
+        watch_enabled: state.watch_enabled,
     })
     .into_response()
 }

@@ -90,6 +90,7 @@ fn render_board_shell() -> String {
   </div>
 </header>
 
+<section id="degraded-banner" class="degraded-banner" hidden></section>
 <section id="warnings" class="warnings" hidden></section>
 
 <section class="filter-bar" aria-label="Filters">

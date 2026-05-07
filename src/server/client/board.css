@@ -391,10 +391,45 @@ button.card { font: inherit; text-align: left; width: 100%; }
   border: 1px solid var(--gp-border); border-radius: 6px;
   padding: 0.25rem 0.6rem; cursor: pointer;
 }
-.conflict-theirs {
+.conflict-theirs,
+.conflict-base,
+.conflict-ours {
   background: var(--gp-surface); border: 1px solid var(--gp-border-subtle);
   border-radius: 6px; padding: 0.5rem; max-height: 18rem; overflow: auto;
   white-space: pre-wrap; font-size: 0.8rem;
+  margin: 0;
+}
+/* M3: three-way merge view (base | ours | theirs). Stacks under
+   ~900px so panes don't compress to unreadable widths. */
+.three-way-merge {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem; margin-top: 0.5rem;
+}
+.three-way-pane h4 {
+  margin: 0 0 0.25rem; font-size: 0.75rem;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--gp-text-muted);
+}
+@media (max-width: 900px) {
+  .three-way-merge { grid-template-columns: 1fr; }
+}
+
+/* M3: degraded / no-watch banner. Distinct hue from the red parse
+   warnings strip so the two surfaces don't visually merge when both
+   appear at once. */
+.degraded-banner {
+  background: rgba(234, 179, 8, 0.10);
+  border: 1px solid rgba(234, 179, 8, 0.45);
+  color: var(--gp-text);
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  margin: 0 auto 1rem;
+  max-width: 1800px;
+  font-size: 0.85rem;
+}
+.degraded-banner p { margin: 0.15rem 0; }
+.degraded-banner code {
+  font-family: 'SF Mono', Menlo, monospace; font-size: 0.8rem;
 }
 .card-invalid { border-color: var(--gp-error); }
 .tag-invalid {

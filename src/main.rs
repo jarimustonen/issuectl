@@ -355,6 +355,13 @@ enum Command {
         #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
         watch_bulk_threshold: u32,
 
+        /// Force the polling watcher backend with the given interval in
+        /// milliseconds. Use this on network filesystems (NFS/SMB)
+        /// where `notify`'s native backend misses events. Default off:
+        /// the platform-native backend is used.
+        #[arg(long, value_name = "MS", value_parser = clap::value_parser!(u64).range(50..))]
+        watch_poll_ms: Option<u64>,
+
         /// Enable PATCH/POST writes when bound to a non-loopback
         /// address. Default off: non-loopback binds are read-only.
         /// Loopback binds always allow writes.
@@ -526,6 +533,7 @@ fn main() -> Result<()> {
             host,
             no_watch,
             watch_bulk_threshold,
+            watch_poll_ms,
             allow_remote_writes,
         } => server::run(
             find_root(),
@@ -534,6 +542,7 @@ fn main() -> Result<()> {
             server::ServeOptions {
                 watch_enabled: !no_watch,
                 watch_bulk_threshold: watch_bulk_threshold as usize,
+                watch_poll_interval: watch_poll_ms.map(std::time::Duration::from_millis),
                 allow_remote_writes,
             },
         ),

@@ -53,6 +53,18 @@
     // response arrives — own echo is dropped, others are processed.
     pending_writes: {},
     deferred_events: {},
+    // M3: server reflects --no-watch via /api/session.watch_enabled.
+    // When false, the SSE stream only carries write-originated events
+    // (mutate-layer publishes); external editor saves and `git pull`
+    // do NOT propagate. The UI shows the manual refresh button as the
+    // primary "see what changed" affordance and labels the watcher as
+    // disabled in the degraded banner.
+    watch_enabled: true,
+    // M3: latched degraded reason from the server. Cleared on Resync
+    // (which emits at every successful watcher (re)start). Lives
+    // separately from per-issue parse warnings so the two strips don't
+    // collide visually.
+    degraded_reason: null,
   };
 
   var els = {
@@ -68,6 +80,7 @@
     detail: document.getElementById('detail'),
     detailBody: document.getElementById('detail-body'),
     detailClose: document.getElementById('detail-close'),
+    degraded: document.getElementById('degraded-banner'),
   };
 
   function effectiveAssignee(i) { return i.assignee || i.owner || ''; }
@@ -80,6 +93,11 @@
       .then(function (s) {
         state.csrf_token = s.csrf_token || '';
         state.instance_id = s.instance_id || null;
+        // `watch_enabled` defaults to true if missing so a server that
+        // predates M3 keeps the previous behaviour. --no-watch flips
+        // this to false; the banner makes the implication visible.
+        state.watch_enabled = s.watch_enabled !== false;
+        renderDegradedBanner();
       })
       .catch(function () { /* best-effort: writes will 403 */ });
   }
@@ -110,6 +128,37 @@
         els.board.innerHTML = '<p class="empty">Failed to load: ' + escapeHtml(String(err)) + '</p>';
       })
       .finally(function () { els.board.setAttribute('aria-busy', 'false'); });
+  }
+
+  // M3: board-level health banner. Surfaces (1) `--no-watch` mode so
+  // the user knows external edits won't propagate, and (2) the
+  // `Degraded` SSE event the server emits after 3 failed watcher
+  // restarts (§8.5). Distinct from `#warnings`, which is per-issue
+  // parse errors — collapsing the two would hide the watcher state
+  // when an unrelated issue happens to have malformed YAML.
+  function renderDegradedBanner() {
+    var parts = [];
+    if (!state.watch_enabled) {
+      parts.push(
+        '<p><strong>Live updates off.</strong> The server is running ' +
+        'with <code>--no-watch</code>; external edits won\'t propagate. ' +
+        'Use the refresh button to reload the board.</p>'
+      );
+    }
+    if (state.degraded_reason) {
+      parts.push(
+        '<p><strong>Watcher unavailable.</strong> Reason: <code>' +
+        escapeHtml(state.degraded_reason) +
+        '</code>. Use the refresh button until the server recovers.</p>'
+      );
+    }
+    if (parts.length === 0) {
+      els.degraded.hidden = true;
+      els.degraded.innerHTML = '';
+      return;
+    }
+    els.degraded.hidden = false;
+    els.degraded.innerHTML = parts.join('');
   }
 
   function renderWarnings() {
@@ -432,6 +481,14 @@
       // the freshly-fetched current version (M2 review F2).
       base_version: baseVersion,
       expected_version: baseVersion,
+      // M3: snapshot the body the textarea was started against. The
+      // three-way merge UI uses this as the *base* in (base, ours,
+      // theirs) — without it we could only show ours-vs-theirs, which
+      // hides which side actually changed. Updated when a save lands
+      // (the new on-disk body becomes the new base) so subsequent
+      // conflicts in the same session continue to show meaningful
+      // three-way context.
+      base_body: initialBody,
       saving: false,
       // dirty_during_save is set when an `input` arrives while a save
       // is in flight, so the success/failure handler can schedule a
@@ -622,6 +679,7 @@
         if (res.status >= 200 && res.status < 300) {
           editor.expected_version = res.body.version;
           editor.base_version = res.body.version;
+          editor.base_body = body;
           editor.lastSavedBody = body;
           state.local_versions[editor.slug] = res.body.version;
           // Drop the localStorage draft on confirmed save — once the
@@ -722,21 +780,47 @@
     if (s) s.textContent = msg;
   }
 
+  // M3: three-way conflict UI. The textarea (ours) is never overwritten
+  // by the conflict surface; instead we render the three sides of the
+  // conflict — base = body at expected_version when this edit started,
+  // ours = current textarea content, theirs = body the server just sent
+  // back in the 409 — and let the user merge by hand. "Keep mine" /
+  // "Keep theirs" remain as one-click shortcuts for the common simple
+  // cases. Side-by-side panes are rendered as monospace <pre> blocks
+  // because diffing in JS without a library would be either huge or
+  // wrong; literal-content side-by-side is honest about what we're
+  // showing and lets the user use browser find/copy as needed.
   function showConflict(theirs, currentVersion) {
     if (!editor) return;
     var pane = els.detailBody.querySelector('#conflict-pane');
     if (!pane) return;
     pane.hidden = false;
     var theirBody = (theirs && theirs.body) || '';
+    var baseBody = editor.base_body || '';
+    var oursBody = '';
+    var ta = els.detailBody.querySelector('#body-editor');
+    if (ta) oursBody = ta.value;
+    var baseSummary = editor.base_body == null
+      ? 'unknown (draft restored without base body — three-way context is approximate)'
+      : 'body at the version you started editing';
     pane.innerHTML =
       '<h3>Conflict — body changed on disk</h3>' +
-      '<p>Your draft is in the textarea above. The current on-disk body is shown below. Pick one:</p>' +
+      '<p>Three-way view: <strong>base</strong> is the ' + escapeHtml(baseSummary) +
+      ', <strong>ours</strong> is the textarea above (still the source of truth — it is never overwritten),' +
+      ' <strong>theirs</strong> is the body that landed on disk while you were editing. Edit the textarea by hand to merge, or use a shortcut:</p>' +
       '<div class="conflict-actions">' +
         '<button type="button" id="conflict-keep-mine">Keep mine (overwrite theirs)</button>' +
         '<button type="button" id="conflict-keep-theirs">Keep theirs (discard my draft)</button>' +
         '<button type="button" id="conflict-dismiss">Manual merge in textarea</button>' +
       '</div>' +
-      '<pre class="conflict-theirs">' + escapeHtml(theirBody) + '</pre>';
+      '<div class="three-way-merge">' +
+        '<div class="three-way-pane"><h4>Base</h4>' +
+          '<pre class="conflict-base">' + escapeHtml(baseBody) + '</pre></div>' +
+        '<div class="three-way-pane"><h4>Ours (your draft)</h4>' +
+          '<pre class="conflict-ours">' + escapeHtml(oursBody) + '</pre></div>' +
+        '<div class="three-way-pane"><h4>Theirs (on disk)</h4>' +
+          '<pre class="conflict-theirs">' + escapeHtml(theirBody) + '</pre></div>' +
+      '</div>';
     pane.querySelector('#conflict-keep-mine').addEventListener('click', function () {
       // M2 review F1: pull the *new* version from the server-supplied
       // top-level field; the embedded issue object lacked it pre-fix
@@ -744,17 +828,23 @@
       if (currentVersion) {
         editor.expected_version = currentVersion;
         editor.base_version = currentVersion;
+        // After accepting "theirs as base" we're effectively rebasing
+        // our draft on top of the server's body. Update base_body so a
+        // subsequent conflict in the same session shows a useful three
+        // way view (base = the body our work was rebased onto).
+        editor.base_body = theirBody;
       }
       pane.hidden = true;
       saveNow(true);
     });
     pane.querySelector('#conflict-keep-theirs').addEventListener('click', function () {
-      var ta = els.detailBody.querySelector('#body-editor');
-      ta.value = theirBody;
+      var taLocal = els.detailBody.querySelector('#body-editor');
+      taLocal.value = theirBody;
       if (currentVersion) {
         editor.expected_version = currentVersion;
         editor.base_version = currentVersion;
       }
+      editor.base_body = theirBody;
       editor.lastSavedBody = theirBody;
       removeDraftsForSlug(editor.slug);
       // M2 review F10: refresh the preview pane so it reflects the
@@ -849,13 +939,30 @@
         render();
         return;
       }
-      case 'Resync':
-      case 'Degraded': {
+      case 'Resync': {
         // M2 review F6 / design §5.7: discard all per-issue local
         // version state on Resync. Stale entries can otherwise suppress
         // legitimate IssueUpserted events after bulk operations.
         state.local_versions = {};
+        // M3: a successful (re)start clears the degraded latch. The
+        // server emits Resync on every watcher restart (§5.8) so this
+        // is the right moment to drop the banner.
+        if (evt.reason === 'watcher_restart' && state.degraded_reason) {
+          state.degraded_reason = null;
+          renderDegradedBanner();
+        }
         load();
+        return;
+      }
+      case 'Degraded': {
+        // §8.5: 3 failed restart attempts. The server has given up on
+        // the watcher. Show the banner; the manual refresh button is
+        // the user's only "see what changed" affordance until they
+        // restart `serve`. Don't refetch — there's no new state to
+        // load that we don't already have, and a refetch storm right
+        // after a watcher crash would just amplify whatever caused it.
+        state.degraded_reason = evt.reason || 'watcher_unavailable';
+        renderDegradedBanner();
         return;
       }
     }
