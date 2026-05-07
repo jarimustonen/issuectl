@@ -1,6 +1,8 @@
 mod canonical;
 mod docs;
 mod doctor;
+mod fmt;
+mod merge_driver;
 mod models;
 mod mutate;
 mod parser;
@@ -385,6 +387,45 @@ enum Command {
         #[arg(long)]
         allow_remote_writes: bool,
     },
+
+    /// Normalize `item.md` files: canonical key order, sorted arrays,
+    /// trimmed whitespace, ATX headings. Idempotent.
+    Fmt {
+        /// Specific slugs to format. Default: every flat-layout issue.
+        #[arg(value_parser = parse_slug_arg)]
+        slugs: Vec<String>,
+
+        /// Don't write — exit non-zero if any file would change. CI mode.
+        #[arg(long, conflicts_with = "diff")]
+        check: bool,
+
+        /// Don't write — print a unified diff for files that would change.
+        #[arg(long, conflicts_with = "check")]
+        diff: bool,
+    },
+
+    /// Custom git merge driver for `issues/**/*.md`. Invoked by git
+    /// after `install-merge-driver` configures the driver. Hidden from
+    /// `--help` because end users do not call this directly.
+    #[command(hide = true)]
+    MergeDriver {
+        #[arg(long, value_name = "PATH")]
+        base: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        ours: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        theirs: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+
+    /// Print the `.gitattributes` and `git config` snippets to wire up
+    /// the issuectl-yaml merge driver. Pass `--apply` to also run
+    /// `git config` for this repo (does not modify `.gitattributes`).
+    InstallMergeDriver {
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -575,7 +616,77 @@ fn main() -> Result<()> {
                 allow_remote_writes,
             },
         ),
+        Command::Fmt { slugs, check, diff } => cmd_fmt(json_output, slugs, check, diff),
+        Command::MergeDriver {
+            base,
+            ours,
+            theirs,
+            output,
+        } => {
+            let code = merge_driver::run(&merge_driver::MergeArgs {
+                base,
+                ours,
+                theirs,
+                output,
+            })?;
+            std::process::exit(code);
+        }
+        Command::InstallMergeDriver { apply } => merge_driver::install(apply),
     }
+}
+
+fn cmd_fmt(json: bool, slugs: Vec<String>, check: bool, diff: bool) -> Result<()> {
+    let mode = if check {
+        fmt::FormatMode::Check
+    } else if diff {
+        fmt::FormatMode::Diff
+    } else {
+        fmt::FormatMode::Write
+    };
+    let root = find_root();
+    let results = fmt::format_repo(&root, &slugs, mode)?;
+    let any_changed = results
+        .iter()
+        .any(|r| r.status == fmt::FormatStatus::Changed);
+
+    if json {
+        let entries: Vec<_> = results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "path": r.path.to_string_lossy(),
+                    "status": match r.status {
+                        fmt::FormatStatus::Unchanged => "unchanged",
+                        fmt::FormatStatus::Changed => "changed",
+                    },
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else {
+        for r in &results {
+            match r.status {
+                fmt::FormatStatus::Unchanged => {}
+                fmt::FormatStatus::Changed => match mode {
+                    fmt::FormatMode::Write => println!("formatted: {}", r.path.display()),
+                    fmt::FormatMode::Check => println!("would format: {}", r.path.display()),
+                    fmt::FormatMode::Diff => {
+                        if let Some(d) = &r.diff {
+                            print!("{d}");
+                        }
+                    }
+                },
+            }
+        }
+        if !any_changed && mode != fmt::FormatMode::Diff {
+            println!("All {} file(s) already formatted.", results.len());
+        }
+    }
+
+    if check && any_changed {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn find_root() -> PathBuf {

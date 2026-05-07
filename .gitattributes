@@ -1,0 +1,11 @@
+# Use the issuectl-yaml merge driver for issue files. To activate it
+# locally, run:
+#
+#   git config merge.issuectl-yaml.driver \
+#       "issuectl merge-driver --base %O --ours %A --theirs %B --output %A"
+#
+# Or run `issuectl install-merge-driver --apply`. Without the local
+# `git config`, git falls back to the default text-merge driver — so
+# clones that haven't installed it still merge correctly, just without
+# the array-union benefits.
+issues/**/*.md merge=issuectl-yaml

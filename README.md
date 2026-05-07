@@ -49,6 +49,11 @@ can use it from a terminal too.
 - `skill install` / `skill print` — install or preview the `/issue` skill
   template for Claude Code or Codex CLI (or both)
 - `serve` — run a local Trello-style web board (read-only)
+- `fmt` — normalize `item.md` files (canonical key order, sorted arrays,
+  ATX headings) so reviews focus on real changes
+- `merge-driver` — opt-in git custom merge driver that union-merges
+  `labels` / `related` / `blocked_by` / `commits` and picks the newer
+  `updated:` instead of conflicting on every cross-branch edit
 - `--root <PATH>` — operate on an external repo from any working directory
 
 ## Install
@@ -259,6 +264,59 @@ _Source: which service / page / feature_
 
 ...
 ```
+
+### `issuectl fmt` — normalize on-disk files
+
+```sh
+issuectl fmt                    # rewrite every issues/<slug>/item.md
+issuectl fmt some-slug          # specific slug(s)
+issuectl fmt --check            # exit non-zero if anything would change (CI)
+issuectl fmt --diff             # print a unified diff, no writes
+issuectl --json fmt --check     # per-file JSON results
+```
+
+`fmt` is idempotent — `issuectl fmt && issuectl fmt --check` always
+exits 0. Normalises:
+
+- **frontmatter key order**: `created`, `updated`, `closed`, `type`,
+  `status`, `priority`, `reporter`, `assignee`, `owner`, `epic`,
+  `blocked_by`, `related`, `labels`, `commits`, then any unknown keys
+  alphabetically;
+- **arrays** (`labels` / `related` / `blocked_by`) sorted;
+  `commits` keeps its order (it's chronological);
+- markdown setext headings (`====`) rewritten to ATX (`#`);
+- one blank line between `---` close and the body, no trailing
+  whitespace, single final newline.
+
+### Optional git merge driver
+
+`issuectl merge-driver` is a custom three-way merge driver for
+`issues/**/*.md`. It union-merges `labels` / `related` / `blocked_by`,
+keeps `commits` as a hash-keyed log, and picks the newer `updated:` —
+mitigating the most common cross-branch conflict mode for file-based
+issue trackers. Scalar fields that diverge on both sides still produce
+a conflict (the driver never silently picks a side).
+
+To enable it for a repo:
+
+```sh
+# Add to .gitattributes (commit this):
+echo 'issues/**/*.md merge=issuectl-yaml' >> .gitattributes
+
+# Configure the driver locally (per-clone, not committed):
+git config merge.issuectl-yaml.driver \
+    "issuectl merge-driver --base %O --ours %A --theirs %B --output %A"
+```
+
+Or print and apply via:
+
+```sh
+issuectl install-merge-driver           # print the snippets
+issuectl install-merge-driver --apply   # also run `git config` for you
+```
+
+`install-merge-driver` never modifies `.gitattributes` — that file is
+shared, so its contents are your decision.
 
 See [issues/AGENTS.md](issues/AGENTS.md) for the full schema reference,
 status workflow, and conventions.
