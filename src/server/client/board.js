@@ -34,6 +34,13 @@
 
   var FILTER_KEYS = ['search', 'type', 'assignee', 'epic', 'label'];
 
+  function columnIdFor(status) {
+    for (var i = 0; i < COLUMNS.length; i++) {
+      if (COLUMNS[i].match(status)) return COLUMNS[i].id;
+    }
+    return 'other';
+  }
+
   var state = {
     issues: [],
     warnings: [],
@@ -65,6 +72,16 @@
     // separately from per-issue parse warnings so the two strips don't
     // collide visually.
     degraded_reason: null,
+    // slug -> canonical version. Source for `expected_version` on the
+    // drag-and-drop PATCH path. Populated from /api/issues, SSE
+    // IssueUpserted events, and write responses; differs from
+    // `local_versions` (which is the narrower "what *this* tab last
+    // wrote" cache used to dedupe self-echo).
+    versions: {},
+    // Active drag bookkeeping. `cancelled` is set if SSE delivers a
+    // change for the dragged slug mid-drag — the drop then becomes a
+    // no-op rather than racing against an already-superseded version.
+    dragging: null,
   };
 
   var els = {
@@ -81,7 +98,16 @@
     detailBody: document.getElementById('detail-body'),
     detailClose: document.getElementById('detail-close'),
     degraded: document.getElementById('degraded-banner'),
+    toastHost: document.getElementById('toast-host'),
   };
+
+  // Columns the user can drop onto. The "closed" bucket spans multiple
+  // closing statuses (done/fixed/wontfix/…) — we deliberately don't pick
+  // one for the user via drag-and-drop; that intent belongs in the
+  // detail dialog. "Other" catches unknown statuses and is also not a
+  // drop target. Drag *out* of either column into an active column is
+  // allowed and just sets a single status.
+  var DROP_TARGETS = { 'open': 'open', 'in-progress': 'in-progress', 'testing': 'testing' };
 
   function effectiveAssignee(i) { return i.assignee || i.owner || ''; }
 
@@ -124,6 +150,13 @@
         state.warnings = data.warnings || [];
         state.snapshot_seq = data.snapshot_seq || 0;
         if (data.instance_id) state.instance_id = data.instance_id;
+        // Rebuild the version cache from the snapshot so any prior stale
+        // entries (e.g. across a Resync) are dropped together with the
+        // issue list they belonged to.
+        state.versions = {};
+        state.issues.forEach(function (i) {
+          if (i.version) state.versions[i.slug] = i.version;
+        });
         renderWarnings();
         populateFilters();
         normalizeFiltersToOptions();
@@ -256,6 +289,7 @@
       if (group.col.id === 'other' && group.items.length === 0) return;
       var col = document.createElement('section');
       col.className = 'column';
+      col.setAttribute('data-column-id', group.col.id);
       col.innerHTML =
         '<div class="column-header"><h2>' + escapeHtml(group.col.label) + '</h2>' +
         '<span class="column-count">' + group.items.length + '</span></div>';
@@ -265,8 +299,136 @@
       } else {
         group.items.forEach(function (i) { col.appendChild(renderCard(i)); });
       }
+      wireColumnDrop(col, group.col.id);
       els.board.appendChild(col);
     });
+  }
+
+  // === Drag and drop ===
+
+  function wireColumnDrop(col, columnId) {
+    col.addEventListener('dragover', function (ev) {
+      if (!state.dragging) return;
+      var validTarget = DROP_TARGETS.hasOwnProperty(columnId);
+      var sameColumn = state.dragging.sourceColumnId === columnId;
+      if (!validTarget || sameColumn) {
+        col.classList.add('drop-invalid');
+        col.classList.remove('drop-target');
+        // No preventDefault — the browser shows the "no-drop" cursor and
+        // the drop event won't fire. Source-column drops are silently a
+        // no-op rather than a confusing failure toast.
+        return;
+      }
+      ev.preventDefault();
+      // effectAllowed was set to 'move' on dragstart; mirror it here so
+      // the OS shows the move cursor consistently across browsers.
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+      col.classList.add('drop-target');
+      col.classList.remove('drop-invalid');
+    });
+    col.addEventListener('dragleave', function (ev) {
+      // dragleave fires when crossing into a child element too. Ignore
+      // unless the cursor actually left the column subtree; otherwise
+      // the highlight flickers as the user moves over individual cards.
+      if (col.contains(ev.relatedTarget)) return;
+      col.classList.remove('drop-target', 'drop-invalid');
+    });
+    col.addEventListener('drop', function (ev) {
+      col.classList.remove('drop-target', 'drop-invalid');
+      if (!state.dragging) return;
+      var validTarget = DROP_TARGETS.hasOwnProperty(columnId);
+      if (!validTarget) return;
+      if (state.dragging.sourceColumnId === columnId) return;
+      ev.preventDefault();
+      var drag = state.dragging;
+      handleDrop(drag, DROP_TARGETS[columnId]);
+    });
+  }
+
+  function findIssueIndex(slug) {
+    return state.issues.findIndex(function (i) { return i.slug === slug; });
+  }
+
+  function handleDrop(drag, newStatus) {
+    // Clear dragging state immediately. The original card's `dragend`
+    // may not fire if a mid-drag SSE re-rendered the board and replaced
+    // its DOM node — leaving state.dragging set would otherwise pin
+    // stale state and break the next drag's source-column check.
+    state.dragging = null;
+    if (drag.cancelled) {
+      // External SSE write landed mid-drag (or the slug was removed).
+      // Bail without a PATCH; the load()/render() that the SSE handler
+      // already triggered carries the authoritative state.
+      showToast('Drop cancelled — issue changed in another window', 'error');
+      return;
+    }
+    var idx = findIssueIndex(drag.slug);
+    if (idx < 0) return;
+    var prevStatus = state.issues[idx].status;
+    var expected = state.versions[drag.slug] || null;
+    // Optimistic move so the user sees the column change immediately.
+    state.issues[idx] = Object.assign({}, state.issues[idx], { status: newStatus });
+    render();
+
+    fetch('/api/issues/' + encodeURIComponent(drag.slug), {
+      method: 'PATCH',
+      headers: csrfJson(),
+      body: JSON.stringify({ expected_version: expected, status: newStatus }),
+    })
+      .then(function (r) {
+        return r.json().then(function (d) { return { status: r.status, body: d, headers: r.headers }; },
+          function () { return { status: r.status, body: {}, headers: r.headers }; });
+      })
+      .then(function (res) {
+        if (res.status >= 200 && res.status < 300) {
+          // Trust the server response over the optimistic guess: a
+          // status PATCH can ripple `closed:` / `updated:` / `folder`,
+          // and the response payload already reflects all of them.
+          if (res.body.version) {
+            state.local_versions[drag.slug] = res.body.version;
+          }
+          if (res.body.issue) {
+            applyIssueToBoard(res.body.issue, res.body.version);
+          }
+          return;
+        }
+        // Failure path: revert the card to its previous column.
+        revertDrop(drag.slug, prevStatus);
+        if (res.status === 409 && res.body && res.body.code === 'version_mismatch') {
+          // The 409 envelope carries the current issue state; refresh
+          // the card in place rather than forcing a full reload (M2 §6.3
+          // metadata-mutation pattern: toast + re-apply, no merge UI).
+          if (res.body.issue) applyIssueToBoard(res.body.issue, res.body.version);
+          showToast('This issue changed externally — refreshed', 'error');
+        } else if (res.status === 429) {
+          var retry = (res.headers && res.headers.get && res.headers.get('Retry-After')) || '?';
+          showToast('Rate limited — retry after ' + retry + 's', 'error');
+        } else {
+          var detail = (res.body && res.body.detail) || ('HTTP ' + res.status);
+          showToast('Move failed: ' + detail, 'error');
+        }
+      })
+      .catch(function (err) {
+        revertDrop(drag.slug, prevStatus);
+        showToast('Move failed: ' + err, 'error');
+      });
+  }
+
+  function revertDrop(slug, prevStatus) {
+    var idx = findIssueIndex(slug);
+    if (idx < 0) return;
+    state.issues[idx] = Object.assign({}, state.issues[idx], { status: prevStatus });
+    render();
+  }
+
+  function showToast(msg, kind) {
+    if (!els.toastHost) return;
+    var t = document.createElement('div');
+    t.className = 'toast' + (kind === 'error' ? ' toast-error' : '');
+    t.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+    t.textContent = msg;
+    els.toastHost.appendChild(t);
+    setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 4000);
   }
 
   function renderCard(issue) {
@@ -275,6 +437,32 @@
     card.className = 'card';
     if (state.invalid[issue.slug]) card.classList.add('card-invalid');
     card.setAttribute('data-slug', issue.slug);
+    // HTML5 DnD on a <button> works in Chrome/Firefox/Safari; the click
+    // handler still fires when the user releases without dragging.
+    card.draggable = true;
+    var sourceColumnId = columnIdFor(issue.status);
+    card.addEventListener('dragstart', function (ev) {
+      state.dragging = {
+        slug: issue.slug,
+        sourceColumnId: sourceColumnId,
+        cancelled: false,
+      };
+      card.classList.add('card-dragging');
+      if (ev.dataTransfer) {
+        ev.dataTransfer.effectAllowed = 'move';
+        // setData is required for Firefox to initiate a drag at all;
+        // the value itself is unused — we read state from `state.dragging`.
+        try { ev.dataTransfer.setData('text/plain', issue.slug); } catch (e) {}
+      }
+    });
+    card.addEventListener('dragend', function () {
+      card.classList.remove('card-dragging');
+      // Clean up any column highlight that lingered (e.g. drop landed
+      // outside any column, so no `drop` event cleared the class).
+      els.board.querySelectorAll('.column.drop-target, .column.drop-invalid')
+        .forEach(function (c) { c.classList.remove('drop-target', 'drop-invalid'); });
+      state.dragging = null;
+    });
     var assignee = effectiveAssignee(issue);
     var meta = [];
     if (issue.type) meta.push('<span class="tag tag-type-' + classSuffix(issue.type) + '">' + escapeHtml(issue.type) + '</span>');
@@ -730,7 +918,7 @@
           // otherwise the originating tab's card stays stale (e.g. a
           // body edit that changed `# Heading` would not refresh the
           // card title until the next reload).
-          if (res.body.issue) applyIssueToBoard(res.body.issue);
+          if (res.body.issue) applyIssueToBoard(res.body.issue, res.body.version);
         } else if (res.status === 409 && res.body && res.body.code === 'version_mismatch') {
           // M2 review F1: the current version lives at the top level of
           // the 409 envelope; the embedded `issue` is the
@@ -772,7 +960,7 @@
     if (cancelBtn) cancelBtn.disabled = false;
   }
 
-  function applyIssueToBoard(issue) {
+  function applyIssueToBoard(issue, version) {
     var idx = state.issues.findIndex(function (i) { return i.slug === issue.slug; });
     var summary = {
       slug: issue.slug,
@@ -786,6 +974,14 @@
       epic: issue.epic,
       labels: issue.labels || [],
     };
+    // The board summary's `version` is what the next drag-and-drop PATCH
+    // will send. Prefer the explicit value (server-confirmed post-write)
+    // and fall back to whatever was on the issue payload — both
+    // PUT/PATCH responses carry the new version, but defensive code
+    // means a stale cache won't silently issue 409s on the next drop.
+    if (version) summary.version = version;
+    else if (issue.version) summary.version = issue.version;
+    if (summary.version) state.versions[issue.slug] = summary.version;
     if (idx >= 0) state.issues[idx] = Object.assign({}, state.issues[idx], summary);
     else state.issues.push(summary);
     populateFilters();
@@ -986,6 +1182,14 @@
         // state from the PUT/PATCH 200 response. Don't re-fetch — it
         // would clobber the textarea mid-edit.
         if (state.local_versions[evt.slug] === evt.version) return;
+        // Drag cancellation: an external write for the slug currently
+        // being dragged means our cached version is already stale. Mark
+        // the drag so the drop handler turns it into a no-op rather
+        // than racing into a guaranteed 409.
+        if (state.dragging && state.dragging.slug === evt.slug) {
+          state.dragging.cancelled = true;
+        }
+        if (evt.version) state.versions[evt.slug] = evt.version;
         // Other tabs' edits still propagate via a refetch.
         load();
         // Clear stale invalid marker if the issue is now valid.
@@ -997,6 +1201,10 @@
       }
       case 'IssueRemoved': {
         state.issues = state.issues.filter(function (i) { return i.slug !== evt.slug; });
+        delete state.versions[evt.slug];
+        if (state.dragging && state.dragging.slug === evt.slug) {
+          state.dragging.cancelled = true;
+        }
         if (state.invalid[evt.slug]) { delete state.invalid[evt.slug]; renderWarnings(); }
         render();
         return;

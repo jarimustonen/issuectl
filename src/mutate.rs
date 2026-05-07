@@ -241,7 +241,9 @@ pub enum MutateError {
     /// response and CLI message can tell the user where to look — the
     /// blanket pre-flat-layout "open/ and closed/" message no longer
     /// covers the new ambiguity classes.
-    AmbiguousSlug { paths: Vec<PathBuf> },
+    AmbiguousSlug {
+        paths: Vec<PathBuf>,
+    },
     /// `expected_version` did not match the current canonical hash.
     /// Carries the current full issue plus its version so the response
     /// can include them per §4.3.
@@ -306,8 +308,7 @@ pub struct WriteLock {
 impl WriteLock {
     pub fn acquire(root: &Path) -> Result<Self> {
         let dir = root.join(".issuectl");
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("cannot create {}", dir.display()))?;
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
         let path = dir.join("write.lock");
         let mut opts = OpenOptions::new();
         opts.read(true).write(true).create(true).truncate(false);
@@ -379,13 +380,8 @@ pub fn update_issue(
     // migration. Read-only locate + parse, no write, no publish.
     if req.is_noop() {
         let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-        let located = repo::locate_issue_full(root, slug)
-            .map_err(|_| MutateError::NotFound)?;
-        let parsed = crate::parser::parse_item_md_with_warnings(
-            &located.item_path,
-            slug,
-            "open",
-        );
+        let located = repo::locate_issue_full(root, slug).map_err(|_| MutateError::NotFound)?;
+        let parsed = crate::parser::parse_item_md_with_warnings(&located.item_path, slug, "open");
         if !parsed.warnings.is_empty() {
             return Err(MutateError::Corrupt {
                 warnings: parsed.warnings,
@@ -505,7 +501,8 @@ fn update_issue_under_lock(
     apply_string_patch(&mut item, "epic", &req.epic);
 
     for label in &req.add_labels {
-        write::add_to_string_list(&mut item.frontmatter, "labels", label).map_err(MutateError::Io)?;
+        write::add_to_string_list(&mut item.frontmatter, "labels", label)
+            .map_err(MutateError::Io)?;
     }
     for label in &req.remove_labels {
         write::remove_from_string_list(&mut item.frontmatter, "labels", label)
@@ -627,9 +624,8 @@ pub fn close_issue(
     // (fs2 advisory flock is per-fd; nested `WriteLock::acquire` would
     // deadlock on Linux).
     let mut req_normalized = req;
-    let normalized_add_related =
-        crate::normalize_related_refs_pub(&req_normalized.add_related)
-            .map_err(|e| MutateError::Validation(e.to_string()))?;
+    let normalized_add_related = crate::normalize_related_refs_pub(&req_normalized.add_related)
+        .map_err(|e| MutateError::Validation(e.to_string()))?;
     let normalized_remove_related =
         crate::normalize_related_refs_pub(&req_normalized.remove_related)
             .map_err(|e| MutateError::Validation(e.to_string()))?;
@@ -752,9 +748,7 @@ fn locate_and_migrate(root: &Path, slug: &str) -> Result<PathBuf, MutateError> {
                 LayoutState::Flat { item_path } => Ok(item_path),
                 LayoutState::Absent => Err(MutateError::NotFound),
                 LayoutState::Ambiguous { paths } => Err(MutateError::AmbiguousSlug { paths }),
-                LayoutState::Invalid { reason, .. } => {
-                    Err(MutateError::Io(anyhow!("{reason}")))
-                }
+                LayoutState::Invalid { reason, .. } => Err(MutateError::Io(anyhow!("{reason}"))),
                 LayoutState::Legacy { .. } => Err(MutateError::Io(anyhow!(
                     "post-migration state still classifies as legacy"
                 ))),
@@ -950,11 +944,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let parsed = crate::parser::parse_item_md_with_warnings(
-            &dir.join("item.md"),
-            slug,
-            "open",
-        );
+        let parsed = crate::parser::parse_item_md_with_warnings(&dir.join("item.md"), slug, "open");
         let mut issue = parsed.issue;
         issue.folder = crate::repo::folder_for_status(&issue.status).to_string();
         canonical_hash(&issue)
@@ -995,6 +985,38 @@ mod tests {
     }
 
     #[test]
+    fn status_only_patch_leaves_other_fields_untouched() {
+        // Drag-and-drop kanban moves PATCH only `status`. Other fields
+        // (priority, assignee, epic, …) must round-trip unchanged via
+        // `Patch::Unspecified` — without this the web UI would silently
+        // clobber metadata on every column move.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/dnd-status-only");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\n\
+             priority: high\nassignee: alice\nepic: roadmap\n---\n\n# Title\n",
+        )
+        .unwrap();
+
+        let req = UpdateIssueRequest {
+            status: Patch::Set("in-progress".into()),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "dnd-status-only", req, None).unwrap();
+        assert_eq!(out.issue.status, "in-progress");
+        assert_eq!(out.issue.priority, "high");
+        assert_eq!(out.issue.assignee.as_deref(), Some("alice"));
+        assert_eq!(out.issue.epic.as_deref(), Some("roadmap"));
+        let on_disk = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("status: in-progress"));
+        assert!(on_disk.contains("priority: high"));
+        assert!(on_disk.contains("assignee: alice"));
+        assert!(on_disk.contains("epic: roadmap"));
+    }
+
+    #[test]
     fn update_status_to_closing_does_not_move_directory() {
         // M14: use inode comparison rather than `created()` (which is
         // Err on most Linux ext4 setups, silently making the assertion
@@ -1016,7 +1038,10 @@ mod tests {
         assert!(!tmp.path().join("issues/closed/close-me-now").exists());
         assert!(!tmp.path().join("issues/open/close-me-now").exists());
         let after_inode = fs::metadata(&flat_dir).unwrap().ino();
-        assert_eq!(before_inode, after_inode, "directory must not have been recreated");
+        assert_eq!(
+            before_inode, after_inode,
+            "directory must not have been recreated"
+        );
         let on_disk = fs::read_to_string(flat_dir.join("item.md")).unwrap();
         assert!(on_disk.contains("status: fixed"));
         assert!(on_disk.contains("closed:"));
@@ -1087,7 +1112,10 @@ mod tests {
         };
         let _ = update_issue(tmp.path(), "backfill-closed", req, None).unwrap();
         let after = fs::read_to_string(dir.join("item.md")).unwrap();
-        assert!(after.contains("closed:"), "expected backfilled closed date in:\n{after}");
+        assert!(
+            after.contains("closed:"),
+            "expected backfilled closed date in:\n{after}"
+        );
     }
 
     #[test]
@@ -1114,7 +1142,10 @@ mod tests {
             ..Default::default()
         };
         let out = update_issue(tmp.path(), "legacy-one-here", req, None).unwrap();
-        assert!(out.issue_dir.to_string_lossy().ends_with("issues/legacy-one-here"));
+        assert!(out
+            .issue_dir
+            .to_string_lossy()
+            .ends_with("issues/legacy-one-here"));
         assert!(!legacy.exists(), "legacy dir must be gone after write");
     }
 
@@ -1211,8 +1242,7 @@ mod tests {
 
     #[test]
     fn deserialize_rejects_unknown_field() {
-        let result: Result<UpdateIssueRequest, _> =
-            serde_json::from_str(r#"{"priorty": "high"}"#);
+        let result: Result<UpdateIssueRequest, _> = serde_json::from_str(r#"{"priorty": "high"}"#);
         assert!(result.is_err(), "typo'd field must be rejected");
     }
 

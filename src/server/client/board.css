@@ -448,3 +448,47 @@ button.card { font: inherit; text-align: left; width: 100%; }
   background: rgba(220, 38, 38, 0.15);
   color: var(--gp-error);
 }
+
+/* === Drag and drop === */
+.card[draggable="true"] { cursor: grab; }
+.card.card-dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+.column.drop-target {
+  outline: 2px dashed var(--gp-accent);
+  outline-offset: -4px;
+  background: var(--gp-surface-hover);
+}
+.column.drop-invalid {
+  outline: 2px dashed var(--gp-border);
+  outline-offset: -4px;
+  cursor: not-allowed;
+}
+
+/* === Toasts === */
+.toast-host {
+  position: fixed;
+  bottom: 1.25rem;
+  right: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  z-index: 1000;
+  pointer-events: none;
+}
+.toast {
+  background: var(--gp-surface);
+  border: 1px solid var(--gp-border);
+  border-radius: 8px;
+  box-shadow: var(--gp-shadow);
+  padding: 0.6rem 0.85rem;
+  font-size: 0.85rem;
+  color: var(--gp-text);
+  max-width: 22rem;
+  pointer-events: auto;
+}
+.toast-error {
+  border-color: var(--gp-error);
+  background: rgba(220, 38, 38, 0.08);
+}

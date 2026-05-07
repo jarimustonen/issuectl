@@ -80,10 +80,15 @@ pub struct IssueSummary {
     pub closed: Option<String>,
     pub commits: Option<Vec<crate::models::Commit>>,
     pub title: String,
+    /// Canonical content hash. Lets the web client send `expected_version`
+    /// on PATCHes (drag-and-drop kanban writes) without a per-card GET to
+    /// fetch the version separately.
+    pub version: String,
 }
 
 impl From<Issue> for IssueSummary {
     fn from(i: Issue) -> Self {
+        let version = crate::canonical::canonical_hash(&i);
         IssueSummary {
             slug: i.slug,
             folder: i.folder,
@@ -101,6 +106,7 @@ impl From<Issue> for IssueSummary {
             closed: i.closed,
             commits: i.commits,
             title: i.title,
+            version,
         }
     }
 }
@@ -289,10 +295,7 @@ fn check_dir(dir: &Path, canon_root: Option<&Path>) -> Option<ItemCheck> {
     let item_meta = match std::fs::symlink_metadata(&item) {
         Ok(m) => m,
         Err(_) => {
-            return Some(ItemCheck::Invalid(format!(
-                "missing {}",
-                item.display()
-            )));
+            return Some(ItemCheck::Invalid(format!("missing {}", item.display())));
         }
     };
     if item_meta.file_type().is_symlink() || !item_meta.is_file() {
@@ -325,7 +328,10 @@ pub fn load_issues(repo_root: &Path) -> Vec<Issue> {
             LayoutState::Ambiguous { paths } => {
                 eprintln!(
                     "Warning: {slug} present at multiple paths ({:?}) — resolve manually",
-                    paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
+                    paths
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
                 );
             }
             LayoutState::Invalid { reason, .. } => {
@@ -532,9 +538,8 @@ pub fn migrate_to_flat_inplace(repo_root: &Path, slug: &str) -> Result<PathBuf> 
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("cannot create {}", parent.display()))?;
             }
-            std::fs::rename(&src, &flat).with_context(|| {
-                format!("cannot rename {} → {}", src.display(), flat.display())
-            })?;
+            std::fs::rename(&src, &flat)
+                .with_context(|| format!("cannot rename {} → {}", src.display(), flat.display()))?;
             Ok(flat)
         }
         LayoutState::Ambiguous { paths } => bail!(
@@ -617,10 +622,8 @@ mod tests {
         let (issues, warnings) = load_issues_with_warnings(tmp.path());
         // No issue is loaded — ambiguity is unresolvable without operator action.
         assert!(issues.iter().all(|i| i.slug != "shared-slug-here"));
-        assert!(warnings
-            .iter()
-            .any(|w| w.slug == "shared-slug-here"
-                && matches!(w.code, Some(LoadWarningCode::AmbiguousSlug))));
+        assert!(warnings.iter().any(|w| w.slug == "shared-slug-here"
+            && matches!(w.code, Some(LoadWarningCode::AmbiguousSlug))));
     }
 
     #[test]
@@ -629,15 +632,16 @@ mod tests {
         seed_legacy(&tmp, "open", "dual-legacy-here", "open");
         seed_legacy(&tmp, "closed", "dual-legacy-here", "fixed");
         let (issues, warnings) = load_issues_with_warnings(tmp.path());
-        let count = issues.iter().filter(|i| i.slug == "dual-legacy-here").count();
+        let count = issues
+            .iter()
+            .filter(|i| i.slug == "dual-legacy-here")
+            .count();
         assert_eq!(
             count, 0,
             "ambiguous dual-legacy must not produce loaded issues"
         );
-        assert!(warnings
-            .iter()
-            .any(|w| w.slug == "dual-legacy-here"
-                && matches!(w.code, Some(LoadWarningCode::AmbiguousSlug))));
+        assert!(warnings.iter().any(|w| w.slug == "dual-legacy-here"
+            && matches!(w.code, Some(LoadWarningCode::AmbiguousSlug))));
     }
 
     #[test]
@@ -710,7 +714,10 @@ mod tests {
         let after_inode = fs::metadata(&r).unwrap().ino();
         let after_content = fs::read_to_string(r.join("item.md")).unwrap();
         assert_eq!(before_inode, after_inode, "no-op must not move dir");
-        assert_eq!(before_content, after_content, "no-op must not modify item.md");
+        assert_eq!(
+            before_content, after_content,
+            "no-op must not modify item.md"
+        );
     }
 
     #[test]
