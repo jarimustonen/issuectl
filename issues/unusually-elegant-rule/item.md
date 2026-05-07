@@ -1,8 +1,8 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-07
 type: feature
-status: open
+status: in-progress
 priority: high
 reporter: jari
 assignee: jari
