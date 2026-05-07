@@ -8,6 +8,11 @@ status: testing
 priority: high
 epic: exorbitantly-ill-apples
 labels: [breaking, foundation, migration]
+commits:
+- hash: 2809ded
+  summary: 'refactor: flat layout (issues/<slug>/item.md, no open/closed split)'
+- hash: 501a1bd
+  summary: 'fix: apply review findings from awfully-faint-sound flat-layout'
 ---
 
 # Migrate to flat layout: issues/<slug>/item.md (status only in YAML, not in path)
