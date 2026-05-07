@@ -101,20 +101,43 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
 
     let mut all_slugs: BTreeMap<String, usize> = BTreeMap::new();
 
-    for folder in &["open", "closed"] {
-        let folder_path = issues_dir.join(folder);
+    // Post-flat-layout: walk the canonical `issues/<slug>/` paths plus
+    // the legacy `issues/{open,closed}/<slug>/` ones for backward-compat
+    // reads. The `folder` axis fed downstream is the kanban-bucket label
+    // (legacy-folder name when reading legacy paths; "flat" otherwise).
+    let mut entries: Vec<(String, std::path::PathBuf, String)> = Vec::new();
+    if let Ok(rd) = fs::read_dir(&issues_dir) {
+        for entry in rd.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "open" || name == "closed" || name == "archive" {
+                continue;
+            }
+            entries.push((name, entry.path(), "flat".to_string()));
+        }
+    }
+    for legacy in ["open", "closed"] {
+        let folder_path = issues_dir.join(legacy);
         if !folder_path.is_dir() {
             continue;
         }
         for entry in fs::read_dir(&folder_path)
             .with_context(|| format!("cannot read {}", folder_path.display()))?
+            .flatten()
         {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
-            let dir_name = entry.file_name().to_string_lossy().to_string();
-            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            entries.push((name, entry.path(), legacy.to_string()));
+        }
+    }
+
+    for (dir_name, path, folder_owned) in entries {
+        let folder = folder_owned.as_str();
+        {
 
             let item_path = path.join("item.md");
             let item_present = item_path.is_file();
@@ -128,7 +151,11 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
 
             if let Some(number) = legacy {
                 let new_slug = slug::generate_unique(repo_root);
-                let new_path = issues_dir.join(folder).join(&new_slug);
+                // Always migrate to the canonical flat path — even if
+                // the legacy `<NN>-<slug>` dir lives under
+                // `issues/{open,closed}/`, doctor `--fix` should bring
+                // it forward to the post-flat-layout home in one pass.
+                let new_path = issues_dir.join(&new_slug);
                 report.legacy_dirs.push(LegacyMigration {
                     folder: folder.to_string(),
                     old_dir_name: dir_name.clone(),
@@ -182,51 +209,64 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
 fn detect_orphan_epic_refs(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
     let issues_dir = repo_root.join("issues");
     let mut existing_slugs: BTreeSet<String> = BTreeSet::new();
-    for folder in &["open", "closed"] {
-        let folder_path = issues_dir.join(folder);
-        if !folder_path.is_dir() {
-            continue;
+
+    let mut walk = |dir: &Path| -> Result<()> {
+        if !dir.is_dir() {
+            return Ok(());
         }
-        for entry in fs::read_dir(&folder_path)?.flatten() {
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                let dir = entry.file_name().to_string_lossy().to_string();
-                existing_slugs.insert(dir.clone());
-                if let Some((_, rest)) = parser::parse_legacy_dir(&dir) {
-                    existing_slugs.insert(rest);
-                }
+        for entry in fs::read_dir(dir)?.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "open" || name == "closed" || name == "archive" {
+                continue;
+            }
+            existing_slugs.insert(name.clone());
+            if let Some((_, rest)) = parser::parse_legacy_dir(&name) {
+                existing_slugs.insert(rest);
             }
         }
-    }
+        Ok(())
+    };
+    walk(&issues_dir)?;
+    walk(&issues_dir.join("open"))?;
+    walk(&issues_dir.join("closed"))?;
 
-    for folder in &["open", "closed"] {
-        let folder_path = issues_dir.join(folder);
-        if !folder_path.is_dir() {
-            continue;
+    let mut walk_for_refs = |dir: &Path| -> Result<()> {
+        if !dir.is_dir() {
+            return Ok(());
         }
-        for entry in fs::read_dir(&folder_path)?.flatten() {
+        for entry in fs::read_dir(dir)?.flatten() {
             if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "open" || name == "closed" || name == "archive" {
                 continue;
             }
             let item = entry.path().join("item.md");
             if !item.is_file() {
                 continue;
             }
-            let slug_id = entry.file_name().to_string_lossy().to_string();
-            // Use the warning-collecting variant here too — the scan() pass
-            // already accounted for parse warnings; this second pass is just
-            // for epic-ref resolution and shouldn't double-print.
-            let issue = parser::parse_item_md_with_warnings(&item, &slug_id, folder).issue;
+            let issue = parser::parse_item_md_with_warnings(&item, &name, "open").issue;
             if let Some(epic) = issue.epic.as_deref() {
                 let stripped = epic.strip_prefix('@').unwrap_or(epic);
-                let exists = existing_slugs.contains(stripped) || stripped.parse::<u32>().is_ok();
+                let exists =
+                    existing_slugs.contains(stripped) || stripped.parse::<u32>().is_ok();
                 if !exists {
                     report
                         .orphan_epic_refs
-                        .push((slug_id.clone(), epic.to_string()));
+                        .push((name.clone(), epic.to_string()));
                 }
             }
         }
-    }
+        Ok(())
+    };
+    walk_for_refs(&issues_dir)?;
+    walk_for_refs(&issues_dir.join("open"))?;
+    walk_for_refs(&issues_dir.join("closed"))?;
+
     Ok(())
 }
 

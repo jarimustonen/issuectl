@@ -1,5 +1,7 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use chrono::Local;
@@ -338,8 +340,12 @@ pub fn render_new_item(args: &NewIssueArgs<'_>) -> String {
     out
 }
 
-pub fn issue_dir(repo_root: &Path, folder: &str, slug: &str) -> PathBuf {
-    repo_root.join("issues").join(folder).join(slug)
+/// Path to a slug's flat-layout issue directory. The `folder` parameter
+/// is unused and retained only to keep test call sites stable; it is
+/// allowed to be any kanban-bucket label.
+#[cfg(test)]
+pub fn issue_dir(repo_root: &Path, _folder: &str, slug: &str) -> PathBuf {
+    repo_root.join("issues").join(slug)
 }
 
 #[cfg(test)]
@@ -703,8 +709,8 @@ mod tests {
     // ── issue_dir ──────────────────────────────────────────────────────────
 
     #[test]
-    fn issue_dir_constructs_path() {
+    fn issue_dir_constructs_flat_path() {
         let p = issue_dir(Path::new("/tmp/repo"), "open", "extremely-quiet-otter");
-        assert_eq!(p, Path::new("/tmp/repo/issues/open/extremely-quiet-otter"));
+        assert_eq!(p, Path::new("/tmp/repo/issues/extremely-quiet-otter"));
     }
 }

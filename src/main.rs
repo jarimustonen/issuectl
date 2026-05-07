@@ -313,6 +313,12 @@ enum Command {
         action: BodyAction,
     },
 
+    /// One-shot migrations between repository layouts
+    Migrate {
+        #[command(subcommand)]
+        action: MigrateAction,
+    },
+
     /// Health-check the repo and (with --fix) migrate legacy numbered issues to slugs
     Doctor {
         /// Apply migrations and fixes (otherwise read-only report)
@@ -379,6 +385,15 @@ enum Command {
         #[arg(long)]
         allow_remote_writes: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum MigrateAction {
+    /// Move issues from the legacy `issues/{open,closed}/<slug>/` layout
+    /// to the canonical flat `issues/<slug>/` layout. Idempotent — a
+    /// repo that's already flat is a no-op. Refuses to run if both
+    /// flat and legacy paths exist for the same slug.
+    Layout,
 }
 
 #[derive(Subcommand)]
@@ -532,6 +547,9 @@ fn main() -> Result<()> {
                 from_file,
                 expected_version,
             } => cmd_body_set(json_output, &slug, stdin, from_file, expected_version),
+        },
+        Command::Migrate { action } => match action {
+            MigrateAction::Layout => cmd_migrate_layout(json_output),
         },
         Command::Doctor { fix } => doctor::run(&find_root(), fix, json_output),
         Command::Skill { action } => match action {
@@ -823,15 +841,13 @@ pub(crate) fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
         description: args.description.as_deref(),
     });
 
-    let open_parent = root.join("issues").join("open");
-    fs::create_dir_all(&open_parent)
-        .with_context(|| format!("cannot create {}", open_parent.display()))?;
+    let issues_parent = root.join("issues");
+    fs::create_dir_all(&issues_parent)
+        .with_context(|| format!("cannot create {}", issues_parent.display()))?;
 
     // Pick a slug atomically: try `fs::create_dir` (which fails on
-    // EEXIST) so two concurrent `issuectl new` invocations cannot race
-    // through `dir.exists()` then both call `fs::create_dir_all` (the
-    // latter is idempotent and does not detect a pre-existing dir).
-    // Returns the slug actually claimed and the open path.
+    // EEXIST) so two concurrent `issuectl new` invocations cannot race.
+    // Post-flat-layout, the canonical home is `issues/<slug>/`.
     let (slug, dir) = match &args.slug {
         Some(s) => {
             let normalized = write::slugify(s, 10);
@@ -843,17 +859,15 @@ pub(crate) fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
                     normalized
                 );
             }
-            // Detect a pre-existing closed issue with the same slug
-            // before attempting `create_dir` in open/, so the error
-            // message is precise.
-            let closed_dir = write::issue_dir(root, "closed", &normalized);
-            if closed_dir.exists() {
+            // Detect a pre-existing legacy copy of the slug so the
+            // error message points at the migration command.
+            let (_flat, legacy_open, legacy_closed) = repo::paths_for(root, &normalized);
+            if legacy_open.exists() || legacy_closed.exists() {
                 bail!(
-                    "slug {normalized} already used by closed issue at {}",
-                    closed_dir.display()
+                    "slug {normalized} already used at legacy path; run `issuectl migrate layout` first"
                 );
             }
-            let dir = open_parent.join(&normalized);
+            let dir = issues_parent.join(&normalized);
             match fs::create_dir(&dir) {
                 Ok(()) => (normalized, dir),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -866,7 +880,7 @@ pub(crate) fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
                 }
             }
         }
-        None => claim_random_slug(root, &open_parent)?,
+        None => claim_random_slug(root, &issues_parent)?,
     };
 
     let item_path = dir.join("item.md");
@@ -891,18 +905,20 @@ pub(crate) fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
     })
 }
 
-/// Generate a random slug and atomically claim its open/ directory.
+/// Generate a random slug and atomically claim its flat directory.
 /// Loops on `EEXIST` so that two concurrent processes that happen to
 /// pick the same slug both retry rather than silently overwriting.
-fn claim_random_slug(root: &Path, open_parent: &Path) -> Result<(String, PathBuf)> {
+fn claim_random_slug(root: &Path, issues_parent: &Path) -> Result<(String, PathBuf)> {
     for _ in 0..16 {
         let candidate = slug::generate();
-        // Cheap pre-check: skip slugs that already exist on disk to
-        // avoid burning a random pick when the answer is obvious.
-        if write::issue_dir(root, "closed", &candidate).exists() {
+        // Cheap pre-check: skip slugs that already exist at any path
+        // (flat or legacy) to avoid burning a random pick when the
+        // answer is obvious.
+        let (_flat, legacy_open, legacy_closed) = repo::paths_for(root, &candidate);
+        if legacy_open.exists() || legacy_closed.exists() {
             continue;
         }
-        let dir = open_parent.join(&candidate);
+        let dir = issues_parent.join(&candidate);
         match fs::create_dir(&dir) {
             Ok(()) => return Ok((candidate, dir)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -1055,11 +1071,17 @@ pub(crate) fn do_close(
     commits: Vec<String>,
     expected_version: Option<String>,
 ) -> Result<UpdateOutcome> {
-    let (folder, item_path) = locate_issue(root, slug)?;
-    if folder == "closed" {
-        bail!("issue {slug} is already in closed/ (use `update` to change status)");
-    }
+    let (_folder, item_path) = locate_issue(root, slug)?;
     let item = write::read_item(&item_path)?;
+    let current_status = item
+        .frontmatter
+        .get(serde_yaml::Value::String("status".into()))
+        .and_then(|v| v.as_str())
+        .unwrap_or("open")
+        .to_string();
+    if is_closing_status(&current_status) {
+        bail!("issue {slug} already has a closing status ({current_status}); use `update` to change status");
+    }
     let issue_type = item
         .frontmatter
         .get(serde_yaml::Value::String("type".into()))
@@ -1086,19 +1108,12 @@ pub(crate) fn do_close(
     )
 }
 
-/// Locate an issue by slug. Returns (folder, item.md path).
+/// Locate an issue by slug. Returns (folder, item.md path) where
+/// `folder` is the kanban-bucket label derived from frontmatter status.
+/// Delegates to `repo::locate_issue`, which handles flat layout plus
+/// legacy compat reads.
 pub fn locate_issue(root: &Path, slug: &str) -> Result<(String, PathBuf)> {
-    for folder in &["open", "closed"] {
-        let folder_path = root.join("issues").join(folder).join(slug);
-        if folder_path.is_dir() {
-            let item = folder_path.join("item.md");
-            if !item.is_file() {
-                bail!("{slug} directory has no item.md: {}", item.display());
-            }
-            return Ok((folder.to_string(), item));
-        }
-    }
-    bail!("issue {slug} not found in issues/open/ or issues/closed/")
+    repo::locate_issue(root, slug)
 }
 
 fn parse_commit_spec(spec: &str) -> Result<(String, String)> {
@@ -1182,6 +1197,157 @@ fn cmd_body_set(
         println!("Updated body of {slug}");
     }
     Ok(())
+}
+
+fn cmd_migrate_layout(json: bool) -> Result<()> {
+    let root = find_root();
+    let report = do_migrate_layout(&root)?;
+    if json {
+        let migrations: Vec<serde_json::Value> = report
+            .migrated
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "slug": m.slug,
+                    "from": m.from.to_string_lossy(),
+                    "to": m.to.to_string_lossy(),
+                })
+            })
+            .collect();
+        let conflicts: Vec<serde_json::Value> = report
+            .conflicts
+            .iter()
+            .map(|c| serde_json::json!({"slug": c.slug, "detail": c.detail}))
+            .collect();
+        let out = serde_json::json!({
+            "migrated": migrations,
+            "conflicts": conflicts,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        if !report.conflicts.is_empty() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    if report.migrated.is_empty() && report.conflicts.is_empty() {
+        println!("Repository already flat — nothing to migrate.");
+        return Ok(());
+    }
+    if !report.conflicts.is_empty() {
+        eprintln!("Conflicts detected — refusing to migrate ambiguous slugs:");
+        for c in &report.conflicts {
+            eprintln!("  {}: {}", c.slug, c.detail);
+        }
+        eprintln!(
+            "\nResolve manually (decide which copy to keep, remove the other), \
+             then re-run."
+        );
+        std::process::exit(1);
+    }
+    println!("Migrated {} issue(s) to flat layout:", report.migrated.len());
+    for m in &report.migrated {
+        println!("  {}  ({} → {})", m.slug, m.from.display(), m.to.display());
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) struct MigrateLayoutReport {
+    pub migrated: Vec<MigrateMove>,
+    pub conflicts: Vec<MigrateConflict>,
+}
+
+#[derive(Debug)]
+pub(crate) struct MigrateMove {
+    pub slug: String,
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct MigrateConflict {
+    pub slug: String,
+    pub detail: String,
+}
+
+/// One-shot move of every legacy `issues/{open,closed}/<slug>/` to
+/// `issues/<slug>/`. Idempotent. Held under the repo write lock so a
+/// concurrent CLI/server mutation cannot race the migration.
+pub(crate) fn do_migrate_layout(root: &Path) -> Result<MigrateLayoutReport> {
+    let _lock = mutate::WriteLock::acquire(root)?;
+    let issues = root.join("issues");
+    let mut migrated = Vec::new();
+    let mut conflicts = Vec::new();
+
+    // Collect pending moves first so a conflict on one slug doesn't
+    // leave the repo half-migrated.
+    let mut planned: Vec<(String, PathBuf, &'static str)> = Vec::new();
+    for legacy in ["open", "closed"] {
+        let legacy_dir = issues.join(legacy);
+        let Ok(rd) = fs::read_dir(&legacy_dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let slug = entry.file_name().to_string_lossy().to_string();
+            planned.push((slug, entry.path(), legacy));
+        }
+    }
+
+    for (slug, src, legacy) in planned {
+        let dest = issues.join(&slug);
+        if dest.exists() {
+            conflicts.push(MigrateConflict {
+                slug: slug.clone(),
+                detail: format!(
+                    "both flat ({}) and legacy ({}) exist",
+                    dest.display(),
+                    src.display()
+                ),
+            });
+            continue;
+        }
+        // Belt-and-braces: refuse to migrate if the slug appears under
+        // BOTH legacy folders (open and closed), regardless of flat
+        // existence — that's the same kind of ambiguity.
+        let other_legacy = if legacy == "open" { "closed" } else { "open" };
+        let other = issues.join(other_legacy).join(&slug);
+        if other.exists() {
+            conflicts.push(MigrateConflict {
+                slug: slug.clone(),
+                detail: format!(
+                    "slug exists in both legacy folders ({} and {})",
+                    src.display(),
+                    other.display()
+                ),
+            });
+            continue;
+        }
+        fs::rename(&src, &dest).with_context(|| {
+            format!("cannot rename {} → {}", src.display(), dest.display())
+        })?;
+        migrated.push(MigrateMove {
+            slug,
+            from: src,
+            to: dest,
+        });
+    }
+
+    // Best-effort: prune now-empty legacy parent dirs so the repo
+    // doesn't keep ghost directories.
+    for legacy in ["open", "closed"] {
+        let p = issues.join(legacy);
+        if p.is_dir() {
+            let _ = fs::remove_dir(&p);
+        }
+    }
+
+    Ok(MigrateLayoutReport {
+        migrated,
+        conflicts,
+    })
 }
 
 fn cmd_skill_install(agent: &str, force: bool) -> Result<()> {
@@ -1355,8 +1521,7 @@ mod tests {
 
     fn fresh_repo() -> TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
-        fs::create_dir_all(tmp.path().join("issues/closed")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         tmp
     }
 
@@ -1422,9 +1587,9 @@ mod tests {
     #[test]
     fn new_rejects_existing_slug() {
         let tmp = fresh_repo();
-        fs::create_dir_all(tmp.path().join("issues/open/taken")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues/taken")).unwrap();
         fs::write(
-            tmp.path().join("issues/open/taken/item.md"),
+            tmp.path().join("issues/taken/item.md"),
             "---\nstatus: open\n---\n",
         )
         .unwrap();
@@ -1503,7 +1668,7 @@ mod tests {
     }
 
     #[test]
-    fn update_with_closing_status_moves_to_closed() {
+    fn update_with_closing_status_does_not_move_directory() {
         let tmp = fresh_repo();
         let mut a = new_args("bug", "Bug");
         a.slug = Some("close-me".into());
@@ -1520,10 +1685,11 @@ mod tests {
         )
         .unwrap();
         assert!(outcome.moved_to_closed);
-        let content = read(&outcome.final_dir.join("item.md"));
+        // Flat layout: the directory does not change on close.
+        assert_eq!(outcome.final_dir, n.item_path.parent().unwrap());
+        let content = read(&n.item_path);
         assert!(content.contains("status: fixed"));
         assert!(content.contains("closed:"));
-        assert!(!n.item_path.exists());
     }
 
     #[test]
@@ -1606,13 +1772,31 @@ mod tests {
     }
 
     #[test]
-    fn locate_issue_finds_in_open_and_closed() {
+    fn locate_issue_finds_flat() {
         let tmp = fresh_repo();
-        fs::create_dir_all(tmp.path().join("issues/open/foo-bar")).unwrap();
-        fs::write(tmp.path().join("issues/open/foo-bar/item.md"), "---\n---\n").unwrap();
+        fs::create_dir_all(tmp.path().join("issues/foo-bar")).unwrap();
+        fs::write(
+            tmp.path().join("issues/foo-bar/item.md"),
+            "---\nstatus: open\n---\n",
+        )
+        .unwrap();
         let (folder, _) = locate_issue(tmp.path(), "foo-bar").unwrap();
         assert_eq!(folder, "open");
         assert!(locate_issue(tmp.path(), "missing").is_err());
+    }
+
+    #[test]
+    fn locate_issue_finds_legacy_path() {
+        let tmp = fresh_repo();
+        fs::create_dir_all(tmp.path().join("issues/closed/old-fox-here")).unwrap();
+        fs::write(
+            tmp.path().join("issues/closed/old-fox-here/item.md"),
+            "---\nstatus: fixed\n---\n",
+        )
+        .unwrap();
+        let (folder, item) = locate_issue(tmp.path(), "old-fox-here").unwrap();
+        assert_eq!(folder, "closed");
+        assert!(item.to_string_lossy().contains("issues/closed/old-fox-here"));
     }
 
     #[test]

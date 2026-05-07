@@ -2,10 +2,15 @@
 //!
 //! Implements the M1 protocol from `docs/design/web-edit-sync.md` §3:
 //! repo-wide `flock` → locate → read → optimistic-version check →
-//! mutate in memory → atomic write (and directory rename for status
-//! crossings) → recompute canonical hash → publish before releasing
-//! the lock. The lock guard is RAII so panic / cancellation during
-//! the sequence drops the file and releases the advisory lock.
+//! mutate in memory → atomic write → recompute canonical hash →
+//! publish before releasing the lock. The lock guard is RAII so panic
+//! / cancellation during the sequence drops the file and releases the
+//! advisory lock.
+//!
+//! Post-flat-layout (issue `awfully-faint-sound`): status changes are
+//! pure frontmatter PATCHes — there is no `open/` ↔ `closed/`
+//! directory rename. If the slug is found at a legacy path, the
+//! mutation moves it to flat layout in-line under the same flock.
 //!
 //! The CLI (`do_update`, `do_close`, `do_new`) and the axum PATCH/POST
 //! handlers both call into this module so a) every writer obtains the
@@ -17,13 +22,13 @@ use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Deserializer};
 
 use crate::canonical::canonical_hash;
 use crate::models::Issue;
-use crate::repo::{self, IssueSummary};
+use crate::repo::{self, folder_for_status, IssueSummary};
 use crate::server::events::{EventHub, EventPayload};
 use crate::write::{self, ItemFile};
 
@@ -198,9 +203,12 @@ fn first_overlap<'a>(a: &'a [String], b: &[String]) -> Option<&'a String> {
 pub struct UpdateOutcome {
     pub issue: Issue,
     pub version: String,
-    /// Directory containing the issue's `item.md` after the mutation
-    /// (changes when the mutation crosses `open/` ↔ `closed/`).
+    /// Directory containing the issue's `item.md` after the mutation.
+    /// Stable across status transitions in the flat layout.
     pub issue_dir: PathBuf,
+    /// True if this mutation transitioned the status from active to
+    /// closing. No directory move happens — the booleans are kept for
+    /// CLI/web messaging parity.
     pub moved_to_closed: bool,
     pub moved_to_open: bool,
 }
@@ -236,7 +244,11 @@ impl std::fmt::Display for MutateError {
         match self {
             MutateError::NotFound => write!(f, "issue not found"),
             MutateError::AmbiguousSlug => {
-                write!(f, "slug exists in both open/ and closed/ — resolve manually")
+                write!(
+                    f,
+                    "slug exists at both flat (issues/<slug>/) and legacy \
+                     (issues/{{open,closed}}/<slug>/) paths — resolve manually"
+                )
             }
             MutateError::VersionMismatch { version, .. } => {
                 write!(f, "version mismatch (current: {version})")
@@ -336,20 +348,24 @@ pub fn update_issue(
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
 
-    // 1) locate
-    let (folder, item_path) = locate_for_mutation(root, slug)?;
+    // 1) locate, then in-line migrate any legacy path under the flock
+    //    so writes always land at the canonical flat path.
+    let item_path = locate_and_migrate(root, slug)?;
+    let folder = "open"; // placeholder; folder is derived from status post-write
 
     // 2) read + parse + hash. Refuse to mutate a corrupt file —
     // overwriting parser fallback defaults would silently destroy the
     // user's real (but malformed) on-disk content (§8.6 / M7).
-    let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, &folder);
+    let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, folder);
     if !parsed.warnings.is_empty() {
         return Err(MutateError::Corrupt {
             warnings: parsed.warnings,
         });
     }
-    let current_issue = parsed.issue;
+    let mut current_issue = parsed.issue;
+    current_issue.folder = folder_for_status(&current_issue.status).to_string();
     let current_version = canonical_hash(&current_issue);
+    let prev_status = current_issue.status.clone();
 
     // 3) optimistic concurrency
     if let Some(ref expected) = req.expected_version {
@@ -363,23 +379,26 @@ pub fn update_issue(
 
     // 4) load the YAML mapping for in-place edits
     let mut item = write::read_item(&item_path).map_err(MutateError::Io)?;
-    let mut new_folder = folder.clone();
     let mut moved_to_closed = false;
     let mut moved_to_open = false;
 
-    // status: special-cased because closing statuses cross folders
+    // Status change is a pure frontmatter PATCH; no directory rename
+    // (post-flat-layout). The `moved_to_*` booleans now track the
+    // active↔closing transition for messaging parity with the old API.
     if let Patch::Set(s) = &req.status {
         write::set_string(&mut item.frontmatter, "status", s);
-        if crate::is_closing_status(s) {
-            new_folder = "closed".to_string();
+        let prev_closing = crate::is_closing_status(&prev_status);
+        let new_closing = crate::is_closing_status(s);
+        if new_closing {
             write::set_string(&mut item.frontmatter, "closed", &write::today());
-            if folder == "open" {
+            if !prev_closing {
                 moved_to_closed = true;
             }
-        } else if folder == "closed" {
+        } else {
             write::remove_key(&mut item.frontmatter, "closed");
-            new_folder = "open".to_string();
-            moved_to_open = true;
+            if prev_closing {
+                moved_to_open = true;
+            }
         }
     } else if let Patch::Clear = &req.status {
         return Err(MutateError::Validation(
@@ -421,47 +440,25 @@ pub fn update_issue(
 
     write::set_string(&mut item.frontmatter, "updated", &write::today());
 
-    // 5+6) write-then-rename. The reviewers all flagged the original
-    // "rename first" order (per design doc §3.4) as crash-unsafe: a
-    // panic between rename and write would leave new-folder + old
-    // content. Writing first means a crash between write and rename
-    // leaves `status: <closing>` content at `open/<slug>/` — which
-    // the startup reconciler can resolve cleanly from frontmatter
-    // alone. Net: no torn states across folder/content axes.
+    // 5) atomic write. No directory rename — flat layout means
+    //    `item_path` is the canonical location regardless of status.
     write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
-    let final_path = if new_folder != folder {
-        rename_status_dir(root, slug, &folder, &new_folder).map_err(MutateError::Io)?;
-        write::issue_dir(root, &new_folder, slug).join("item.md")
-    } else {
-        item_path.clone()
-    };
+    let final_path = item_path.clone();
 
-    // 7) recompute canonical hash from final on-disk content
-    let after = crate::parser::parse_item_md_with_warnings(&final_path, slug, &new_folder);
-    let new_issue = after.issue;
+    // 6) recompute canonical hash from final on-disk content
+    let after = crate::parser::parse_item_md_with_warnings(&final_path, slug, "open");
+    let mut new_issue = after.issue;
+    new_issue.folder = folder_for_status(&new_issue.status).to_string();
     let new_version = canonical_hash(&new_issue);
 
-    // 8) publish while still inside the lock so seq order matches
-    //    disk order. Cross-folder moves emit a single atomic
-    //    `IssueMoved` event (one seq, one client-side handler) — no
-    //    Remove+Upsert race window. The watcher will also fire on
-    //    the rename; clients dedupe by `version`.
+    // 7) publish while still inside the lock so seq order matches
+    //    disk order.
     if let Some(hub) = hub {
-        if folder != new_folder {
-            hub.publish(EventPayload::IssueMoved {
-                slug: slug.to_string(),
-                from_folder: folder.clone(),
-                to_folder: new_folder.clone(),
-                version: new_version.clone(),
-                issue: Box::new(IssueSummary::from(new_issue.clone())),
-            });
-        } else {
-            hub.publish(EventPayload::IssueUpserted {
-                slug: slug.to_string(),
-                version: new_version.clone(),
-                issue: Box::new(IssueSummary::from(new_issue.clone())),
-            });
-        }
+        hub.publish(EventPayload::IssueUpserted {
+            slug: slug.to_string(),
+            version: new_version.clone(),
+            issue: Box::new(IssueSummary::from(new_issue.clone())),
+        });
     }
 
     Ok(UpdateOutcome {
@@ -496,20 +493,22 @@ pub fn update_body(
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
 
-    let (folder, item_path) = locate_for_mutation(root, slug)?;
+    let item_path = locate_and_migrate(root, slug)?;
 
-    let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, &folder);
+    let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
     if !parsed.warnings.is_empty() {
         return Err(MutateError::Corrupt {
             warnings: parsed.warnings,
         });
     }
-    let current_version = canonical_hash(&parsed.issue);
+    let mut prev_issue = parsed.issue;
+    prev_issue.folder = folder_for_status(&prev_issue.status).to_string();
+    let current_version = canonical_hash(&prev_issue);
 
     if let Some(ref expected) = expected_version {
         if expected != &current_version {
             return Err(MutateError::VersionMismatch {
-                current: parsed.issue,
+                current: prev_issue,
                 version: current_version,
             });
         }
@@ -531,8 +530,9 @@ pub fn update_body(
 
     write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
 
-    let after = crate::parser::parse_item_md_with_warnings(&item_path, slug, &folder);
-    let new_issue = after.issue;
+    let after = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
+    let mut new_issue = after.issue;
+    new_issue.folder = folder_for_status(&new_issue.status).to_string();
     let new_version = canonical_hash(&new_issue);
 
     if let Some(hub) = hub {
@@ -565,23 +565,41 @@ fn apply_string_patch(item: &mut ItemFile, key: &str, p: &Patch<String>) {
     }
 }
 
-/// Locate the issue with M1's stricter ambiguous-slug semantics. The
-/// existing `repo::locate_issue` short-circuits on the first match; we
-/// add an explicit "both folders" check so the mutate layer can return
-/// `AmbiguousSlug` instead of silently picking one side.
-fn locate_for_mutation(root: &Path, slug: &str) -> Result<(String, PathBuf), MutateError> {
-    let issues = root.join("issues");
-    let open_dir = issues.join("open").join(slug);
-    let closed_dir = issues.join("closed").join(slug);
-    let open_exists = real_dir(&open_dir);
-    let closed_exists = real_dir(&closed_dir);
-    if open_exists && closed_exists {
+/// Locate the issue and, if it lives at a legacy path, move it to the
+/// canonical flat path under the held flock. Returns the final flat
+/// `item.md` path.
+///
+/// Ambiguous case (both flat and any legacy path exist for the same
+/// slug) is rejected outright — silently picking one side hides
+/// real state divergence introduced by, e.g., a partially-completed
+/// migration.
+fn locate_and_migrate(root: &Path, slug: &str) -> Result<PathBuf, MutateError> {
+    let (flat, legacy_open, legacy_closed) = repo::paths_for(root, slug);
+    let flat_exists = real_dir(&flat);
+    let legacy_open_exists = real_dir(&legacy_open);
+    let legacy_closed_exists = real_dir(&legacy_closed);
+    if (flat_exists && (legacy_open_exists || legacy_closed_exists))
+        || (legacy_open_exists && legacy_closed_exists)
+    {
         return Err(MutateError::AmbiguousSlug);
     }
-    match repo::locate_issue(root, slug) {
-        Ok((folder, item_path)) => Ok((folder, item_path)),
-        Err(_) => Err(MutateError::NotFound),
+    if flat_exists {
+        let item = flat.join("item.md");
+        if !item.is_file() {
+            return Err(MutateError::NotFound);
+        }
+        return Ok(item);
     }
+    // Legacy → flat: move the directory, then return the new item path.
+    if legacy_open_exists || legacy_closed_exists {
+        let new_dir = repo::migrate_to_flat_inplace(root, slug).map_err(MutateError::Io)?;
+        let item = new_dir.join("item.md");
+        if !item.is_file() {
+            return Err(MutateError::NotFound);
+        }
+        return Ok(item);
+    }
+    Err(MutateError::NotFound)
 }
 
 fn real_dir(p: &Path) -> bool {
@@ -630,34 +648,6 @@ pub fn write_item_atomic(target: &Path, item: &ItemFile) -> Result<()> {
 fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     let f = File::open(dir)?;
     f.sync_all()
-}
-
-/// Rename `<root>/issues/<from>/<slug>` to `<root>/issues/<to>/<slug>`.
-/// On all platforms we pre-check that the target does not exist (a
-/// TOCTOU window which is acceptable: only writers under our `flock`
-/// can race with us; uncoordinated writers are out of scope per §3).
-fn rename_status_dir(root: &Path, slug: &str, from: &str, to: &str) -> Result<()> {
-    let old = write::issue_dir(root, from, slug);
-    let new = write::issue_dir(root, to, slug);
-    if let Some(parent) = new.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create {}", parent.display()))?;
-    }
-    if new.exists() {
-        bail!("target directory already exists: {}", new.display());
-    }
-    fs::rename(&old, &new)
-        .with_context(|| format!("cannot rename {} → {}", old.display(), new.display()))?;
-    #[cfg(unix)]
-    {
-        if let Some(p) = old.parent() {
-            let _ = fsync_dir(p);
-        }
-        if let Some(p) = new.parent() {
-            let _ = fsync_dir(p);
-        }
-    }
-    Ok(())
 }
 
 // ── Create / close ──────────────────────────────────────────────────────
@@ -753,7 +743,8 @@ pub fn new_issue(
 
     // Re-read for canonical hash + Issue.
     let parsed = crate::parser::parse_item_md_with_warnings(&outcome.item_path, &outcome.slug, "open");
-    let issue = parsed.issue;
+    let mut issue = parsed.issue;
+    issue.folder = folder_for_status(&issue.status).to_string();
     let version = canonical_hash(&issue);
 
     if let Some(hub) = hub {
@@ -778,13 +769,14 @@ mod tests {
 
     fn fresh_repo() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
-        fs::create_dir_all(tmp.path().join("issues/closed")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         tmp
     }
 
-    fn seed_issue(root: &Path, folder: &str, slug: &str, status: &str) -> String {
-        let dir = root.join("issues").join(folder).join(slug);
+    fn seed_issue(root: &Path, _folder: &str, slug: &str, status: &str) -> String {
+        // Flat layout: `_folder` retained for test-call-site compatibility
+        // but no longer affects on-disk placement.
+        let dir = root.join("issues").join(slug);
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("item.md"),
@@ -796,9 +788,11 @@ mod tests {
         let parsed = crate::parser::parse_item_md_with_warnings(
             &dir.join("item.md"),
             slug,
-            folder,
+            "open",
         );
-        canonical_hash(&parsed.issue)
+        let mut issue = parsed.issue;
+        issue.folder = crate::repo::folder_for_status(&issue.status).to_string();
+        canonical_hash(&issue)
     }
 
     #[test]
@@ -836,26 +830,90 @@ mod tests {
     }
 
     #[test]
-    fn update_status_to_closing_renames_directory() {
+    fn update_status_to_closing_does_not_move_directory() {
         let tmp = fresh_repo();
         let _v0 = seed_issue(tmp.path(), "open", "close-me-now", "open");
+        let flat_dir = tmp.path().join("issues/close-me-now");
+        let before_inode = fs::metadata(&flat_dir).unwrap().created().ok();
         let req = UpdateIssueRequest {
             status: Patch::Set("fixed".into()),
             ..Default::default()
         };
         let out = update_issue(tmp.path(), "close-me-now", req, None).unwrap();
+        // Status transition flag still flips, but the dir does not move.
         assert!(out.moved_to_closed);
-        assert!(out
-            .issue_dir
-            .to_string_lossy()
-            .contains("/closed/close-me-now"));
+        assert_eq!(out.issue_dir, flat_dir);
+        assert!(flat_dir.is_dir(), "flat dir must still exist");
+        assert!(!tmp.path().join("issues/closed/close-me-now").exists());
         assert!(!tmp.path().join("issues/open/close-me-now").exists());
+        let after_inode = fs::metadata(&flat_dir).unwrap().created().ok();
+        // Best-effort: created-time should match (no rename happened).
+        if let (Some(a), Some(b)) = (before_inode, after_inode) {
+            assert_eq!(a, b, "directory must not have been recreated");
+        }
+        let on_disk = fs::read_to_string(flat_dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("status: fixed"));
+        assert!(on_disk.contains("closed:"));
+    }
+
+    #[test]
+    fn legacy_path_is_migrated_in_place_on_write() {
+        let tmp = fresh_repo();
+        let legacy = tmp.path().join("issues/open/legacy-one-here");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            legacy.join("item.md"),
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n# T\n",
+        )
+        .unwrap();
+        let v0 = {
+            let parsed = crate::parser::parse_item_md_with_warnings(
+                &legacy.join("item.md"),
+                "legacy-one-here",
+                "open",
+            );
+            canonical_hash(&parsed.issue)
+        };
+        let req = UpdateIssueRequest {
+            expected_version: Some(v0),
+            priority: Patch::Set("high".into()),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "legacy-one-here", req, None).unwrap();
+        assert!(out.issue_dir.to_string_lossy().ends_with("issues/legacy-one-here"));
+        assert!(!legacy.exists(), "legacy dir must be gone after write");
+    }
+
+    #[test]
+    fn ambiguous_layout_is_rejected() {
+        let tmp = fresh_repo();
+        // Both flat and legacy versions of the same slug exist.
+        let flat = tmp.path().join("issues/dual-path-here");
+        fs::create_dir_all(&flat).unwrap();
+        fs::write(
+            flat.join("item.md"),
+            "---\ntype: bug\nstatus: open\n---\n# T\n",
+        )
+        .unwrap();
+        let legacy = tmp.path().join("issues/open/dual-path-here");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            legacy.join("item.md"),
+            "---\ntype: bug\nstatus: open\n---\n# T\n",
+        )
+        .unwrap();
+        let req = UpdateIssueRequest {
+            priority: Patch::Set("high".into()),
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "dual-path-here", req, None).unwrap_err();
+        assert!(matches!(err, MutateError::AmbiguousSlug));
     }
 
     #[test]
     fn patch_clear_removes_field() {
         let tmp = fresh_repo();
-        let dir = tmp.path().join("issues/open/has-epic-here");
+        let dir = tmp.path().join("issues/has-epic-here");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("item.md"),
@@ -874,7 +932,7 @@ mod tests {
     #[test]
     fn patch_unspecified_does_not_touch_field() {
         let tmp = fresh_repo();
-        let dir = tmp.path().join("issues/open/keep-epic-as-is");
+        let dir = tmp.path().join("issues/keep-epic-as-is");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("item.md"),

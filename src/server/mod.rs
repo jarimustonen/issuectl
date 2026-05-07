@@ -336,20 +336,18 @@ async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) ->
     let watch_degraded: Arc<parking_lot::Mutex<Option<String>>> =
         Arc::new(parking_lot::Mutex::new(None));
 
-    // Watcher: a separate tokio task. We materialise `issues/open` and
-    // `issues/closed` at startup so the watcher always has something to
-    // hook — without this, `issuectl serve` in a fresh repo followed by
-    // `issuectl new` from the CLI never lights up the board.
+    // Watcher: a separate tokio task. We materialise `issues/` at startup
+    // so the watcher always has something to hook — without this,
+    // `issuectl serve` in a fresh repo followed by `issuectl new` from
+    // the CLI never lights up the board.
     let watcher_handle = if options.watch_enabled {
-        for sub in &["open", "closed"] {
-            let p = root.join("issues").join(sub);
-            if let Err(e) = std::fs::create_dir_all(&p) {
-                eprintln!(
-                    "issuectl[serve]: cannot create {}: {} — watcher disabled",
-                    p.display(),
-                    e
-                );
-            }
+        let p = root.join("issues");
+        if let Err(e) = std::fs::create_dir_all(&p) {
+            eprintln!(
+                "issuectl[serve]: cannot create {}: {} — watcher disabled",
+                p.display(),
+                e
+            );
         }
         if root.join("issues").is_dir() {
             let backend = match options.watch_poll_interval {
@@ -465,8 +463,10 @@ mod tests {
     use std::path::Path;
     use tower::util::ServiceExt;
 
-    fn write_issue(root: &Path, folder: &str, slug: &str, fm: &str, body: &str) {
-        let dir = root.join("issues").join(folder).join(slug);
+    fn write_issue(root: &Path, _folder: &str, slug: &str, fm: &str, body: &str) {
+        // Flat layout post-`awfully-faint-sound`: `_folder` retained for
+        // call-site compatibility and now derived from frontmatter status.
+        let dir = root.join("issues").join(slug);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("item.md"), format!("---\n{fm}---\n\n{body}\n")).unwrap();
     }
@@ -500,8 +500,8 @@ mod tests {
     #[tokio::test]
     async fn api_issues_returns_all_issues_with_metadata() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
-        fs::create_dir_all(tmp.path().join("issues/closed")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        
         write_issue(
             tmp.path(),
             "open",
@@ -544,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn api_issue_detail_returns_rendered_html_body() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         write_issue(
             tmp.path(),
             "open",
@@ -571,7 +571,7 @@ mod tests {
     #[tokio::test]
     async fn api_issue_detail_404s_for_unknown_slug() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let resp = make_router(tmp.path())
             .oneshot(
                 Request::get("/api/issues/nope-nope-nope")
@@ -586,7 +586,7 @@ mod tests {
     #[tokio::test]
     async fn api_issue_detail_rejects_invalid_slug() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         // `..` is not a valid slug shape, so it must be rejected before
         // touching the filesystem regardless of URL decoding details.
         let resp = make_router(tmp.path())
@@ -603,7 +603,7 @@ mod tests {
     #[tokio::test]
     async fn root_returns_html_shell_with_assets() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let resp = make_router(tmp.path())
             .oneshot(Request::get("/").body(Body::empty()).unwrap())
             .await
@@ -617,7 +617,7 @@ mod tests {
     #[tokio::test]
     async fn issue_html_page_renders_for_valid_slug() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         write_issue(
             tmp.path(),
             "open",
@@ -642,7 +642,7 @@ mod tests {
     #[tokio::test]
     async fn issue_html_page_404s_for_unknown_slug() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let resp = make_router(tmp.path())
             .oneshot(
                 Request::get("/issue/no-such-thing")
@@ -657,7 +657,7 @@ mod tests {
     #[tokio::test]
     async fn issue_html_escapes_title_content() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         write_issue(
             tmp.path(),
             "open",
@@ -690,7 +690,7 @@ mod tests {
     #[tokio::test]
     async fn detail_endpoint_strips_xss_from_body_html() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         write_issue(
             tmp.path(),
             "open",
@@ -717,7 +717,7 @@ mod tests {
     #[tokio::test]
     async fn detail_endpoint_lists_extra_md_docs() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("issues/open/clever-quiet-stage");
+        let dir = tmp.path().join("issues/clever-quiet-stage");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("item.md"),
@@ -752,7 +752,7 @@ mod tests {
     #[tokio::test]
     async fn doc_endpoint_serves_extra_md_rendered() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("issues/open/loud-spicy-fox");
+        let dir = tmp.path().join("issues/loud-spicy-fox");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("item.md"), "---\nstatus: open\n---\n# T\n").unwrap();
         fs::write(dir.join("analysis.md"), "# Analysis\n\n**bold**").unwrap();
@@ -776,7 +776,7 @@ mod tests {
     #[tokio::test]
     async fn doc_endpoint_rejects_path_traversal() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("issues/open/loud-spicy-fox");
+        let dir = tmp.path().join("issues/loud-spicy-fox");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("item.md"), "---\nstatus: open\n---\n# T\n").unwrap();
         // Caller cannot escape the issue directory via `../`, slashes, or
@@ -812,7 +812,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         fs::write(outside.path().join("secret.md"), "# secret").unwrap();
-        let dir = tmp.path().join("issues/open/safe-quiet-otter");
+        let dir = tmp.path().join("issues/safe-quiet-otter");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("item.md"), "---\nstatus: open\n---\n# T\n").unwrap();
         // Plant a symlink inside the issue dir pointing to a file outside.
@@ -840,7 +840,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         let tmp = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         fs::write(
             outside.path().join("item.md"),
             "---\nstatus: open\n---\n# leaked\n",
@@ -848,7 +848,7 @@ mod tests {
         .unwrap();
         symlink(
             outside.path(),
-            tmp.path().join("issues/open/escaped-not-otter"),
+            tmp.path().join("issues/escaped-not-otter"),
         )
         .unwrap();
 
@@ -866,7 +866,7 @@ mod tests {
     #[tokio::test]
     async fn warnings_surface_invalid_yaml() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("issues/open/broken-yaml-here");
+        let dir = tmp.path().join("issues/broken-yaml-here");
         fs::create_dir_all(&dir).unwrap();
         // Unterminated quote → invalid YAML.
         fs::write(
@@ -892,7 +892,7 @@ mod tests {
     #[tokio::test]
     async fn security_headers_present_on_root() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let resp = make_router(tmp.path())
             .oneshot(Request::get("/").body(Body::empty()).unwrap())
             .await
@@ -907,7 +907,7 @@ mod tests {
     // ── M1: write surface ─────────────────────────────────────────
 
     fn seed_open_issue(root: &Path, slug: &str) {
-        let dir = root.join("issues/open").join(slug);
+        let dir = root.join("issues").join(slug);
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("item.md"),
@@ -919,10 +919,12 @@ mod tests {
     /// Compute the canonical version directly from disk for a seeded
     /// issue.
     fn version_on_disk(root: &Path, slug: &str) -> String {
-        let p = root.join("issues/open").join(slug).join("item.md");
+        let p = root.join("issues").join(slug).join("item.md");
         let parsed =
             crate::parser::parse_item_md_with_warnings(&p, slug, "open");
-        crate::canonical::canonical_hash(&parsed.issue)
+        let mut issue = parsed.issue;
+        issue.folder = crate::repo::folder_for_status(&issue.status).to_string();
+        crate::canonical::canonical_hash(&issue)
     }
 
     /// `--no-watch` flips `AppState.watch_enabled`; `/api/session`
@@ -933,7 +935,7 @@ mod tests {
     #[tokio::test]
     async fn session_reports_watch_disabled_when_no_watch() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let r = router(AppState {
             root: Arc::new(tmp.path().to_path_buf()),
             event_hub: Arc::new(EventHub::new()),
@@ -984,7 +986,7 @@ mod tests {
     #[tokio::test]
     async fn session_surfaces_latched_degraded_reason() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let watch_degraded: Arc<parking_lot::Mutex<Option<String>>> =
             Arc::new(parking_lot::Mutex::new(Some("watcher_unavailable".to_string())));
         let r = router(AppState {
@@ -1009,7 +1011,7 @@ mod tests {
     #[tokio::test]
     async fn session_returns_csrf_token() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let r = make_secured_router(tmp.path());
         let resp = r
             .oneshot(
@@ -1030,7 +1032,7 @@ mod tests {
     #[tokio::test]
     async fn host_header_normalization_accepts_uppercase_and_trailing_dot() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let r = make_secured_router(tmp.path());
         // RFC 3986: hostnames are case-insensitive; trailing dot is
         // legal. Both must pass the Host allow-list.
@@ -1138,7 +1140,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn patch_status_to_closing_renames_directory() {
+    async fn patch_status_to_closing_does_not_move_directory() {
         let tmp = tempfile::tempdir().unwrap();
         seed_open_issue(tmp.path(), "patch-close-dir");
         let r = make_router(tmp.path());
@@ -1156,10 +1158,12 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
         assert!(body["moved_to_closed"].as_bool().unwrap());
-        assert!(tmp
-            .path()
-            .join("issues/closed/patch-close-dir/item.md")
-            .exists());
+        // Flat layout: the issue stays at issues/<slug>/ regardless of status.
+        let item = tmp.path().join("issues/patch-close-dir/item.md");
+        assert!(item.exists(), "flat path must remain after close");
+        let on_disk = fs::read_to_string(&item).unwrap();
+        assert!(on_disk.contains("status: fixed"));
+        assert!(!tmp.path().join("issues/closed/patch-close-dir").exists());
         assert!(!tmp.path().join("issues/open/patch-close-dir").exists());
     }
 
@@ -1208,7 +1212,7 @@ mod tests {
     #[tokio::test]
     async fn patch_corrupt_issue_returns_422() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("issues/open/corrupt-yml-here");
+        let dir = tmp.path().join("issues/corrupt-yml-here");
         fs::create_dir_all(&dir).unwrap();
         // Unterminated quote → parser warns, recovers to defaults.
         fs::write(
@@ -1233,7 +1237,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn patch_status_crossing_publishes_issue_moved() {
+    async fn patch_status_crossing_publishes_issue_upserted() {
         let tmp = tempfile::tempdir().unwrap();
         seed_open_issue(tmp.path(), "patch-publish-mvd");
         let event_hub = Arc::new(EventHub::new());
@@ -1259,22 +1263,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        // Drain the broadcast channel and look for the IssueMoved
-        // payload. The mutate layer must publish exactly one
-        // IssueMoved (no Remove+Upsert pair) for status crossings.
-        let mut saw_moved = false;
+        // Post-flat-layout, status crossings publish a single
+        // IssueUpserted with the new version. Clients re-bucket via
+        // `summary.status`/`summary.folder`; no folder-rename event.
+        let mut saw_upserted = false;
         while let Ok(evt) = rx.try_recv() {
-            if let crate::server::events::EventPayload::IssueMoved {
-                slug, from_folder, to_folder, ..
+            if let crate::server::events::EventPayload::IssueUpserted {
+                slug, issue, ..
             } = &evt.payload
             {
                 assert_eq!(slug, "patch-publish-mvd");
-                assert_eq!(from_folder, "open");
-                assert_eq!(to_folder, "closed");
-                saw_moved = true;
+                assert_eq!(issue.status, "fixed");
+                assert_eq!(issue.folder, "closed");
+                saw_upserted = true;
             }
         }
-        assert!(saw_moved, "expected an IssueMoved event");
+        assert!(saw_upserted, "expected an IssueUpserted event");
     }
 
     #[tokio::test]
@@ -1324,7 +1328,7 @@ mod tests {
     #[tokio::test]
     async fn post_creates_new_issue() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let r = make_router(tmp.path());
         let payload = serde_json::json!({
             "type": "bug",
@@ -1350,14 +1354,14 @@ mod tests {
         assert!(body["version"].as_str().unwrap().starts_with("sha256:"));
         assert!(tmp
             .path()
-            .join("issues/open/api-create-test/item.md")
+            .join("issues/api-create-test/item.md")
             .exists());
     }
 
     #[tokio::test]
     async fn assets_have_correct_content_type() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let r = make_router(tmp.path());
         let css = r
             .clone()
@@ -1420,7 +1424,7 @@ mod tests {
         assert_eq!(v_new, version_on_disk(tmp.path(), "body-fresh-vers1"));
         // post-condition: version field also matches what we just wrote
         let on_disk = std::fs::read_to_string(
-            tmp.path().join("issues/open/body-fresh-vers1/item.md"),
+            tmp.path().join("issues/body-fresh-vers1/item.md"),
         )
         .unwrap();
         assert!(on_disk.contains("fresh content."));
@@ -1454,7 +1458,7 @@ mod tests {
     #[tokio::test]
     async fn put_body_rejects_invalid_slug_shape() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let r = make_router(tmp.path());
         let resp = r
             .oneshot(
@@ -1542,7 +1546,7 @@ mod tests {
     #[tokio::test]
     async fn preview_renders_and_sanitises_xss() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let r = make_router(tmp.path());
         let payload = serde_json::json!({
             "body": "# Hello\n\n<script>alert(1)</script>\n[x](javascript:alert(1))"
@@ -1568,7 +1572,7 @@ mod tests {
     #[tokio::test]
     async fn preview_without_csrf_rejected_when_token_required() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let r = make_secured_router(tmp.path());
         let resp = r
             .oneshot(
@@ -1644,7 +1648,7 @@ mod tests {
     #[tokio::test]
     async fn preview_rejects_unknown_field() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
         let r = make_router(tmp.path());
         let payload = serde_json::json!({
             "body": "# x",

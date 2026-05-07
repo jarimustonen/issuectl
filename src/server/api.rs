@@ -103,7 +103,14 @@ pub async fn get_issue(
     let slug_for_load = slug_param.clone();
     let (issue, docs) = tokio::task::spawn_blocking(move || {
         let issue = repo::load_issue(root.as_path(), &slug_for_load)?;
-        let dir = root.join("issues").join(&issue.folder).join(&issue.slug);
+        // Resolve the actual on-disk item.md (handles flat + legacy
+        // compat reads); use its parent for sibling-doc enumeration.
+        let located = repo::locate_issue_full(root.as_path(), &slug_for_load)?;
+        let dir = located
+            .item_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("item.md has no parent"))?
+            .to_path_buf();
         let docs = list_extra_docs(&dir);
         anyhow::Ok((issue, docs))
     })
@@ -141,13 +148,14 @@ pub async fn get_doc(
     let slug_owned = slug_param.clone();
     let doc_owned = doc_name.clone();
     let body = tokio::task::spawn_blocking(move || -> Result<String, DocError> {
-        let (folder, _item) =
-            repo::locate_issue(root.as_path(), &slug_owned).map_err(|_| DocError::NotFound)?;
-        let path = root
-            .join("issues")
-            .join(&folder)
-            .join(&slug_owned)
-            .join(&doc_owned);
+        let located = repo::locate_issue_full(root.as_path(), &slug_owned)
+            .map_err(|_| DocError::NotFound)?;
+        let issue_dir = located
+            .item_path
+            .parent()
+            .ok_or(DocError::Internal)?
+            .to_path_buf();
+        let path = issue_dir.join(&doc_owned);
         // Rebuilt-from-validated-segments path cannot escape the issue dir
         // by string operations alone, but a symlink inside the dir could
         // still point outward. Canonicalize both sides and require the doc
@@ -156,8 +164,8 @@ pub async fn get_doc(
             std::io::ErrorKind::NotFound => DocError::NotFound,
             _ => DocError::Internal,
         })?;
-        let issue_dir = std::fs::canonicalize(root.join("issues").join(&folder).join(&slug_owned))
-            .map_err(|_| DocError::Internal)?;
+        let issue_dir =
+            std::fs::canonicalize(&issue_dir).map_err(|_| DocError::Internal)?;
         if !canon.starts_with(&issue_dir) {
             return Err(DocError::Forbidden);
         }

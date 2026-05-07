@@ -16,11 +16,26 @@ lives in a separate worktree; this doc is a contract for that work, not code.
 
 Decisions on disputed/discussion items are recorded in §12.
 
+> **Post-flat-layout note (issue `awfully-faint-sound`):** The
+> on-disk layout is now `issues/<slug>/item.md` (flat). The
+> `issues/{open,closed}/<slug>/` split this document was originally
+> written against has been retired. Sections that referred to the
+> split — §3.2 (canonical hash), §3.4 (status change = directory
+> rename), §5.2/§5.3 (slug resolution / folder moves), §6.2
+> (status/folder authority) — have been rewritten or struck through
+> with replacement notes inline. Status is authoritative from
+> frontmatter; the kanban-bucket label (`open`/`closed`) is derived
+> from `is_closing_status(status)`. Legacy paths are still accepted
+> for reads (compat layer in `repo::locate_issue_full` +
+> `mutate::locate_and_migrate`); writes always migrate the slug to
+> the flat path under `flock`. The one-shot migration is `issuectl
+> migrate layout`.
+
 ## 1. Goals & non-goals
 
 **Goals**
 
-- Edit issues in the browser; changes land in `issues/<folder>/<slug>/item.md`.
+- Edit issues in the browser; changes land in `issues/<slug>/item.md`.
 - External edits (`$EDITOR`, `git pull`, `issuectl update`, agents) propagate
   live to every connected board.
 - Filesystem stays the source of truth. The server is a renderer + a thin
@@ -206,10 +221,14 @@ fn canonical_hash(item: &Item) -> String {
 /// `updated:` is excluded — it is bumped on every save and would re-introduce
 /// false-409s. Unknown keys preserved by the loader are included so
 /// undocumented user fields participate in concurrency control.
+///
+/// Post-flat-layout: `status` is taken straight from frontmatter; there
+/// is no `directory_authoritative_status` indirection because there is
+/// no parallel folder axis to reconcile.
 fn canonical_frontmatter_value(fm: &Frontmatter) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     m.insert("type".into(),     fm.issue_type.clone().into());
-    m.insert("status".into(),   directory_authoritative_status(fm).into()); // §6.2
+    m.insert("status".into(),   fm.status.clone().into());
     m.insert("priority".into(), fm.priority.clone().into());
     if let Some(v) = &fm.created   { m.insert("created".into(),   v.clone().into()); }
     if let Some(v) = &fm.closed    { m.insert("closed".into(),    v.clone().into()); }
@@ -240,10 +259,9 @@ fn normalize_body(body: &str) -> Cow<'_, str> {
 
 Notes on the projection:
 
-- **Computed over directory-authoritative status** (§6.2). If `closed/foo`
-  has frontmatter `status: open`, the hash uses `done` (or whichever
-  default the reconciler picks), not the on-disk `open`. This keeps the
-  hash consistent with the issue shape clients see in API responses.
+- **Computed over `fm.status`.** Pre-flat-layout this paragraph
+  described folder-derived status; post-flat-layout there is no folder
+  axis, so frontmatter is the single source of truth.
 - **Sorted keys + no whitespace**: use `serde_json_canonical` (RFC 8785
   JCS) or equivalent. Two correct implementations must produce identical
   bytes for identical content.
@@ -285,51 +303,37 @@ fn write_item_atomic(target: &Path, content: &str) -> Result<()> {
 - On Windows, `fsync_dir` is a no-op — `std::fs::File::open(dir)` returns
   `Err`, so the call is gated `#[cfg(unix)]`.
 
-### 3.4 Status change = directory rename
+### 3.4 Status change is a frontmatter PATCH (post-flat-layout)
 
-Closing/reopening crosses the `open/` ↔ `closed/` boundary. Authoritative
-rule: **directory wins.** Frontmatter `status:` follows folder.
+> **Replaces the original §3.4 ("Status change = directory rename").**
+> The pre-flat-layout sequence — rename the directory across
+> `open/` ↔ `closed/`, then write content — is gone. With the flat
+> layout there is no directory to rename: the issue lives at
+> `issues/<slug>/item.md` regardless of status.
 
-Sequence inside the lock:
+Sequence inside the lock simplifies to:
 
 ```
-1. update frontmatter in memory (new status, closed: today if closing)
-2. on Linux: fs::rename + RENAME_NOREPLACE, fail if target exists
-   on others: fs::rename, then check via fs::metadata that we created
-              the dir (rename to existing-non-empty fails ENOTEMPTY,
-              which is fine; rename overwriting an empty dir is the
-              edge case we accept and let the reconciler resolve)
-3. write_item_atomic(<new_folder>/<slug>/item.md, content)
-4. on Unix: fsync_dir(<root>/issues/<old_folder>) and
-            fsync_dir(<root>/issues/<new_folder>) — both best-effort,
-            warn on failure (durability of the rename across both
-            directory entries)
+1. update frontmatter in memory (new status, closed: today if
+   closing; remove `closed:` if reopening)
+2. write_item_atomic(<root>/issues/<slug>/item.md, content)
 ```
 
-The preflight check from the previous design is removed — it was
-TOCTOU-vulnerable. Rely on the rename failure mode instead:
-`renameat2(RENAME_NOREPLACE)` on Linux is atomic; on macOS the
-existing-target case fails with `ENOTEMPTY` for non-empty dirs.
+`mutate::locate_and_migrate` runs before step 1: if the slug is found
+at a legacy `issues/{open,closed}/<slug>/` path (compat read), the
+directory is moved to the canonical flat path under the same flock
+before the write. Ambiguous state (flat AND legacy both present, or
+both legacy folders both present) is rejected with
+`MutateError::AmbiguousSlug` — silently picking one side hides
+divergence introduced by, e.g., a partially-completed migration.
 
-**Crash gap between (2) and (3)** leaves a renamed directory with stale
-frontmatter content. The startup reconciler (§13 spin-off) detects this
-on next `serve` and corrects the frontmatter to match the folder.
-Specific reconciliation rules:
-
-| State on disk | Reconciler action |
-| --- | --- |
-| `closed/<slug>` with `status:` = active value (`open`, `in-progress`, `testing`) | Rewrite `status: done`. If `closed:` absent, set to today's date. Emit `LoadWarning`. |
-| `open/<slug>` with `status:` = closing value (`done`, `fixed`, …) | Rewrite `status: open`. Remove `closed:` field. Emit `LoadWarning`. |
-| Both `open/<slug>` and `closed/<slug>` exist | Don't pick a side. Emit `LoadWarning` with `code: "ambiguous_slug"`. `locate_issue` returns `Err(AmbiguousSlug)` until human resolves. |
-| `<folder>/<slug>/` exists with no `item.md` | `LoadWarning`, exclude from listings. |
-| `item.md` is invalid YAML or has merge markers (`<<<<<<<`) | `IssueInvalid` event, never auto-rewrite — user resolves. |
-
-`closed:` date for the auto-rewrite case: today's date (when reconciler
-runs). Documented as approximate; the actual close moment is lost. If
-the user cares, they can set it manually.
-
-Web UI surfaces these warnings in the existing `#warnings` strip — no
-new UI surface needed.
+**Reconciler rules deleted.** The old table — closing-folder with
+active frontmatter, open-folder with closing frontmatter, both
+folders present — described mismatch states that no longer exist
+because there is no folder axis. The remaining startup-reconciliation
+work (item.md missing, malformed YAML, merge markers) is covered by
+`load_issues_with_warnings` and `parse_slug_state` directly; the
+spin-off issue tracked in §13 has a smaller surface as a result.
 
 ### 3.5 Shared mutation DTO
 
@@ -544,39 +548,43 @@ To uphold "anything the web does is reachable from CLI":
   so a `git checkout` of 200 issues doesn't stall the watcher's event
   loop.
 
-### 5.2 Slug resolution from event paths
+### 5.2 Slug resolution from event paths (post-flat-layout)
 
 ```rust
 fn issue_slug_from_event(issues_root: &Path, path: &Path) -> Option<String> {
     let rel = path.strip_prefix(issues_root).ok()?;
     let mut comps = rel.components();
-    let folder = comps.next()?.as_os_str().to_str()?;
-    if folder != "open" && folder != "closed" { return None; }
-    let slug = comps.next()?.as_os_str().to_str()?;
+    let first = comps.next()?.as_os_str().to_str()?;
+    let slug = if first == "open" || first == "closed" {
+        comps.next()?.as_os_str().to_str()? // legacy compat
+    } else {
+        first                                 // flat layout (canonical)
+    };
     if !slug::is_valid(slug) { return None; }
     Some(slug.to_owned())
 }
 ```
 
-For `issues/open/foo/item.md`, this returns `"foo"`. The original doc
-said "two levels above the changed file" which arithmetically gave
-`"open"`; corrected.
+The flat layout puts the slug as the first component under
+`issues/`. The legacy `open`/`closed` prefix is still accepted so
+compat-read repos light up the watcher; `parse_slug_state` then
+surfaces a `legacy_layout` (or `ambiguous_slug`) warning to the
+client.
 
-### 5.3 Slug renames and folder moves
+### 5.3 Slug renames (post-flat-layout)
 
-`git mv issues/open/old-slug issues/open/new-slug` produces a rename event
-with both paths (full debouncer preserves them). Watcher emits both:
+`git mv issues/old-slug issues/new-slug` produces a rename event with
+both paths (full debouncer preserves them). Watcher emits both:
 
 ```
 IssueRemoved  { slug: "old-slug" }
 IssueUpserted { slug: "new-slug", ... }
 ```
 
-Same shape applies to `open/foo` → `closed/foo` (status change) when an
-external writer does it. The server's own status-change move (§3.4)
-synthesises one `IssueUpserted` server-side and tags it with the new
-version, but the watcher will also fire — clients dedupe by version
-(§5.6).
+There is no longer a separate "folder move" event class — closing or
+reopening an issue does not move its directory. Status crossings are a
+single `IssueUpserted` from the mutate layer (with the new
+`version`); clients re-bucket from `summary.status`/`summary.folder`.
 
 ### 5.4 Transport: SSE
 
@@ -825,17 +833,15 @@ Layers 1 and 2 prevent corruption; layer 3 surfaces *user-visible*
 conflicts. Removing layer 3 would silently overwrite changes; removing
 1 or 2 would corrupt the file.
 
-### 6.2 Status/folder authority
+### 6.2 Status authority (post-flat-layout)
 
-DISCUSS #19 = A: directory wins. If reconciler or any read path detects
-mismatch between folder (`closed/`) and frontmatter (`status: open`), the
-folder is authoritative; frontmatter is rewritten to a sane default
-(closed-folder issues with active `status:` get `status: done` and a
-`LoadWarning` entry; open-folder issues with closing `status:` get
-`status: open` and a warning).
+> **Replaces the original §6.2 ("directory wins").** Without a parallel
+> folder axis, there is nothing to be authoritative *over*: status is
+> read from frontmatter and written by frontmatter PATCH. Period.
 
-The web UI surfaces these warnings in the existing `#warnings` strip.
-No new UI needed.
+The kanban-bucket label (`open` / `closed`) appearing in API
+payloads is derived from `is_closing_status(fm.status)` and is
+strictly a presentation detail — not a parallel state.
 
 ### 6.3 Body conflict UX (M2)
 
@@ -1050,11 +1056,13 @@ This is a future feature; M0–M3 stays loopback-only for writes.
 | **M1** | `mutate.rs` refactor with `Patch<T>` + `UpdateIssueRequest` + `flock` + per-slug mutex + canonical hash. CSRF token + `Host` validation. PATCH metadata routes. CLI: `--expected-version`, `version` field in `--json` output. Drag-to-move in UI. | Status drag, label/assignee edits — most-requested ergonomic gap. |
 | **M2** | `PUT /body` + textarea + `POST /api/preview` + `localStorage` draft + body conflict UX. `IssueInvalid` event surfacing. CLI: `issuectl body set`. | Full edit-in-place. |
 | **M3** | `--watch-poll-ms`, `--no-watch`, `Degraded` banner, three-way merge UI for body conflicts. | Robustness for real multi-client use. |
+| **Flat layout** | `issues/<slug>/item.md` (no `open`/`closed` split). Status is pure frontmatter PATCH; legacy paths read-compat with in-line migrate-on-write; one-shot `issuectl migrate layout`. | Eliminates §3.4's rename surface; collapses §5.2/§5.3/§6.2 into trivia. |
 
 **Spin-offs** (own issues, off the M0–M3 path):
 
-- Startup reconciliation (extends `issuectl doctor`) — see issue
-  created in this revision.
+- Startup reconciliation (extends `issuectl doctor`) — surface
+  shrunk post-flat-layout (no folder/status mismatch class), but
+  `item.md`-missing / merge-marker / orphan-epic cleanup remain.
 - Field-level merge for commuting metadata PATCHes — only build if
   M2 user reports show 409 friction is real.
 
@@ -1079,7 +1087,7 @@ exotic perms).
 | Replay mechanism | broadcast::Sender alone / explicit EventHub | **EventHub** | broadcast can't replay by `Last-Event-ID` |
 | Initial state ↔ stream | Snapshot-then-stream / cursor handoff | **`replay_from_seq` cursor in REST** | Closes the lost-event window |
 | CSRF | Punt to v2 / per-process token / persistent token | **Per-process token from M1** | Loopback ≠ trusted; npm postinstall is realistic |
-| Status/folder authority | Directory / frontmatter / diagnose-only | **Directory** | `git mv` works; reconciler rule is one line |
+| ~~Status/folder authority~~ | ~~Directory / frontmatter / diagnose-only~~ | ~~**Directory**~~ | ~~`git mv` works; reconciler rule is one line~~ — **superseded post-flat-layout: frontmatter is the only axis.** |
 | Body autosave | None / 750 ms / 5 s + localStorage | **5 s + localStorage + manual** | Covers tab-close + avoids 409 storms |
 
 ## 12. Decisions record

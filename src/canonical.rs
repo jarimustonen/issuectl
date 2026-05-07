@@ -5,15 +5,14 @@
 //! `updated:`, plus CRLF-normalised body) so a no-op resave that only
 //! bumps `updated:` does not produce a new version.
 //!
-//! This module is the single source of truth for both the watcher
-//! (server-side, M0) and `mutate.rs` (M1). Without sharing this
-//! function the M1 synthetic event and the M0/M1 watcher event would
-//! compute different hashes for the same write, breaking client-side
-//! echo suppression (§6.4).
+//! Post-flat-layout (issue `awfully-faint-sound`): status is taken
+//! directly from frontmatter — the on-disk path no longer participates
+//! in identity, so there is no separate "directory authoritative"
+//! projection. One source of truth: `fm.status`.
 //!
 //! Known limitation: today's `Frontmatter` does not preserve unknown
 //! fields. The design's full canonical projection includes them so
-//! user-added keys participate in concurrency control. M1 should
+//! user-added keys participate in concurrency control. Future change:
 //! extend `Frontmatter` (BTreeMap "unknown" field) and update this
 //! function to project them — both producers stay consistent because
 //! both call this function.
@@ -41,16 +40,12 @@ pub fn canonical_hash(issue: &Issue) -> String {
 
 /// Project the issue's frontmatter into a canonical JSON object.
 /// `updated:` is excluded — it is bumped on every save and would
-/// re-introduce false-409s. Status uses the directory-authoritative
-/// value (`folder`) when M1's reconciler is wired up; today the
-/// frontmatter status is used directly.
+/// re-introduce false-409s. Status comes straight from frontmatter:
+/// the post-flat-layout repo has no parallel folder axis to reconcile.
 fn canonical_frontmatter_value(issue: &Issue) -> Value {
     let mut m = Map::new();
     m.insert("type".into(), Value::String(issue.issue_type.clone()));
-    m.insert(
-        "status".into(),
-        Value::String(directory_authoritative_status(issue)),
-    );
+    m.insert("status".into(), Value::String(issue.status.clone()));
     m.insert("priority".into(), Value::String(issue.priority.clone()));
     if let Some(v) = &issue.created {
         m.insert("created".into(), Value::String(v.clone()));
@@ -93,13 +88,6 @@ fn canonical_frontmatter_value(issue: &Issue) -> Value {
     // and rebuild.
     let sorted: std::collections::BTreeMap<String, Value> = m.into_iter().collect();
     Value::Object(sorted.into_iter().collect())
-}
-
-/// Folder-derived status when M1 reconciler conventions land. For now
-/// the parsed frontmatter status is authoritative; this seam exists so
-/// M1 can flip the policy without changing call sites.
-fn directory_authoritative_status(issue: &Issue) -> String {
-    issue.status.clone()
 }
 
 /// Normalize CRLF→LF and trim only trailing newlines (NOT arbitrary

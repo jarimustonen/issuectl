@@ -417,87 +417,92 @@ enum ParseOutcome {
 
 /// Re-derive the on-disk state of one slug. Runs in `spawn_blocking`.
 ///
-/// The returned outcome distinguishes three filesystem states:
-/// - **Vanished**: neither `issues/open/<slug>/` nor `issues/closed/<slug>/`
-///   exists, or the slug shape is invalid. Watcher emits `IssueRemoved`.
-/// - **Invalid**: the issue dir exists but `item.md` cannot be parsed
-///   cleanly (missing, invalid YAML, both folders contain it). Watcher
-///   emits `IssueInvalid` so the card stays visible with an error
-///   badge — never silently disappear (§5.6, §8.6).
-/// - **Loaded**: parsed successfully. Watcher emits `IssueUpserted`.
+/// Post-flat-layout, the canonical path is `issues/<slug>/item.md`.
+/// Legacy `issues/{open,closed}/<slug>/` paths are still accepted for
+/// reads (so the board surfaces the issue with a `legacy_layout`
+/// warning) until the user runs `issuectl migrate layout`.
 ///
-/// Read-once-then-parse so the published `IssueSummary` and `version`
-/// always describe the same byte image of `item.md` (no TOCTOU between
-/// a "read for parse" and "read for hash" pair of syscalls).
+/// The returned outcome distinguishes three filesystem states:
+/// - **Vanished**: no such slug exists on disk, or slug shape invalid.
+/// - **Invalid**: the issue dir exists but `item.md` cannot be parsed
+///   cleanly, or the slug exists at multiple paths simultaneously.
+/// - **Loaded**: parsed successfully.
 fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
     if !slug::is_valid(slug) {
         return ParseOutcome::Vanished;
     }
 
-    let open_dir = root.join("issues").join("open").join(slug);
-    let closed_dir = root.join("issues").join("closed").join(slug);
-    let open_exists = is_real_dir(&open_dir);
-    let closed_exists = is_real_dir(&closed_dir);
+    let (flat, legacy_open, legacy_closed) = crate::repo::paths_for(root, slug);
+    let flat_exists = is_real_dir(&flat);
+    let legacy_open_exists = is_real_dir(&legacy_open);
+    let legacy_closed_exists = is_real_dir(&legacy_closed);
 
-    let folder = match (open_exists, closed_exists) {
-        (false, false) => return ParseOutcome::Vanished,
-        (true, true) => {
-            // Both folders present is the "ambiguous slug" state from
-            // §3.4. Don't pick a side here; surface as Invalid so the
-            // user is forced to resolve it.
-            return ParseOutcome::Invalid {
-                warnings: vec![crate::repo::LoadWarning {
-                    slug: slug.to_string(),
-                    folder: "open+closed".to_string(),
-                    message: "ambiguous slug: present in both open/ and closed/ — \
-                         resolve manually before issuectl serve will trust this issue"
+    // Multi-path presence is ambiguous — surface as Invalid until the
+    // user runs `issuectl migrate layout` (or any write goes through
+    // mutate.rs, which migrates in-line under flock).
+    let exists_count =
+        usize::from(flat_exists) + usize::from(legacy_open_exists) + usize::from(legacy_closed_exists);
+    if exists_count == 0 {
+        return ParseOutcome::Vanished;
+    }
+    if exists_count > 1 {
+        return ParseOutcome::Invalid {
+            warnings: vec![crate::repo::LoadWarning {
+                slug: slug.to_string(),
+                folder: "ambiguous".to_string(),
+                message:
+                    "ambiguous slug: present at flat (issues/<slug>/) AND legacy \
+                     (issues/{open,closed}/<slug>/) paths — run `issuectl migrate layout`"
                         .to_string(),
-                }],
-            };
-        }
-        (true, false) => "open",
-        (false, true) => "closed",
+                code: Some("ambiguous_slug".to_string()),
+            }],
+        };
+    }
+
+    let (dir, legacy) = if flat_exists {
+        (flat, None)
+    } else if legacy_open_exists {
+        (legacy_open, Some("open"))
+    } else {
+        (legacy_closed, Some("closed"))
     };
 
-    let dir = if folder == "open" {
-        open_dir
-    } else {
-        closed_dir
-    };
     let item_path = dir.join("item.md");
     let text = match std::fs::read_to_string(&item_path) {
         Ok(t) => t,
         Err(e) => {
-            // Folder exists but item.md doesn't (or is unreadable):
-            // partial-write or `mkdir` without a save. Surface as
-            // Invalid, not Vanished — operator should see the error.
             return ParseOutcome::Invalid {
                 warnings: vec![crate::repo::LoadWarning {
                     slug: slug.to_string(),
-                    folder: folder.to_string(),
+                    folder: legacy.unwrap_or("open").to_string(),
                     message: format!("cannot read {}: {}", item_path.display(), e),
+                    code: None,
                 }],
             };
         }
     };
 
-    let parsed = crate::parser::parse_item_md_text_with_warnings(&text, slug, folder, &item_path);
+    let parsed = crate::parser::parse_item_md_text_with_warnings(&text, slug, "open", &item_path);
     if !parsed.warnings.is_empty() {
+        let derived_folder = crate::repo::folder_for_status(&parsed.issue.status).to_string();
         let warnings = parsed
             .warnings
             .into_iter()
             .map(|w| crate::repo::LoadWarning {
                 slug: slug.to_string(),
-                folder: folder.to_string(),
+                folder: derived_folder.clone(),
                 message: w,
+                code: None,
             })
             .collect();
         return ParseOutcome::Invalid { warnings };
     }
 
-    let version = crate::canonical::canonical_hash(&parsed.issue);
+    let mut issue = parsed.issue;
+    issue.folder = crate::repo::folder_for_status(&issue.status).to_string();
+    let version = crate::canonical::canonical_hash(&issue);
     ParseOutcome::Loaded {
-        summary: Box::new(IssueSummary::from(parsed.issue)),
+        summary: Box::new(IssueSummary::from(issue)),
         version,
     }
 }
@@ -520,25 +525,30 @@ fn is_relevant_kind(kind: &EventKind) -> bool {
 }
 
 /// Map a filesystem event path back to an issue slug, or `None` if the
-/// path is irrelevant (outside the issues tree, a tempfile, an unknown
-/// folder, an invalid slug shape).
+/// path is irrelevant (outside the issues tree, a tempfile, an invalid
+/// slug shape).
+///
+/// Accepts both the canonical flat layout (`issues/<slug>/item.md`)
+/// and the legacy `issues/{open,closed}/<slug>/item.md` paths so a
+/// repo mid-migration still produces SSE events. `parse_slug_state`
+/// then surfaces the legacy or ambiguous state to the client.
 pub fn issue_slug_from_event(issues_root: &Path, path: &Path) -> Option<String> {
     let rel = path.strip_prefix(issues_root).ok()?;
-    // F17: filter atomic-write tempfiles by basename (final component
-    // *of the path*, after strip_prefix). Filtering all components
-    // before strip_prefix would over-filter when the repo path itself
-    // contains `.issuectl-tmp-…` (e.g. `/tmp/.issuectl-tmp-test/`).
+    // F17: filter atomic-write tempfiles by basename.
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         if name.starts_with(".issuectl-tmp-") {
             return None;
         }
     }
     let mut comps = rel.components();
-    let folder = comps.next()?.as_os_str().to_str()?;
-    if folder != "open" && folder != "closed" {
-        return None;
-    }
-    let slug = comps.next()?.as_os_str().to_str()?;
+    let first = comps.next()?.as_os_str().to_str()?;
+    let slug = if first == "open" || first == "closed" {
+        // Legacy compat path: skip the kanban-folder component.
+        comps.next()?.as_os_str().to_str()?
+    } else {
+        // Flat layout: first component is the slug itself.
+        first
+    };
     if !slug::is_valid(slug) {
         return None;
     }
@@ -550,7 +560,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slug_resolver_strips_open_prefix() {
+    fn slug_resolver_extracts_flat_slug() {
+        let root = Path::new("/repo/issues");
+        let p = Path::new("/repo/issues/quiet-brave-otter/item.md");
+        assert_eq!(
+            issue_slug_from_event(root, p).as_deref(),
+            Some("quiet-brave-otter")
+        );
+    }
+
+    #[test]
+    fn slug_resolver_strips_legacy_open_prefix() {
         let root = Path::new("/repo/issues");
         let p = Path::new("/repo/issues/open/quiet-brave-otter/item.md");
         assert_eq!(
@@ -560,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn slug_resolver_handles_closed() {
+    fn slug_resolver_handles_legacy_closed() {
         let root = Path::new("/repo/issues");
         let p = Path::new("/repo/issues/closed/tiny-wild-comet/item.md");
         assert_eq!(
@@ -570,23 +590,16 @@ mod tests {
     }
 
     #[test]
-    fn slug_resolver_rejects_unknown_folder() {
-        let root = Path::new("/repo/issues");
-        let p = Path::new("/repo/issues/draft/foo/item.md");
-        assert!(issue_slug_from_event(root, p).is_none());
-    }
-
-    #[test]
     fn slug_resolver_rejects_invalid_slug() {
         let root = Path::new("/repo/issues");
-        let p = Path::new("/repo/issues/open/INVALID_SLUG/item.md");
+        let p = Path::new("/repo/issues/INVALID_SLUG/item.md");
         assert!(issue_slug_from_event(root, p).is_none());
     }
 
     #[test]
     fn slug_resolver_filters_tempfiles() {
         let root = Path::new("/repo/issues");
-        let p = Path::new("/repo/issues/open/quiet-brave-otter/.issuectl-tmp-abc.md");
+        let p = Path::new("/repo/issues/quiet-brave-otter/.issuectl-tmp-abc.md");
         assert!(issue_slug_from_event(root, p).is_none());
     }
 
@@ -599,10 +612,8 @@ mod tests {
 
     #[test]
     fn slug_resolver_unaffected_by_temp_components_in_repo_path() {
-        // F17: the tempfile filter must not over-match when the repo
-        // root itself contains a `.issuectl-tmp-` component.
         let root = Path::new("/tmp/.issuectl-tmp-test/issues");
-        let p = Path::new("/tmp/.issuectl-tmp-test/issues/open/quiet-brave-otter/item.md");
+        let p = Path::new("/tmp/.issuectl-tmp-test/issues/quiet-brave-otter/item.md");
         assert_eq!(
             issue_slug_from_event(root, p).as_deref(),
             Some("quiet-brave-otter")
@@ -620,8 +631,7 @@ mod tests {
         use tokio::time::timeout;
 
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("issues/closed")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("issues")).unwrap();
 
         let hub = std::sync::Arc::new(EventHub::new());
         let mut rx = hub.tx_subscribe_for_test();
@@ -641,7 +651,7 @@ mod tests {
         assert!(matches!(first, Ok(Ok(_))), "expected Resync, got {first:?}");
 
         // Now drop a real issue on disk and watch for the event.
-        let issue_dir = tmp.path().join("issues/open/quiet-brave-otter");
+        let issue_dir = tmp.path().join("issues/quiet-brave-otter");
         std::fs::create_dir_all(&issue_dir).unwrap();
         std::fs::write(
             issue_dir.join("item.md"),
@@ -693,8 +703,7 @@ mod tests {
         use tokio::time::timeout;
 
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("issues/closed")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("issues")).unwrap();
 
         let hub = std::sync::Arc::new(EventHub::new());
         let mut rx = hub.tx_subscribe_for_test();
@@ -711,7 +720,7 @@ mod tests {
         let first = timeout(Duration::from_secs(2), rx.recv()).await;
         assert!(matches!(first, Ok(Ok(_))), "expected Resync, got {first:?}");
 
-        let issue_dir = tmp.path().join("issues/open/poll-brave-otter");
+        let issue_dir = tmp.path().join("issues/poll-brave-otter");
         std::fs::create_dir_all(&issue_dir).unwrap();
         std::fs::write(
             issue_dir.join("item.md"),
