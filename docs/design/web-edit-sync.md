@@ -1024,8 +1024,13 @@ This is a future feature; M0–M3 stays loopback-only for writes.
 
 ### 9.5 Other hardening
 
-- Request size limits per route: PATCH metadata 64 KiB, PUT body
-  1 MiB, POST preview 1 MiB.
+- Request size: a single global 1 MiB envelope on every route. The
+  earlier per-route plan (PATCH 64 KiB / PUT 1 MiB / preview 1 MiB)
+  was simplified after M2 review — PATCH metadata payloads in
+  practice are well under 64 KiB anyway, and one global limit cuts
+  the layer wiring complexity. If a future route needs a tighter cap
+  (e.g. an audit-log endpoint), apply `route_layer(DefaultBodyLimit)`
+  there.
 - Atomic-write target re-canonicalised inside `locate_issue`-style
   guard before persist (`symlink_metadata` + canonical-prefix check).
   Note: `flock` is *not* a symlink-swap defence — it's advisory and

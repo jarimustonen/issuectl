@@ -47,6 +47,12 @@
     // reconcile its own SSE echo (§6.4); without it every save would
     // re-render the dialog and clobber the textarea with stale state.
     local_versions: {},
+    // M2 review F3: the SSE event for our own write can land before
+    // the HTTP PUT response resolves. While a save is in flight we
+    // queue same-slug events and reconcile them by version once the
+    // response arrives — own echo is dropped, others are processed.
+    pending_writes: {},
+    deferred_events: {},
   };
 
   var els = {
@@ -339,29 +345,103 @@
 
   // === Edit mode ===
 
+  // Tunables. Centralised so the trade-offs are reviewable in one place
+  // rather than buried at call sites.
+  var PREVIEW_DEBOUNCE_MS = 250;
+  var AUTOSAVE_DEBOUNCE_MS = 5000;
+  // Drafts older than this are pruned at startup. Long enough to cover
+  // a long weekend; short enough that orphaned localStorage doesn't
+  // keep silently restoring stale text after a tab crash.
+  var DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
   function draftKey(slug, startedAt) {
     return 'issuectl-draft:' + slug + ':' + startedAt;
+  }
+
+  function readDraft(rawValue) {
+    // M2 review F2: drafts must round-trip the version they were started
+    // against, otherwise a reload pairs an old body with the *current*
+    // server version and silently overwrites whatever changed in the
+    // gap. Tolerate legacy plain-string drafts so a newly-deployed
+    // build doesn't lose drafts written by the previous version.
+    if (rawValue == null) return null;
+    if (rawValue.charAt && rawValue.charAt(0) === '{') {
+      try {
+        var parsed = JSON.parse(rawValue);
+        return {
+          body: parsed.body || '',
+          base_version: parsed.base_version || null,
+          started_at: parsed.started_at || null,
+        };
+      } catch (e) { /* fall through to legacy string handling */ }
+    }
+    return { body: String(rawValue), base_version: null, started_at: null };
+  }
+
+  function writeDraft(key, body, base_version, started_at) {
+    try {
+      localStorage.setItem(key, JSON.stringify({
+        body: body,
+        base_version: base_version,
+        started_at: started_at,
+      }));
+    } catch (e) { /* quota / private mode */ }
+  }
+
+  function removeDraftsForSlug(slug) {
+    var prefix = 'issuectl-draft:' + slug + ':';
+    try {
+      var keys = [];
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (k && k.indexOf(prefix) === 0) keys.push(k);
+      }
+      keys.forEach(function (k) { localStorage.removeItem(k); });
+    } catch (e) {}
+  }
+
+  function pruneOldDrafts() {
+    var prefix = 'issuectl-draft:';
+    var now = Date.now();
+    try {
+      var keys = [];
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (!k || k.indexOf(prefix) !== 0) continue;
+        var lastColon = k.lastIndexOf(':');
+        var startedAt = parseInt(k.slice(lastColon + 1), 10);
+        if (!startedAt || now - startedAt > DRAFT_TTL_MS) keys.push(k);
+      }
+      keys.forEach(function (k) { localStorage.removeItem(k); });
+    } catch (e) {}
   }
 
   function enterEditMode(detail) {
     var startedAt = Date.now();
     var key = draftKey(detail.slug, startedAt);
-    var initialBody = detail.body_markdown != null ? detail.body_markdown : (detail.body || '');
+    var initialBody = detail.body || '';
+    var baseVersion = detail.version || null;
     editor = {
       slug: detail.slug,
       startedAt: startedAt,
       key: key,
-      // expected_version is the version we read at edit-start. Each
-      // successful PUT advances it to the server's response.
-      expected_version: detail.version || null,
+      // base_version is the version the textarea was *started* against.
+      // expected_version is what the next PUT will send — equal to
+      // base_version until a save advances it. Keeping both lets the
+      // localStorage restore path send the *original* base instead of
+      // the freshly-fetched current version (M2 review F2).
+      base_version: baseVersion,
+      expected_version: baseVersion,
       saving: false,
+      // dirty_during_save is set when an `input` arrives while a save
+      // is in flight, so the success/failure handler can schedule a
+      // follow-up save instead of silently dropping the keystrokes.
+      dirty_during_save: false,
       previewTimer: null,
       autosaveTimer: null,
       lastSavedBody: initialBody,
-      // theirs is the on-disk body we last fetched; updated on 409 so
-      // the user can see what changed externally without re-clicking.
-      theirs: null,
     };
+    state.lastDetailSlug = detail.slug;
     els.detailBody.innerHTML = renderEditMode(detail, initialBody);
     wireEditMode(initialBody);
     schedulePreview(initialBody);
@@ -391,11 +471,11 @@
     function onInput() {
       if (!editor) return;
       var body = ta.value;
-      // localStorage write on every keystroke is the crash-safe
-      // backup (§6.3). It's synchronous and small, so the cost is
-      // negligible — and worth it because losing a draft to a tab
-      // crash is the worst-case UX failure.
-      try { localStorage.setItem(editor.key, body); } catch (e) { /* quota / private mode */ }
+      // Crash-safe backup (§6.3). Includes base_version so a reload
+      // restores the *correct* expected_version, not whatever happens
+      // to be on disk now (M2 review F2).
+      writeDraft(editor.key, body, editor.base_version, editor.startedAt);
+      if (editor.saving) editor.dirty_during_save = true;
       schedulePreview(body);
       scheduleAutosave();
     }
@@ -411,12 +491,15 @@
     });
     saveBtn.addEventListener('click', function () { saveNow(true); });
     cancelBtn.addEventListener('click', function () {
-      // Cancel discards both the in-memory and localStorage drafts.
-      // Without clearing localStorage the next reload would silently
-      // resurrect the abandoned draft on top of fresh on-disk state.
-      if (editor) { try { localStorage.removeItem(editor.key); } catch (e) {} }
+      // Cancel discards every draft for this slug, not just the current
+      // session's key. M2 review F8: timestamped keys plus
+      // "scan-latest-draft" restore made Cancel resurrect the next-newest
+      // zombie draft on the same slug.
+      var slug = editor && editor.slug;
+      if (slug) removeDraftsForSlug(slug);
       editor = null;
-      openDetail(state.lastDetailSlug || ta.getAttribute('data-slug') || '');
+      if (slug) openDetail(slug);
+      else closeDetail();
     });
 
     // Restore an existing draft if the user reloaded mid-edit. The key
@@ -426,11 +509,16 @@
     if (existing && existing.key !== editor.key) {
       ta.value = existing.body;
       editor.key = existing.key;
-      editor.startedAt = existing.startedAt;
+      editor.startedAt = existing.started_at || editor.startedAt;
+      // Pull the base_version the draft was started against; falls back
+      // to the current version only if the draft predates this fix.
+      if (existing.base_version) {
+        editor.base_version = existing.base_version;
+        editor.expected_version = existing.base_version;
+      }
+      editor.lastSavedBody = existing.body;
       schedulePreview(existing.body);
     }
-
-    state.lastDetailSlug = editor.slug;
   }
 
   function scanLatestDraft(slug) {
@@ -443,7 +531,15 @@
         var startedAt = parseInt(k.slice(prefix.length), 10);
         if (!startedAt) continue;
         if (!best || startedAt > best.startedAt) {
-          best = { key: k, startedAt: startedAt, body: localStorage.getItem(k) || '' };
+          var draft = readDraft(localStorage.getItem(k));
+          if (!draft) continue;
+          best = {
+            key: k,
+            startedAt: startedAt,
+            body: draft.body,
+            base_version: draft.base_version,
+            started_at: draft.started_at || startedAt,
+          };
         }
       }
     } catch (e) { return null; }
@@ -465,7 +561,7 @@
           if (pane) pane.innerHTML = d.body_html || '';
         })
         .catch(function () { /* preview is best-effort */ });
-    }, 250);
+    }, PREVIEW_DEBOUNCE_MS);
   }
 
   function scheduleAutosave() {
@@ -473,16 +569,33 @@
     if (editor.autosaveTimer) clearTimeout(editor.autosaveTimer);
     // 5 s debounce per design D3=C. Avoids 409 storms while a user
     // is mid-keystroke.
-    editor.autosaveTimer = setTimeout(function () { saveNow(false); }, 5000);
+    editor.autosaveTimer = setTimeout(function () { saveNow(false); }, AUTOSAVE_DEBOUNCE_MS);
   }
 
   function saveNow(manual) {
-    if (!editor || editor.saving) return;
+    if (!editor) return;
     var ta = els.detailBody.querySelector('#body-editor');
     if (!ta) return;
     var body = ta.value;
+    if (editor.saving) {
+      // M2 review F5: don't silently drop intent. Mark dirty so the
+      // currently-running save's resolution handler schedules a
+      // follow-up. Manual saves (Ctrl+S, Save button, blur) take
+      // priority — schedule an immediate follow-up regardless.
+      editor.dirty_during_save = true;
+      if (manual) editor.manual_during_save = true;
+      return;
+    }
     if (!manual && body === editor.lastSavedBody) return;
     editor.saving = true;
+    editor.dirty_during_save = false;
+    editor.manual_during_save = false;
+    // M2 review F3: track the in-flight write so SSE echoes that arrive
+    // before the HTTP response can be deferred and reconciled by
+    // version once the response lands.
+    state.pending_writes[editor.slug] = (state.pending_writes[editor.slug] || 0) + 1;
+    state.deferred_events[editor.slug] = state.deferred_events[editor.slug] || [];
+    setSaveBusy(true);
     setSaveStatus('Saving…');
     fetch('/api/issues/' + encodeURIComponent(editor.slug) + '/body', {
       method: 'PUT',
@@ -490,12 +603,25 @@
       body: JSON.stringify({ expected_version: editor.expected_version, body: body }),
     })
       .then(function (r) {
-        return r.json().then(function (d) { return { status: r.status, body: d }; });
+        return r.json().then(function (d) { return { status: r.status, body: d }; },
+          // The server occasionally returns an empty body on internal
+          // errors; tolerate that instead of breaking the chain.
+          function () { return { status: r.status, body: {} }; });
       })
       .then(function (res) {
+        // Editor may have been torn down (Cancel, dialog close) while
+        // the request was in flight. If so, we still need to drain the
+        // pending-write counter so SSE echoes don't queue forever.
+        var slug = state.lastDetailSlug;
+        var responseVersion = res.body && res.body.version;
+        finishPendingWrite(slug, responseVersion);
+        if (!editor) return;
+
         editor.saving = false;
+        setSaveBusy(false);
         if (res.status >= 200 && res.status < 300) {
           editor.expected_version = res.body.version;
+          editor.base_version = res.body.version;
           editor.lastSavedBody = body;
           state.local_versions[editor.slug] = res.body.version;
           // Drop the localStorage draft on confirmed save — once the
@@ -505,19 +631,90 @@
           setSaveStatus('Saved');
           var pane = els.detailBody.querySelector('#body-preview');
           if (pane && res.body.body_html) pane.innerHTML = res.body.body_html;
+          // M2 review F4: apply server response to the board state too,
+          // otherwise the originating tab's card stays stale (e.g. a
+          // body edit that changed `# Heading` would not refresh the
+          // card title until the next reload).
+          if (res.body.issue) applyIssueToBoard(res.body.issue);
         } else if (res.status === 409 && res.body && res.body.code === 'version_mismatch') {
-          showConflict(res.body.issue || {});
+          // M2 review F1: the current version lives at the top level of
+          // the 409 envelope; the embedded `issue` is the
+          // `IssueDetailResponse` shape (M2 server fix added
+          // `version` + `body_html` inside it too).
+          showConflict(res.body.issue || {}, res.body.version || null);
         } else if (res.status === 429) {
-          setSaveStatus('Rate limited; retrying soon');
+          setSaveStatus('Rate limited; will retry on next edit');
         } else {
           var detail = (res.body && res.body.detail) || ('HTTP ' + res.status);
           setSaveStatus('Save failed: ' + detail);
         }
+        // M2 review F5: if more keystrokes arrived during the save,
+        // either run them immediately (manual intent) or schedule the
+        // next autosave so the buffer doesn't stall waiting for input.
+        var dirty = editor.dirty_during_save || (ta.value !== editor.lastSavedBody);
+        var manualPending = editor.manual_during_save;
+        editor.dirty_during_save = false;
+        editor.manual_during_save = false;
+        if (dirty) {
+          if (manualPending) saveNow(true);
+          else scheduleAutosave();
+        }
       })
       .catch(function (e) {
+        finishPendingWrite(state.lastDetailSlug, null);
+        if (!editor) return;
         editor.saving = false;
+        setSaveBusy(false);
         setSaveStatus('Save failed: ' + e);
       });
+  }
+
+  function setSaveBusy(busy) {
+    var saveBtn = els.detailBody.querySelector('#save-body');
+    var cancelBtn = els.detailBody.querySelector('#cancel-edit');
+    if (saveBtn) saveBtn.disabled = !!busy;
+    // Cancel stays enabled — it's the user's escape hatch even mid-save.
+    if (cancelBtn) cancelBtn.disabled = false;
+  }
+
+  function applyIssueToBoard(issue) {
+    var idx = state.issues.findIndex(function (i) { return i.slug === issue.slug; });
+    var summary = {
+      slug: issue.slug,
+      folder: issue.folder,
+      title: issue.title,
+      type: issue.type,
+      status: issue.status,
+      priority: issue.priority,
+      assignee: issue.assignee,
+      owner: issue.owner,
+      epic: issue.epic,
+      labels: issue.labels || [],
+    };
+    if (idx >= 0) state.issues[idx] = Object.assign({}, state.issues[idx], summary);
+    else state.issues.push(summary);
+    populateFilters();
+    normalizeFiltersToOptions();
+    applyFiltersToInputs();
+    render();
+  }
+
+  function finishPendingWrite(slug, responseVersion) {
+    if (!slug) return;
+    var pending = state.pending_writes[slug] || 0;
+    if (pending > 0) state.pending_writes[slug] = pending - 1;
+    var deferred = state.deferred_events[slug] || [];
+    state.deferred_events[slug] = [];
+    deferred.forEach(function (evt) {
+      // Drop our own echo (matches the response version); process
+      // anything else as an external edit so concurrent writers from
+      // other clients land correctly.
+      if (responseVersion && evt.version === responseVersion) {
+        state.local_versions[slug] = evt.version;
+        return;
+      }
+      handleEvent(evt);
+    });
   }
 
   function setSaveStatus(msg) {
@@ -525,13 +722,12 @@
     if (s) s.textContent = msg;
   }
 
-  function showConflict(theirs) {
+  function showConflict(theirs, currentVersion) {
     if (!editor) return;
-    editor.theirs = theirs;
     var pane = els.detailBody.querySelector('#conflict-pane');
     if (!pane) return;
     pane.hidden = false;
-    var theirBody = (theirs && (theirs.body_markdown != null ? theirs.body_markdown : theirs.body)) || '';
+    var theirBody = (theirs && theirs.body) || '';
     pane.innerHTML =
       '<h3>Conflict — body changed on disk</h3>' +
       '<p>Your draft is in the textarea above. The current on-disk body is shown below. Pick one:</p>' +
@@ -542,26 +738,40 @@
       '</div>' +
       '<pre class="conflict-theirs">' + escapeHtml(theirBody) + '</pre>';
     pane.querySelector('#conflict-keep-mine').addEventListener('click', function () {
-      // Re-read the freshly-fetched on-disk version so the next PUT
-      // proceeds — without this we'd 409 again with the same data.
-      editor.expected_version = (theirs && theirs.version) || editor.expected_version;
+      // M2 review F1: pull the *new* version from the server-supplied
+      // top-level field; the embedded issue object lacked it pre-fix
+      // and clicking Keep mine looped on 409 forever.
+      if (currentVersion) {
+        editor.expected_version = currentVersion;
+        editor.base_version = currentVersion;
+      }
       pane.hidden = true;
       saveNow(true);
     });
     pane.querySelector('#conflict-keep-theirs').addEventListener('click', function () {
       var ta = els.detailBody.querySelector('#body-editor');
       ta.value = theirBody;
-      editor.expected_version = (theirs && theirs.version) || editor.expected_version;
+      if (currentVersion) {
+        editor.expected_version = currentVersion;
+        editor.base_version = currentVersion;
+      }
       editor.lastSavedBody = theirBody;
-      try { localStorage.removeItem(editor.key); } catch (e) {}
+      removeDraftsForSlug(editor.slug);
+      // M2 review F10: refresh the preview pane so it reflects the
+      // textarea's new content rather than the discarded draft.
+      schedulePreview(theirBody);
       pane.hidden = true;
       setSaveStatus('Discarded local draft');
     });
     pane.querySelector('#conflict-dismiss').addEventListener('click', function () {
-      // Stay in textarea so the user can hand-merge. Do NOT advance
-      // expected_version — the next save will conflict again until
-      // the user explicitly chooses a side.
-      pane.hidden = true;
+      // Manual merge: keep the conflict pane visible so the user can
+      // copy/paste from "theirs" while editing the textarea (M2 review
+      // F9 — hiding it before merging defeated the purpose). Just hide
+      // the action buttons; leave the rendered diff/pane in place.
+      var actions = pane.querySelector('.conflict-actions');
+      if (actions) actions.hidden = true;
+      // Do NOT advance expected_version — the next save will conflict
+      // again until the user explicitly chooses a side.
     });
   }
 
@@ -572,6 +782,11 @@
   }
 
   function closeDetail() {
+    // Esc / backdrop dismiss preserves the draft on purpose — it's the
+    // crash-recovery path the design's "localStorage every keystroke"
+    // (§6.3) is built around. Explicit Cancel is what discards. The
+    // startup prune (DRAFT_TTL_MS) keeps abandoned drafts from
+    // accumulating long-term.
     if (typeof els.detail.close === 'function') els.detail.close();
     else els.detail.removeAttribute('open');
     editor = null;
@@ -599,6 +814,15 @@
     switch (evt.type) {
       case 'IssueUpserted':
       case 'IssueMoved': {
+        // M2 review F3: if a save is in flight on this slug, the SSE
+        // echo can arrive before fetch() resolves. Defer instead of
+        // suppressing or re-fetching; the save handler reconciles by
+        // version once the response lands.
+        if ((state.pending_writes[evt.slug] || 0) > 0) {
+          state.deferred_events[evt.slug] = state.deferred_events[evt.slug] || [];
+          state.deferred_events[evt.slug].push(evt);
+          return;
+        }
         // Echo suppression: if this version matches what *this* tab
         // last wrote for this slug, we already have the up-to-date
         // state from the PUT/PATCH 200 response. Don't re-fetch — it
@@ -627,6 +851,10 @@
       }
       case 'Resync':
       case 'Degraded': {
+        // M2 review F6 / design §5.7: discard all per-issue local
+        // version state on Resync. Stale entries can otherwise suppress
+        // legitimate IssueUpserted events after bulk operations.
+        state.local_versions = {};
         load();
         return;
       }
@@ -701,5 +929,6 @@
     if (e.target === els.detail) closeDetail();
   });
 
+  pruneOldDrafts();
   fetchSession().then(load);
 })();

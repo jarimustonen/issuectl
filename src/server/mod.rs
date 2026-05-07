@@ -1441,6 +1441,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_body_409_envelope_includes_version_and_body_html_in_issue() {
+        // M2 review F1: clients reading `theirs.version` from the 409
+        // envelope's embedded `issue` were looping on stale tokens
+        // because the field wasn't there. Lock the response shape
+        // (§4.3): `issue` carries `version` + `body_html`, and the
+        // top-level `version` mirrors it.
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "body-409-shape1");
+        let r = make_router(tmp.path());
+        let payload = serde_json::json!({
+            "expected_version": "sha256:deadbeef",
+            "body": "stale draft",
+        });
+        let resp = r
+            .oneshot(
+                Request::put("/api/issues/body-409-shape1/body")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert_eq!(body["code"], "version_mismatch");
+        let top_v = body["version"].as_str().unwrap();
+        assert!(top_v.starts_with("sha256:"));
+        let issue_v = body["issue"]["version"].as_str().unwrap();
+        assert_eq!(top_v, issue_v, "issue.version must mirror top-level version");
+        assert!(body["issue"]["body_html"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn put_body_rejects_unknown_field() {
+        // M2 review F7: typos in optimistic-concurrency field names
+        // must 400, not silently parse as `expected_version: None` and
+        // proceed with a blind overwrite.
+        let tmp = tempfile::tempdir().unwrap();
+        seed_open_issue(tmp.path(), "body-deny-unknown");
+        let r = make_router(tmp.path());
+        let payload = serde_json::json!({
+            "expected_verison": "sha256:abc",
+            "body": "x",
+        });
+        let resp = r
+            .oneshot(
+                Request::put("/api/issues/body-deny-unknown/body")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn preview_rejects_unknown_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues/open")).unwrap();
+        let r = make_router(tmp.path());
+        let payload = serde_json::json!({
+            "body": "# x",
+            "extra": "boom",
+        });
+        let resp = r
+            .oneshot(
+                Request::post("/api/preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn issue_detail_includes_version_for_body_editor() {
         let tmp = tempfile::tempdir().unwrap();
         seed_open_issue(tmp.path(), "detail-vers-here");

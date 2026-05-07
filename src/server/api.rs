@@ -549,7 +549,12 @@ pub async fn put_body(
     }
 }
 
+/// `deny_unknown_fields` is mandatory: typos like `expected_verison` must
+/// 400 instead of silently parsing as `expected_version: None`, which
+/// would bypass optimistic concurrency control. M1 enforces this on
+/// `UpdateIssueRequest`; M2 inherits the convention.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BodyPutRequest {
     #[serde(default)]
     pub expected_version: Option<String>,
@@ -557,6 +562,7 @@ pub struct BodyPutRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PreviewRequest {
     pub body: String,
 }
@@ -617,15 +623,33 @@ fn mutate_error_to_response(err: MutateError) -> Response {
             "slug exists in both open/ and closed/ — resolve manually",
         ),
         MutateError::VersionMismatch { current, version } => {
-            // 409 with the full current issue so the client can
-            // refresh without an extra GET roundtrip (§4.3).
+            // 409 with the full current issue plus pre-rendered HTML and
+            // the new version, matching the `IssueDetailResponse` shape
+            // from `GET /api/issues/{slug}` (§4.3). Clients use the
+            // payload directly; no extra GET roundtrip, no special-case
+            // shape divergence (M2 reviewers caught the original
+            // top-level-only `version` placement causing client
+            // "Keep mine" to loop on stale tokens).
+            let body_html = super::render::sanitize_markdown(&current.body);
+            let mut issue_value =
+                serde_json::to_value(&current).expect("Issue serializes");
+            if let serde_json::Value::Object(ref mut m) = issue_value {
+                m.insert(
+                    "body_html".into(),
+                    serde_json::Value::String(body_html),
+                );
+                m.insert(
+                    "version".into(),
+                    serde_json::Value::String(version.clone()),
+                );
+            }
             let body = serde_json::json!({
                 "type": "https://issuectl/errors/version_mismatch",
                 "title": "Version mismatch",
                 "status": 409,
                 "code": "version_mismatch",
                 "detail": format!("expected version did not match current: {version}"),
-                "issue": current,
+                "issue": issue_value,
                 "version": version,
             });
             (StatusCode::CONFLICT, Json(body)).into_response()
