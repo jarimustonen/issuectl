@@ -2,12 +2,16 @@
 created: 2026-05-07
 updated: 2026-05-07
 type: bug
-status: open
+status: fixed
 priority: low
 reporter: jari
 assignee: jari
 epic: exorbitantly-ill-apples
 labels: [cli, display]
+closed: 2026-05-07
+commits:
+- hash: 6549ce6
+  summary: fix parser shadowing that dropped leading E in titles
 ---
 
 # `issuectl ls` drops first character of issue title in CLI display

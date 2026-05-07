@@ -32,8 +32,10 @@ quality-of-life improvements are deferred to v0.6.0.
 ## Scope (11 issues)
 
 ### M0 — architectural prerequisite (must land first)
-- [ ] @awfully-faint-sound — Migrate to flat layout `issues/<slug>/item.md`
-  (status only in YAML). Eliminates §3.4 of the web-edit-sync design.
+- [x] @awfully-faint-sound — Migrate to flat layout `issues/<slug>/item.md`
+  (status only in YAML). Landed in `2809ded` + review fixes `501a1bd`;
+  layout migration folded into `doctor --fix` (`ea8250a`). Status
+  `testing` pending real-world soak.
 
 ### M1 — web edit/sync
 
@@ -53,25 +55,27 @@ to keep the epic in sync with the worktree:
   `/llm-review` + `/assess-findings` (report:
   `history/review-m0-implementation.md`, gitignored). 136/136 tests,
   end-to-end SSE smoke verified.
-- [ ] **design-M1: writes** — `mutate.rs` shared by CLI and server,
-  flock on `.issuectl/write.lock`, PATCH/PUT/POST routes, CSRF +
-  Host-header validation, `expected_version` optimistic concurrency,
-  CLI `--expected-version` requirement on `--json`. Next worktree.
-- [ ] **design-M2: body editor** — `PUT /body`, textarea + preview,
-  localStorage draft, conflict UX.
-- [ ] **design-M3: robustness** — `--watch-poll-ms` (re-add removed in
-  cluster 1), `Degraded` banner, three-way merge UI.
-- [ ] @needlessly-fluffy-decision — Drag-and-drop write-back on the kanban.
-- [ ] (worktree) @amazingly-scattered-month — Startup reconciliation
-  (subsumed by @slightly-finicky-heart; link when worktree merges).
+- [x] **design-M1: writes** — `28e15bf` + review fixes `b094cdb`.
+  `mutate.rs` shared by CLI and server, flock on `.issuectl/write.lock`,
+  PATCH/PUT/POST routes, CSRF + Host-header validation,
+  `expected_version` optimistic concurrency, CLI `--expected-version`
+  requirement on `--json`.
+- [x] **design-M2: body editor** — `0b3b88d` + review fixes `832c363`.
+  `PUT /body`, textarea + preview, localStorage draft, conflict UX.
+- [x] **design-M3: robustness** — `b1a4910` + review fixes `565e7ac`.
+  `--watch-poll-ms`, `Degraded` banner, three-way merge UI.
+- [x] @needlessly-fluffy-decision — Drag-and-drop write-back on the
+  kanban. Landed `32802d0` + review rounds `88dfb85` and `1ddd09b`.
+- [ ] @amazingly-scattered-month — Startup reconciliation
+  (subsumed by @slightly-finicky-heart; close when M2 lands).
 
 ### M2 — agent-safe foundation
 - [ ] @slightly-finicky-heart — `issuectl doctor`: full validation suite +
   installable git hooks. Subsumes @amazingly-scattered-month.
 - [ ] @peculiarly-political-interest — Agent-safe mutation CLI
   (`set` / `note` / `check` / `label` / `apply` + `--dry-run`).
-- [ ] @outright-homely-calendar — `issuectl fmt` + optional YAML merge
-  driver. Land before drag-and-drop ships.
+- [x] @outright-homely-calendar — `issuectl fmt` + optional YAML merge
+  driver. Landed `230974d` + review fixes `49e7c0f`.
 - [ ] @vastly-lyrical-police — Declarative status transition rules +
   per-type body section linting. Small extension of doctor.
 - [ ] @overly-dreary-yak — Standardized markdown body sections (comments,
@@ -90,9 +94,8 @@ to keep the epic in sync with the worktree:
   M2 introduces a new CLI surface.
 
 ### Bugs / polish (small, dropped into v0.5.0 because they hurt daily use)
-- [ ] @peculiarly-truncated-title — `issuectl ls` drops the first
-  character of the H1 title in CLI display. Cosmetic, local fix in
-  the title-extraction helper.
+- [x] @peculiarly-truncated-title — `issuectl ls` drops the first
+  character of the H1 title in CLI display. Fixed in `6549ce6`.
 
 ## Phases
 
