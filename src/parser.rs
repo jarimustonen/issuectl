@@ -185,11 +185,15 @@ fn extract_title(body: Option<&str>) -> String {
 }
 
 fn strip_legacy_title_number(title: &str) -> &str {
-    let title = title.strip_prefix('E').unwrap_or(title);
-    let Some((number, rest)) = title.split_once(". ") else {
+    // Legacy headings are `# E10. Title` or `# 10. Title`. The `E`
+    // prefix is meaningful only when the rest parses as `<digits>. <rest>`.
+    // Returning the un-stripped original on the no-match path keeps a
+    // plain title like `# Esimiehen …` intact.
+    let candidate = title.strip_prefix('E').unwrap_or(title);
+    let Some((number, rest)) = candidate.split_once(". ") else {
         return title;
     };
-    if number.chars().all(|ch| ch.is_ascii_digit()) {
+    if !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit()) {
         rest
     } else {
         title
@@ -204,4 +208,39 @@ pub fn parse_legacy_dir(dirname: &str) -> Option<(u32, String)> {
     let number: u32 = num_part.parse().ok()?;
     let slug = dirname[hyphen + 1..].to_string();
     Some((number, slug))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_legacy_title_number;
+
+    #[test]
+    fn strips_legacy_e_prefix_form() {
+        assert_eq!(strip_legacy_title_number("E10. Foo bar"), "Foo bar");
+    }
+
+    #[test]
+    fn strips_legacy_numeric_form() {
+        assert_eq!(strip_legacy_title_number("10. Foo bar"), "Foo bar");
+    }
+
+    #[test]
+    fn keeps_plain_title_starting_with_e() {
+        // Regression: `# Esimiehen ...` was being rendered as
+        // `simiehen ...` because `E` was stripped unconditionally.
+        assert_eq!(
+            strip_legacy_title_number("Esimiehen ennakkolupa-flow"),
+            "Esimiehen ennakkolupa-flow"
+        );
+    }
+
+    #[test]
+    fn keeps_plain_title_without_legacy_shape() {
+        assert_eq!(strip_legacy_title_number("Foo bar"), "Foo bar");
+    }
+
+    #[test]
+    fn keeps_e_prefixed_title_without_dot_number() {
+        assert_eq!(strip_legacy_title_number("Eager parser"), "Eager parser");
+    }
 }
