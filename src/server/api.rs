@@ -643,11 +643,32 @@ fn mutate_error_to_response(err: MutateError) -> Response {
         MutateError::NotFound => {
             error_response(StatusCode::NOT_FOUND, "not_found", "issue not found")
         }
-        MutateError::AmbiguousSlug => error_response(
-            StatusCode::CONFLICT,
-            "ambiguous_slug",
-            "slug exists in both open/ and closed/ — resolve manually",
-        ),
+        MutateError::AmbiguousSlug { paths } => {
+            // 409 with the offending paths so the user can resolve
+            // manually. Generic "open/ and closed/" wording was wrong
+            // post-flat-layout — ambiguity now spans flat+legacy and
+            // both-legacy variants.
+            let detail = format!(
+                "slug present at multiple paths — resolve manually: {}",
+                paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let body = serde_json::json!({
+                "type": "https://issuectl/errors/ambiguous_slug",
+                "title": "Ambiguous slug",
+                "status": 409,
+                "code": "ambiguous_slug",
+                "detail": detail,
+                "paths": paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>(),
+            });
+            (StatusCode::CONFLICT, Json(body)).into_response()
+        }
         MutateError::VersionMismatch { current, version } => {
             // 409 with the full current issue plus pre-rendered HTML and
             // the new version, matching the `IssueDetailResponse` shape

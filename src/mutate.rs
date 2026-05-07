@@ -110,6 +110,23 @@ pub struct CommitSpec {
 }
 
 impl UpdateIssueRequest {
+    /// True when no field would actually change on disk — every patch
+    /// slot is `Unspecified` and every list/commit collection is empty.
+    /// `expected_version` is *not* a mutation; an empty body with only a
+    /// version token is still a no-op (M13).
+    pub fn is_noop(&self) -> bool {
+        matches!(self.status, Patch::Unspecified)
+            && matches!(self.priority, Patch::Unspecified)
+            && matches!(self.assignee, Patch::Unspecified)
+            && matches!(self.owner, Patch::Unspecified)
+            && matches!(self.epic, Patch::Unspecified)
+            && self.add_labels.is_empty()
+            && self.remove_labels.is_empty()
+            && self.add_related.is_empty()
+            && self.remove_related.is_empty()
+            && self.add_commits.is_empty()
+    }
+
     /// Reject empty-string Sets, type-set vs enum mismatches, and
     /// add_X/remove_X intent collisions. Runs once after both serde
     /// and clap have produced the request.
@@ -219,7 +236,12 @@ pub struct UpdateOutcome {
 #[derive(Debug)]
 pub enum MutateError {
     NotFound,
-    AmbiguousSlug,
+    /// Slug present at multiple paths simultaneously (flat + legacy, or
+    /// both legacy folders). Carries the offending paths so the API
+    /// response and CLI message can tell the user where to look — the
+    /// blanket pre-flat-layout "open/ and closed/" message no longer
+    /// covers the new ambiguity classes.
+    AmbiguousSlug { paths: Vec<PathBuf> },
     /// `expected_version` did not match the current canonical hash.
     /// Carries the current full issue plus its version so the response
     /// can include them per §4.3.
@@ -243,11 +265,15 @@ impl std::fmt::Display for MutateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MutateError::NotFound => write!(f, "issue not found"),
-            MutateError::AmbiguousSlug => {
+            MutateError::AmbiguousSlug { paths } => {
                 write!(
                     f,
-                    "slug exists at both flat (issues/<slug>/) and legacy \
-                     (issues/{{open,closed}}/<slug>/) paths — resolve manually"
+                    "slug present at multiple paths — resolve manually: {}",
+                    paths
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             }
             MutateError::VersionMismatch { version, .. } => {
@@ -346,11 +372,67 @@ pub fn update_issue(
 
     req.validate()?;
 
+    // M13: an empty PATCH (all `Unspecified`, no list/commit changes)
+    // is a no-op — return the current state without touching the file.
+    // Without this short-circuit, an "empty" call would still bump
+    // `updated:` and (surprisingly) trigger an in-line legacy→flat
+    // migration. Read-only locate + parse, no write, no publish.
+    if req.is_noop() {
+        let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
+        let located = repo::locate_issue_full(root, slug)
+            .map_err(|_| MutateError::NotFound)?;
+        let parsed = crate::parser::parse_item_md_with_warnings(
+            &located.item_path,
+            slug,
+            "open",
+        );
+        if !parsed.warnings.is_empty() {
+            return Err(MutateError::Corrupt {
+                warnings: parsed.warnings,
+            });
+        }
+        let mut issue = parsed.issue;
+        issue.folder = folder_for_status(&issue.status).to_string();
+        let version = canonical_hash(&issue);
+        if let Some(ref expected) = req.expected_version {
+            if expected != &version {
+                return Err(MutateError::VersionMismatch {
+                    current: issue,
+                    version,
+                });
+            }
+        }
+        return Ok(UpdateOutcome {
+            issue_dir: located
+                .item_path
+                .parent()
+                .expect("item.md has parent")
+                .to_path_buf(),
+            issue,
+            version,
+            moved_to_closed: false,
+            moved_to_open: false,
+        });
+    }
+
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
 
     // 1) locate, then in-line migrate any legacy path under the flock
     //    so writes always land at the canonical flat path.
     let item_path = locate_and_migrate(root, slug)?;
+    update_issue_under_lock(slug, item_path, req, hub)
+}
+
+/// Body of `update_issue` that runs with the flock already held. Used
+/// by `close_issue` to read+decide+mutate atomically without
+/// double-acquiring the lock (which deadlocks on Linux because fs2's
+/// advisory lock is per-fd).
+fn update_issue_under_lock(
+    slug: &str,
+    item_path: PathBuf,
+    req: UpdateIssueRequest,
+    hub: Option<&Arc<EventHub>>,
+) -> Result<UpdateOutcome, MutateError> {
     let folder = "open"; // placeholder; folder is derived from status post-write
 
     // 2) read + parse + hash. Refuse to mutate a corrupt file —
@@ -390,7 +472,18 @@ pub fn update_issue(
         let prev_closing = crate::is_closing_status(&prev_status);
         let new_closing = crate::is_closing_status(s);
         if new_closing {
-            write::set_string(&mut item.frontmatter, "closed", &write::today());
+            // Only set `closed:` on the active→closing edge, OR backfill
+            // if the field is missing on a closing→closing transition
+            // against an issue that pre-dates the auto-stamping.
+            // Closing→closing (e.g. fixed→wontfix) MUST preserve the
+            // historical close date — overwriting it would silently
+            // destroy provenance.
+            let has_closed = item
+                .frontmatter
+                .contains_key(serde_yaml::Value::String("closed".into()));
+            if !prev_closing || !has_closed {
+                write::set_string(&mut item.frontmatter, "closed", &write::today());
+            }
             if !prev_closing {
                 moved_to_closed = true;
             }
@@ -471,6 +564,79 @@ pub fn update_issue(
         moved_to_closed,
         moved_to_open,
     })
+}
+
+/// `issuectl close` semantics: read current type/status, reject if
+/// already closing, default the status from the issue type, then apply
+/// a status PATCH — all under a single flock so the type read cannot
+/// race a concurrent mutation that flips it (M4).
+///
+/// `status_override` mirrors `--status`. When `None`, the default is
+/// `fixed` for `type: bug`, `done` otherwise.
+pub fn close_issue(
+    root: &Path,
+    slug: &str,
+    status_override: Option<String>,
+    commits: Vec<CommitSpec>,
+    expected_version: Option<String>,
+    hub: Option<&Arc<EventHub>>,
+) -> Result<UpdateOutcome, MutateError> {
+    if !crate::slug::is_valid(slug) {
+        return Err(MutateError::Validation(format!(
+            "invalid slug shape: {slug:?}"
+        )));
+    }
+
+    let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
+
+    let item_path = locate_and_migrate(root, slug)?;
+    let item = write::read_item(&item_path).map_err(MutateError::Io)?;
+    let current_status = item
+        .frontmatter
+        .get(serde_yaml::Value::String("status".into()))
+        .and_then(|v| v.as_str())
+        .unwrap_or("open")
+        .to_string();
+    if crate::is_closing_status(&current_status) {
+        return Err(MutateError::Validation(format!(
+            "issue {slug} already has a closing status ({current_status}); use `update` to change status"
+        )));
+    }
+    let issue_type = item
+        .frontmatter
+        .get(serde_yaml::Value::String("type".into()))
+        .and_then(|v| v.as_str())
+        .unwrap_or("bug")
+        .to_string();
+    let resolved_status = status_override.unwrap_or_else(|| {
+        if issue_type == "bug" {
+            "fixed".to_string()
+        } else {
+            "done".to_string()
+        }
+    });
+
+    let req = UpdateIssueRequest {
+        expected_version,
+        status: Patch::Set(resolved_status),
+        add_commits: commits,
+        ..Default::default()
+    };
+    // _lock drops at end-of-scope after the locked update path returns.
+    // We call the under-lock helper directly so we don't double-acquire
+    // (fs2 advisory flock is per-fd; nested `WriteLock::acquire` would
+    // deadlock on Linux).
+    let mut req_normalized = req;
+    let normalized_add_related =
+        crate::normalize_related_refs_pub(&req_normalized.add_related)
+            .map_err(|e| MutateError::Validation(e.to_string()))?;
+    let normalized_remove_related =
+        crate::normalize_related_refs_pub(&req_normalized.remove_related)
+            .map_err(|e| MutateError::Validation(e.to_string()))?;
+    req_normalized.add_related = normalized_add_related;
+    req_normalized.remove_related = normalized_remove_related;
+    req_normalized.validate()?;
+    update_issue_under_lock(slug, item_path, req_normalized, hub)
 }
 
 /// PUT-style replacement of an issue's body markdown. Same lock and
@@ -569,43 +735,34 @@ fn apply_string_patch(item: &mut ItemFile, key: &str, p: &Patch<String>) {
 /// canonical flat path under the held flock. Returns the final flat
 /// `item.md` path.
 ///
-/// Ambiguous case (both flat and any legacy path exist for the same
-/// slug) is rejected outright — silently picking one side hides
-/// real state divergence introduced by, e.g., a partially-completed
-/// migration.
+/// Delegates classification to `repo::resolve_layout` so the mutate
+/// layer's view of the filesystem matches the loader/watcher/migrate
+/// commands — no per-call-site classification logic. After a legacy →
+/// flat migration, re-resolves to validate the new flat path picked up
+/// by the resolver's symlink/escape hardening (M4 fix).
 fn locate_and_migrate(root: &Path, slug: &str) -> Result<PathBuf, MutateError> {
-    let (flat, legacy_open, legacy_closed) = repo::paths_for(root, slug);
-    let flat_exists = real_dir(&flat);
-    let legacy_open_exists = real_dir(&legacy_open);
-    let legacy_closed_exists = real_dir(&legacy_closed);
-    if (flat_exists && (legacy_open_exists || legacy_closed_exists))
-        || (legacy_open_exists && legacy_closed_exists)
-    {
-        return Err(MutateError::AmbiguousSlug);
-    }
-    if flat_exists {
-        let item = flat.join("item.md");
-        if !item.is_file() {
-            return Err(MutateError::NotFound);
+    use repo::LayoutState;
+    match repo::resolve_layout(root, slug) {
+        LayoutState::Flat { item_path } => Ok(item_path),
+        LayoutState::Legacy { .. } => {
+            // Migrate, then re-resolve to surface any post-rename
+            // anomaly (e.g. a symlink swapped in concurrently).
+            repo::migrate_to_flat_inplace(root, slug).map_err(MutateError::Io)?;
+            match repo::resolve_layout(root, slug) {
+                LayoutState::Flat { item_path } => Ok(item_path),
+                LayoutState::Absent => Err(MutateError::NotFound),
+                LayoutState::Ambiguous { paths } => Err(MutateError::AmbiguousSlug { paths }),
+                LayoutState::Invalid { reason, .. } => {
+                    Err(MutateError::Io(anyhow!("{reason}")))
+                }
+                LayoutState::Legacy { .. } => Err(MutateError::Io(anyhow!(
+                    "post-migration state still classifies as legacy"
+                ))),
+            }
         }
-        return Ok(item);
-    }
-    // Legacy → flat: move the directory, then return the new item path.
-    if legacy_open_exists || legacy_closed_exists {
-        let new_dir = repo::migrate_to_flat_inplace(root, slug).map_err(MutateError::Io)?;
-        let item = new_dir.join("item.md");
-        if !item.is_file() {
-            return Err(MutateError::NotFound);
-        }
-        return Ok(item);
-    }
-    Err(MutateError::NotFound)
-}
-
-fn real_dir(p: &Path) -> bool {
-    match fs::symlink_metadata(p) {
-        Ok(m) => m.is_dir() && !m.file_type().is_symlink(),
-        Err(_) => false,
+        LayoutState::Ambiguous { paths } => Err(MutateError::AmbiguousSlug { paths }),
+        LayoutState::Absent => Err(MutateError::NotFound),
+        LayoutState::Invalid { reason, .. } => Err(MutateError::Io(anyhow!("{reason}"))),
     }
 }
 
@@ -713,9 +870,14 @@ pub fn new_issue(
         )));
     }
 
-    // `do_new` itself acquires the WriteLock (M1 contract: every
-    // writer holds the repo flock). Don't double-acquire here.
-    let outcome = crate::do_new(
+    // C3: hold the flock through write + parse + publish so seq order
+    // matches disk order. The previous implementation called `do_new`,
+    // which acquired/released the lock internally — the synthetic
+    // `IssueUpserted` then published OUTSIDE the lock, inverting seq
+    // against concurrent writers.
+    let lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
+    let outcome = crate::do_new_locked(
+        &lock,
         root,
         crate::NewArgs {
             issue_type: req.issue_type,
@@ -741,8 +903,9 @@ pub fn new_issue(
         }
     })?;
 
-    // Re-read for canonical hash + Issue.
-    let parsed = crate::parser::parse_item_md_with_warnings(&outcome.item_path, &outcome.slug, "open");
+    // Re-read for canonical hash + Issue. Still holding the lock.
+    let parsed =
+        crate::parser::parse_item_md_with_warnings(&outcome.item_path, &outcome.slug, "open");
     let mut issue = parsed.issue;
     issue.folder = folder_for_status(&issue.status).to_string();
     let version = canonical_hash(&issue);
@@ -755,11 +918,13 @@ pub fn new_issue(
         });
     }
 
-    Ok(NewOutcome {
+    let result = NewOutcome {
         issue_dir: outcome.item_path.parent().unwrap().to_path_buf(),
         issue,
         version,
-    })
+    };
+    drop(lock);
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -831,10 +996,14 @@ mod tests {
 
     #[test]
     fn update_status_to_closing_does_not_move_directory() {
+        // M14: use inode comparison rather than `created()` (which is
+        // Err on most Linux ext4 setups, silently making the assertion
+        // a no-op).
+        use std::os::unix::fs::MetadataExt;
         let tmp = fresh_repo();
         let _v0 = seed_issue(tmp.path(), "open", "close-me-now", "open");
         let flat_dir = tmp.path().join("issues/close-me-now");
-        let before_inode = fs::metadata(&flat_dir).unwrap().created().ok();
+        let before_inode = fs::metadata(&flat_dir).unwrap().ino();
         let req = UpdateIssueRequest {
             status: Patch::Set("fixed".into()),
             ..Default::default()
@@ -846,14 +1015,79 @@ mod tests {
         assert!(flat_dir.is_dir(), "flat dir must still exist");
         assert!(!tmp.path().join("issues/closed/close-me-now").exists());
         assert!(!tmp.path().join("issues/open/close-me-now").exists());
-        let after_inode = fs::metadata(&flat_dir).unwrap().created().ok();
-        // Best-effort: created-time should match (no rename happened).
-        if let (Some(a), Some(b)) = (before_inode, after_inode) {
-            assert_eq!(a, b, "directory must not have been recreated");
-        }
+        let after_inode = fs::metadata(&flat_dir).unwrap().ino();
+        assert_eq!(before_inode, after_inode, "directory must not have been recreated");
         let on_disk = fs::read_to_string(flat_dir.join("item.md")).unwrap();
         assert!(on_disk.contains("status: fixed"));
         assert!(on_disk.contains("closed:"));
+    }
+
+    #[test]
+    fn empty_patch_is_noop_no_legacy_migration() {
+        // M13: an empty PATCH against a legacy-path issue must NOT
+        // migrate the directory or bump `updated:`. The version returned
+        // matches what `show --json` would have read.
+        let tmp = fresh_repo();
+        let legacy = tmp.path().join("issues/open/empty-patch-legacy");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            legacy.join("item.md"),
+            "---\ntype: bug\nstatus: open\npriority: normal\nupdated: 2026-01-01\n---\n\n# T\n",
+        )
+        .unwrap();
+        let before = fs::read_to_string(legacy.join("item.md")).unwrap();
+
+        let req = UpdateIssueRequest::default();
+        let out = update_issue(tmp.path(), "empty-patch-legacy", req, None).unwrap();
+
+        // Legacy directory is preserved (no migration on a no-op).
+        assert!(legacy.is_dir(), "legacy dir must remain untouched");
+        let after = fs::read_to_string(legacy.join("item.md")).unwrap();
+        assert_eq!(before, after, "no-op must not touch item.md");
+        assert!(out.version.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn closing_to_closing_preserves_closed_date() {
+        // C2: fixed → wontfix must preserve the original `closed:` date.
+        // Overwriting it silently destroys historical close provenance.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/preserve-closed-date");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-01-01\nstatus: fixed\nclosed: 2026-01-15\npriority: normal\n---\n\n# T\n",
+        )
+        .unwrap();
+        let req = UpdateIssueRequest {
+            status: Patch::Set("wontfix".into()),
+            ..Default::default()
+        };
+        let _ = update_issue(tmp.path(), "preserve-closed-date", req, None).unwrap();
+        let after = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert!(after.contains("closed: 2026-01-15"), "got:\n{after}");
+        assert!(after.contains("status: wontfix"));
+    }
+
+    #[test]
+    fn closing_backfills_closed_date_when_missing() {
+        // Closing→closing on an issue that pre-dates auto-stamping should
+        // backfill rather than leave the field empty.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/backfill-closed");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: fixed\npriority: normal\n---\n\n# T\n",
+        )
+        .unwrap();
+        let req = UpdateIssueRequest {
+            status: Patch::Set("wontfix".into()),
+            ..Default::default()
+        };
+        let _ = update_issue(tmp.path(), "backfill-closed", req, None).unwrap();
+        let after = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert!(after.contains("closed:"), "expected backfilled closed date in:\n{after}");
     }
 
     #[test]
@@ -907,7 +1141,7 @@ mod tests {
             ..Default::default()
         };
         let err = update_issue(tmp.path(), "dual-path-here", req, None).unwrap_err();
-        assert!(matches!(err, MutateError::AmbiguousSlug));
+        assert!(matches!(err, MutateError::AmbiguousSlug { .. }));
     }
 
     #[test]

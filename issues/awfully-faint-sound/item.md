@@ -1,10 +1,10 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-07
 type: improvement
 reporter: jari
 assignee: jari
-status: open
+status: testing
 priority: high
 epic: exorbitantly-ill-apples
 labels: [breaking, foundation, migration]

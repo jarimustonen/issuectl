@@ -81,6 +81,11 @@ pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
     let mut report = scan(repo_root)?;
 
     if fix {
+        // D2: hold the repo write lock through the apply pass so doctor
+        // doesn't race CLI/server mutations. Re-scan under the lock to
+        // ensure the plan reflects the locked-state filesystem.
+        let _lock = crate::mutate::WriteLock::acquire(repo_root)?;
+        report = scan(repo_root)?;
         apply(repo_root, &mut report)?;
     }
 
@@ -594,9 +599,14 @@ fn render_text(report: &DoctorReport, fix: bool) {
         };
         println!("{title}");
         for m in &report.legacy_dirs {
+            // Legacy <NN>-<slug> dirs are migrated to the canonical flat
+            // path post-flat-layout; print the actual destination rather
+            // than the (incorrect) "{folder}/{new}" pre-flat shape.
             println!(
-                "  {}/{}  →  {}/{}",
-                m.folder, m.old_dir_name, m.folder, m.new_slug
+                "  {}/{}  →  {}",
+                m.folder,
+                m.old_dir_name,
+                m.new_path.display()
             );
         }
         println!();

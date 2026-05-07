@@ -415,66 +415,100 @@ enum ParseOutcome {
     Vanished,
 }
 
+/// Maximum size of `item.md` the watcher will load into memory. Files
+/// past this cap are surfaced as `IssueInvalid` rather than parsed —
+/// stops a single accidental commit (or hostile local write) from
+/// OOM-ing the server. (M3.)
+const MAX_ITEM_MD_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Re-derive the on-disk state of one slug. Runs in `spawn_blocking`.
+/// Delegates layout classification to `repo::resolve_layout` (the single
+/// source of truth shared with loader/locator/mutate/migrate).
 ///
-/// Post-flat-layout, the canonical path is `issues/<slug>/item.md`.
-/// Legacy `issues/{open,closed}/<slug>/` paths are still accepted for
-/// reads (so the board surfaces the issue with a `legacy_layout`
-/// warning) until the user runs `issuectl migrate layout`.
-///
-/// The returned outcome distinguishes three filesystem states:
-/// - **Vanished**: no such slug exists on disk, or slug shape invalid.
-/// - **Invalid**: the issue dir exists but `item.md` cannot be parsed
-///   cleanly, or the slug exists at multiple paths simultaneously.
-/// - **Loaded**: parsed successfully.
+/// Post-flat-layout, legacy `issues/{open,closed}/<slug>/` paths are
+/// surfaced as `IssueInvalid` with `legacy_layout` — the card stays
+/// visible with a warning badge but is not treated as healthy until the
+/// user runs `issuectl migrate layout` (or any write triggers in-line
+/// migration under the flock).
 fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
     if !slug::is_valid(slug) {
         return ParseOutcome::Vanished;
     }
 
-    let (flat, legacy_open, legacy_closed) = crate::repo::paths_for(root, slug);
-    let flat_exists = is_real_dir(&flat);
-    let legacy_open_exists = is_real_dir(&legacy_open);
-    let legacy_closed_exists = is_real_dir(&legacy_closed);
-
-    // Multi-path presence is ambiguous — surface as Invalid until the
-    // user runs `issuectl migrate layout` (or any write goes through
-    // mutate.rs, which migrates in-line under flock).
-    let exists_count =
-        usize::from(flat_exists) + usize::from(legacy_open_exists) + usize::from(legacy_closed_exists);
-    if exists_count == 0 {
-        return ParseOutcome::Vanished;
-    }
-    if exists_count > 1 {
-        return ParseOutcome::Invalid {
-            warnings: vec![crate::repo::LoadWarning {
-                slug: slug.to_string(),
-                folder: "ambiguous".to_string(),
-                message:
-                    "ambiguous slug: present at flat (issues/<slug>/) AND legacy \
-                     (issues/{open,closed}/<slug>/) paths — run `issuectl migrate layout`"
-                        .to_string(),
-                code: Some("ambiguous_slug".to_string()),
-            }],
-        };
-    }
-
-    let (dir, legacy) = if flat_exists {
-        (flat, None)
-    } else if legacy_open_exists {
-        (legacy_open, Some("open"))
-    } else {
-        (legacy_closed, Some("closed"))
+    let item_path = match crate::repo::resolve_layout(root, slug) {
+        crate::repo::LayoutState::Absent => return ParseOutcome::Vanished,
+        crate::repo::LayoutState::Flat { item_path } => item_path,
+        crate::repo::LayoutState::Legacy { folder, .. } => {
+            // M5 / user decision #17: legacy paths are surfaced as
+            // Invalid. Card remains visible with a warning until the
+            // user migrates; mutate-path writes will migrate it in-line.
+            return ParseOutcome::Invalid {
+                warnings: vec![crate::repo::LoadWarning {
+                    slug: slug.to_string(),
+                    folder: folder.to_string(),
+                    message: format!(
+                        "found at legacy path issues/{folder}/{slug}/ — run `issuectl migrate layout`"
+                    ),
+                    code: Some(crate::repo::LoadWarningCode::LegacyLayout),
+                }],
+            };
+        }
+        crate::repo::LayoutState::Ambiguous { paths } => {
+            return ParseOutcome::Invalid {
+                warnings: vec![crate::repo::LoadWarning {
+                    slug: slug.to_string(),
+                    folder: "ambiguous".to_string(),
+                    message: format!(
+                        "ambiguous slug — present at: {}",
+                        paths
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    code: Some(crate::repo::LoadWarningCode::AmbiguousSlug),
+                }],
+            };
+        }
+        crate::repo::LayoutState::Invalid { reason, .. } => {
+            return ParseOutcome::Invalid {
+                warnings: vec![crate::repo::LoadWarning {
+                    slug: slug.to_string(),
+                    folder: "open".to_string(),
+                    message: reason,
+                    code: None,
+                }],
+            };
+        }
     };
 
-    let item_path = dir.join("item.md");
+    // M3: cap item.md size. `symlink_metadata` is fine here because
+    // `resolve_layout` already verified the path isn't a symlink.
+    if let Ok(meta) = std::fs::symlink_metadata(&item_path) {
+        if meta.len() > MAX_ITEM_MD_BYTES {
+            return ParseOutcome::Invalid {
+                warnings: vec![crate::repo::LoadWarning {
+                    slug: slug.to_string(),
+                    folder: "open".to_string(),
+                    message: format!(
+                        "{} is too large ({} bytes; cap = {} bytes)",
+                        item_path.display(),
+                        meta.len(),
+                        MAX_ITEM_MD_BYTES
+                    ),
+                    code: Some(crate::repo::LoadWarningCode::TooLarge),
+                }],
+            };
+        }
+    }
+
     let text = match std::fs::read_to_string(&item_path) {
         Ok(t) => t,
         Err(e) => {
             return ParseOutcome::Invalid {
                 warnings: vec![crate::repo::LoadWarning {
                     slug: slug.to_string(),
-                    folder: legacy.unwrap_or("open").to_string(),
+                    folder: "open".to_string(),
                     message: format!("cannot read {}: {}", item_path.display(), e),
                     code: None,
                 }],
@@ -492,7 +526,7 @@ fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
                 slug: slug.to_string(),
                 folder: derived_folder.clone(),
                 message: w,
-                code: None,
+                code: Some(crate::repo::LoadWarningCode::ParseWarning),
             })
             .collect();
         return ParseOutcome::Invalid { warnings };
@@ -504,16 +538,6 @@ fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
     ParseOutcome::Loaded {
         summary: Box::new(IssueSummary::from(issue)),
         version,
-    }
-}
-
-/// Real (non-symlink) directory check. Mirrors `repo::locate_issue`'s
-/// stance: a symlinked entry is treated as not-a-real-dir to keep
-/// notify-driven watching consistent with the read path.
-fn is_real_dir(path: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(m) => m.is_dir() && !m.file_type().is_symlink(),
-        Err(_) => false,
     }
 }
 

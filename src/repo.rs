@@ -7,10 +7,56 @@ use crate::models::Issue;
 use crate::parser;
 
 const ISSUES_DIR: &str = "issues";
-/// Names that look like slugs but are actually legacy status folders or
-/// other reserved subdirectories under `issues/`. Walked separately by
-/// the loader; never treated as slug-named issue directories.
-const RESERVED_SUBDIRS: &[&str] = &["open", "closed", "archive"];
+/// Legacy status-folder names walked separately as compat-read paths.
+/// Cold-storage convention is `.archive/<slug>/` (leading dot keeps it
+/// out of `slug::is_valid` shape, so no explicit reservation needed).
+const LEGACY_FOLDERS: &[&str] = &["open", "closed"];
+
+/// Stable machine-readable warning codes surfaced via `LoadWarning.code`.
+/// The wire format serialises as snake_case strings — clients dispatch on
+/// these without scraping `message`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadWarningCode {
+    /// Issue is at a legacy `issues/{open,closed}/<slug>/` path.
+    LegacyLayout,
+    /// Slug is present at multiple paths simultaneously (flat + legacy,
+    /// or both legacy folders).
+    AmbiguousSlug,
+    /// `item.md` is missing from an otherwise-existing issue dir.
+    MissingItem,
+    /// `item.md` exceeds the parser size cap.
+    TooLarge,
+    /// `item.md` parsed with warnings (bad YAML, partial write, etc.).
+    ParseWarning,
+}
+
+/// Per-slug filesystem state classification. One source of truth used by
+/// the loader, locator, watcher, mutate layer, and migrate command — see
+/// `resolve_layout`.
+#[derive(Debug, Clone)]
+pub enum LayoutState {
+    /// Slug not present at any candidate path.
+    Absent,
+    /// Slug at the canonical `issues/<slug>/item.md` path. `item_path` is
+    /// validated (no symlinks, contained under issues_root).
+    Flat { item_path: PathBuf },
+    /// Slug at a legacy `issues/{open,closed}/<slug>/item.md` path.
+    /// `legacy_folder` is the kanban-bucket label of where it was found.
+    Legacy {
+        folder: &'static str,
+        item_path: PathBuf,
+    },
+    /// Slug exists at >1 candidate path; refuse to pick a side.
+    Ambiguous { paths: Vec<PathBuf> },
+    /// Path-shape rejection — symlinked dir, dir contained outside
+    /// issues_root, missing item.md, symlinked item.md, etc. Surfaced as
+    /// a warning to the UI but treated as not-loadable.
+    Invalid {
+        item_path: Option<PathBuf>,
+        reason: String,
+    },
+}
 
 /// Slimmer projection of `Issue` for list endpoints — same fields minus the
 /// markdown body. The web board renders cards from frontmatter + title, so
@@ -69,11 +115,11 @@ pub struct LoadWarning {
     pub slug: String,
     pub folder: String,
     pub message: String,
-    /// Stable machine-readable warning code. `None` for ad-hoc parse
-    /// messages; populated for warnings the UI may want to special-case
-    /// (currently only `legacy_layout`).
+    /// Stable machine-readable warning code. `None` for ad-hoc messages
+    /// without a stable category; populated when the UI may want to
+    /// special-case (e.g. `LegacyLayout`, `AmbiguousSlug`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
+    pub code: Option<LoadWarningCode>,
 }
 
 /// Walk up from start (default: cwd) to find repo root.
@@ -105,75 +151,188 @@ pub fn folder_for_status(status: &str) -> &'static str {
     }
 }
 
-/// Iterate over every slug-named issue directory in the repo, including
-/// legacy `issues/open/<slug>` and `issues/closed/<slug>` paths. Yields
-/// `(slug, item_path, legacy_folder)` where `legacy_folder` is `Some("open")`
-/// or `Some("closed")` for legacy reads and `None` for flat-layout reads.
-fn walk_issue_dirs(
-    repo_root: &Path,
-) -> Vec<(String, PathBuf, Option<&'static str>)> {
-    let mut out: Vec<(String, PathBuf, Option<&'static str>)> = Vec::new();
+/// Discover every slug appearing under `issues/` — flat, legacy-open, or
+/// legacy-closed. Returns each slug exactly once; the resolver determines
+/// the slug's `LayoutState`.
+///
+/// Reserved-subdir filter: `open` and `closed` are walked as legacy parents,
+/// not as slug directories. Anything else under `issues/` (including
+/// `.archive/`) is surfaced as a slug candidate — the resolver will
+/// reject leading-dot or otherwise invalid shapes via `slug::is_valid`.
+fn discover_slugs(repo_root: &Path) -> std::collections::BTreeSet<String> {
+    use std::collections::BTreeSet;
+    let mut slugs = BTreeSet::new();
     let issues_dir = repo_root.join(ISSUES_DIR);
 
-    // Flat: issues/<slug>/
     if let Ok(rd) = std::fs::read_dir(&issues_dir) {
-        let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
+        for entry in rd.flatten() {
             if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if RESERVED_SUBDIRS.contains(&name.as_str()) {
+            if LEGACY_FOLDERS.contains(&name.as_str()) {
                 continue;
             }
-            out.push((name, entry.path(), None));
+            if !crate::slug::is_valid(&name) {
+                continue;
+            }
+            slugs.insert(name);
+        }
+    }
+    for legacy in LEGACY_FOLDERS {
+        let dir = issues_dir.join(legacy);
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !crate::slug::is_valid(&name) {
+                continue;
+            }
+            slugs.insert(name);
+        }
+    }
+    slugs
+}
+
+/// Single source of truth for per-slug filesystem-state classification.
+/// All five callers (loader, locator, watcher, mutate, migrate) consume
+/// `LayoutState` and apply their own policy on top — never re-implement
+/// the tri-path detection.
+///
+/// The classification is path-shape only: it does not parse `item.md`
+/// content. The caller does that after `LayoutState::Flat` /
+/// `LayoutState::Legacy`.
+pub fn resolve_layout(repo_root: &Path, slug: &str) -> LayoutState {
+    let issues_root = repo_root.join(ISSUES_DIR);
+    let canon_root = match std::fs::canonicalize(&issues_root) {
+        Ok(p) => Some(p),
+        Err(_) => None,
+    };
+
+    let candidates: [(PathBuf, Option<&'static str>); 3] = [
+        (issues_root.join(slug), None),
+        (issues_root.join("open").join(slug), Some("open")),
+        (issues_root.join("closed").join(slug), Some("closed")),
+    ];
+
+    let mut hits: Vec<(PathBuf, Option<&'static str>, ItemCheck)> = Vec::new();
+    for (dir, legacy) in candidates {
+        match check_dir(&dir, canon_root.as_deref()) {
+            Some(check) => hits.push((dir, legacy, check)),
+            None => continue,
         }
     }
 
-    // Legacy compat: issues/open/<slug>, issues/closed/<slug>
-    for legacy in ["open", "closed"] {
-        let legacy_dir = issues_dir.join(legacy);
-        let Ok(rd) = std::fs::read_dir(&legacy_dir) else {
-            continue;
-        };
-        let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
+    match hits.len() {
+        0 => LayoutState::Absent,
+        1 => {
+            let (dir, legacy, check) = hits.into_iter().next().unwrap();
+            match check {
+                ItemCheck::Ok(item) => match legacy {
+                    None => LayoutState::Flat { item_path: item },
+                    Some(folder) => LayoutState::Legacy {
+                        folder,
+                        item_path: item,
+                    },
+                },
+                ItemCheck::Invalid(reason) => LayoutState::Invalid {
+                    item_path: Some(dir.join("item.md")),
+                    reason,
+                },
             }
-            let name = entry.file_name().to_string_lossy().to_string();
-            // If a flat copy already exists, skip the legacy one — the
-            // caller surfaces the conflict via the dedicated ambiguous
-            // path check (`legacy_paths_for`).
-            if issues_dir.join(&name).is_dir() {
-                continue;
+        }
+        _ => LayoutState::Ambiguous {
+            paths: hits.into_iter().map(|(d, _, _)| d).collect(),
+        },
+    }
+}
+
+enum ItemCheck {
+    Ok(PathBuf),
+    Invalid(String),
+}
+
+/// Inspect a candidate issue directory. Returns `None` if the directory
+/// doesn't exist (so `resolve_layout` can count present-paths cleanly);
+/// returns `Some(Invalid)` for symlinked or escaping dirs / bad item.md.
+fn check_dir(dir: &Path, canon_root: Option<&Path>) -> Option<ItemCheck> {
+    let meta = std::fs::symlink_metadata(dir).ok()?;
+    if meta.file_type().is_symlink() {
+        return Some(ItemCheck::Invalid(format!(
+            "issue directory is a symlink: {}",
+            dir.display()
+        )));
+    }
+    if !meta.is_dir() {
+        // A regular file at this path is treated as "not the issue"
+        // for resolver counting; callers like migrate may still surface
+        // it as a conflict via their own check.
+        return None;
+    }
+    if let Some(root) = canon_root {
+        match std::fs::canonicalize(dir) {
+            Ok(c) if !c.starts_with(root) => {
+                return Some(ItemCheck::Invalid(format!(
+                    "issue directory escapes repository: {} → {}",
+                    dir.display(),
+                    c.display()
+                )));
             }
-            out.push((name, entry.path(), Some(if legacy == "open" { "open" } else { "closed" })));
+            _ => {}
         }
     }
-    out
+    let item = dir.join("item.md");
+    let item_meta = match std::fs::symlink_metadata(&item) {
+        Ok(m) => m,
+        Err(_) => {
+            return Some(ItemCheck::Invalid(format!(
+                "missing {}",
+                item.display()
+            )));
+        }
+    };
+    if item_meta.file_type().is_symlink() || !item_meta.is_file() {
+        return Some(ItemCheck::Invalid(format!(
+            "item.md is symlinked or not a regular file: {}",
+            item.display()
+        )));
+    }
+    Some(ItemCheck::Ok(item))
 }
 
 /// Load all issues from the flat layout (and legacy compat paths).
 pub fn load_issues(repo_root: &Path) -> Vec<Issue> {
     let mut result = Vec::new();
-    for (slug, dir, legacy) in walk_issue_dirs(repo_root) {
-        let item_path = dir.join("item.md");
-        if !item_path.is_file() {
-            continue;
+    for slug in discover_slugs(repo_root) {
+        match resolve_layout(repo_root, &slug) {
+            LayoutState::Flat { item_path } => {
+                let mut issue = parser::parse_item_md(&item_path, &slug, "open");
+                issue.folder = folder_for_status(&issue.status).to_string();
+                result.push(issue);
+            }
+            LayoutState::Legacy { item_path, folder } => {
+                eprintln!(
+                    "Warning: {slug} found at legacy path issues/{folder}/{slug}/ — run `issuectl migrate layout`"
+                );
+                let mut issue = parser::parse_item_md(&item_path, &slug, "open");
+                issue.folder = folder_for_status(&issue.status).to_string();
+                result.push(issue);
+            }
+            LayoutState::Ambiguous { paths } => {
+                eprintln!(
+                    "Warning: {slug} present at multiple paths ({:?}) — resolve manually",
+                    paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
+                );
+            }
+            LayoutState::Invalid { reason, .. } => {
+                eprintln!("Warning: {slug}: {reason}");
+            }
+            LayoutState::Absent => {}
         }
-        let mut issue = parser::parse_item_md(&item_path, &slug, "open");
-        // Folder is derived from frontmatter status post-flat-layout.
-        issue.folder = folder_for_status(&issue.status).to_string();
-        if legacy.is_some() {
-            eprintln!(
-                "Warning: {slug} found at legacy path {} — run `issuectl migrate layout`",
-                dir.display()
-            );
-        }
-        result.push(issue);
     }
     result.sort_by(|a, b| a.slug.cmp(&b.slug));
     result
@@ -184,45 +343,84 @@ pub fn load_issues_with_warnings(repo_root: &Path) -> (Vec<Issue>, Vec<LoadWarni
     let mut issues = Vec::new();
     let mut warnings = Vec::new();
 
-    for (slug, dir, legacy) in walk_issue_dirs(repo_root) {
-        let item_path = dir.join("item.md");
-        let folder_label = legacy.unwrap_or("open"); // placeholder, overwritten below
-        if !item_path.is_file() {
-            warnings.push(LoadWarning {
-                slug: slug.clone(),
-                folder: folder_label.to_string(),
-                message: format!("missing {}", item_path.display()),
-                code: None,
-            });
-            continue;
+    for slug in discover_slugs(repo_root) {
+        match resolve_layout(repo_root, &slug) {
+            LayoutState::Flat { item_path } => {
+                push_issue_with_parse(&slug, &item_path, false, None, &mut issues, &mut warnings);
+            }
+            LayoutState::Legacy { folder, item_path } => {
+                push_issue_with_parse(
+                    &slug,
+                    &item_path,
+                    true,
+                    Some(folder),
+                    &mut issues,
+                    &mut warnings,
+                );
+            }
+            LayoutState::Ambiguous { paths } => {
+                warnings.push(LoadWarning {
+                    slug: slug.clone(),
+                    folder: "ambiguous".to_string(),
+                    message: format!(
+                        "ambiguous slug — present at: {}",
+                        paths
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    code: Some(LoadWarningCode::AmbiguousSlug),
+                });
+            }
+            LayoutState::Invalid { reason, .. } => {
+                warnings.push(LoadWarning {
+                    slug: slug.clone(),
+                    folder: "open".to_string(),
+                    message: reason,
+                    code: Some(LoadWarningCode::MissingItem),
+                });
+            }
+            LayoutState::Absent => {}
         }
-        let parsed = parser::parse_item_md_with_warnings(&item_path, &slug, folder_label);
-        let derived_folder = folder_for_status(&parsed.issue.status);
-        for w in parsed.warnings {
-            warnings.push(LoadWarning {
-                slug: slug.clone(),
-                folder: derived_folder.to_string(),
-                message: w,
-                code: None,
-            });
-        }
-        if let Some(legacy_kind) = legacy {
-            warnings.push(LoadWarning {
-                slug: slug.clone(),
-                folder: derived_folder.to_string(),
-                message: format!(
-                    "found at legacy path issues/{legacy_kind}/{slug}/ — run `issuectl migrate layout`"
-                ),
-                code: Some("legacy_layout".to_string()),
-            });
-        }
-        let mut issue = parsed.issue;
-        issue.folder = derived_folder.to_string();
-        issues.push(issue);
     }
 
     issues.sort_by(|a, b| a.slug.cmp(&b.slug));
     (issues, warnings)
+}
+
+fn push_issue_with_parse(
+    slug: &str,
+    item_path: &Path,
+    legacy: bool,
+    legacy_folder: Option<&'static str>,
+    issues: &mut Vec<Issue>,
+    warnings: &mut Vec<LoadWarning>,
+) {
+    let parsed = parser::parse_item_md_with_warnings(item_path, slug, "open");
+    let derived_folder = folder_for_status(&parsed.issue.status);
+    for w in parsed.warnings {
+        warnings.push(LoadWarning {
+            slug: slug.to_string(),
+            folder: derived_folder.to_string(),
+            message: w,
+            code: Some(LoadWarningCode::ParseWarning),
+        });
+    }
+    if legacy {
+        let folder = legacy_folder.unwrap_or("open");
+        warnings.push(LoadWarning {
+            slug: slug.to_string(),
+            folder: derived_folder.to_string(),
+            message: format!(
+                "found at legacy path issues/{folder}/{slug}/ — run `issuectl migrate layout`"
+            ),
+            code: Some(LoadWarningCode::LegacyLayout),
+        });
+    }
+    let mut issue = parsed.issue;
+    issue.folder = derived_folder.to_string();
+    issues.push(issue);
 }
 
 /// Load only frontmatter + title summaries for every issue.
@@ -242,86 +440,50 @@ pub struct Located {
     pub legacy_folder: Option<&'static str>,
 }
 
-/// Locate a single issue's `item.md` by slug.
-///
-/// Search order:
-///   1. `issues/<slug>/item.md`            (flat — canonical)
-///   2. `issues/open/<slug>/item.md`       (legacy compat read)
-///   3. `issues/closed/<slug>/item.md`     (legacy compat read)
-///
-/// Refuses symlinked issue directories outright and verifies (via canonical
-/// path comparison) that the resolved directory stays under
-/// `<repo_root>/issues/`. Without this, a symlinked entry could escape
-/// containment when the slug is reached via direct `/api/issues/<slug>`
-/// lookup.
-///
-/// Returns the canonical legacy folder hint for the compat-read warning;
-/// callers writing under a flock should call `migrate_to_flat_inplace`
-/// before mutating, so the compat path never gets a write.
+/// Locate a single issue's `item.md` by slug. Delegates classification to
+/// `resolve_layout`. Returns `Err` for `Absent`, `Ambiguous`, and
+/// `Invalid` — callers that need to disambiguate use `resolve_layout`
+/// directly.
 pub fn locate_issue_full(repo_root: &Path, slug: &str) -> Result<Located> {
-    let issues_root = repo_root.join(ISSUES_DIR);
-    let issues_root_canon = std::fs::canonicalize(&issues_root)
-        .with_context(|| format!("cannot canonicalize {}", issues_root.display()))?;
-
-    let candidates: [(PathBuf, Option<&'static str>); 3] = [
-        (issues_root.join(slug), None),
-        (issues_root.join("open").join(slug), Some("open")),
-        (issues_root.join("closed").join(slug), Some("closed")),
-    ];
-
-    for (dir, legacy) in candidates {
-        let meta = match std::fs::symlink_metadata(&dir) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if meta.file_type().is_symlink() {
-            bail!(
-                "issue directory is a symlink (refusing to follow): {}",
-                dir.display()
-            );
-        }
-        if !meta.is_dir() {
-            continue;
-        }
-        let dir_canon = std::fs::canonicalize(&dir)
-            .with_context(|| format!("cannot canonicalize {}", dir.display()))?;
-        if !dir_canon.starts_with(&issues_root_canon) {
-            bail!(
-                "issue directory escapes repository: {} → {}",
-                dir.display(),
-                dir_canon.display()
-            );
-        }
-        let item = dir_canon.join("item.md");
-        let item_meta = std::fs::symlink_metadata(&item)
-            .with_context(|| format!("{slug} directory has no item.md: {}", item.display()))?;
-        if item_meta.file_type().is_symlink() || !item_meta.is_file() {
-            bail!("{slug} item.md is missing or symlinked: {}", item.display());
-        }
-        return Ok(Located {
-            item_path: item,
-            legacy_folder: legacy,
-        });
+    if !crate::slug::is_valid(slug) {
+        bail!("invalid slug shape: {slug:?}");
     }
-    bail!("issue {slug} not found under {}", issues_root.display())
+    match resolve_layout(repo_root, slug) {
+        LayoutState::Flat { item_path } => Ok(Located {
+            item_path,
+            legacy_folder: None,
+        }),
+        LayoutState::Legacy { folder, item_path } => Ok(Located {
+            item_path,
+            legacy_folder: Some(folder),
+        }),
+        LayoutState::Absent => bail!(
+            "issue {slug} not found under {}",
+            repo_root.join(ISSUES_DIR).display()
+        ),
+        LayoutState::Ambiguous { paths } => bail!(
+            "issue {slug} is ambiguous (present at: {})",
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        LayoutState::Invalid { reason, .. } => bail!("{reason}"),
+    }
 }
 
-/// Backwards-compatible shim that returns a `(folder, item_path)` tuple
-/// where `folder` is the kanban bucket derived from on-disk content (the
-/// caller may overwrite via `parser::parse_item_md` for status-aware
-/// folder labels). Kept so existing CLI code paths keep compiling.
+/// Backwards-compatible shim returning `(folder, item_path)` where
+/// `folder` is the kanban bucket derived from frontmatter status — never
+/// the legacy on-disk folder name. Kept so existing CLI code paths keep
+/// compiling.
 pub fn locate_issue(repo_root: &Path, slug: &str) -> Result<(String, PathBuf)> {
     let located = locate_issue_full(repo_root, slug)?;
-    let folder = match located.legacy_folder {
-        Some(f) => f.to_string(),
-        None => {
-            // Flat-layout read: peek at frontmatter status to derive the
-            // kanban folder. Cheap because parse_item_md only re-reads
-            // the file once.
-            let issue = parser::parse_item_md(&located.item_path, slug, "open");
-            folder_for_status(&issue.status).to_string()
-        }
-    };
+    // Always derive folder from content — never return the legacy
+    // on-disk folder name. A `status: fixed` issue at `issues/open/foo/`
+    // surfaces as folder = "closed".
+    let issue = parser::parse_item_md(&located.item_path, slug, "open");
+    let folder = folder_for_status(&issue.status).to_string();
     Ok((folder, located.item_path))
 }
 
@@ -349,42 +511,41 @@ pub fn paths_for(repo_root: &Path, slug: &str) -> (PathBuf, PathBuf, PathBuf) {
 /// the canonical flat `issues/<slug>/`. Caller MUST hold the repo
 /// `flock`. Returns the new flat path.
 ///
-/// Refuses to overwrite an existing flat path — the caller is expected
-/// to surface that as an ambiguous-slug error rather than silently
-/// merging directories.
+/// Defensive: rejects ambiguous state (flat+legacy or both-legacy) even
+/// though `mutate::locate_and_migrate` pre-checks. The function is `pub`
+/// so tests / future callers may bypass the pre-check; the helper must
+/// enforce its own invariants.
 pub fn migrate_to_flat_inplace(repo_root: &Path, slug: &str) -> Result<PathBuf> {
-    let (flat, legacy_open, legacy_closed) = paths_for(repo_root, slug);
-    let legacy_present = if real_dir(&legacy_open) {
-        Some(legacy_open)
-    } else if real_dir(&legacy_closed) {
-        Some(legacy_closed)
-    } else {
-        None
-    };
-    let Some(src) = legacy_present else {
-        // Already flat (or absent); nothing to do.
-        return Ok(flat);
-    };
-    if real_dir(&flat) {
-        bail!(
-            "ambiguous slug {slug}: both flat ({}) and legacy ({}) layouts exist",
-            flat.display(),
-            src.display()
-        );
-    }
-    if let Some(parent) = flat.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create {}", parent.display()))?;
-    }
-    std::fs::rename(&src, &flat)
-        .with_context(|| format!("cannot rename {} → {}", src.display(), flat.display()))?;
-    Ok(flat)
-}
-
-fn real_dir(p: &Path) -> bool {
-    match std::fs::symlink_metadata(p) {
-        Ok(m) => m.is_dir() && !m.file_type().is_symlink(),
-        Err(_) => false,
+    match resolve_layout(repo_root, slug) {
+        LayoutState::Flat { item_path } => {
+            // Already flat — return parent dir.
+            Ok(item_path.parent().unwrap_or(repo_root).to_path_buf())
+        }
+        LayoutState::Absent => Ok(repo_root.join(ISSUES_DIR).join(slug)),
+        LayoutState::Legacy { item_path, .. } => {
+            let src = item_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("legacy item.md has no parent"))?
+                .to_path_buf();
+            let flat = repo_root.join(ISSUES_DIR).join(slug);
+            if let Some(parent) = flat.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("cannot create {}", parent.display()))?;
+            }
+            std::fs::rename(&src, &flat).with_context(|| {
+                format!("cannot rename {} → {}", src.display(), flat.display())
+            })?;
+            Ok(flat)
+        }
+        LayoutState::Ambiguous { paths } => bail!(
+            "ambiguous slug {slug}: cannot migrate, present at {}",
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        LayoutState::Invalid { reason, .. } => bail!("cannot migrate {slug}: {reason}"),
     }
 }
 
@@ -443,18 +604,50 @@ mod tests {
         seed_legacy(&tmp, "open", "legacy-issue-here", "open");
         let (issues, warnings) = load_issues_with_warnings(tmp.path());
         assert_eq!(issues.len(), 1);
-        assert!(warnings.iter().any(|w| w.code.as_deref() == Some("legacy_layout")));
+        assert!(warnings
+            .iter()
+            .any(|w| matches!(w.code, Some(LoadWarningCode::LegacyLayout))));
     }
 
     #[test]
-    fn flat_takes_precedence_over_legacy_walk() {
+    fn ambiguous_flat_plus_legacy_emits_warning_no_duplicate() {
         let tmp = fresh_repo();
         seed_flat(&tmp, "shared-slug-here", "open");
         seed_legacy(&tmp, "open", "shared-slug-here", "open");
-        // walk_issue_dirs must skip the legacy copy when a flat copy exists
-        // so load_issues doesn't return a duplicate.
+        let (issues, warnings) = load_issues_with_warnings(tmp.path());
+        // No issue is loaded — ambiguity is unresolvable without operator action.
+        assert!(issues.iter().all(|i| i.slug != "shared-slug-here"));
+        assert!(warnings
+            .iter()
+            .any(|w| w.slug == "shared-slug-here"
+                && matches!(w.code, Some(LoadWarningCode::AmbiguousSlug))));
+    }
+
+    #[test]
+    fn ambiguous_dual_legacy_emits_warning_no_duplicate() {
+        let tmp = fresh_repo();
+        seed_legacy(&tmp, "open", "dual-legacy-here", "open");
+        seed_legacy(&tmp, "closed", "dual-legacy-here", "fixed");
+        let (issues, warnings) = load_issues_with_warnings(tmp.path());
+        let count = issues.iter().filter(|i| i.slug == "dual-legacy-here").count();
+        assert_eq!(
+            count, 0,
+            "ambiguous dual-legacy must not produce loaded issues"
+        );
+        assert!(warnings
+            .iter()
+            .any(|w| w.slug == "dual-legacy-here"
+                && matches!(w.code, Some(LoadWarningCode::AmbiguousSlug))));
+    }
+
+    #[test]
+    fn load_issues_does_not_duplicate_dual_legacy() {
+        let tmp = fresh_repo();
+        seed_legacy(&tmp, "open", "dual-legacy-here", "open");
+        seed_legacy(&tmp, "closed", "dual-legacy-here", "fixed");
         let issues = load_issues(tmp.path());
-        assert_eq!(issues.len(), 1);
+        // load_issues drops ambiguous slugs entirely (with an eprintln).
+        assert!(issues.iter().all(|i| i.slug != "dual-legacy-here"));
     }
 
     #[cfg(unix)]
@@ -505,9 +698,32 @@ mod tests {
 
     #[test]
     fn migrate_to_flat_inplace_is_noop_for_flat() {
+        // M14: assert idempotence — content + dir identity must be
+        // preserved across a no-op migrate call.
+        use std::os::unix::fs::MetadataExt;
         let tmp = fresh_repo();
         seed_flat(&tmp, "already-flat-here", "open");
-        let r = migrate_to_flat_inplace(tmp.path(), "already-flat-here");
-        assert!(r.is_ok());
+        let dir = tmp.path().join("issues/already-flat-here");
+        let before_inode = fs::metadata(&dir).unwrap().ino();
+        let before_content = fs::read_to_string(dir.join("item.md")).unwrap();
+        let r = migrate_to_flat_inplace(tmp.path(), "already-flat-here").unwrap();
+        let after_inode = fs::metadata(&r).unwrap().ino();
+        let after_content = fs::read_to_string(r.join("item.md")).unwrap();
+        assert_eq!(before_inode, after_inode, "no-op must not move dir");
+        assert_eq!(before_content, after_content, "no-op must not modify item.md");
+    }
+
+    #[test]
+    fn migrate_to_flat_inplace_rejects_dual_legacy() {
+        // M2 defensive: even when locate_and_migrate's pre-check is
+        // bypassed, the helper itself refuses to silently pick a side.
+        let tmp = fresh_repo();
+        seed_legacy(&tmp, "open", "dual-here", "open");
+        seed_legacy(&tmp, "closed", "dual-here", "fixed");
+        let err = migrate_to_flat_inplace(tmp.path(), "dual-here").unwrap_err();
+        assert!(err.to_string().contains("ambiguous"));
+        // Both legacy dirs must remain on disk for manual recovery.
+        assert!(tmp.path().join("issues/open/dual-here").is_dir());
+        assert!(tmp.path().join("issues/closed/dual-here").is_dir());
     }
 }

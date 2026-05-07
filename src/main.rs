@@ -59,7 +59,7 @@ Examples:
   issuectl search redirect                 Keyword search
   issuectl new --type bug --title \"...\"    Create a new issue (random slug)
   issuectl update <slug> --status testing  Change status
-  issuectl close <slug> --status fixed     Move to closed/ with closing status
+  issuectl close <slug> --status fixed     Set a closing status (fixed/done/...)
   issuectl doctor                          Health-check the repo
   issuectl doctor --fix                    Migrate legacy numbered issues
   issuectl skill install                   Install /issue skill in current repo
@@ -236,7 +236,7 @@ enum Command {
         #[arg(value_parser = parse_slug_arg)]
         slug: String,
 
-        /// New status (active or closing — closing also moves to closed/)
+        /// New status (active or closing — frontmatter only, no directory move)
         #[arg(short = 's', long, value_parser = PossibleValuesParser::new(all_statuses()))]
         status: Option<String>,
 
@@ -288,7 +288,7 @@ enum Command {
         expected_version: Option<String>,
     },
 
-    /// Set a closing status and move the issue to closed/
+    /// Set a closing status (frontmatter only; flat layout has no directory move)
     Close {
         /// Issue slug
         #[arg(value_parser = parse_slug_arg)]
@@ -816,7 +816,20 @@ pub(crate) fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
     // `flock`. Without this acquire, concurrent `issuectl new` from
     // the terminal would race against server-side mutations and
     // bypass the protocol's serialization guarantee.
-    let _lock = mutate::WriteLock::acquire(root)?;
+    let lock = mutate::WriteLock::acquire(root)?;
+    do_new_locked(&lock, root, args)
+}
+
+/// Body of `do_new` that assumes the caller holds the repo `WriteLock`.
+/// Server-side `mutate::new_issue` uses this so it can hold the same
+/// lock through the post-write parse + publish — without splitting the
+/// sequence the synthetic `IssueUpserted` lands AFTER the lock is
+/// released, inverting seq order against concurrent writers (C3).
+pub(crate) fn do_new_locked(
+    _lock: &mutate::WriteLock,
+    root: &Path,
+    args: NewArgs,
+) -> Result<NewOutcome> {
     if args.issue_type == "epic" {
         if args.assignee.is_some() || args.reporter.is_some() {
             bail!("epics use --owner, not --reporter/--assignee");
@@ -975,13 +988,9 @@ fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
         return Ok(());
     }
     if out.moved_to_closed {
-        println!("Updated {slug}: moved to {}", out.final_dir.display());
-        println!("  status set to closing — moved to closed/");
+        println!("Updated {slug}: closing status set ({})", out.final_dir.display());
     } else if out.moved_to_open {
-        println!(
-            "Updated {slug}: re-opened, moved to {}",
-            out.final_dir.display()
-        );
+        println!("Updated {slug}: re-opened ({})", out.final_dir.display());
     } else {
         println!("Updated {slug}");
     }
@@ -1057,7 +1066,7 @@ fn cmd_close(
         return Ok(());
     }
     if out.moved_to_closed {
-        println!("Closed {slug}: moved to {}", out.final_dir.display());
+        println!("Closed {slug} ({})", out.final_dir.display());
     } else {
         println!("Updated {slug}");
     }
@@ -1071,41 +1080,25 @@ pub(crate) fn do_close(
     commits: Vec<String>,
     expected_version: Option<String>,
 ) -> Result<UpdateOutcome> {
-    let (_folder, item_path) = locate_issue(root, slug)?;
-    let item = write::read_item(&item_path)?;
-    let current_status = item
-        .frontmatter
-        .get(serde_yaml::Value::String("status".into()))
-        .and_then(|v| v.as_str())
-        .unwrap_or("open")
-        .to_string();
-    if is_closing_status(&current_status) {
-        bail!("issue {slug} already has a closing status ({current_status}); use `update` to change status");
-    }
-    let issue_type = item
-        .frontmatter
-        .get(serde_yaml::Value::String("type".into()))
-        .and_then(|v| v.as_str())
-        .unwrap_or("bug")
-        .to_string();
-    let resolved_status = status.unwrap_or_else(|| {
-        if issue_type == "bug" {
-            "fixed".to_string()
-        } else {
-            "done".to_string()
-        }
-    });
-
-    do_update(
-        root,
-        UpdateArgs {
-            slug: slug.to_string(),
-            status: Some(resolved_status),
-            add_commits: commits,
-            expected_version,
-            ..Default::default()
-        },
-    )
+    // M4: read+decide+mutate now happen atomically inside
+    // `mutate::close_issue` under one flock. The previous read-then-call
+    // pattern was racy — a concurrent writer could flip the status or
+    // type between the unlocked read here and the locked update later.
+    let commit_specs = commits
+        .iter()
+        .map(|spec| {
+            let (hash, summary) = parse_commit_spec(spec)?;
+            Ok::<_, anyhow::Error>(mutate::CommitSpec { hash, summary })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let outcome = mutate::close_issue(root, slug, status, commit_specs, expected_version, None)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(UpdateOutcome {
+        final_dir: outcome.issue_dir,
+        moved_to_closed: outcome.moved_to_closed,
+        moved_to_open: outcome.moved_to_open,
+        version: outcome.version,
+    })
 }
 
 /// Locate an issue by slug. Returns (folder, item.md path) where
@@ -1271,17 +1264,29 @@ pub(crate) struct MigrateConflict {
 }
 
 /// One-shot move of every legacy `issues/{open,closed}/<slug>/` to
-/// `issues/<slug>/`. Idempotent. Held under the repo write lock so a
-/// concurrent CLI/server mutation cannot race the migration.
+/// `issues/<slug>/`. Held under the repo write lock so a concurrent
+/// CLI/server mutation cannot race the migration.
+///
+/// Two-pass plan-then-execute: discover everything → classify into
+/// `moves` and `conflicts` → if any conflict exists, return without
+/// touching disk. Only when the plan is clean does the rename pass
+/// run. This honours the docstring's all-or-nothing intent and matches
+/// what reviewers and the JSON exit-code contract expect (C6, M7).
+///
+/// Skips legacy directory entries whose names don't pass `slug::is_valid`
+/// — `issues/open/scratchwork` (or any non-kebab name) is reported as a
+/// `MigrateConflict` rather than silently migrated to `issues/scratchwork`
+/// (M6).
 pub(crate) fn do_migrate_layout(root: &Path) -> Result<MigrateLayoutReport> {
     let _lock = mutate::WriteLock::acquire(root)?;
     let issues = root.join("issues");
-    let mut migrated = Vec::new();
-    let mut conflicts = Vec::new();
 
-    // Collect pending moves first so a conflict on one slug doesn't
-    // leave the repo half-migrated.
-    let mut planned: Vec<(String, PathBuf, &'static str)> = Vec::new();
+    // Pass 1: discover. Group every legacy dir by slug so we see both
+    // legacy folders for the same slug as a single entry rather than
+    // emitting two duplicate conflicts (M7).
+    use std::collections::BTreeMap;
+    let mut by_slug: BTreeMap<String, Vec<(PathBuf, &'static str)>> = BTreeMap::new();
+    let mut conflicts = Vec::new();
     for legacy in ["open", "closed"] {
         let legacy_dir = issues.join(legacy);
         let Ok(rd) = fs::read_dir(&legacy_dir) else {
@@ -1291,12 +1296,26 @@ pub(crate) fn do_migrate_layout(root: &Path) -> Result<MigrateLayoutReport> {
             if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
-            let slug = entry.file_name().to_string_lossy().to_string();
-            planned.push((slug, entry.path(), legacy));
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !slug::is_valid(&name) {
+                // M6: don't silently migrate non-slug-shaped names.
+                conflicts.push(MigrateConflict {
+                    slug: name.clone(),
+                    detail: format!(
+                        "{} is not a valid slug shape — rename or move out of issues/{} before migrating",
+                        entry.path().display(),
+                        legacy
+                    ),
+                });
+                continue;
+            }
+            by_slug.entry(name).or_default().push((entry.path(), legacy));
         }
     }
 
-    for (slug, src, legacy) in planned {
+    // Pass 2: classify. flat-exists OR multiple-legacy → conflict.
+    let mut moves: Vec<(String, PathBuf, PathBuf)> = Vec::new();
+    for (slug, locations) in by_slug {
         let dest = issues.join(&slug);
         if dest.exists() {
             conflicts.push(MigrateConflict {
@@ -1304,27 +1323,44 @@ pub(crate) fn do_migrate_layout(root: &Path) -> Result<MigrateLayoutReport> {
                 detail: format!(
                     "both flat ({}) and legacy ({}) exist",
                     dest.display(),
-                    src.display()
+                    locations
+                        .iter()
+                        .map(|(p, _)| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             });
             continue;
         }
-        // Belt-and-braces: refuse to migrate if the slug appears under
-        // BOTH legacy folders (open and closed), regardless of flat
-        // existence — that's the same kind of ambiguity.
-        let other_legacy = if legacy == "open" { "closed" } else { "open" };
-        let other = issues.join(other_legacy).join(&slug);
-        if other.exists() {
+        if locations.len() > 1 {
             conflicts.push(MigrateConflict {
                 slug: slug.clone(),
                 detail: format!(
-                    "slug exists in both legacy folders ({} and {})",
-                    src.display(),
-                    other.display()
+                    "slug exists in both legacy folders ({})",
+                    locations
+                        .iter()
+                        .map(|(p, _)| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" and ")
                 ),
             });
             continue;
         }
+        let (src, _) = locations.into_iter().next().unwrap();
+        moves.push((slug, src, dest));
+    }
+
+    // C6: all-or-nothing. If any conflict exists, do not rename anything.
+    if !conflicts.is_empty() {
+        return Ok(MigrateLayoutReport {
+            migrated: Vec::new(),
+            conflicts,
+        });
+    }
+
+    // Pass 3: execute renames.
+    let mut migrated = Vec::new();
+    for (slug, src, dest) in moves {
         fs::rename(&src, &dest).with_context(|| {
             format!("cannot rename {} → {}", src.display(), dest.display())
         })?;
@@ -1346,7 +1382,7 @@ pub(crate) fn do_migrate_layout(root: &Path) -> Result<MigrateLayoutReport> {
 
     Ok(MigrateLayoutReport {
         migrated,
-        conflicts,
+        conflicts: Vec::new(),
     })
 }
 
