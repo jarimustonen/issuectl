@@ -78,6 +78,12 @@
     // `local_versions` (which is the narrower "what *this* tab last
     // wrote" cache used to dedupe self-echo).
     versions: {},
+    // slug -> opId of the latest optimistic drag-drop mutation. Lives
+    // in a side map so the `_optimisticDrop` tag never pollutes the
+    // serialised issue summary (no leak through filter/render/JSON
+    // paths). revertDrop only undoes the mutation if the tag still
+    // matches its opId.
+    optimistic_tags: {},
     // Active drag bookkeeping. `cancelled` is set if SSE delivers a
     // change for the dragged slug mid-drag — the drop then becomes a
     // no-op rather than racing against an already-superseded version.
@@ -163,21 +169,17 @@
         state.warnings = data.warnings || [];
         state.snapshot_seq = data.snapshot_seq || 0;
         if (data.instance_id) state.instance_id = data.instance_id;
-        // Merge — don't clobber. The snapshot is taken at `snapshot_seq`
-        // before the fetch resolves; any SSE event with a newer version
-        // for a slug may have updated `state.versions[slug]` between
-        // snapshot capture and our arrival here. Replacing wholesale
-        // would silently downgrade those to the snapshot's older
-        // version, producing 409 storms on the next drag.
-        // Slugs that disappear from the snapshot are pruned (Resync /
-        // remote delete propagation) so the cache doesn't grow forever.
+        // Snapshot-authoritative: every slug in the response gets its
+        // server-supplied version, replacing whatever was cached.
+        // Content hashes have no ordering, so a "newer wins" merge by
+        // truthiness was wrong (kept stale entries forever after slug
+        // reuse, after Resync, or after an external edit reflected in
+        // the snapshot but not yet in cache). The cost of dropping a
+        // freshly-arrived SSE version is one wasted 409 round-trip;
+        // the cost of pinning a stale version is silent corruption.
         var nextVersions = {};
         state.issues.forEach(function (i) {
-          if (!i.version) return;
-          var current = state.versions[i.slug];
-          // Keep the cached version if we already advanced past the
-          // snapshot's value; otherwise adopt the snapshot's.
-          nextVersions[i.slug] = current || i.version;
+          if (i.version) nextVersions[i.slug] = i.version;
         });
         state.versions = nextVersions;
         renderWarnings();
@@ -397,6 +399,16 @@
       state.dragging = null;
       return;
     }
+    // Block overlapping writes on the same slug. Without this, a
+    // failed first PATCH followed by a failed second PATCH leaves the
+    // optimistic state of the second write applied permanently — the
+    // first revert refuses (opId mismatch) and the second reverts to
+    // the already-overwritten "previous" status, not the original.
+    if ((state.pending_writes[drag.slug] || 0) > 0) {
+      state.dragging = null;
+      showToast('Move already in progress for this issue', 'error');
+      return;
+    }
     var expected = state.versions[drag.slug];
     if (!expected) {
       // No version cached → optimistic concurrency would degenerate to
@@ -414,11 +426,12 @@
     // needs the cancellation observation window.
     drag.patchStarted = true;
     // Optimistic move so the user sees the column change immediately.
-    // _optimisticDrop tags this mutation; revertDrop only undoes
-    // mutations whose tag still matches.
+    // The opId is tracked in a side map so revertDrop can refuse to
+    // undo a mutation that has been superseded by a concurrent SSE
+    // load() (which replaces the issue object wholesale).
+    state.optimistic_tags[drag.slug] = opId;
     state.issues[idx] = Object.assign({}, state.issues[idx], {
       status: newStatus,
-      _optimisticDrop: opId,
     });
     render();
 
@@ -486,27 +499,22 @@
   }
 
   function revertDrop(slug, prevStatus, opId) {
+    // If a concurrent SSE update already produced authoritative state
+    // (different opId, or the tag was cleared by a 409/200 response),
+    // the current display is newer than our optimistic guess —
+    // clobbering it with stale prevStatus would be wrong.
+    if (state.optimistic_tags[slug] !== opId) return;
+    delete state.optimistic_tags[slug];
     var idx = findIssueIndex(slug);
     if (idx < 0) return;
-    var cur = state.issues[idx];
-    // If a concurrent SSE update already replaced the optimistic
-    // mutation (different opId or absent tag), the current state is
-    // newer and authoritative — don't clobber it with stale prevStatus.
-    if (cur._optimisticDrop !== opId) return;
-    var next = Object.assign({}, cur, { status: prevStatus });
-    delete next._optimisticDrop;
-    state.issues[idx] = next;
+    state.issues[idx] = Object.assign({}, state.issues[idx], { status: prevStatus });
     render();
   }
 
   function clearOptimisticTag(slug, opId) {
-    var idx = findIssueIndex(slug);
-    if (idx < 0) return;
-    var cur = state.issues[idx];
-    if (cur._optimisticDrop !== opId) return;
-    var next = Object.assign({}, cur);
-    delete next._optimisticDrop;
-    state.issues[idx] = next;
+    if (state.optimistic_tags[slug] === opId) {
+      delete state.optimistic_tags[slug];
+    }
   }
 
   function openClosingStatusPicker(drag) {
@@ -525,14 +533,18 @@
     var idx = findIssueIndex(drag.slug);
     var title = idx >= 0 ? (state.issues[idx].title || drag.slug) : drag.slug;
     dialog.innerHTML =
-      '<form method="dialog" class="status-picker-form">' +
-        '<h2>Close issue</h2>' +
+      '<form method="dialog" class="status-picker-form" aria-labelledby="status-picker-title">' +
+        '<h2 id="status-picker-title">Close issue</h2>' +
         '<p>Pick a closing status for <code>' + escapeHtml(drag.slug) + '</code> — ' +
         escapeHtml(title) + '.</p>' +
         '<div class="status-picker-options">' +
-          CLOSING_STATUSES.map(function (s) {
-            return '<button type="button" class="status-option" data-status="' +
-              escapeHtml(s) + '">' + escapeHtml(s) + '</button>';
+          CLOSING_STATUSES.map(function (s, i) {
+            // autofocus on the first option so keyboard users land
+            // ready to pick. native showModal()'s default focus is
+            // browser-dependent.
+            return '<button type="button" class="status-option"' +
+              (i === 0 ? ' autofocus' : '') +
+              ' data-status="' + escapeHtml(s) + '">' + escapeHtml(s) + '</button>';
           }).join('') +
         '</div>' +
         '<div class="status-picker-actions">' +
@@ -540,26 +552,49 @@
         '</div>' +
       '</form>';
 
+    // AbortController centralises listener cleanup so a closed modal
+    // can't leak a stale `cancel` handler that nulls a *future* drag's
+    // state.dragging when the user reopens the picker.
+    var ctl = new AbortController();
+    var sig = ctl.signal;
+    var settled = false;
+
+    function closePicker() {
+      ctl.abort();
+      if (dialog.open && typeof dialog.close === 'function') dialog.close();
+      else dialog.removeAttribute('open');
+    }
     function pick(status) {
+      if (settled) return;
+      settled = true;
       closePicker();
       handleDrop(drag, status);
     }
-    function cancel() {
+    function cancel(ev) {
+      if (settled) return;
+      settled = true;
+      // The native `cancel` event on <dialog> would close the dialog
+      // without our null'ing logic; preventDefault keeps closePicker
+      // in charge of the close call.
+      if (ev && ev.type === 'cancel') ev.preventDefault();
       closePicker();
-      state.dragging = null;
-    }
-    function closePicker() {
-      if (typeof dialog.close === 'function') dialog.close();
-      else dialog.removeAttribute('open');
+      // Guard: only null state.dragging if it still points to *our*
+      // drag. A second drag that started while the modal was open
+      // would have replaced state.dragging; don't kill it.
+      if (state.dragging === drag) state.dragging = null;
     }
 
     dialog.querySelectorAll('.status-option').forEach(function (b) {
-      b.addEventListener('click', function () { pick(b.getAttribute('data-status')); });
+      b.addEventListener('click', function () {
+        pick(b.getAttribute('data-status'));
+      }, { signal: sig });
     });
-    dialog.querySelector('#status-picker-cancel').addEventListener('click', cancel);
-    // Backdrop click + Esc both cancel without writing.
-    dialog.addEventListener('click', function (ev) { if (ev.target === dialog) cancel(); }, { once: true });
-    dialog.addEventListener('cancel', cancel, { once: true });
+    dialog.querySelector('#status-picker-cancel').addEventListener('click', cancel, { signal: sig });
+    // Backdrop click and Esc both cancel without writing.
+    dialog.addEventListener('click', function (ev) {
+      if (ev.target === dialog) cancel(ev);
+    }, { signal: sig });
+    dialog.addEventListener('cancel', cancel, { signal: sig });
 
     if (typeof dialog.showModal === 'function') dialog.showModal();
     else dialog.setAttribute('open', '');
@@ -1421,9 +1456,12 @@
         // Drag cancellation: only cancel when the *version* actually
         // changed. A no-op write (or an event that re-publishes the
         // same version, e.g. a watcher resync) shouldn't kill an
-        // in-progress drag. The cached version is the user's intended
-        // base; we keep dragging so the drop's PATCH carries that
-        // base and lets the server arbitrate via 409 if needed.
+        // in-progress drag. We compare the SSE event's version to the
+        // visibly-applied cache; the cache is updated by load() below
+        // (snapshot-authoritative), not pre-applied here. Pre-applying
+        // would let the user issue a drag PATCH with a version they
+        // haven't visibly observed, silently overwriting an external
+        // edit instead of 409-ing.
         if (
           state.dragging &&
           state.dragging.slug === evt.slug &&
@@ -1432,7 +1470,6 @@
         ) {
           state.dragging.cancelled = true;
         }
-        if (evt.version) state.versions[evt.slug] = evt.version;
         // Other tabs' edits still propagate via a refetch.
         load();
         // Clear stale invalid marker if the issue is now valid.

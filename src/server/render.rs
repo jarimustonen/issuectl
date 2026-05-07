@@ -103,7 +103,7 @@ fn render_board_shell() -> String {
 
 <main id="board" class="board" aria-busy="true"></main>
 
-<div id="toast-host" class="toast-host" aria-live="polite" aria-atomic="false"></div>
+<div id="toast-host" class="toast-host"></div>
 
 <dialog id="detail" class="detail-dialog" aria-label="Issue detail">
   <article id="detail-body"></article>

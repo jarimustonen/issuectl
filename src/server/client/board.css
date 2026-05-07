@@ -519,6 +519,12 @@ button.card { font: inherit; text-align: left; width: 100%; }
   box-shadow: var(--gp-shadow);
   max-width: 28rem;
   width: 90vw;
+  /* Safari/WebKit doesn't reliably centre <dialog> with custom sizing;
+     match the workaround used elsewhere in this file. */
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  height: fit-content;
 }
 .status-picker-dialog::backdrop {
   background: rgba(0, 0, 0, 0.4);

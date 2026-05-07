@@ -1167,6 +1167,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn patch_status_open_clears_closed_date_and_returns_summary() {
+        // Drag-and-drop reopen path through the HTTP layer: a card in
+        // the closed column dragged to an active column issues a
+        // status-only PATCH. The response must reflect both the
+        // status change and the cleared `closed:` date so the board
+        // can refresh in place via applyIssueToBoard without a
+        // follow-up GET. Mirrors mutate.rs' reopening test, but at
+        // the API level — that's where the drag-and-drop client
+        // actually hits.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("issues/reopen-via-patch");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-01\nstatus: fixed\npriority: normal\nclosed: 2026-05-05\n---\n\n# T\n",
+        )
+        .unwrap();
+        let v = version_on_disk(tmp.path(), "reopen-via-patch");
+        let r = make_router(tmp.path());
+        let payload = serde_json::json!({
+            "expected_version": v,
+            "status": "open",
+        });
+        let resp = r
+            .oneshot(
+                Request::patch("/api/issues/reopen-via-patch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert!(body["moved_to_open"].as_bool().unwrap_or(false));
+        assert_eq!(body["issue"]["status"], "open");
+        assert!(
+            body["issue"]["closed"].is_null(),
+            "response must signal cleared closed date, got: {}",
+            body["issue"]["closed"]
+        );
+        let on_disk = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("status: open"));
+        assert!(
+            !on_disk.contains("closed:"),
+            "frontmatter must drop closed: on reopen, got:\n{on_disk}"
+        );
+    }
+
+    #[tokio::test]
     async fn patch_with_unknown_field_returns_400() {
         let tmp = tempfile::tempdir().unwrap();
         seed_open_issue(tmp.path(), "patch-typo-fld");
