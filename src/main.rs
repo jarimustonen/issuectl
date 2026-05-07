@@ -315,13 +315,8 @@ enum Command {
         action: BodyAction,
     },
 
-    /// One-shot migrations between repository layouts
-    Migrate {
-        #[command(subcommand)]
-        action: MigrateAction,
-    },
-
-    /// Health-check the repo and (with --fix) migrate legacy numbered issues to slugs
+    /// Health-check the repo and (with --fix) migrate legacy layouts and
+    /// numbered issues to the canonical flat slug layout
     Doctor {
         /// Apply migrations and fixes (otherwise read-only report)
         #[arg(long)]
@@ -426,15 +421,6 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
-}
-
-#[derive(Subcommand)]
-enum MigrateAction {
-    /// Move issues from the legacy `issues/{open,closed}/<slug>/` layout
-    /// to the canonical flat `issues/<slug>/` layout. Idempotent — a
-    /// repo that's already flat is a no-op. Refuses to run if both
-    /// flat and legacy paths exist for the same slug.
-    Layout,
 }
 
 #[derive(Subcommand)]
@@ -588,9 +574,6 @@ fn main() -> Result<()> {
                 from_file,
                 expected_version,
             } => cmd_body_set(json_output, &slug, stdin, from_file, expected_version),
-        },
-        Command::Migrate { action } => match action {
-            MigrateAction::Layout => cmd_migrate_layout(json_output),
         },
         Command::Doctor { fix } => doctor::run(&find_root(), fix, json_output),
         Command::Skill { action } => match action {
@@ -998,7 +981,7 @@ pub(crate) fn do_new_locked(
             let (_flat, legacy_open, legacy_closed) = repo::paths_for(root, &normalized);
             if legacy_open.exists() || legacy_closed.exists() {
                 bail!(
-                    "slug {normalized} already used at legacy path; run `issuectl migrate layout` first"
+                    "slug {normalized} already used at legacy path; run `issuectl doctor --fix` first"
                 );
             }
             let dir = issues_parent.join(&normalized);
@@ -1316,67 +1299,6 @@ fn cmd_body_set(
     Ok(())
 }
 
-fn cmd_migrate_layout(json: bool) -> Result<()> {
-    let root = find_root();
-    let report = do_migrate_layout(&root)?;
-    if json {
-        let migrations: Vec<serde_json::Value> = report
-            .migrated
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "slug": m.slug,
-                    "from": m.from.to_string_lossy(),
-                    "to": m.to.to_string_lossy(),
-                })
-            })
-            .collect();
-        let conflicts: Vec<serde_json::Value> = report
-            .conflicts
-            .iter()
-            .map(|c| serde_json::json!({"slug": c.slug, "detail": c.detail}))
-            .collect();
-        let out = serde_json::json!({
-            "migrated": migrations,
-            "conflicts": conflicts,
-        });
-        println!("{}", serde_json::to_string_pretty(&out)?);
-        if !report.conflicts.is_empty() {
-            std::process::exit(1);
-        }
-        return Ok(());
-    }
-    if report.migrated.is_empty() && report.conflicts.is_empty() {
-        println!("Repository already flat — nothing to migrate.");
-        return Ok(());
-    }
-    if !report.conflicts.is_empty() {
-        eprintln!("Conflicts detected — refusing to migrate ambiguous slugs:");
-        for c in &report.conflicts {
-            eprintln!("  {}: {}", c.slug, c.detail);
-        }
-        eprintln!(
-            "\nResolve manually (decide which copy to keep, remove the other), \
-             then re-run."
-        );
-        std::process::exit(1);
-    }
-    println!(
-        "Migrated {} issue(s) to flat layout:",
-        report.migrated.len()
-    );
-    for m in &report.migrated {
-        println!("  {}  ({} → {})", m.slug, m.from.display(), m.to.display());
-    }
-    Ok(())
-}
-
-#[derive(Debug)]
-pub(crate) struct MigrateLayoutReport {
-    pub migrated: Vec<MigrateMove>,
-    pub conflicts: Vec<MigrateConflict>,
-}
-
 #[derive(Debug)]
 pub(crate) struct MigrateMove {
     pub slug: String,
@@ -1404,13 +1326,18 @@ pub(crate) struct MigrateConflict {
 /// — `issues/open/scratchwork` (or any non-kebab name) is reported as a
 /// `MigrateConflict` rather than silently migrated to `issues/scratchwork`
 /// (M6).
-pub(crate) fn do_migrate_layout(root: &Path) -> Result<MigrateLayoutReport> {
-    let _lock = mutate::WriteLock::acquire(root)?;
+#[derive(Debug, Default)]
+pub(crate) struct MigrateLayoutPlan {
+    pub moves: Vec<(String, PathBuf, PathBuf)>,
+    pub conflicts: Vec<MigrateConflict>,
+}
+
+/// Read-only plan: discover what would move and what conflicts. No renames.
+/// Safe to call without the write lock — callers wanting consistency
+/// should re-run after acquiring the lock.
+pub(crate) fn plan_migrate_layout(root: &Path) -> Result<MigrateLayoutPlan> {
     let issues = root.join("issues");
 
-    // Pass 1: discover. Group every legacy dir by slug so we see both
-    // legacy folders for the same slug as a single entry rather than
-    // emitting two duplicate conflicts (M7).
     use std::collections::BTreeMap;
     let mut by_slug: BTreeMap<String, Vec<(PathBuf, &'static str)>> = BTreeMap::new();
     let mut conflicts = Vec::new();
@@ -1480,15 +1407,25 @@ pub(crate) fn do_migrate_layout(root: &Path) -> Result<MigrateLayoutReport> {
         moves.push((slug, src, dest));
     }
 
-    // C6: all-or-nothing. If any conflict exists, do not rename anything.
+    // C6: all-or-nothing. If any conflict exists, the plan carries no
+    // moves so callers don't accidentally execute a partial migration.
     if !conflicts.is_empty() {
-        return Ok(MigrateLayoutReport {
-            migrated: Vec::new(),
+        return Ok(MigrateLayoutPlan {
+            moves: Vec::new(),
             conflicts,
         });
     }
 
-    // Pass 3: execute renames.
+    Ok(MigrateLayoutPlan { moves, conflicts })
+}
+
+/// Execute a previously-planned migration. Caller must hold the repo
+/// write lock.
+pub(crate) fn execute_migrate_layout_plan(
+    root: &Path,
+    moves: Vec<(String, PathBuf, PathBuf)>,
+) -> Result<Vec<MigrateMove>> {
+    let issues = root.join("issues");
     let mut migrated = Vec::new();
     for (slug, src, dest) in moves {
         fs::rename(&src, &dest)
@@ -1509,10 +1446,7 @@ pub(crate) fn do_migrate_layout(root: &Path) -> Result<MigrateLayoutReport> {
         }
     }
 
-    Ok(MigrateLayoutReport {
-        migrated,
-        conflicts: Vec::new(),
-    })
+    Ok(migrated)
 }
 
 fn cmd_skill_install(agent: &str, force: bool) -> Result<()> {

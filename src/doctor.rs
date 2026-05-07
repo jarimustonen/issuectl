@@ -13,6 +13,7 @@ use regex::{Captures, Regex};
 use crate::parser;
 use crate::slug;
 use crate::write;
+use crate::{execute_migrate_layout_plan, plan_migrate_layout, MigrateConflict, MigrateMove};
 
 /// Decide whether an issue directory is in the legacy numbered layout and,
 /// if so, return its numeric id.
@@ -65,6 +66,11 @@ struct LegacyMigration {
 #[derive(Debug, Default)]
 struct DoctorReport {
     legacy_dirs: Vec<LegacyMigration>,
+    /// Slug-shaped issues still living under `issues/{open,closed}/<slug>/`
+    /// (post-flat-layout legacy). Planned moves to `issues/<slug>/`.
+    flat_layout_moves: Vec<(String, PathBuf, PathBuf)>,
+    flat_layout_migrated: Vec<MigrateMove>,
+    flat_layout_conflicts: Vec<MigrateConflict>,
     invalid_slugs: Vec<String>,
     duplicate_slugs: Vec<String>,
     missing_item_md: Vec<String>,
@@ -207,6 +213,10 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
 
     detect_orphan_epic_refs(repo_root, &mut report)?;
 
+    let plan = plan_migrate_layout(repo_root)?;
+    report.flat_layout_moves = plan.moves;
+    report.flat_layout_conflicts = plan.conflicts;
+
     Ok(report)
 }
 
@@ -274,6 +284,33 @@ fn detect_orphan_epic_refs(repo_root: &Path, report: &mut DoctorReport) -> Resul
 }
 
 fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
+    // Flat-layout migration runs first: any issue still under
+    // `issues/{open,closed}/<slug>/` moves up to `issues/<slug>/`. The
+    // pre-acquired write lock in `run` covers this — `execute_migrate_layout_plan`
+    // is the lock-free body and must not re-acquire.
+    if !report.flat_layout_conflicts.is_empty() {
+        bail!(
+            "doctor: flat-layout migration has conflicts; resolve before --fix:\n  {}",
+            report
+                .flat_layout_conflicts
+                .iter()
+                .map(|c| format!("{}: {}", c.slug, c.detail))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
+    }
+    if !report.flat_layout_moves.is_empty() {
+        let moves = std::mem::take(&mut report.flat_layout_moves);
+        report.flat_layout_migrated = execute_migrate_layout_plan(repo_root, moves)?;
+        // Paths in `legacy_dirs` (collected by the initial scan) now point
+        // at the pre-migration location. Re-scan so the NN-rename pass
+        // operates on fresh `old_path`s and picks up any frontmatter-only
+        // legacy issues that just moved into the flat layout.
+        let fresh = scan(repo_root)?;
+        report.legacy_dirs = fresh.legacy_dirs;
+        report.duplicate_slugs = fresh.duplicate_slugs;
+    }
+
     if report.legacy_dirs.is_empty() {
         report.fix_applied = true;
         return Ok(());
@@ -579,6 +616,9 @@ fn rewrite_text(
 
 fn render_text(report: &DoctorReport, fix: bool) {
     if report.legacy_dirs.is_empty()
+        && report.flat_layout_moves.is_empty()
+        && report.flat_layout_migrated.is_empty()
+        && report.flat_layout_conflicts.is_empty()
         && report.invalid_slugs.is_empty()
         && report.duplicate_slugs.is_empty()
         && report.missing_item_md.is_empty()
@@ -587,6 +627,27 @@ fn render_text(report: &DoctorReport, fix: bool) {
     {
         println!("Repository OK — no migrations or fixes needed.");
         return;
+    }
+
+    if !report.flat_layout_migrated.is_empty() {
+        println!("Migrated to flat layout:");
+        for m in &report.flat_layout_migrated {
+            println!("  {}  ({} → {})", m.slug, m.from.display(), m.to.display());
+        }
+        println!();
+    } else if !report.flat_layout_moves.is_empty() {
+        println!("Issues still in legacy `issues/{{open,closed}}/<slug>/` layout:");
+        for (slug, src, dest) in &report.flat_layout_moves {
+            println!("  {}  ({} → {})", slug, src.display(), dest.display());
+        }
+        println!();
+    }
+    if !report.flat_layout_conflicts.is_empty() {
+        println!("Flat-layout migration conflicts:");
+        for c in &report.flat_layout_conflicts {
+            println!("  {}: {}", c.slug, c.detail);
+        }
+        println!();
     }
 
     if !report.legacy_dirs.is_empty() {
@@ -681,9 +742,40 @@ fn render_json(report: &DoctorReport, fix: bool) -> serde_json::Value {
         .map(|(loc, msg)| serde_json::json!({"location": loc, "message": msg}))
         .collect();
 
+    let flat_layout_planned: Vec<serde_json::Value> = report
+        .flat_layout_moves
+        .iter()
+        .map(|(slug, src, dest)| {
+            serde_json::json!({
+                "slug": slug,
+                "from": src.to_string_lossy(),
+                "to": dest.to_string_lossy(),
+            })
+        })
+        .collect();
+    let flat_layout_migrated: Vec<serde_json::Value> = report
+        .flat_layout_migrated
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "slug": m.slug,
+                "from": m.from.to_string_lossy(),
+                "to": m.to.to_string_lossy(),
+            })
+        })
+        .collect();
+    let flat_layout_conflicts: Vec<serde_json::Value> = report
+        .flat_layout_conflicts
+        .iter()
+        .map(|c| serde_json::json!({"slug": c.slug, "detail": c.detail}))
+        .collect();
+
     serde_json::json!({
         "fix_applied": fix && report.fix_applied,
         "migrations": migrations,
+        "flat_layout_planned": flat_layout_planned,
+        "flat_layout_migrated": flat_layout_migrated,
+        "flat_layout_conflicts": flat_layout_conflicts,
         "invalid_slugs": report.invalid_slugs,
         "duplicate_slugs": report.duplicate_slugs,
         "missing_item_md": report.missing_item_md,

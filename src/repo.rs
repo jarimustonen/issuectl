@@ -319,7 +319,7 @@ pub fn load_issues(repo_root: &Path) -> Vec<Issue> {
             }
             LayoutState::Legacy { item_path, folder } => {
                 eprintln!(
-                    "Warning: {slug} found at legacy path issues/{folder}/{slug}/ — run `issuectl migrate layout`"
+                    "Warning: {slug} found at legacy path issues/{folder}/{slug}/ — run `issuectl doctor --fix`"
                 );
                 let mut issue = parser::parse_item_md(&item_path, &slug, "open");
                 issue.folder = folder_for_status(&issue.status).to_string();
@@ -419,7 +419,7 @@ fn push_issue_with_parse(
             slug: slug.to_string(),
             folder: derived_folder.to_string(),
             message: format!(
-                "found at legacy path issues/{folder}/{slug}/ — run `issuectl migrate layout`"
+                "found at legacy path issues/{folder}/{slug}/ — run `issuectl doctor --fix`"
             ),
             code: Some(LoadWarningCode::LegacyLayout),
         });

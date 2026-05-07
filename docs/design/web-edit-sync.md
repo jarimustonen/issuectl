@@ -29,7 +29,7 @@ Decisions on disputed/discussion items are recorded in §12.
 > for reads (compat layer in `repo::locate_issue_full` +
 > `mutate::locate_and_migrate`); writes always migrate the slug to
 > the flat path under `flock`. The one-shot migration is `issuectl
-> migrate layout`.
+> doctor migrate-layout`.
 
 ## 1. Goals & non-goals
 
@@ -1056,7 +1056,7 @@ This is a future feature; M0–M3 stays loopback-only for writes.
 | **M1** | `mutate.rs` refactor with `Patch<T>` + `UpdateIssueRequest` + `flock` + per-slug mutex + canonical hash. CSRF token + `Host` validation. PATCH metadata routes. CLI: `--expected-version`, `version` field in `--json` output. Drag-to-move in UI. | Status drag, label/assignee edits — most-requested ergonomic gap. |
 | **M2** | `PUT /body` + textarea + `POST /api/preview` + `localStorage` draft + body conflict UX. `IssueInvalid` event surfacing. CLI: `issuectl body set`. | Full edit-in-place. |
 | **M3** | `--watch-poll-ms`, `--no-watch`, `Degraded` banner, three-way merge UI for body conflicts. | Robustness for real multi-client use. |
-| **Flat layout** | `issues/<slug>/item.md` (no `open`/`closed` split). Status is pure frontmatter PATCH; legacy paths read-compat with in-line migrate-on-write; one-shot `issuectl migrate layout`. | Eliminates §3.4's rename surface; collapses §5.2/§5.3/§6.2 into trivia. |
+| **Flat layout** | `issues/<slug>/item.md` (no `open`/`closed` split). Status is pure frontmatter PATCH; legacy paths read-compat with in-line migrate-on-write; one-shot `issuectl doctor --fix`. | Eliminates §3.4's rename surface; collapses §5.2/§5.3/§6.2 into trivia. |
 
 **Spin-offs** (own issues, off the M0–M3 path):
 

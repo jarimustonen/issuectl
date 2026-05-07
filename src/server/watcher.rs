@@ -431,7 +431,7 @@ const MAX_ITEM_MD_BYTES: u64 = 16 * 1024 * 1024;
 /// Post-flat-layout, legacy `issues/{open,closed}/<slug>/` paths are
 /// surfaced as `IssueInvalid` with `legacy_layout` — the card stays
 /// visible with a warning badge but is not treated as healthy until the
-/// user runs `issuectl migrate layout` (or any write triggers in-line
+/// user runs `issuectl doctor --fix` (or any write triggers in-line
 /// migration under the flock).
 fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
     if !slug::is_valid(slug) {
@@ -450,7 +450,7 @@ fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
                     slug: slug.to_string(),
                     folder: folder.to_string(),
                     message: format!(
-                        "found at legacy path issues/{folder}/{slug}/ — run `issuectl migrate layout`"
+                        "found at legacy path issues/{folder}/{slug}/ — run `issuectl doctor --fix`"
                     ),
                     code: Some(crate::repo::LoadWarningCode::LegacyLayout),
                 }],
