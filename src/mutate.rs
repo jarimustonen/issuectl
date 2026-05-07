@@ -530,6 +530,21 @@ fn update_issue_under_lock(
 
     write::set_string(&mut item.frontmatter, "updated", &write::today());
 
+    // Reopen flow: when transitioning closing → active, append a
+    // `## Reopen Notes — <date>` section so the rationale isn't
+    // implicit. One section per transition (multiple reopens stack).
+    if moved_to_open {
+        let leading = item.body.starts_with('\n');
+        let trimmed_body = item.body.trim_start_matches('\n');
+        let with_section =
+            crate::body_sections::append_reopen_notes(trimmed_body, &write::today());
+        item.body = if leading {
+            format!("\n{with_section}")
+        } else {
+            with_section
+        };
+    }
+
     // 5) atomic write. No directory rename — flat layout means
     //    `item_path` is the canonical location regardless of status.
     write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
@@ -687,6 +702,99 @@ pub fn update_body(
         body
     } else {
         format!("\n{body}")
+    };
+    write::set_string(&mut item.frontmatter, "updated", &write::today());
+
+    write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
+
+    let after = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
+    let mut new_issue = after.issue;
+    new_issue.folder = folder_for_status(&new_issue.status).to_string();
+    let new_version = canonical_hash(&new_issue);
+
+    if let Some(hub) = hub {
+        hub.publish(EventPayload::IssueUpserted {
+            slug: slug.to_string(),
+            version: new_version.clone(),
+            issue: Box::new(IssueSummary::from(new_issue.clone())),
+        });
+    }
+
+    Ok(UpdateOutcome {
+        issue: new_issue,
+        version: new_version,
+        issue_dir: item_path
+            .parent()
+            .expect("item.md has a parent")
+            .to_path_buf(),
+        moved_to_closed: false,
+        moved_to_open: false,
+    })
+}
+
+/// Append a timestamped block to the issue's `## Comments` section
+/// (creating it if missing). Same flock + optimistic-version contract
+/// as `update_issue`. Body-only mutation: `status`, `closed`, etc.
+/// are untouched, so this never causes a status transition or
+/// directory rename.
+pub fn note_issue(
+    root: &Path,
+    slug: &str,
+    author: &str,
+    message: &str,
+    expected_version: Option<String>,
+    hub: Option<&Arc<EventHub>>,
+) -> Result<UpdateOutcome, MutateError> {
+    if !crate::slug::is_valid(slug) {
+        return Err(MutateError::Validation(format!(
+            "invalid slug shape: {slug:?}"
+        )));
+    }
+    if author.trim().is_empty() {
+        return Err(MutateError::Validation("author cannot be empty".into()));
+    }
+    if message.trim().is_empty() {
+        return Err(MutateError::Validation("message cannot be empty".into()));
+    }
+
+    let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
+    let item_path = locate_and_migrate(root, slug)?;
+
+    let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
+    if !parsed.warnings.is_empty() {
+        return Err(MutateError::Corrupt {
+            warnings: parsed.warnings,
+        });
+    }
+    let mut prev_issue = parsed.issue;
+    prev_issue.folder = folder_for_status(&prev_issue.status).to_string();
+    let current_version = canonical_hash(&prev_issue);
+    if let Some(ref expected) = expected_version {
+        if expected != &current_version {
+            return Err(MutateError::VersionMismatch {
+                current: prev_issue,
+                version: current_version,
+            });
+        }
+    }
+
+    let mut item = write::read_item(&item_path).map_err(MutateError::Io)?;
+    let block = crate::body_sections::render_note_block(
+        &crate::body_sections::now_iso(),
+        author.trim(),
+        message,
+    );
+    let leading = item.body.starts_with('\n');
+    let trimmed_body = item.body.trim_start_matches('\n');
+    let new_body = crate::body_sections::append_block(
+        trimmed_body,
+        crate::body_sections::COMMENTS,
+        &block,
+    );
+    item.body = if leading {
+        format!("\n{new_body}")
+    } else {
+        new_body
     };
     write::set_string(&mut item.frontmatter, "updated", &write::today());
 
@@ -1317,6 +1425,89 @@ mod tests {
             "body-stale-here",
             Some("sha256:deadbeef".into()),
             "x".into(),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, MutateError::VersionMismatch { .. }));
+    }
+
+    #[test]
+    fn reopen_appends_reopen_notes_section() {
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/reopen-section");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-01\nstatus: fixed\n\
+             priority: normal\nclosed: 2026-05-05\n---\n\n# T\n\n## Description\n\nx\n",
+        )
+        .unwrap();
+        let req = UpdateIssueRequest {
+            status: Patch::Set("open".into()),
+            ..Default::default()
+        };
+        let _ = update_issue(tmp.path(), "reopen-section", req, None).unwrap();
+        let on_disk = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert!(
+            on_disk.contains("## Reopen Notes —"),
+            "expected Reopen Notes section, got:\n{on_disk}"
+        );
+    }
+
+    #[test]
+    fn note_appends_to_comments_section() {
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/notable-issue-x");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n# T\n\n## Description\n\nx\n",
+        )
+        .unwrap();
+        // First note creates the section.
+        let _ = note_issue(
+            tmp.path(),
+            "notable-issue-x",
+            "alice",
+            "first thought",
+            None,
+            None,
+        )
+        .unwrap();
+        let after1 = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert!(after1.contains("## Comments"));
+        assert!(after1.contains("first thought"));
+        // Second note appends without duplicating the section.
+        let _ = note_issue(
+            tmp.path(),
+            "notable-issue-x",
+            "bob",
+            "second thought",
+            None,
+            None,
+        )
+        .unwrap();
+        let after2 = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert_eq!(after2.matches("## Comments").count(), 1);
+        assert!(after2.contains("first thought"));
+        assert!(after2.contains("second thought"));
+        let i_first = after2.find("first thought").unwrap();
+        let i_second = after2.find("second thought").unwrap();
+        assert!(i_first < i_second);
+        // Description preserved.
+        assert!(after2.contains("## Description"));
+    }
+
+    #[test]
+    fn note_rejects_stale_version() {
+        let tmp = fresh_repo();
+        let _ = seed_issue(tmp.path(), "open", "stale-note-here", "open");
+        let err = note_issue(
+            tmp.path(),
+            "stale-note-here",
+            "alice",
+            "hi",
+            Some("sha256:deadbeef".into()),
             None,
         )
         .unwrap_err();

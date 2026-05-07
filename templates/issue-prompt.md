@@ -137,6 +137,35 @@ Output shape:
 **Adding the issue to an epic**: also update the parent epic's `## Issues` list
 in its item.md (CLI handles frontmatter only, not body sections).
 
+### Action: Note
+
+Append a timestamped block to an issue's `## Comments` section
+(creating it if missing). Same flock + optimistic-version contract
+as `update`; body-only mutation.
+
+- `issuectl --json note <slug> --as <user> "<message>"`
+- `--expected-version <token>` is required with `--json` (fetch via
+  `show --json`).
+
+Block shape (auto-generated):
+
+```
+### 2026-05-07T12:00:00Z · @alice
+
+<message>
+```
+
+Reopen flow: `update --status <active>` on a closed issue
+auto-appends a `## Reopen Notes — <today>` section in the same
+write — no extra CLI step is needed.
+
+Output shape:
+
+```json
+{ "slug": "extremely-quiet-otter", "version": "sha256:...",
+  "issue_dir": "/abs/path/issues/extremely-quiet-otter" }
+```
+
 ### Action: Create
 
 #### 1. Gather Information

@@ -1,3 +1,4 @@
+mod body_sections;
 mod canonical;
 mod docs;
 mod doctor;
@@ -309,6 +310,25 @@ enum Command {
         expected_version: Option<String>,
     },
 
+    /// Append a timestamped block to an issue's `## Comments` section
+    Note {
+        /// Issue slug
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+
+        /// Author of the note (e.g. `alice` or `agent-name`)
+        #[arg(long = "as", value_parser = parse_non_empty)]
+        author: String,
+
+        /// Note text (one positional argument; quote multi-word input)
+        #[arg(value_parser = parse_non_empty)]
+        message: String,
+
+        /// Optimistic-concurrency token; required with --json
+        #[arg(long = "expected-version", value_parser = parse_non_empty)]
+        expected_version: Option<String>,
+    },
+
     /// Edit issue body markdown
     Body {
         #[command(subcommand)]
@@ -567,6 +587,12 @@ fn main() -> Result<()> {
             commits,
             expected_version,
         } => cmd_close(json_output, &slug, status, commits, expected_version),
+        Command::Note {
+            slug,
+            author,
+            message,
+            expected_version,
+        } => cmd_note(json_output, &slug, &author, &message, expected_version),
         Command::Body { action } => match action {
             BodyAction::Set {
                 slug,
@@ -1255,6 +1281,34 @@ fn normalize_related_refs(refs: &[String]) -> Result<Vec<String>> {
         out.push(format!("@{stripped}"));
     }
     Ok(out)
+}
+
+fn cmd_note(
+    json: bool,
+    slug: &str,
+    author: &str,
+    message: &str,
+    expected_version: Option<String>,
+) -> Result<()> {
+    if json && expected_version.is_none() {
+        bail!(
+            "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
+        );
+    }
+    let root = find_root();
+    let outcome = mutate::note_issue(&root, slug, author, message, expected_version, None)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if json {
+        let report = serde_json::json!({
+            "slug": slug,
+            "version": outcome.version,
+            "issue_dir": outcome.issue_dir.to_string_lossy(),
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("Appended note to {slug}");
+    }
+    Ok(())
 }
 
 fn cmd_body_set(
