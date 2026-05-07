@@ -1017,6 +1017,38 @@ mod tests {
     }
 
     #[test]
+    fn reopening_a_closed_issue_clears_closed_date() {
+        // Drag-and-drop allows moving a card out of the closed column
+        // back to an active status. The frontmatter `closed:` date must
+        // be removed in the same write so the issue isn't left in a
+        // contradictory "status: open, closed: 2026-01-01" state.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/reopen-me");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-01\nstatus: fixed\n\
+             priority: normal\nclosed: 2026-05-05\n---\n\n# Title\n",
+        )
+        .unwrap();
+
+        let req = UpdateIssueRequest {
+            status: Patch::Set("open".into()),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "reopen-me", req, None).unwrap();
+        assert!(out.moved_to_open);
+        assert_eq!(out.issue.status, "open");
+        assert!(out.issue.closed.is_none(), "closed: must be cleared on reopen");
+        let on_disk = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("status: open"));
+        assert!(
+            !on_disk.contains("closed:"),
+            "frontmatter must not retain closed: after reopen, got:\n{on_disk}"
+        );
+    }
+
+    #[test]
     fn update_status_to_closing_does_not_move_directory() {
         // M14: use inode comparison rather than `created()` (which is
         // Err on most Linux ext4 setups, silently making the assertion

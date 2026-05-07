@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Web kanban: cards are draggable between status columns. Dropping on an
+  active column (Open / In progress / Testing) issues a status PATCH
+  immediately; dropping on Closed opens a small picker so the user
+  selects a closing status (`done`/`fixed`/`wontfix`/...). Optimistic
+  UI with revert-on-failure, version-aware concurrency, and toast
+  notifications.
+
+### Changed
+- API: `IssueSummary` (returned from `GET /api/issues` and embedded in
+  SSE `IssueUpserted` events) gained a non-optional `version` field
+  carrying the issue's canonical content hash. The web client uses it as
+  `expected_version` for drag-and-drop PATCHes without per-card GETs.
+  External consumers deserializing the response with `deny_unknown_fields`
+  will need to add the field; permissive deserializers are unaffected.
+
 ## [0.3.1] - 2026-05-06
 
 The 0.3.0 release pipeline published binaries built from the

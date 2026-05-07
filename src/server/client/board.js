@@ -99,15 +99,28 @@
     detailClose: document.getElementById('detail-close'),
     degraded: document.getElementById('degraded-banner'),
     toastHost: document.getElementById('toast-host'),
+    statusPicker: document.getElementById('status-picker'),
   };
 
-  // Columns the user can drop onto. The "closed" bucket spans multiple
-  // closing statuses (done/fixed/wontfix/…) — we deliberately don't pick
-  // one for the user via drag-and-drop; that intent belongs in the
-  // detail dialog. "Other" catches unknown statuses and is also not a
-  // drop target. Drag *out* of either column into an active column is
-  // allowed and just sets a single status.
-  var DROP_TARGETS = { 'open': 'open', 'in-progress': 'in-progress', 'testing': 'testing' };
+  // Maximum simultaneous toasts on screen. Older ones are evicted FIFO so
+  // an SSE/error storm can't fill the screen and push later updates out
+  // of view.
+  var MAX_TOASTS = 5;
+  // Toasts auto-dismiss after this; long enough to read an error, short
+  // enough to not pile up. Pause-on-hover/focus extends the window.
+  var TOAST_TTL_MS = 6000;
+
+  // Columns the user can drop onto. Active columns map directly to a
+  // status. "closed" is special: it spans six closing statuses
+  // (done/fixed/wontfix/duplicate/cannot-reproduce/obsolete) so the drop
+  // opens a status-picker modal rather than guessing. "Other" remains
+  // an invalid drop target — unknown statuses don't get normalised by
+  // accident.
+  var ACTIVE_DROP_TARGETS = { 'open': 'open', 'in-progress': 'in-progress', 'testing': 'testing' };
+  var CLOSING_STATUSES = ['done', 'fixed', 'wontfix', 'duplicate', 'cannot-reproduce', 'obsolete'];
+  function isDropTargetColumn(columnId) {
+    return ACTIVE_DROP_TARGETS.hasOwnProperty(columnId) || columnId === 'closed';
+  }
 
   function effectiveAssignee(i) { return i.assignee || i.owner || ''; }
 
@@ -150,13 +163,23 @@
         state.warnings = data.warnings || [];
         state.snapshot_seq = data.snapshot_seq || 0;
         if (data.instance_id) state.instance_id = data.instance_id;
-        // Rebuild the version cache from the snapshot so any prior stale
-        // entries (e.g. across a Resync) are dropped together with the
-        // issue list they belonged to.
-        state.versions = {};
+        // Merge — don't clobber. The snapshot is taken at `snapshot_seq`
+        // before the fetch resolves; any SSE event with a newer version
+        // for a slug may have updated `state.versions[slug]` between
+        // snapshot capture and our arrival here. Replacing wholesale
+        // would silently downgrade those to the snapshot's older
+        // version, producing 409 storms on the next drag.
+        // Slugs that disappear from the snapshot are pruned (Resync /
+        // remote delete propagation) so the cache doesn't grow forever.
+        var nextVersions = {};
         state.issues.forEach(function (i) {
-          if (i.version) state.versions[i.slug] = i.version;
+          if (!i.version) return;
+          var current = state.versions[i.slug];
+          // Keep the cached version if we already advanced past the
+          // snapshot's value; otherwise adopt the snapshot's.
+          nextVersions[i.slug] = current || i.version;
         });
+        state.versions = nextVersions;
         renderWarnings();
         populateFilters();
         normalizeFiltersToOptions();
@@ -309,9 +332,8 @@
   function wireColumnDrop(col, columnId) {
     col.addEventListener('dragover', function (ev) {
       if (!state.dragging) return;
-      var validTarget = DROP_TARGETS.hasOwnProperty(columnId);
       var sameColumn = state.dragging.sourceColumnId === columnId;
-      if (!validTarget || sameColumn) {
+      if (!isDropTargetColumn(columnId) || sameColumn) {
         col.classList.add('drop-invalid');
         col.classList.remove('drop-target');
         // No preventDefault — the browser shows the "no-drop" cursor and
@@ -336,12 +358,18 @@
     col.addEventListener('drop', function (ev) {
       col.classList.remove('drop-target', 'drop-invalid');
       if (!state.dragging) return;
-      var validTarget = DROP_TARGETS.hasOwnProperty(columnId);
-      if (!validTarget) return;
+      if (!isDropTargetColumn(columnId)) return;
       if (state.dragging.sourceColumnId === columnId) return;
       ev.preventDefault();
       var drag = state.dragging;
-      handleDrop(drag, DROP_TARGETS[columnId]);
+      // Closed column: open the picker so the user names the exact
+      // closing status. The picker dispatches `handleDrop` once a
+      // status is selected, or cancels.
+      if (columnId === 'closed') {
+        openClosingStatusPicker(drag);
+        return;
+      }
+      handleDrop(drag, ACTIVE_DROP_TARGETS[columnId]);
     });
   }
 
@@ -349,27 +377,52 @@
     return state.issues.findIndex(function (i) { return i.slug === slug; });
   }
 
+  // Monotonic counter tagging each optimistic move so revertDrop can
+  // refuse to clobber state that has advanced past the move it was
+  // meant to undo (e.g. a concurrent SSE load() that already produced
+  // the authoritative status).
+  var nextOpId = 1;
+
   function handleDrop(drag, newStatus) {
-    // Clear dragging state immediately. The original card's `dragend`
-    // may not fire if a mid-drag SSE re-rendered the board and replaced
-    // its DOM node — leaving state.dragging set would otherwise pin
-    // stale state and break the next drag's source-column check.
-    state.dragging = null;
     if (drag.cancelled) {
       // External SSE write landed mid-drag (or the slug was removed).
-      // Bail without a PATCH; the load()/render() that the SSE handler
+      // Bail without a PATCH; the load()/render() the SSE handler
       // already triggered carries the authoritative state.
+      state.dragging = null;
       showToast('Drop cancelled — issue changed in another window', 'error');
       return;
     }
     var idx = findIssueIndex(drag.slug);
-    if (idx < 0) return;
+    if (idx < 0) {
+      state.dragging = null;
+      return;
+    }
+    var expected = state.versions[drag.slug];
+    if (!expected) {
+      // No version cached → optimistic concurrency would degenerate to
+      // an unconditional write. Refuse and refresh; the user can retry
+      // once the cache repopulates.
+      state.dragging = null;
+      showToast('Cannot move — version unknown, refreshing…', 'error');
+      load();
+      return;
+    }
     var prevStatus = state.issues[idx].status;
-    var expected = state.versions[drag.slug] || null;
+    var opId = nextOpId++;
+    // Mark ownership transfer: dragend must not null state.dragging
+    // for this drag once we've started a PATCH; the SSE handler still
+    // needs the cancellation observation window.
+    drag.patchStarted = true;
     // Optimistic move so the user sees the column change immediately.
-    state.issues[idx] = Object.assign({}, state.issues[idx], { status: newStatus });
+    // _optimisticDrop tags this mutation; revertDrop only undoes
+    // mutations whose tag still matches.
+    state.issues[idx] = Object.assign({}, state.issues[idx], {
+      status: newStatus,
+      _optimisticDrop: opId,
+    });
     render();
 
+    beginPendingWrite(drag.slug);
     fetch('/api/issues/' + encodeURIComponent(drag.slug), {
       method: 'PATCH',
       headers: csrfJson(),
@@ -380,25 +433,41 @@
           function () { return { status: r.status, body: {}, headers: r.headers }; });
       })
       .then(function (res) {
+        var responseVersion = res.body && res.body.version;
+        finishPendingWrite(drag.slug, responseVersion);
+        // Clear dragging only after the write resolves so an SSE event
+        // arriving during the round-trip can still flip
+        // `state.dragging.cancelled` and prevent the user-facing
+        // "drop cancelled" race from misfiring on the next drag.
+        if (state.dragging === drag) state.dragging = null;
+
         if (res.status >= 200 && res.status < 300) {
           // Trust the server response over the optimistic guess: a
           // status PATCH can ripple `closed:` / `updated:` / `folder`,
           // and the response payload already reflects all of them.
-          if (res.body.version) {
-            state.local_versions[drag.slug] = res.body.version;
+          if (responseVersion) {
+            state.local_versions[drag.slug] = responseVersion;
           }
           if (res.body.issue) {
-            applyIssueToBoard(res.body.issue, res.body.version);
+            applyIssueToBoard(res.body.issue, responseVersion);
           }
+          // Drop the optimistic tag if applyIssueToBoard didn't already
+          // (e.g. response missing `issue` for some reason).
+          clearOptimisticTag(drag.slug, opId);
           return;
         }
-        // Failure path: revert the card to its previous column.
-        revertDrop(drag.slug, prevStatus);
+        // Failure path: revert the card to its previous column, but
+        // only if the optimistic mutation is still the latest write
+        // for this slug. SSE/load() may have superseded it.
+        revertDrop(drag.slug, prevStatus, opId);
         if (res.status === 409 && res.body && res.body.code === 'version_mismatch') {
-          // The 409 envelope carries the current issue state; refresh
-          // the card in place rather than forcing a full reload (M2 §6.3
-          // metadata-mutation pattern: toast + re-apply, no merge UI).
-          if (res.body.issue) applyIssueToBoard(res.body.issue, res.body.version);
+          // 409 envelope carries the current issue state; refresh the
+          // card in place. If the envelope is missing the embedded
+          // issue (proxy truncation, server bug), fall back to
+          // load() — claiming "refreshed" while not refreshing would
+          // mislead the user and pin stale state.
+          if (res.body.issue) applyIssueToBoard(res.body.issue, responseVersion);
+          else load();
           showToast('This issue changed externally — refreshed', 'error');
         } else if (res.status === 429) {
           var retry = (res.headers && res.headers.get && res.headers.get('Retry-After')) || '?';
@@ -409,26 +478,132 @@
         }
       })
       .catch(function (err) {
-        revertDrop(drag.slug, prevStatus);
+        finishPendingWrite(drag.slug, null);
+        if (state.dragging === drag) state.dragging = null;
+        revertDrop(drag.slug, prevStatus, opId);
         showToast('Move failed: ' + err, 'error');
       });
   }
 
-  function revertDrop(slug, prevStatus) {
+  function revertDrop(slug, prevStatus, opId) {
     var idx = findIssueIndex(slug);
     if (idx < 0) return;
-    state.issues[idx] = Object.assign({}, state.issues[idx], { status: prevStatus });
+    var cur = state.issues[idx];
+    // If a concurrent SSE update already replaced the optimistic
+    // mutation (different opId or absent tag), the current state is
+    // newer and authoritative — don't clobber it with stale prevStatus.
+    if (cur._optimisticDrop !== opId) return;
+    var next = Object.assign({}, cur, { status: prevStatus });
+    delete next._optimisticDrop;
+    state.issues[idx] = next;
     render();
+  }
+
+  function clearOptimisticTag(slug, opId) {
+    var idx = findIssueIndex(slug);
+    if (idx < 0) return;
+    var cur = state.issues[idx];
+    if (cur._optimisticDrop !== opId) return;
+    var next = Object.assign({}, cur);
+    delete next._optimisticDrop;
+    state.issues[idx] = next;
+  }
+
+  function openClosingStatusPicker(drag) {
+    // Same ownership-transfer flag as handleDrop: keep state.dragging
+    // alive across dragend so SSE arriving while the modal is open
+    // can still mark the drag as cancelled before the user picks.
+    drag.patchStarted = true;
+    var dialog = els.statusPicker;
+    if (!dialog) {
+      // Fallback: if the modal element is missing, use the legacy
+      // "drop is invalid" behaviour rather than guessing a status.
+      state.dragging = null;
+      showToast('Status picker unavailable — please use the issue dialog', 'error');
+      return;
+    }
+    var idx = findIssueIndex(drag.slug);
+    var title = idx >= 0 ? (state.issues[idx].title || drag.slug) : drag.slug;
+    dialog.innerHTML =
+      '<form method="dialog" class="status-picker-form">' +
+        '<h2>Close issue</h2>' +
+        '<p>Pick a closing status for <code>' + escapeHtml(drag.slug) + '</code> — ' +
+        escapeHtml(title) + '.</p>' +
+        '<div class="status-picker-options">' +
+          CLOSING_STATUSES.map(function (s) {
+            return '<button type="button" class="status-option" data-status="' +
+              escapeHtml(s) + '">' + escapeHtml(s) + '</button>';
+          }).join('') +
+        '</div>' +
+        '<div class="status-picker-actions">' +
+          '<button type="button" id="status-picker-cancel">Cancel</button>' +
+        '</div>' +
+      '</form>';
+
+    function pick(status) {
+      closePicker();
+      handleDrop(drag, status);
+    }
+    function cancel() {
+      closePicker();
+      state.dragging = null;
+    }
+    function closePicker() {
+      if (typeof dialog.close === 'function') dialog.close();
+      else dialog.removeAttribute('open');
+    }
+
+    dialog.querySelectorAll('.status-option').forEach(function (b) {
+      b.addEventListener('click', function () { pick(b.getAttribute('data-status')); });
+    });
+    dialog.querySelector('#status-picker-cancel').addEventListener('click', cancel);
+    // Backdrop click + Esc both cancel without writing.
+    dialog.addEventListener('click', function (ev) { if (ev.target === dialog) cancel(); }, { once: true });
+    dialog.addEventListener('cancel', cancel, { once: true });
+
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
   }
 
   function showToast(msg, kind) {
     if (!els.toastHost) return;
+    // Cap concurrent toasts so an SSE/error storm can't fill the
+    // viewport. FIFO-evict the oldest first.
+    while (els.toastHost.children.length >= MAX_TOASTS) {
+      els.toastHost.removeChild(els.toastHost.firstChild);
+    }
     var t = document.createElement('div');
     t.className = 'toast' + (kind === 'error' ? ' toast-error' : '');
+    // The toast carries its own live-region role; the host element
+    // does not declare aria-live, so polite-vs-assertive isn't
+    // contradicted across nested regions.
     t.setAttribute('role', kind === 'error' ? 'alert' : 'status');
-    t.textContent = msg;
+
+    var text = document.createElement('span');
+    text.className = 'toast-text';
+    text.textContent = msg;
+    t.appendChild(text);
+
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'toast-close';
+    close.setAttribute('aria-label', 'Dismiss notification');
+    close.textContent = '×';
+    close.addEventListener('click', function () {
+      if (t.parentNode) t.parentNode.removeChild(t);
+    });
+    t.appendChild(close);
+
     els.toastHost.appendChild(t);
-    setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 4000);
+
+    var timer = setTimeout(function () {
+      if (t.parentNode) t.parentNode.removeChild(t);
+    }, TOAST_TTL_MS);
+    // Pause the auto-dismiss while the user is reading. focusin covers
+    // keyboard users tabbing onto the close button.
+    function pause() { clearTimeout(timer); }
+    t.addEventListener('mouseenter', pause);
+    t.addEventListener('focusin', pause);
   }
 
   function renderCard(issue) {
@@ -440,13 +615,30 @@
     // HTML5 DnD on a <button> works in Chrome/Firefox/Safari; the click
     // handler still fires when the user releases without dragging.
     card.draggable = true;
-    var sourceColumnId = columnIdFor(issue.status);
+    // `dragOccurred` distinguishes "click that happened to be wrapped
+    // in dragstart/dragend" (which still fires `click`) from "real
+    // drag that ended in any state". Without this, a cancelled drag
+    // (Esc, drop outside a column) opens the detail dialog on release.
+    var dragOccurred = false;
+    // Track the drag object this card started so dragend knows whether
+    // to clear `state.dragging`. If handleDrop has already begun (drop
+    // landed in a real target), it owns the lifecycle and dragend must
+    // not null `state.dragging` — that would lose the SSE-cancellation
+    // observation window during the in-flight PATCH.
+    var startedDrag = null;
     card.addEventListener('dragstart', function (ev) {
-      state.dragging = {
+      dragOccurred = true;
+      // Re-read status from state at drag start — never trust the
+      // closure capture from render time, which goes stale if a future
+      // code path mutates status without re-rendering.
+      var idx = findIssueIndex(issue.slug);
+      var currentStatus = idx >= 0 ? state.issues[idx].status : issue.status;
+      startedDrag = {
         slug: issue.slug,
-        sourceColumnId: sourceColumnId,
+        sourceColumnId: columnIdFor(currentStatus),
         cancelled: false,
       };
+      state.dragging = startedDrag;
       card.classList.add('card-dragging');
       if (ev.dataTransfer) {
         ev.dataTransfer.effectAllowed = 'move';
@@ -461,7 +653,19 @@
       // outside any column, so no `drop` event cleared the class).
       els.board.querySelectorAll('.column.drop-target, .column.drop-invalid')
         .forEach(function (c) { c.classList.remove('drop-target', 'drop-invalid'); });
-      state.dragging = null;
+      // Reset on a microtask so the immediately-following synthetic
+      // `click` (some browsers fire it after a no-op drag) sees the
+      // suppression flag and bails.
+      setTimeout(function () { dragOccurred = false; }, 0);
+      // Only clear state.dragging when this dragstart's drag is still
+      // the one in flight AND handleDrop hasn't taken ownership yet.
+      // After handleDrop starts, it tags the drag with `.patchStarted`
+      // and is responsible for clearing state on PATCH resolution —
+      // clearing here would close the SSE-cancellation window early.
+      if (state.dragging === startedDrag && !startedDrag.patchStarted) {
+        state.dragging = null;
+      }
+      startedDrag = null;
     });
     var assignee = effectiveAssignee(issue);
     var meta = [];
@@ -481,7 +685,18 @@
         '<span class="slug">' + escapeHtml(issue.slug) + '</span>' +
         meta.join('') +
       '</span>';
-    card.addEventListener('click', function () { openDetail(issue.slug); });
+    card.addEventListener('click', function (ev) {
+      if (dragOccurred) {
+        // Some browsers fire `click` after `dragend` even when the
+        // user dragged with intent. Swallow it so a half-completed
+        // drag (cancelled with Esc, dropped on an invalid target)
+        // doesn't open the detail dialog as a surprise.
+        ev.preventDefault();
+        ev.stopPropagation();
+        return;
+      }
+      openDetail(issue.slug);
+    });
     return card;
   }
 
@@ -866,8 +1081,7 @@
     // M2 review F3: track the in-flight write so SSE echoes that arrive
     // before the HTTP response can be deferred and reconciled by
     // version once the response lands.
-    state.pending_writes[editor.slug] = (state.pending_writes[editor.slug] || 0) + 1;
-    state.deferred_events[editor.slug] = state.deferred_events[editor.slug] || [];
+    beginPendingWrite(editor.slug);
     setSaveBusy(true);
     setSaveStatus('Saving…');
     fetch('/api/issues/' + encodeURIComponent(editor.slug) + '/body', {
@@ -962,17 +1176,28 @@
 
   function applyIssueToBoard(issue, version) {
     var idx = state.issues.findIndex(function (i) { return i.slug === issue.slug; });
+    // Mirror the full IssueSummary projection from /api/issues so a
+    // status PATCH that ripples `closed:` / `updated:` / `folder` is
+    // reflected in board state, not silently lost until the next
+    // load(). Hand-maintained partial projections drift; this list
+    // tracks IssueSummary in src/repo.rs verbatim.
     var summary = {
       slug: issue.slug,
       folder: issue.folder,
-      title: issue.title,
-      type: issue.type,
+      created: issue.created,
       status: issue.status,
+      updated: issue.updated,
       priority: issue.priority,
+      type: issue.type,
+      reporter: issue.reporter,
       assignee: issue.assignee,
       owner: issue.owner,
       epic: issue.epic,
+      related: issue.related || [],
       labels: issue.labels || [],
+      closed: issue.closed,
+      commits: issue.commits || [],
+      title: issue.title,
     };
     // The board summary's `version` is what the next drag-and-drop PATCH
     // will send. Prefer the explicit value (server-confirmed post-write)
@@ -990,10 +1215,21 @@
     render();
   }
 
+  // Shared write-lifecycle hooks. Body PUT and drag-and-drop PATCH both
+  // call begin/finishPendingWrite so SSE echoes that race ahead of the
+  // HTTP response are deferred and reconciled by version, instead of
+  // being treated as external edits and triggering a redundant load().
+  function beginPendingWrite(slug) {
+    if (!slug) return;
+    state.pending_writes[slug] = (state.pending_writes[slug] || 0) + 1;
+    state.deferred_events[slug] = state.deferred_events[slug] || [];
+  }
+
   function finishPendingWrite(slug, responseVersion) {
     if (!slug) return;
     var pending = state.pending_writes[slug] || 0;
     if (pending > 0) state.pending_writes[slug] = pending - 1;
+    if (state.pending_writes[slug] === 0) delete state.pending_writes[slug];
     var deferred = state.deferred_events[slug] || [];
     state.deferred_events[slug] = [];
     deferred.forEach(function (evt) {
@@ -1182,11 +1418,18 @@
         // state from the PUT/PATCH 200 response. Don't re-fetch — it
         // would clobber the textarea mid-edit.
         if (state.local_versions[evt.slug] === evt.version) return;
-        // Drag cancellation: an external write for the slug currently
-        // being dragged means our cached version is already stale. Mark
-        // the drag so the drop handler turns it into a no-op rather
-        // than racing into a guaranteed 409.
-        if (state.dragging && state.dragging.slug === evt.slug) {
+        // Drag cancellation: only cancel when the *version* actually
+        // changed. A no-op write (or an event that re-publishes the
+        // same version, e.g. a watcher resync) shouldn't kill an
+        // in-progress drag. The cached version is the user's intended
+        // base; we keep dragging so the drop's PATCH carries that
+        // base and lets the server arbitrate via 409 if needed.
+        if (
+          state.dragging &&
+          state.dragging.slug === evt.slug &&
+          evt.version &&
+          evt.version !== state.versions[evt.slug]
+        ) {
           state.dragging.cancelled = true;
         }
         if (evt.version) state.versions[evt.slug] = evt.version;

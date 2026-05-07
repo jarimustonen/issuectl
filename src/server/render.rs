@@ -110,6 +110,8 @@ fn render_board_shell() -> String {
   <button id="detail-close" autofocus>Close</button>
 </dialog>
 
+<dialog id="status-picker" class="status-picker-dialog" aria-label="Pick closing status"></dialog>
+
 <script src="/assets/theme-toggle.js" defer></script>
 <script src="/assets/board.js" defer></script>
 </body>
