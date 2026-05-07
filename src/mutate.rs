@@ -1039,7 +1039,10 @@ mod tests {
         let out = update_issue(tmp.path(), "reopen-me", req, None).unwrap();
         assert!(out.moved_to_open);
         assert_eq!(out.issue.status, "open");
-        assert!(out.issue.closed.is_none(), "closed: must be cleared on reopen");
+        assert!(
+            out.issue.closed.is_none(),
+            "closed: must be cleared on reopen"
+        );
         let on_disk = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(on_disk.contains("status: open"));
         assert!(

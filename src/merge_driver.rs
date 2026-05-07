@@ -79,8 +79,7 @@ pub fn run(args: &MergeArgs) -> Result<i32> {
     let (theirs_fm, theirs_body) = parse_sides(&theirs_raw)?;
 
     let fm_outcome = three_way_merge_frontmatter(&base_fm, &ours_fm, &theirs_fm);
-    let (merged_body, body_conflict) =
-        three_way_merge_body(&base_body, &ours_body, &theirs_body)?;
+    let (merged_body, body_conflict) = three_way_merge_body(&base_body, &ours_body, &theirs_body)?;
 
     // Stitch frontmatter + body. On clean frontmatter we round-trip
     // through `format_text` so the output is canonical. On conflict
@@ -89,8 +88,8 @@ pub fn run(args: &MergeArgs) -> Result<i32> {
     // the markers if we ever made the parser tolerant.
     let final_text = match &fm_outcome {
         FrontmatterMerge::Clean(map) => {
-            let stitched = stitch_clean(map, &merged_body)
-                .context("cannot serialise merged frontmatter")?;
+            let stitched =
+                stitch_clean(map, &merged_body).context("cannot serialise merged frontmatter")?;
             if body_conflict {
                 // Body conflict: don't run fmt, the body contains
                 // `<<<<<<<` markers that aren't markdown content.
@@ -111,8 +110,8 @@ pub fn run(args: &MergeArgs) -> Result<i32> {
     // direct temp+rename to preserve byte-for-byte output. The lock
     // covers both paths.
     if let Some(root) = repo_root_for(&args.output) {
-        let _lock = WriteLock::acquire(&root)
-            .context("cannot acquire repo write lock for merge output")?;
+        let _lock =
+            WriteLock::acquire(&root).context("cannot acquire repo write lock for merge output")?;
         write_atomic_text(&args.output, &final_text)?;
     } else {
         // Output path doesn't live under a recognisable repo (rare —
@@ -443,7 +442,16 @@ fn three_way_merge_body(
     std::fs::write(&tp, theirs_body).context("write theirs body")?;
 
     let out = Command::new("git")
-        .args(["merge-file", "--stdout", "-L", "ours", "-L", "base", "-L", "theirs"])
+        .args([
+            "merge-file",
+            "--stdout",
+            "-L",
+            "ours",
+            "-L",
+            "base",
+            "-L",
+            "theirs",
+        ])
         .arg(&op)
         .arg(&bp)
         .arg(&tp)
@@ -545,8 +553,7 @@ fn write_atomic_text(target: &Path, text: &str) -> Result<()> {
     let dir = target
         .parent()
         .ok_or_else(|| anyhow!("target has no parent: {}", target.display()))?;
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("cannot create {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let mut tf = tempfile::Builder::new()
         .prefix(".issuectl-tmp-")
         .tempfile_in(dir)
@@ -592,12 +599,8 @@ pub fn install(root: &Path, apply: bool) -> Result<()> {
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "issuectl".to_string());
-    let driver_value = format!(
-        "{exe} merge-driver --base %O --ours %A --theirs %B --output %A"
-    );
-    let config_cmd = format!(
-        "git config merge.issuectl-yaml.driver \"{driver_value}\""
-    );
+    let driver_value = format!("{exe} merge-driver --base %O --ours %A --theirs %B --output %A");
+    let config_cmd = format!("git config merge.issuectl-yaml.driver \"{driver_value}\"");
     println!("Add to .gitattributes (commit this):");
     println!("  {attr_line}");
     println!();
@@ -606,11 +609,7 @@ pub fn install(root: &Path, apply: bool) -> Result<()> {
     if apply {
         let status = Command::new("git")
             .current_dir(root)
-            .args([
-                "config",
-                "merge.issuectl-yaml.driver",
-                &driver_value,
-            ])
+            .args(["config", "merge.issuectl-yaml.driver", &driver_value])
             .status()
             .context("cannot invoke `git config`")?;
         if !status.success() {
@@ -629,11 +628,7 @@ pub fn install(root: &Path, apply: bool) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn write_files(
-        base: &str,
-        ours: &str,
-        theirs: &str,
-    ) -> (tempfile::TempDir, MergeArgs) {
+    fn write_files(base: &str, ours: &str, theirs: &str) -> (tempfile::TempDir, MergeArgs) {
         let tmp = tempfile::tempdir().unwrap();
         let b = tmp.path().join("base");
         let o = tmp.path().join("ours");
@@ -696,8 +691,7 @@ mod tests {
         // C3 regression test: ours adds `assignee: alice`, theirs doesn't
         // touch the field, base doesn't have it. Must NOT conflict.
         let base = "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n";
-        let ours =
-            "---\ntype: bug\nstatus: open\npriority: normal\nassignee: alice\n---\n# T\n";
+        let ours = "---\ntype: bug\nstatus: open\npriority: normal\nassignee: alice\n---\n# T\n";
         let theirs = base;
         let (_t, args) = write_files(base, ours, theirs);
         let code = run(&args).unwrap();
@@ -719,7 +713,10 @@ mod tests {
         let merged = std::fs::read_to_string(&args.output).unwrap();
         assert!(merged.contains("<<<<<<< ours"), "missing markers: {merged}");
         assert!(merged.contains("======="), "missing markers: {merged}");
-        assert!(merged.contains(">>>>>>> theirs"), "missing markers: {merged}");
+        assert!(
+            merged.contains(">>>>>>> theirs"),
+            "missing markers: {merged}"
+        );
         assert!(merged.contains("status: in-progress"));
         assert!(merged.contains("status: testing"));
         // Parsing the result as YAML must FAIL — that's the signal.
@@ -733,7 +730,8 @@ mod tests {
     #[test]
     fn commits_union_by_hash() {
         let base = "---\ncommits:\n- hash: a\n  summary: one\n---\n# T\n";
-        let ours = "---\ncommits:\n- hash: a\n  summary: one\n- hash: b\n  summary: ours-add\n---\n# T\n";
+        let ours =
+            "---\ncommits:\n- hash: a\n  summary: one\n- hash: b\n  summary: ours-add\n---\n# T\n";
         let theirs = "---\ncommits:\n- hash: a\n  summary: one\n- hash: c\n  summary: theirs-add\n---\n# T\n";
         let (_t, args) = write_files(base, ours, theirs);
         let code = run(&args).unwrap();
@@ -747,9 +745,12 @@ mod tests {
     #[test]
     fn updated_picks_newer_of_ours_and_theirs_ignoring_base() {
         // P7 regression: base must not beat ours/theirs.
-        let base = "---\nupdated: 2026-12-31\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
-        let ours = "---\nupdated: 2026-01-15\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
-        let theirs = "---\nupdated: 2026-02-15\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
+        let base =
+            "---\nupdated: 2026-12-31\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
+        let ours =
+            "---\nupdated: 2026-01-15\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
+        let theirs =
+            "---\nupdated: 2026-02-15\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
         let (_t, args) = write_files(base, ours, theirs);
         let code = run(&args).unwrap();
         assert_eq!(code, 0);

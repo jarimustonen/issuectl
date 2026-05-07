@@ -133,11 +133,7 @@ fn reorder_frontmatter(map: &mut Mapping) {
             nonstring_remaining.push((k, v));
         }
     }
-    string_remaining.sort_by(|a, b| {
-        a.0.as_str()
-            .unwrap_or("")
-            .cmp(b.0.as_str().unwrap_or(""))
-    });
+    string_remaining.sort_by(|a, b| a.0.as_str().unwrap_or("").cmp(b.0.as_str().unwrap_or("")));
 
     for (k, v) in taken {
         map.insert(k, v);
@@ -158,13 +154,10 @@ fn sort_array_fields(map: &mut Mapping) {
             // partitioned to the tail so they don't get reshuffled
             // across string entries (a stable comparator that maps
             // non-strings to "" would reorder them past strings).
-            let (mut strings, others): (Vec<Value>, Vec<Value>) =
-                std::mem::take(seq)
-                    .into_iter()
-                    .partition(|v| v.as_str().is_some());
-            strings.sort_by(|a, b| {
-                a.as_str().unwrap_or("").cmp(b.as_str().unwrap_or(""))
-            });
+            let (mut strings, others): (Vec<Value>, Vec<Value>) = std::mem::take(seq)
+                .into_iter()
+                .partition(|v| v.as_str().is_some());
+            strings.sort_by(|a, b| a.as_str().unwrap_or("").cmp(b.as_str().unwrap_or("")));
             strings.dedup_by(|a, b| match (a.as_str(), b.as_str()) {
                 (Some(x), Some(y)) => x == y,
                 _ => false,
@@ -253,9 +246,7 @@ fn normalise_body(body: &str) -> String {
         .position(|s| !s.trim().is_empty())
         .unwrap_or(out.len());
     // Strip trailing blank lines so the final-newline pass is canonical.
-    let last_nonblank = out
-        .iter()
-        .rposition(|s| !s.trim().is_empty());
+    let last_nonblank = out.iter().rposition(|s| !s.trim().is_empty());
     let trimmed: &[String] = match last_nonblank {
         Some(last) => &out[first_nonblank..=last],
         None => &[],
@@ -342,8 +333,8 @@ fn strip_trailing_preserving_hard_break(line: &str) -> String {
 /// `fmt` shares the partial-write protection with the rest of the
 /// mutation surface.
 pub fn format_file(path: &Path, mode: FormatMode) -> Result<FormatResult> {
-    let original = std::fs::read_to_string(path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
+    let original =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     // Refuse to format files with unresolved git conflict markers —
     // the line-by-line normaliser would happily eat the `=======`
     // separator (treating it as a setext underline) and leave the file
@@ -400,11 +391,7 @@ fn has_conflict_markers(text: &str) -> bool {
 /// snapshots and the lock acquisition would write `.issuectl/write.lock`
 /// to the working tree, which breaks read-only checkouts and CI
 /// volumes.
-pub fn format_repo(
-    root: &Path,
-    slugs: &[String],
-    mode: FormatMode,
-) -> Result<Vec<FormatResult>> {
+pub fn format_repo(root: &Path, slugs: &[String], mode: FormatMode) -> Result<Vec<FormatResult>> {
     let _lock = if mode == FormatMode::Write {
         Some(WriteLock::acquire(root)?)
     } else {
@@ -474,7 +461,8 @@ mod tests {
 
     #[test]
     fn reorders_to_canonical_order() {
-        let input = "---\nstatus: open\ncreated: 2026-01-01\ntype: bug\npriority: normal\n---\n\n# T\n";
+        let input =
+            "---\nstatus: open\ncreated: 2026-01-01\ntype: bug\npriority: normal\n---\n\n# T\n";
         let out = format_text(input).unwrap();
         let pos_created = out.find("created:").unwrap();
         let pos_type = out.find("type:").unwrap();
@@ -510,7 +498,8 @@ mod tests {
 
     #[test]
     fn unknown_keys_appended_alphabetically() {
-        let input = "---\ntype: bug\nstatus: open\npriority: normal\nzeta: 1\nalpha: 2\n---\n\n# T\n";
+        let input =
+            "---\ntype: bug\nstatus: open\npriority: normal\nzeta: 1\nalpha: 2\n---\n\n# T\n";
         let out = format_text(input).unwrap();
         let pos_alpha = out.find("alpha:").unwrap();
         let pos_zeta = out.find("zeta:").unwrap();
@@ -563,7 +552,8 @@ mod tests {
 
     #[test]
     fn setext_inside_fence_is_preserved() {
-        let input = "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n```text\nTitle\n=====\n```\n";
+        let input =
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n```text\nTitle\n=====\n```\n";
         let out = format_text(input).unwrap();
         assert!(out.contains("Title\n====="), "got: {out}");
         assert!(!out.contains("# Title\n```"));
@@ -579,7 +569,8 @@ mod tests {
 
     #[test]
     fn tilde_fence_also_handled() {
-        let input = "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n~~~yaml\nSetext\n=====\n~~~\n";
+        let input =
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n~~~yaml\nSetext\n=====\n~~~\n";
         let out = format_text(input).unwrap();
         assert!(out.contains("Setext\n====="), "got: {out}");
     }
@@ -598,7 +589,10 @@ mod tests {
         // must NOT strip them outside code.
         let input = "---\ntype: bug\nstatus: open\npriority: normal\n---\n\nLine one  \nLine two\n";
         let out = format_text(input).unwrap();
-        assert!(out.contains("Line one  \n"), "expected hard-break in: {out:?}");
+        assert!(
+            out.contains("Line one  \n"),
+            "expected hard-break in: {out:?}"
+        );
     }
 
     #[test]
@@ -701,7 +695,10 @@ mod tests {
         let results = format_repo(tmp.path(), &[], FormatMode::Check).unwrap();
         // Only the flat-layout issue should be visited.
         assert_eq!(results.len(), 1);
-        assert!(results[0].path.to_string_lossy().contains("flat-thing-here"));
+        assert!(results[0]
+            .path
+            .to_string_lossy()
+            .contains("flat-thing-here"));
     }
 
     #[test]

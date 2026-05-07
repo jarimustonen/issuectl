@@ -136,10 +136,7 @@ mod tests {
         // must not be misread as the close marker — close requires the
         // line to be exactly `---`.
         let s = split("---\nnote: |\n  ---foo\nstatus: open\n---\n# T\n");
-        assert_eq!(
-            s.frontmatter,
-            Some("note: |\n  ---foo\nstatus: open"),
-        );
+        assert_eq!(s.frontmatter, Some("note: |\n  ---foo\nstatus: open"),);
     }
 
     #[test]
