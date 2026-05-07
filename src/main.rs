@@ -21,8 +21,7 @@ use anyhow::{bail, Context, Result};
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
 
-pub(crate) const ISSUE_TYPES: &[&str] =
-    &["bug", "task", "feature", "improvement", "chore", "epic"];
+pub(crate) const ISSUE_TYPES: &[&str] = &["bug", "task", "feature", "improvement", "chore", "epic"];
 pub(crate) const PRIORITIES: &[&str] = &["normal", "high"];
 pub(crate) const ACTIVE_STATUSES: &[&str] = &["open", "in-progress", "testing"];
 pub(crate) const CLOSING_STATUSES: &[&str] = &[
@@ -1110,7 +1109,10 @@ fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
         return Ok(());
     }
     if out.moved_to_closed {
-        println!("Updated {slug}: closing status set ({})", out.final_dir.display());
+        println!(
+            "Updated {slug}: closing status set ({})",
+            out.final_dir.display()
+        );
     } else if out.moved_to_open {
         println!("Updated {slug}: re-opened ({})", out.final_dir.display());
     } else {
@@ -1155,8 +1157,8 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
         })
         .collect::<Result<_, _>>()?;
 
-    let outcome = mutate::update_issue(root, &args.slug, req, None)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let outcome =
+        mutate::update_issue(root, &args.slug, req, None).map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(UpdateOutcome {
         final_dir: outcome.issue_dir,
         moved_to_closed: outcome.moved_to_closed,
@@ -1359,7 +1361,10 @@ fn cmd_migrate_layout(json: bool) -> Result<()> {
         );
         std::process::exit(1);
     }
-    println!("Migrated {} issue(s) to flat layout:", report.migrated.len());
+    println!(
+        "Migrated {} issue(s) to flat layout:",
+        report.migrated.len()
+    );
     for m in &report.migrated {
         println!("  {}  ({} → {})", m.slug, m.from.display(), m.to.display());
     }
@@ -1431,7 +1436,10 @@ pub(crate) fn do_migrate_layout(root: &Path) -> Result<MigrateLayoutReport> {
                 });
                 continue;
             }
-            by_slug.entry(name).or_default().push((entry.path(), legacy));
+            by_slug
+                .entry(name)
+                .or_default()
+                .push((entry.path(), legacy));
         }
     }
 
@@ -1483,9 +1491,8 @@ pub(crate) fn do_migrate_layout(root: &Path) -> Result<MigrateLayoutReport> {
     // Pass 3: execute renames.
     let mut migrated = Vec::new();
     for (slug, src, dest) in moves {
-        fs::rename(&src, &dest).with_context(|| {
-            format!("cannot rename {} → {}", src.display(), dest.display())
-        })?;
+        fs::rename(&src, &dest)
+            .with_context(|| format!("cannot rename {} → {}", src.display(), dest.display()))?;
         migrated.push(MigrateMove {
             slug,
             from: src,
@@ -1954,7 +1961,9 @@ mod tests {
         .unwrap();
         let (folder, item) = locate_issue(tmp.path(), "old-fox-here").unwrap();
         assert_eq!(folder, "closed");
-        assert!(item.to_string_lossy().contains("issues/closed/old-fox-here"));
+        assert!(item
+            .to_string_lossy()
+            .contains("issues/closed/old-fox-here"));
     }
 
     #[test]

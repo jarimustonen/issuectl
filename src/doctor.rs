@@ -143,7 +143,6 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
     for (dir_name, path, folder_owned) in entries {
         let folder = folder_owned.as_str();
         {
-
             let item_path = path.join("item.md");
             let item_present = item_path.is_file();
 
@@ -257,8 +256,7 @@ fn detect_orphan_epic_refs(repo_root: &Path, report: &mut DoctorReport) -> Resul
             let issue = parser::parse_item_md_with_warnings(&item, &name, "open").issue;
             if let Some(epic) = issue.epic.as_deref() {
                 let stripped = epic.strip_prefix('@').unwrap_or(epic);
-                let exists =
-                    existing_slugs.contains(stripped) || stripped.parse::<u32>().is_ok();
+                let exists = existing_slugs.contains(stripped) || stripped.parse::<u32>().is_ok();
                 if !exists {
                     report
                         .orphan_epic_refs

@@ -146,7 +146,10 @@ fn log_warn(msg: &str) {
 async fn run_once(hub: Arc<EventHub>, cfg: WatcherConfig) -> Result<(), RunFailure> {
     let issues_root = cfg.root.join("issues");
     let issues_root_canon = std::fs::canonicalize(&issues_root).map_err(|e| {
-        RunFailure::Transient(format!("cannot canonicalize {}: {e}", issues_root.display()))
+        RunFailure::Transient(format!(
+            "cannot canonicalize {}: {e}",
+            issues_root.display()
+        ))
     })?;
 
     // Channel from the (sync) debouncer callback into our async loop.

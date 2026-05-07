@@ -148,8 +148,8 @@ pub async fn get_doc(
     let slug_owned = slug_param.clone();
     let doc_owned = doc_name.clone();
     let body = tokio::task::spawn_blocking(move || -> Result<String, DocError> {
-        let located = repo::locate_issue_full(root.as_path(), &slug_owned)
-            .map_err(|_| DocError::NotFound)?;
+        let located =
+            repo::locate_issue_full(root.as_path(), &slug_owned).map_err(|_| DocError::NotFound)?;
         let issue_dir = located
             .item_path
             .parent()
@@ -164,8 +164,7 @@ pub async fn get_doc(
             std::io::ErrorKind::NotFound => DocError::NotFound,
             _ => DocError::Internal,
         })?;
-        let issue_dir =
-            std::fs::canonicalize(&issue_dir).map_err(|_| DocError::Internal)?;
+        let issue_dir = std::fs::canonicalize(&issue_dir).map_err(|_| DocError::Internal)?;
         if !canon.starts_with(&issue_dir) {
             return Err(DocError::Forbidden);
         }
@@ -431,11 +430,7 @@ pub async fn patch_issue(
     body: axum::body::Bytes,
 ) -> Response {
     if !slug::is_valid(&slug_param) {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "validation",
-            "invalid slug shape",
-        );
+        return error_response(StatusCode::BAD_REQUEST, "validation", "invalid slug shape");
     }
     let req: UpdateIssueRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -489,10 +484,9 @@ pub async fn create_issue(
     };
     let root = state.root.clone();
     let hub = state.event_hub.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        mutate::new_issue(root.as_path(), req, Some(&hub))
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || mutate::new_issue(root.as_path(), req, Some(&hub)))
+            .await;
     match result {
         Ok(Ok(out)) => {
             let slug = out.issue.slug.clone();
@@ -571,7 +565,11 @@ pub async fn put_body(
             Json(resp).into_response()
         }
         Ok(Err(err)) => mutate_error_to_response(err),
-        Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal", "task panicked"),
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "task panicked",
+        ),
     }
 }
 
@@ -596,10 +594,7 @@ pub struct PreviewRequest {
 /// `POST /api/preview` — render markdown to sanitised HTML without
 /// touching disk. Shares the body bucket; CSRF + Host gates apply via
 /// the global guard layer (it's a POST, so `mutating == true`).
-pub async fn preview(
-    State(state): State<super::AppState>,
-    body: axum::body::Bytes,
-) -> Response {
+pub async fn preview(State(state): State<super::AppState>, body: axum::body::Bytes) -> Response {
     let decision = state.body_limiter.check("preview");
     if !decision.allowed {
         return rate_limited_response(decision.retry_after_secs);
@@ -678,17 +673,10 @@ fn mutate_error_to_response(err: MutateError) -> Response {
             // top-level-only `version` placement causing client
             // "Keep mine" to loop on stale tokens).
             let body_html = super::render::sanitize_markdown(&current.body);
-            let mut issue_value =
-                serde_json::to_value(&current).expect("Issue serializes");
+            let mut issue_value = serde_json::to_value(&current).expect("Issue serializes");
             if let serde_json::Value::Object(ref mut m) = issue_value {
-                m.insert(
-                    "body_html".into(),
-                    serde_json::Value::String(body_html),
-                );
-                m.insert(
-                    "version".into(),
-                    serde_json::Value::String(version.clone()),
-                );
+                m.insert("body_html".into(), serde_json::Value::String(body_html));
+                m.insert("version".into(), serde_json::Value::String(version.clone()));
             }
             let body = serde_json::json!({
                 "type": "https://issuectl/errors/version_mismatch",
@@ -715,9 +703,7 @@ fn mutate_error_to_response(err: MutateError) -> Response {
             });
             (StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response()
         }
-        MutateError::Validation(msg) => {
-            error_response(StatusCode::BAD_REQUEST, "validation", &msg)
-        }
+        MutateError::Validation(msg) => error_response(StatusCode::BAD_REQUEST, "validation", &msg),
         MutateError::ConflictingIntent(msg) => {
             error_response(StatusCode::BAD_REQUEST, "conflicting_intent", &msg)
         }

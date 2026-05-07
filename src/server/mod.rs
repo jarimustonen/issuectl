@@ -128,10 +128,7 @@ pub fn router(state: AppState) -> Router {
             get(render::theme_bootstrap_js),
         )
         .route("/api/session", get(api::session))
-        .route(
-            "/api/issues",
-            get(api::list_issues).post(api::create_issue),
-        )
+        .route("/api/issues", get(api::list_issues).post(api::create_issue))
         .route(
             "/api/issues/{slug}",
             get(api::get_issue).patch(api::patch_issue),
@@ -361,9 +358,9 @@ async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) ->
                     "issuectl[serve]: watcher = polling backend, interval {}ms",
                     interval.as_millis()
                 ),
-                watcher::WatcherBackend::Recommended => eprintln!(
-                    "issuectl[serve]: watcher = native backend"
-                ),
+                watcher::WatcherBackend::Recommended => {
+                    eprintln!("issuectl[serve]: watcher = native backend")
+                }
             }
             let cfg = watcher::WatcherConfig {
                 root: root.clone(),
@@ -371,7 +368,11 @@ async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) ->
                 bulk_threshold: options.watch_bulk_threshold,
                 backend,
             };
-            Some(watcher::spawn(event_hub.clone(), watch_degraded.clone(), cfg))
+            Some(watcher::spawn(
+                event_hub.clone(),
+                watch_degraded.clone(),
+                cfg,
+            ))
         } else {
             eprintln!(
                 "issuectl[serve]: {} is not a directory — watcher disabled",
@@ -501,7 +502,7 @@ mod tests {
     async fn api_issues_returns_all_issues_with_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("issues")).unwrap();
-        
+
         write_issue(
             tmp.path(),
             "open",
@@ -846,11 +847,7 @@ mod tests {
             "---\nstatus: open\n---\n# leaked\n",
         )
         .unwrap();
-        symlink(
-            outside.path(),
-            tmp.path().join("issues/escaped-not-otter"),
-        )
-        .unwrap();
+        symlink(outside.path(), tmp.path().join("issues/escaped-not-otter")).unwrap();
 
         let resp = make_router(tmp.path())
             .oneshot(
@@ -920,8 +917,7 @@ mod tests {
     /// issue.
     fn version_on_disk(root: &Path, slug: &str) -> String {
         let p = root.join("issues").join(slug).join("item.md");
-        let parsed =
-            crate::parser::parse_item_md_with_warnings(&p, slug, "open");
+        let parsed = crate::parser::parse_item_md_with_warnings(&p, slug, "open");
         let mut issue = parsed.issue;
         issue.folder = crate::repo::folder_for_status(&issue.status).to_string();
         crate::canonical::canonical_hash(&issue)
@@ -947,9 +943,7 @@ mod tests {
             watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
         });
         let resp = r
-            .oneshot(
-                Request::get("/api/session").body(Body::empty()).unwrap(),
-            )
+            .oneshot(Request::get("/api/session").body(Body::empty()).unwrap())
             .await
             .unwrap();
         let body: serde_json::Value =
@@ -987,8 +981,9 @@ mod tests {
     async fn session_surfaces_latched_degraded_reason() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("issues")).unwrap();
-        let watch_degraded: Arc<parking_lot::Mutex<Option<String>>> =
-            Arc::new(parking_lot::Mutex::new(Some("watcher_unavailable".to_string())));
+        let watch_degraded: Arc<parking_lot::Mutex<Option<String>>> = Arc::new(
+            parking_lot::Mutex::new(Some("watcher_unavailable".to_string())),
+        );
         let r = router(AppState {
             root: Arc::new(tmp.path().to_path_buf()),
             event_hub: Arc::new(EventHub::new()),
@@ -1036,7 +1031,11 @@ mod tests {
         let r = make_secured_router(tmp.path());
         // RFC 3986: hostnames are case-insensitive; trailing dot is
         // legal. Both must pass the Host allow-list.
-        for host in ["TEST.INVALID:7878", "test.invalid.:7878", "Test.Invalid.:7878"] {
+        for host in [
+            "TEST.INVALID:7878",
+            "test.invalid.:7878",
+            "Test.Invalid.:7878",
+        ] {
             let resp = r
                 .clone()
                 .oneshot(
@@ -1268,9 +1267,8 @@ mod tests {
         // `summary.status`/`summary.folder`; no folder-rename event.
         let mut saw_upserted = false;
         while let Ok(evt) = rx.try_recv() {
-            if let crate::server::events::EventPayload::IssueUpserted {
-                slug, issue, ..
-            } = &evt.payload
+            if let crate::server::events::EventPayload::IssueUpserted { slug, issue, .. } =
+                &evt.payload
             {
                 assert_eq!(slug, "patch-publish-mvd");
                 assert_eq!(issue.status, "fixed");
@@ -1352,10 +1350,7 @@ mod tests {
             serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
         assert_eq!(body["slug"], "api-create-test");
         assert!(body["version"].as_str().unwrap().starts_with("sha256:"));
-        assert!(tmp
-            .path()
-            .join("issues/api-create-test/item.md")
-            .exists());
+        assert!(tmp.path().join("issues/api-create-test/item.md").exists());
     }
 
     #[tokio::test]
@@ -1423,10 +1418,8 @@ mod tests {
         // and matches what we just wrote on disk
         assert_eq!(v_new, version_on_disk(tmp.path(), "body-fresh-vers1"));
         // post-condition: version field also matches what we just wrote
-        let on_disk = std::fs::read_to_string(
-            tmp.path().join("issues/body-fresh-vers1/item.md"),
-        )
-        .unwrap();
+        let on_disk =
+            std::fs::read_to_string(tmp.path().join("issues/body-fresh-vers1/item.md")).unwrap();
         assert!(on_disk.contains("fresh content."));
     }
 
@@ -1517,8 +1510,7 @@ mod tests {
         // Burst capacity is 10 in the default limiter; the 11th in
         // rapid succession on the same slug should trip 429.
         for _ in 0..12 {
-            let payload =
-                serde_json::json!({ "body": "# rate test\n\nmore content here.\n" });
+            let payload = serde_json::json!({ "body": "# rate test\n\nmore content here.\n" });
             let resp = r
                 .clone()
                 .oneshot(
@@ -1617,7 +1609,10 @@ mod tests {
         let top_v = body["version"].as_str().unwrap();
         assert!(top_v.starts_with("sha256:"));
         let issue_v = body["issue"]["version"].as_str().unwrap();
-        assert_eq!(top_v, issue_v, "issue.version must mirror top-level version");
+        assert_eq!(
+            top_v, issue_v,
+            "issue.version must mirror top-level version"
+        );
         assert!(body["issue"]["body_html"].as_str().is_some());
     }
 
