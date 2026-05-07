@@ -1,6 +1,6 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-07
 type: epic
 status: in-progress
 priority: high
@@ -88,6 +88,11 @@ to keep the epic in sync with the worktree:
 - [ ] @markedly-terrific-angle — `.issuectl/AGENTS.md` agent policy file.
   Agents read it automatically; small change, huge leverage now that
   M2 introduces a new CLI surface.
+
+### Bugs / polish (small, dropped into v0.5.0 because they hurt daily use)
+- [ ] @peculiarly-truncated-title — `issuectl ls` drops the first
+  character of the H1 title in CLI display. Cosmetic, local fix in
+  the title-extraction helper.
 
 ## Phases
 
