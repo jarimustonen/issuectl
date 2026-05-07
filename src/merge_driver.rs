@@ -1,29 +1,46 @@
-//! Custom git merge driver for `issues/**/*.md`.
+//! Custom git merge driver for `issues/<slug>/item.md`.
 //!
-//! Wired via `.gitattributes` (`issues/**/*.md merge=issuectl-yaml`) and
-//! `git config merge.issuectl-yaml.driver "issuectl merge-driver --base
-//! %O --ours %A --theirs %B --output %A"`. Print the snippets with
-//! `issuectl install-merge-driver`.
+//! Wired via `.gitattributes` (`issues/**/item.md merge=issuectl-yaml`)
+//! and `git config merge.issuectl-yaml.driver "issuectl merge-driver
+//! --base %O --ours %A --theirs %B --output %A"`. Print the snippets
+//! with `issuectl install-merge-driver`.
 //!
-//! Semantics (kept tight on purpose — wider semantics belong in `fmt`):
+//! Semantics:
 //! - **frontmatter** is parsed as YAML on all three sides and merged
 //!   field by field;
-//!   - array fields `labels`, `related`, `blocked_by` use the standard
-//!     "ours ∪ theirs minus base-deletions-respected" rule so adds from
-//!     either branch survive and deletes from either branch take effect;
-//!   - `commits` arrays are unioned by `hash` (ours wins on summary
-//!     conflict), preserving first-appearance order — the field is a
-//!     log, not a set;
-//!   - `updated:` picks the lexicographically newer date (ISO-8601
-//!     ensures lex ≡ chronological);
-//!   - other scalars: if both sides agree, keep; if only one changed,
-//!     take it; if both diverged, leave a YAML-comment conflict marker
-//!     and exit 1 — never silently pick a side.
-//! - **body** falls back to `git merge-file --stdout %A %O %B` so the
-//!   driver does not try to be clever about markdown.
+//!   - array fields `labels`/`related`/`blocked_by` use the standard
+//!     "ours ∪ theirs minus base-side deletions" rule so adds from
+//!     either branch survive and deletes from either branch take
+//!     effect;
+//!   - `commits` is unioned by `hash` (ours wins on summary collision),
+//!     preserving first-appearance order. Deletions are NOT honoured
+//!     (commits are append-only by current CLI contract — if you need
+//!     to drop a commit, edit it on every branch);
+//!   - `updated:` picks the lexicographically newer date *of ours and
+//!     theirs* (base is ignored — both branches deliberately set it,
+//!     so resurrecting a stale base value would be wrong);
+//!   - other scalars: 3-way merge with `(base, ours, theirs)` triple
+//!     so a one-sided add against an absent base is kept (not a
+//!     conflict); only diverging changes against the same base produce
+//!     a conflict;
+//!   - on a frontmatter conflict, the driver emits **real** `<<<<<<<`
+//!     conflict markers around the offending fields. The result is
+//!     intentionally invalid YAML — that's the point: every other tool
+//!     (parser, IDE merge editor, git mergetool) recognises the
+//!     conflict and refuses to silently accept the file.
+//! - **body** falls back to `git merge-file --stdout` on body-only
+//!   temp files so frontmatter differences don't pollute the body
+//!   merge. Conflict-marker labels are passed via `-L ours -L base -L
+//!   theirs` (instead of leaking temp paths).
 //! - On any unresolved conflict, exit 1; git surfaces the standard
-//!   merge UI. The output file MUST NOT contain a "merged" frontmatter
-//!   with an unresolved field collision while exiting 0.
+//!   merge UI. The output file MUST contain real conflict markers (in
+//!   the body, the frontmatter, or both) — the driver never produces
+//!   a parseable "merged" file with hidden conflicts.
+//!
+//! Coordination with `issuectl serve`: the driver acquires the repo
+//! `WriteLock` before writing the output and uses `write_item_atomic`,
+//! so a concurrent web mutation cannot race the merge result. The
+//! lock is held briefly per `serve` PATCH, so this never deadlocks.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -33,6 +50,9 @@ use anyhow::{anyhow, Context, Result};
 use serde_yaml::{Mapping, Value};
 
 use crate::fmt::format_text;
+use crate::item_text;
+use crate::mutate::{write_item_atomic, WriteLock};
+use crate::write::{self, ItemFile};
 
 #[derive(Debug)]
 pub struct MergeArgs {
@@ -58,40 +78,51 @@ pub fn run(args: &MergeArgs) -> Result<i32> {
     let (ours_fm, ours_body) = parse_sides(&ours_raw)?;
     let (theirs_fm, theirs_body) = parse_sides(&theirs_raw)?;
 
-    let MergeFrontmatterOutcome {
-        merged: merged_fm,
-        had_conflict: fm_conflict,
-    } = three_way_merge_frontmatter(&base_fm, &ours_fm, &theirs_fm);
+    let fm_outcome = three_way_merge_frontmatter(&base_fm, &ours_fm, &theirs_fm);
+    let (merged_body, body_conflict) =
+        three_way_merge_body(&base_body, &ours_body, &theirs_body)?;
 
-    // Body: defer to `git merge-file --stdout`. It returns the merged
-    // text on stdout and a non-zero exit on conflict; we propagate that
-    // by leaving the conflict markers in place and exiting 1.
-    let (merged_body, body_conflict) = three_way_merge_body(
-        &base_body,
-        &ours_body,
-        &theirs_body,
-        &args.base,
-        &args.ours,
-        &args.theirs,
-    )?;
-
-    // Stitch frontmatter + body and run through `fmt` so the output is
-    // canonical (idempotent on a follow-up `issuectl fmt --check`).
-    let stitched = stitch(&merged_fm, &merged_body);
-    let final_text = if fm_conflict || body_conflict {
-        // Don't run the formatter on conflict markers — `format_text`
-        // would fail to parse a frontmatter block containing comment
-        // markers we leave for the user to resolve. Write the raw
-        // stitched text so the user sees the conflicts.
-        stitched
-    } else {
-        format_text(&stitched).unwrap_or(stitched)
+    // Stitch frontmatter + body. On clean frontmatter we round-trip
+    // through `format_text` so the output is canonical. On conflict
+    // we keep the raw text (which contains real `<<<<<<<` markers) —
+    // running format_text would either fail (invalid YAML) or strip
+    // the markers if we ever made the parser tolerant.
+    let final_text = match &fm_outcome {
+        FrontmatterMerge::Clean(map) => {
+            let stitched = stitch_clean(map, &merged_body)
+                .context("cannot serialise merged frontmatter")?;
+            if body_conflict {
+                // Body conflict: don't run fmt, the body contains
+                // `<<<<<<<` markers that aren't markdown content.
+                stitched
+            } else {
+                format_text(&stitched).context("cannot canonicalise merged item")?
+            }
+        }
+        FrontmatterMerge::Conflicted(text) => stitch_conflicted(text, &merged_body),
     };
 
-    std::fs::write(&args.output, final_text)
-        .with_context(|| format!("cannot write output {}", args.output.display()))?;
+    let had_conflict = body_conflict || matches!(fm_outcome, FrontmatterMerge::Conflicted(_));
 
-    if fm_conflict || body_conflict {
+    // Write the output under the repo flock + atomically. Reuse
+    // `write_item_atomic` only for clean merges (it goes through
+    // serialize_item which would re-frame the YAML); for conflicted
+    // outputs we have raw text with conflict markers so we use a
+    // direct temp+rename to preserve byte-for-byte output. The lock
+    // covers both paths.
+    if let Some(root) = repo_root_for(&args.output) {
+        let _lock = WriteLock::acquire(&root)
+            .context("cannot acquire repo write lock for merge output")?;
+        write_atomic_text(&args.output, &final_text)?;
+    } else {
+        // Output path doesn't live under a recognisable repo (rare —
+        // git always invokes us with paths inside the repo). Fall
+        // back to a non-locked atomic write rather than failing the
+        // merge entirely.
+        write_atomic_text(&args.output, &final_text)?;
+    }
+
+    if had_conflict {
         Ok(1)
     } else {
         Ok(0)
@@ -99,35 +130,22 @@ pub fn run(args: &MergeArgs) -> Result<i32> {
 }
 
 fn parse_sides(text: &str) -> Result<(Mapping, String)> {
-    // Reuse the same split convention as fmt::format_text. We don't call
-    // format_text here because we want raw frontmatter Mapping for
-    // field-by-field merging.
-    let trimmed = text.trim_start();
-    if !trimmed.starts_with("---") {
-        return Ok((Mapping::new(), text.to_string()));
-    }
-    let rest = &trimmed[3..];
-    let Some(end) = rest.find("\n---") else {
-        return Ok((Mapping::new(), text.to_string()));
+    let split = item_text::split(text);
+    let fm: Mapping = match split.frontmatter {
+        Some(yaml) if !yaml.trim().is_empty() => {
+            serde_yaml::from_str(yaml).context("cannot parse frontmatter")?
+        }
+        _ => Mapping::new(),
     };
-    let yaml = &rest[..end];
-    let mut after = end + 4;
-    if rest.as_bytes().get(after) == Some(&b'\n') {
-        after += 1;
-    }
-    let body = rest[after..].to_string();
-    let fm: Mapping = if yaml.trim().is_empty() {
-        Mapping::new()
-    } else {
-        serde_yaml::from_str(yaml).context("cannot parse frontmatter")?
-    };
-    Ok((fm, body))
+    Ok((fm, split.body.to_string()))
 }
 
 #[derive(Debug)]
-struct MergeFrontmatterOutcome {
-    merged: Mapping,
-    had_conflict: bool,
+enum FrontmatterMerge {
+    Clean(Mapping),
+    /// Pre-formatted frontmatter text (without surrounding `---`
+    /// delimiters) that contains real `<<<<<<<` conflict markers.
+    Conflicted(String),
 }
 
 const ARRAY_UNION_FIELDS: &[&str] = &["labels", "related", "blocked_by"];
@@ -136,18 +154,36 @@ fn three_way_merge_frontmatter(
     base: &Mapping,
     ours: &Mapping,
     theirs: &Mapping,
-) -> MergeFrontmatterOutcome {
-    let mut merged = Mapping::new();
-    let mut had_conflict = false;
+) -> FrontmatterMerge {
+    let mut clean = Mapping::new();
+    let mut conflicts: Vec<FieldConflict> = Vec::new();
 
-    let all_keys: BTreeSet<String> = base
-        .keys()
-        .chain(ours.keys())
-        .chain(theirs.keys())
-        .filter_map(|k| k.as_str().map(|s| s.to_string()))
-        .collect();
+    // Walk every key that appears anywhere. Non-string keys are
+    // preserved verbatim by tracking them separately.
+    let mut all_string_keys: BTreeSet<String> = BTreeSet::new();
+    for k in base.keys().chain(ours.keys()).chain(theirs.keys()) {
+        if let Some(s) = k.as_str() {
+            all_string_keys.insert(s.to_string());
+        }
+    }
+    // Non-string keys: take ours first, then any new from theirs.
+    // (Reviewer flag C5: silent drop is data loss. Preservation policy:
+    // ours-wins on value collision for these uncommon keys.)
+    let mut nonstring_emit: Vec<(Value, Value)> = Vec::new();
+    let mut seen_nonstring: BTreeSet<String> = BTreeSet::new();
+    for src in [ours, theirs] {
+        for (k, v) in src.iter() {
+            if k.as_str().is_some() {
+                continue;
+            }
+            let fp = format!("{:?}", k);
+            if seen_nonstring.insert(fp) {
+                nonstring_emit.push((k.clone(), v.clone()));
+            }
+        }
+    }
 
-    for key in &all_keys {
+    for key in &all_string_keys {
         let kv = Value::String(key.clone());
         let bv = base.get(&kv);
         let ov = ours.get(&kv);
@@ -155,64 +191,71 @@ fn three_way_merge_frontmatter(
 
         if ARRAY_UNION_FIELDS.contains(&key.as_str()) {
             if let Some(seq) = merge_array_union(bv, ov, tv) {
-                merged.insert(kv, seq);
+                clean.insert(kv, seq);
             }
             continue;
         }
 
         if key == "commits" {
-            if let Some(seq) = merge_commits(bv, ov, tv) {
-                merged.insert(kv, seq);
+            if let Some(seq) = merge_commits(ov, tv) {
+                clean.insert(kv, seq);
             }
             continue;
         }
 
         if key == "updated" {
-            // Pick the lexicographically newer ISO date (works as
-            // chronological for YYYY-MM-DD).
-            let candidates = [ov, tv, bv];
-            let newest = candidates
+            // Pick the newer of (ours, theirs). Ignoring base prevents
+            // a stale base value from beating a deliberate downward
+            // edit on both branches (P7).
+            let candidates: Vec<&str> = [ov, tv]
                 .iter()
                 .filter_map(|c| c.and_then(|v| v.as_str()))
-                .max();
-            if let Some(s) = newest {
-                merged.insert(kv, Value::String(s.to_string()));
+                .collect();
+            if let Some(s) = candidates.into_iter().max() {
+                clean.insert(kv, Value::String(s.to_string()));
+            } else if let Some(b) = bv.and_then(|v| v.as_str()) {
+                // Both sides cleared — keep base (rare; matches the
+                // "no explicit overwrite on either side" intuition).
+                clean.insert(kv, Value::String(b.to_string()));
             }
             continue;
         }
 
-        // Generic 3-way scalar merge.
         match scalar_three_way(bv, ov, tv) {
             ScalarMerge::Drop => {}
             ScalarMerge::Keep(v) => {
-                merged.insert(kv, v);
+                clean.insert(kv, v);
             }
             ScalarMerge::Conflict {
                 ours_val,
                 theirs_val,
             } => {
-                had_conflict = true;
-                merged.insert(
-                    Value::String(format!("__conflict_{key}__")),
-                    Value::String(format!(
-                        "ours={} theirs={} — resolve manually",
-                        yaml_repr(&ours_val),
-                        yaml_repr(&theirs_val),
-                    )),
-                );
-                // Also write ours as the primary value so the file at
-                // least parses; the __conflict__ key signals the human.
-                if let Some(o) = ours_val {
-                    merged.insert(Value::String(key.clone()), o);
-                }
+                conflicts.push(FieldConflict {
+                    key: key.clone(),
+                    ours: ours_val,
+                    theirs: theirs_val,
+                });
             }
         }
     }
 
-    MergeFrontmatterOutcome {
-        merged,
-        had_conflict,
+    // Re-attach non-string keys at the end in deterministic order.
+    for (k, v) in nonstring_emit {
+        clean.insert(k, v);
     }
+
+    if conflicts.is_empty() {
+        FrontmatterMerge::Clean(clean)
+    } else {
+        FrontmatterMerge::Conflicted(render_conflicted_frontmatter(&clean, &conflicts))
+    }
+}
+
+#[derive(Debug)]
+struct FieldConflict {
+    key: String,
+    ours: Option<Value>,
+    theirs: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -225,27 +268,54 @@ enum ScalarMerge {
     },
 }
 
+/// 3-way scalar merge using the full (base, ours, theirs) triple. The
+/// key insight relative to a 2-way merge: "absent on one side" can mean
+/// either "this side deleted it" (when present in base) OR "this side
+/// didn't touch it" (when also absent in base). Conflating those two
+/// produced spurious conflicts on every one-sided field add (C3).
 fn scalar_three_way(
     base: Option<&Value>,
     ours: Option<&Value>,
     theirs: Option<&Value>,
 ) -> ScalarMerge {
-    match (ours, theirs) {
-        (None, None) => ScalarMerge::Drop,
-        (Some(o), None) => {
-            // theirs deleted. If ours == base, accept the delete; else
-            // ours changed AND theirs deleted → conflict.
-            if values_equal(Some(o), base) {
+    match (base, ours, theirs) {
+        (None, None, None) => ScalarMerge::Drop,
+
+        // Absent in base + only one side has a value → that side added
+        // it; the other side simply didn't touch the field.
+        (None, Some(o), None) => ScalarMerge::Keep(o.clone()),
+        (None, None, Some(t)) => ScalarMerge::Keep(t.clone()),
+
+        // Absent in base + both sides added.
+        (None, Some(o), Some(t)) => {
+            if o == t {
+                ScalarMerge::Keep(o.clone())
+            } else {
+                ScalarMerge::Conflict {
+                    ours_val: Some(o.clone()),
+                    theirs_val: Some(t.clone()),
+                }
+            }
+        }
+
+        // Present in base; both deleted.
+        (Some(_), None, None) => ScalarMerge::Drop,
+
+        // Present in base; one side deleted, other side present.
+        (Some(b), Some(o), None) => {
+            if o == b {
+                // Ours unchanged, theirs deleted → take the delete.
                 ScalarMerge::Drop
             } else {
+                // Ours edited AND theirs deleted → conflict.
                 ScalarMerge::Conflict {
                     ours_val: Some(o.clone()),
                     theirs_val: None,
                 }
             }
         }
-        (None, Some(t)) => {
-            if values_equal(Some(t), base) {
+        (Some(b), None, Some(t)) => {
+            if t == b {
                 ScalarMerge::Drop
             } else {
                 ScalarMerge::Conflict {
@@ -254,12 +324,14 @@ fn scalar_three_way(
                 }
             }
         }
-        (Some(o), Some(t)) => {
-            if values_equal(Some(o), Some(t)) {
+
+        // Present in base; both sides have values.
+        (Some(b), Some(o), Some(t)) => {
+            if o == t {
                 ScalarMerge::Keep(o.clone())
-            } else if values_equal(Some(o), base) {
+            } else if o == b {
                 ScalarMerge::Keep(t.clone())
-            } else if values_equal(Some(t), base) {
+            } else if t == b {
                 ScalarMerge::Keep(o.clone())
             } else {
                 ScalarMerge::Conflict {
@@ -271,27 +343,9 @@ fn scalar_three_way(
     }
 }
 
-fn values_equal(a: Option<&Value>, b: Option<&Value>) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(x), Some(y)) => x == y,
-        _ => false,
-    }
-}
-
-fn yaml_repr(v: &Option<Value>) -> String {
-    match v {
-        None => "(absent)".to_string(),
-        Some(val) => serde_yaml::to_string(val)
-            .unwrap_or_else(|_| "?".into())
-            .trim()
-            .to_string(),
-    }
-}
-
-/// Standard 3-way array union: result = (ours ∪ theirs) − items deleted
-/// from base by either side. An item deleted on one side and present on
-/// the other (with no change in base) honours the delete.
+/// 3-way array merge. Items present in only one side that aren't in
+/// base are adds; items in base + ours-or-theirs but not both are
+/// deletes. The result is the union minus deletions.
 fn merge_array_union(
     base: Option<&Value>,
     ours: Option<&Value>,
@@ -301,10 +355,6 @@ fn merge_array_union(
     let o = as_string_set(ours);
     let t = as_string_set(theirs);
 
-    // Items present in both ours and theirs — keep.
-    // Items present in only one side: keep iff also in base (no
-    // explicit add) AND the other side did not delete them, OR they
-    // were added by exactly that side.
     let mut keep: BTreeSet<String> = BTreeSet::new();
     let union: BTreeSet<&String> = o.union(&t).collect();
     for item in union {
@@ -314,16 +364,11 @@ fn merge_array_union(
         let deleted_by_ours = in_base && !in_ours;
         let deleted_by_theirs = in_base && !in_theirs;
         if deleted_by_ours || deleted_by_theirs {
-            // explicit delete — skip
             continue;
         }
         keep.insert(item.clone());
     }
-    if keep.is_empty() && b.is_empty() && o.is_empty() && t.is_empty() {
-        return None;
-    }
     if keep.is_empty() {
-        // Field was explicitly cleared on both sides — drop the key.
         return None;
     }
     let seq: Vec<Value> = keep.into_iter().map(Value::String).collect();
@@ -340,24 +385,17 @@ fn as_string_set(v: Option<&Value>) -> BTreeSet<String> {
     }
 }
 
-/// Union commits by hash; ours wins on summary conflict. Order is
+/// Union commits by hash; ours wins on summary collision. Order is
 /// first-appearance: ours' commits in their original order, then
-/// theirs' new ones in theirs' order. Base is consulted only for
-/// "is this entry an unchanged inheritance vs. a new addition" — but
-/// because commits are append-only in practice we never need to drop
-/// a base commit.
-fn merge_commits(
-    _base: Option<&Value>,
-    ours: Option<&Value>,
-    theirs: Option<&Value>,
-) -> Option<Value> {
+/// theirs' new ones. Deletions are not honoured — commits are
+/// append-only by current CLI contract (no `--remove-commit`); a
+/// commit removed manually on one branch will reappear from the
+/// other branch's copy. Documented here so callers don't expect
+/// delete-respect semantics symmetric with `merge_array_union`.
+fn merge_commits(ours: Option<&Value>, theirs: Option<&Value>) -> Option<Value> {
     let mut order: Vec<String> = Vec::new();
     let mut by_hash: BTreeMap<String, Mapping> = BTreeMap::new();
 
-    // Iterate ours first so first-appearance order respects ours, then
-    // theirs adds new commits at the tail. The `is_ours` flag drives
-    // the "ours wins on summary collision" rule — a same-hash commit
-    // from theirs only overwrites if ours hasn't claimed it yet.
     for (side, is_ours) in [(ours, true), (theirs, false)] {
         let Some(Value::Sequence(seq)) = side else {
             continue;
@@ -393,13 +431,9 @@ fn three_way_merge_body(
     base_body: &str,
     ours_body: &str,
     theirs_body: &str,
-    _base_path: &Path,
-    _ours_path: &Path,
-    _theirs_path: &Path,
 ) -> Result<(String, bool)> {
-    // Write the body slices to temp files so `git merge-file` operates
-    // on body-only inputs — frontmatter differences must not register
-    // as body conflicts (we own frontmatter merging).
+    // Body-only temp files so frontmatter differences don't show up
+    // as body conflicts.
     let dir = tempfile::tempdir().context("cannot create temp dir for body merge")?;
     let bp = dir.path().join("base.body");
     let op = dir.path().join("ours.body");
@@ -409,29 +443,33 @@ fn three_way_merge_body(
     std::fs::write(&tp, theirs_body).context("write theirs body")?;
 
     let out = Command::new("git")
-        .args(["merge-file", "--stdout"])
+        .args(["merge-file", "--stdout", "-L", "ours", "-L", "base", "-L", "theirs"])
         .arg(&op)
         .arg(&bp)
         .arg(&tp)
         .output()
         .with_context(|| "cannot invoke `git merge-file`")?;
-    // git merge-file exits with the number of conflicts (>0) on
-    // conflicting merges, or 0 for clean. <0 (255) means error.
-    let status_code = out.status.code().unwrap_or(-1);
-    if status_code < 0 {
-        return Err(anyhow!(
-            "git merge-file failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
+
+    let code = out.status.code();
     let merged_text = String::from_utf8_lossy(&out.stdout).to_string();
-    let had_conflict = status_code > 0 || merged_text.contains("<<<<<<<");
-    Ok((merged_text, had_conflict))
+    match code {
+        Some(0) => Ok((merged_text, false)),
+        // git merge-file uses 1..=127 for "n conflicts". Anything else
+        // (including signal-killed -1) is a real failure.
+        Some(n) if (1..=127).contains(&n) => Ok((merged_text, true)),
+        Some(other) => Err(anyhow!(
+            "git merge-file failed with status {other}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        None => Err(anyhow!(
+            "git merge-file terminated by signal: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
 }
 
-fn stitch(fm: &Mapping, body: &str) -> String {
-    // Reuse write::serialize_item for the standard frontmatter framing.
-    let item = crate::write::ItemFile {
+fn stitch_clean(fm: &Mapping, body: &str) -> Result<String> {
+    let item = ItemFile {
         frontmatter: fm.clone(),
         body: if body.starts_with('\n') {
             body.to_string()
@@ -439,34 +477,149 @@ fn stitch(fm: &Mapping, body: &str) -> String {
             format!("\n{body}")
         },
     };
-    crate::write::serialize_item(&item).unwrap_or_else(|_| String::new())
+    write::serialize_item(&item)
+}
+
+/// Stitch a frontmatter that already contains `<<<<<<<` markers (raw
+/// text, no leading/trailing `---`) plus the body. Output is invalid
+/// YAML by design — that's how we make sure no parser quietly accepts
+/// a "merged" file.
+fn stitch_conflicted(fm_text: &str, body: &str) -> String {
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str(fm_text);
+    if !fm_text.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("---\n");
+    if body.starts_with('\n') {
+        out.push_str(body);
+    } else {
+        out.push('\n');
+        out.push_str(body);
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Render the conflicted-frontmatter form: clean fields first, then a
+/// real `<<<<<<<` / `=======` / `>>>>>>>` block listing the
+/// conflicting fields on each side. The `<<<<<<<` form is intentional:
+/// invalid YAML is exactly the signal we want — every parser stops,
+/// every IDE merge editor renders the conflict, and `git mergetool`
+/// works as usual. C4 fix.
+fn render_conflicted_frontmatter(clean: &Mapping, conflicts: &[FieldConflict]) -> String {
+    let mut out = String::new();
+    if !clean.is_empty() {
+        let yaml = serde_yaml::to_string(clean).unwrap_or_default();
+        out.push_str(&yaml);
+    }
+    out.push_str("<<<<<<< ours\n");
+    for c in conflicts {
+        if let Some(v) = &c.ours {
+            out.push_str(&render_field_line(&c.key, v));
+        }
+    }
+    out.push_str("=======\n");
+    for c in conflicts {
+        if let Some(v) = &c.theirs {
+            out.push_str(&render_field_line(&c.key, v));
+        }
+    }
+    out.push_str(">>>>>>> theirs\n");
+    out
+}
+
+fn render_field_line(key: &str, val: &Value) -> String {
+    let mut single = Mapping::new();
+    single.insert(Value::String(key.to_string()), val.clone());
+    // serde_yaml emits e.g. `status: in-progress\n`. Strip leading
+    // `---` in case to_string ever adds it (it doesn't for Mapping,
+    // but guard anyway).
+    serde_yaml::to_string(&single).unwrap_or_else(|_| format!("{key}: ?\n"))
+}
+
+fn write_atomic_text(target: &Path, text: &str) -> Result<()> {
+    let dir = target
+        .parent()
+        .ok_or_else(|| anyhow!("target has no parent: {}", target.display()))?;
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("cannot create {}", dir.display()))?;
+    let mut tf = tempfile::Builder::new()
+        .prefix(".issuectl-tmp-")
+        .tempfile_in(dir)
+        .with_context(|| format!("cannot create tempfile in {}", dir.display()))?;
+    use std::io::Write;
+    tf.as_file_mut()
+        .write_all(text.as_bytes())
+        .with_context(|| format!("cannot write {}", target.display()))?;
+    tf.as_file()
+        .sync_all()
+        .with_context(|| format!("cannot fsync {}", target.display()))?;
+    tf.persist(target)
+        .map_err(|e| anyhow!("cannot persist tempfile: {e}"))?;
+    Ok(())
+}
+
+/// Try to find the issuectl repo root above `output` so we can take
+/// the same flock as the rest of the mutation surface. Walks upward
+/// looking for an `issues/` directory or a `.git`. Returns `None` if
+/// no recognisable root exists (e.g. driver invoked from a test fixture
+/// outside any repo).
+fn repo_root_for(output: &Path) -> Option<PathBuf> {
+    let mut cur = output.parent();
+    while let Some(p) = cur {
+        if p.join("issues").is_dir() || p.join(".git").exists() {
+            return Some(p.to_path_buf());
+        }
+        cur = p.parent();
+    }
+    None
 }
 
 /// Print the snippet a downstream user pastes into their repo to
-/// activate the driver. `apply` runs `git config` for them — we never
-/// silently mutate user git config without their explicit opt-in.
-pub fn install(apply: bool) -> Result<()> {
-    let attr_line = "issues/**/*.md merge=issuectl-yaml";
-    let config_cmd = "git config merge.issuectl-yaml.driver \
-        \"issuectl merge-driver --base %O --ours %A --theirs %B --output %A\"";
-    println!("Add to .gitattributes:");
+/// activate the driver. `apply` runs `git config` for them — never
+/// silently mutates `.gitattributes` (committed, shared) or git
+/// global config (cross-repo blast radius).
+pub fn install(root: &Path, apply: bool) -> Result<()> {
+    let attr_line = "issues/**/item.md merge=issuectl-yaml";
+    // Use the absolute path of the running binary so installs survive
+    // PATH changes and cargo-installed binaries that get relocated.
+    // Falls back to bare `issuectl` if current_exe fails (cross-arch
+    // builds, exotic platforms).
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "issuectl".to_string());
+    let driver_value = format!(
+        "{exe} merge-driver --base %O --ours %A --theirs %B --output %A"
+    );
+    let config_cmd = format!(
+        "git config merge.issuectl-yaml.driver \"{driver_value}\""
+    );
+    println!("Add to .gitattributes (commit this):");
     println!("  {attr_line}");
     println!();
     println!("Then run (per-repo, in your local config):");
     println!("  {config_cmd}");
     if apply {
         let status = Command::new("git")
+            .current_dir(root)
             .args([
                 "config",
                 "merge.issuectl-yaml.driver",
-                "issuectl merge-driver --base %O --ours %A --theirs %B --output %A",
+                &driver_value,
             ])
             .status()
             .context("cannot invoke `git config`")?;
         if !status.success() {
             return Err(anyhow!("git config failed with status {status}"));
         }
-        println!("\nApplied: merge.issuectl-yaml.driver is now configured for this repo.");
+        println!(
+            "\nApplied: merge.issuectl-yaml.driver is now configured for {}.",
+            root.display()
+        );
         println!("Note: .gitattributes is NOT modified — add the line yourself and commit.");
     }
     Ok(())
@@ -489,7 +642,7 @@ mod tests {
         std::fs::write(&b, base).unwrap();
         std::fs::write(&o, ours).unwrap();
         std::fs::write(&t, theirs).unwrap();
-        std::fs::write(&out, ours).unwrap(); // pre-seed like git would
+        std::fs::write(&out, ours).unwrap();
         (
             tmp,
             MergeArgs {
@@ -516,13 +669,13 @@ mod tests {
     #[test]
     fn array_one_side_deletes() {
         let base = "---\nlabels: [a, b]\n---\n# T\n";
-        let ours = "---\nlabels: [b]\n---\n# T\n"; // ours removed `a`
-        let theirs = "---\nlabels: [a, b]\n---\n# T\n"; // theirs unchanged
+        let ours = "---\nlabels: [b]\n---\n# T\n";
+        let theirs = "---\nlabels: [a, b]\n---\n# T\n";
         let (_t, args) = write_files(base, ours, theirs);
         let code = run(&args).unwrap();
         assert_eq!(code, 0);
         let merged = std::fs::read_to_string(&args.output).unwrap();
-        assert!(merged.contains("labels: [b]"), "got: {merged}");
+        assert!(merged.contains("labels: [b]"));
         assert!(!merged.contains("labels: [a"));
     }
 
@@ -539,7 +692,24 @@ mod tests {
     }
 
     #[test]
-    fn scalar_both_diverge_conflict() {
+    fn scalar_one_sided_add_from_absent_base_kept() {
+        // C3 regression test: ours adds `assignee: alice`, theirs doesn't
+        // touch the field, base doesn't have it. Must NOT conflict.
+        let base = "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n";
+        let ours =
+            "---\ntype: bug\nstatus: open\npriority: normal\nassignee: alice\n---\n# T\n";
+        let theirs = base;
+        let (_t, args) = write_files(base, ours, theirs);
+        let code = run(&args).unwrap();
+        assert_eq!(code, 0, "one-sided add must not conflict");
+        let merged = std::fs::read_to_string(&args.output).unwrap();
+        assert!(merged.contains("assignee: alice"), "got: {merged}");
+    }
+
+    #[test]
+    fn scalar_both_diverge_emits_real_conflict_markers() {
+        // C4 regression test: diverging scalars must produce real
+        // `<<<<<<<` markers, not a parseable __conflict_*__ key.
         let base = "---\nstatus: open\npriority: normal\ntype: bug\n---\n# T\n";
         let ours = "---\nstatus: in-progress\npriority: normal\ntype: bug\n---\n# T\n";
         let theirs = "---\nstatus: testing\npriority: normal\ntype: bug\n---\n# T\n";
@@ -547,7 +717,17 @@ mod tests {
         let code = run(&args).unwrap();
         assert_eq!(code, 1, "diverged scalar must produce conflict");
         let merged = std::fs::read_to_string(&args.output).unwrap();
-        assert!(merged.contains("__conflict_status__"), "got: {merged}");
+        assert!(merged.contains("<<<<<<< ours"), "missing markers: {merged}");
+        assert!(merged.contains("======="), "missing markers: {merged}");
+        assert!(merged.contains(">>>>>>> theirs"), "missing markers: {merged}");
+        assert!(merged.contains("status: in-progress"));
+        assert!(merged.contains("status: testing"));
+        // Parsing the result as YAML must FAIL — that's the signal.
+        let frontmatter = merged.split("---").nth(1).unwrap_or("");
+        assert!(
+            serde_yaml::from_str::<serde_yaml::Value>(frontmatter).is_err(),
+            "conflicted frontmatter must NOT parse as valid YAML"
+        );
     }
 
     #[test]
@@ -565,30 +745,62 @@ mod tests {
     }
 
     #[test]
-    fn updated_picks_newest_date() {
-        let base = "---\nupdated: 2026-01-01\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
-        let ours = "---\nupdated: 2026-02-01\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
-        let theirs = "---\nupdated: 2026-03-01\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
+    fn updated_picks_newer_of_ours_and_theirs_ignoring_base() {
+        // P7 regression: base must not beat ours/theirs.
+        let base = "---\nupdated: 2026-12-31\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
+        let ours = "---\nupdated: 2026-01-15\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
+        let theirs = "---\nupdated: 2026-02-15\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
         let (_t, args) = write_files(base, ours, theirs);
         let code = run(&args).unwrap();
         assert_eq!(code, 0);
         let merged = std::fs::read_to_string(&args.output).unwrap();
-        assert!(merged.contains("updated: 2026-03-01"));
+        assert!(merged.contains("updated: 2026-02-15"), "got: {merged}");
+        assert!(!merged.contains("updated: 2026-12-31"));
     }
 
     #[test]
-    fn body_conflict_propagates() {
+    fn body_conflict_propagates_with_real_markers() {
         let base = "---\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n\nshared\n";
         let ours = "---\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n\nours-line\n";
         let theirs = "---\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n\ntheirs-line\n";
         let (_t, args) = write_files(base, ours, theirs);
         let code = run(&args).unwrap();
-        assert_eq!(code, 1, "diverging body must produce conflict");
+        assert_eq!(code, 1);
+        let merged = std::fs::read_to_string(&args.output).unwrap();
+        assert!(merged.contains("<<<<<<< ours"));
+        assert!(merged.contains(">>>>>>> theirs"));
+        // Labels must be `ours` / `theirs`, NOT temp paths.
+        assert!(!merged.contains("/tmp/"));
+        assert!(!merged.contains(".body"));
+    }
+
+    #[test]
+    fn output_overwriting_ours_path_is_safe() {
+        // Mirrors git's actual invocation: --output %A == --ours %A.
+        let base = "---\nlabels: [a]\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
+        let ours = "---\nlabels: [a, b]\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
+        let theirs = "---\nlabels: [a, c]\nstatus: open\ntype: bug\npriority: normal\n---\n# T\n";
+        let tmp = tempfile::tempdir().unwrap();
+        let bp = tmp.path().join("base");
+        let op = tmp.path().join("ours");
+        let tp = tmp.path().join("theirs");
+        std::fs::write(&bp, base).unwrap();
+        std::fs::write(&op, ours).unwrap();
+        std::fs::write(&tp, theirs).unwrap();
+        let args = MergeArgs {
+            base: bp,
+            ours: op.clone(),
+            theirs: tp,
+            output: op,
+        };
+        let code = run(&args).unwrap();
+        assert_eq!(code, 0);
+        let merged = std::fs::read_to_string(&args.output).unwrap();
+        assert!(merged.contains("labels: [a, b, c]"));
     }
 
     #[test]
     fn merge_idempotent_with_fmt() {
-        // After a clean merge, the output should already pass `fmt --check`.
         let base = "---\nstatus: open\ntype: bug\npriority: normal\nlabels: [a]\n---\n\n# T\n";
         let ours = "---\nstatus: open\ntype: bug\npriority: normal\nlabels: [a, b]\n---\n\n# T\n";
         let theirs = "---\nstatus: open\ntype: bug\npriority: normal\nlabels: [a, c]\n---\n\n# T\n";

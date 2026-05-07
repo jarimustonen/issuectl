@@ -8,4 +8,4 @@
 # `git config`, git falls back to the default text-merge driver — so
 # clones that haven't installed it still merge correctly, just without
 # the array-union benefits.
-issues/**/*.md merge=issuectl-yaml
+issues/**/item.md merge=issuectl-yaml

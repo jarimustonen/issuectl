@@ -2,6 +2,7 @@ mod canonical;
 mod docs;
 mod doctor;
 mod fmt;
+mod item_text;
 mod merge_driver;
 mod models;
 mod mutate;
@@ -631,7 +632,10 @@ fn main() -> Result<()> {
             })?;
             std::process::exit(code);
         }
-        Command::InstallMergeDriver { apply } => merge_driver::install(apply),
+        Command::InstallMergeDriver { apply } => {
+            let root = find_root();
+            merge_driver::install(&root, apply)
+        }
     }
 }
 
@@ -653,13 +657,20 @@ fn cmd_fmt(json: bool, slugs: Vec<String>, check: bool, diff: bool) -> Result<()
         let entries: Vec<_> = results
             .iter()
             .map(|r| {
-                serde_json::json!({
+                let mut o = serde_json::json!({
                     "path": r.path.to_string_lossy(),
                     "status": match r.status {
                         fmt::FormatStatus::Unchanged => "unchanged",
                         fmt::FormatStatus::Changed => "changed",
                     },
-                })
+                });
+                // Include the diff when --diff requested so JSON
+                // consumers don't lose what the human pretty-printer
+                // would have shown (M6).
+                if let (Some(d), serde_json::Value::Object(map)) = (&r.diff, &mut o) {
+                    map.insert("diff".into(), serde_json::Value::String(d.clone()));
+                }
+                o
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&entries)?);

@@ -301,7 +301,7 @@ To enable it for a repo:
 
 ```sh
 # Add to .gitattributes (commit this):
-echo 'issues/**/*.md merge=issuectl-yaml' >> .gitattributes
+echo 'issues/**/item.md merge=issuectl-yaml' >> .gitattributes
 
 # Configure the driver locally (per-clone, not committed):
 git config merge.issuectl-yaml.driver \
