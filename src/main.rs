@@ -1,5 +1,6 @@
 mod body_sections;
 mod canonical;
+mod context;
 mod docs;
 mod doctor;
 mod fmt;
@@ -500,6 +501,39 @@ enum Command {
         output: PathBuf,
     },
 
+    /// Render an agent context bundle for an issue (issue + parent epic +
+    /// related/blocking refs + body sections + commits + schema rules).
+    /// Read-only — never mutates `issues/`. Output is byte-deterministic
+    /// for caching by downstream agents.
+    Context {
+        /// Issue slug
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+
+        /// Write the bundle into `.issuectl/cache/agent/<slug>/` (gitignored)
+        /// instead of (or in addition to) printing it.
+        #[arg(long)]
+        write: bool,
+    },
+
+    /// Render a repo-local prompt template against an issue's context
+    /// bundle. Templates live at `.issuectl/prompts/<template>.md` and use
+    /// `{{key}}` substitution; unknown keys are left intact.
+    Prompt {
+        /// Template name (e.g. `implement` → `.issuectl/prompts/implement.md`).
+        #[arg(value_parser = parse_non_empty)]
+        template: String,
+
+        /// Issue slug
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+
+        /// Write the rendered prompt into
+        /// `.issuectl/cache/agent/<slug>/prompts/<template>.md`.
+        #[arg(long)]
+        write: bool,
+    },
+
     /// Print the `.gitattributes` and `git config` snippets to wire up
     /// the issuectl-yaml merge driver. Pass `--apply` to also run
     /// `git config` for this repo (does not modify `.gitattributes`).
@@ -710,6 +744,12 @@ fn main() -> Result<()> {
             })?;
             std::process::exit(code);
         }
+        Command::Context { slug, write } => cmd_context(json_output, &slug, write),
+        Command::Prompt {
+            template,
+            slug,
+            write,
+        } => cmd_prompt(json_output, &template, &slug, write),
         Command::InstallMergeDriver { apply } => {
             let root = find_root();
             merge_driver::install(&root, apply)
@@ -774,6 +814,72 @@ fn cmd_fmt(json: bool, slugs: Vec<String>, check: bool, diff: bool) -> Result<()
 
     if check && any_changed {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn cmd_context(json: bool, slug: &str, write: bool) -> Result<()> {
+    let root = find_root();
+    let bundle = context::build(&root, slug)?;
+    let (filename, content) = if json {
+        ("context.json", context::render_json(&bundle)?)
+    } else {
+        ("context.md", context::render_markdown(&bundle))
+    };
+    if write {
+        let path = context::write_artifact(&root, slug, filename, &content)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "slug": slug,
+                }))?
+            );
+        } else {
+            println!("wrote {}", path.display());
+        }
+    } else {
+        print!("{content}");
+    }
+    Ok(())
+}
+
+fn cmd_prompt(json: bool, template: &str, slug: &str, write: bool) -> Result<()> {
+    let root = find_root();
+    let bundle = context::build(&root, slug)?;
+    let tpl = context::load_template(&root, template)?;
+    let rendered = context::render_prompt(&tpl, &bundle);
+    if write {
+        let filename = if template.ends_with(".md") {
+            format!("prompts/{template}")
+        } else {
+            format!("prompts/{template}.md")
+        };
+        let path = context::write_artifact(&root, slug, &filename, &rendered)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "slug": slug,
+                    "template": template,
+                }))?
+            );
+        } else {
+            println!("wrote {}", path.display());
+        }
+    } else if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "slug": slug,
+                "template": template,
+                "rendered": rendered,
+            }))?
+        );
+    } else {
+        print!("{rendered}");
     }
     Ok(())
 }

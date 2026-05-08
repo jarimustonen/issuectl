@@ -388,6 +388,26 @@ pub fn parse_section(body: &str, section: &str) -> Vec<Block> {
     out
 }
 
+/// Extract the raw text between `## <section>` and the next H2 (or EOF),
+/// fence-aware. Returns `None` if the section is absent. Leading and
+/// trailing blank lines are trimmed; interior text is preserved verbatim
+/// so list bullets, fenced code blocks, etc. round-trip unchanged.
+///
+/// Used by `issuectl context` to lift sections like `Acceptance Criteria`
+/// or `Quick Test` out of an issue body without re-parsing markdown.
+pub fn extract_section_text(body: &str, section: &str) -> Option<String> {
+    let lines: Vec<&str> = body.split('\n').collect();
+    let start = scan_outside_fences(&lines, |_, l| is_h2_named(l, section))
+        .into_iter()
+        .next()?;
+    let after = &lines[start + 1..];
+    let next_offset = scan_outside_fences(after, |_, l| is_any_h2(l))
+        .into_iter()
+        .next()
+        .unwrap_or(after.len());
+    Some(trim_blank_borders(&after[..next_offset]))
+}
+
 #[allow(dead_code)]
 fn parse_block_heading(line: &str) -> Option<(String, String)> {
     let rest = line.strip_prefix("### ")?.trim_end();
@@ -400,7 +420,6 @@ fn parse_block_heading(line: &str) -> Option<(String, String)> {
     Some((ts.trim().to_string(), author.to_string()))
 }
 
-#[allow(dead_code)]
 fn trim_blank_borders(lines: &[&str]) -> String {
     let first = lines.iter().position(|l| !l.trim().is_empty());
     let last = lines.iter().rposition(|l| !l.trim().is_empty());

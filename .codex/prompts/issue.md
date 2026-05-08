@@ -249,7 +249,7 @@ The CLI:
 - Returns the slug and path in `--json` (parse `.slug`)
 - Optionally accepts `--slug <kebab>` to override the auto-generated value
 
-Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slug>"` (repeatable).
+Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slug>"` (repeatable), `--field key=value` (repeatable; for custom frontmatter fields declared in `issues/.schema.yaml`, e.g. `--field team=payments`).
 
 #### 3. Flesh out the body
 

@@ -4,5 +4,9 @@ Cargo.lock.bak
 /history
 .claude/scheduled_tasks.lock
 
-# Per-process advisory lock for mutate.rs (recreated on every serve/CLI run)
-.issuectl/
+# Per-process advisory lock for mutate.rs (recreated on every serve/CLI run).
+# `issuectl context --write` / `issuectl prompt --write` cache artefacts
+# also live here. Templates under `.issuectl/prompts/` are committed.
+.issuectl/lock
+.issuectl/write.lock
+.issuectl/cache/
