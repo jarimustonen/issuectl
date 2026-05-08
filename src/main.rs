@@ -160,6 +160,27 @@ fn parse_custom_field(s: &str) -> std::result::Result<(String, String), String> 
     Ok((key.to_string(), value.to_string()))
 }
 
+/// Clap value parser for `--clear-field <key>`. Same shape and reserved
+/// rules as `parse_custom_field`, but consumes a bare key (no `=value`).
+fn parse_custom_field_key(s: &str) -> std::result::Result<String, String> {
+    let key = s.trim();
+    if key.is_empty() {
+        return Err(format!("expected a non-empty field key, got {s:?}"));
+    }
+    if !key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "field key {key:?} must be alphanumeric / underscore / hyphen"
+        ));
+    }
+    if let Some((_, hint)) = RESERVED_CUSTOM_FIELDS.iter().find(|(k, _)| *k == key) {
+        return Err(format!("field {key:?} is built-in: {hint}"));
+    }
+    Ok(key.to_string())
+}
+
 /// Clap value parser for any slug-shaped CLI argument. Rejects anything
 /// that wouldn't pass [`slug::is_valid`], which closes the path-traversal
 /// door for `Show/Update/Close <slug>` and keeps `--epic` / `--related`
@@ -349,6 +370,19 @@ enum Command {
         /// Record a commit, format HASH:summary (repeatable)
         #[arg(long = "add-commit", value_parser = parse_non_empty)]
         add_commits: Vec<String>,
+
+        /// Set a custom frontmatter field (repeatable). Format `key=value`.
+        /// Mirrors `new --field`. Built-in fields use their dedicated
+        /// flags (`--status`, `--priority`, ...).
+        #[arg(long = "field", value_parser = parse_custom_field)]
+        custom_fields: Vec<(String, String)>,
+
+        /// Remove a custom frontmatter field (repeatable). Built-in fields
+        /// have dedicated removal mechanics (e.g. `--no-epic`); use this
+        /// only for keys the schema or client added beyond the built-in
+        /// set.
+        #[arg(long = "clear-field", value_parser = parse_custom_field_key)]
+        clear_fields: Vec<String>,
 
         /// Optimistic-concurrency token from a prior `show`/`list --json`.
         /// Required when `--json` is in effect (the `--json` channel is the
@@ -666,6 +700,8 @@ fn main() -> Result<()> {
             add_related,
             remove_related,
             add_commits,
+            custom_fields,
+            clear_fields,
             expected_version,
         } => cmd_update(
             json_output,
@@ -682,6 +718,8 @@ fn main() -> Result<()> {
                 add_related,
                 remove_related,
                 add_commits,
+                custom_fields,
+                clear_fields,
                 expected_version,
             },
         ),
@@ -1346,6 +1384,8 @@ pub(crate) struct UpdateArgs {
     pub add_related: Vec<String>,
     pub remove_related: Vec<String>,
     pub add_commits: Vec<String>,
+    pub custom_fields: Vec<(String, String)>,
+    pub clear_fields: Vec<String>,
     pub expected_version: Option<String>,
 }
 
@@ -1422,6 +1462,33 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
             Ok::<_, anyhow::Error>(mutate::CommitSpec { hash, summary })
         })
         .collect::<Result<_, _>>()?;
+
+    // `--field foo=a --field foo=b` collapses silently in a BTreeMap; reject
+    // it explicitly so the user gets a precise error rather than the
+    // last-wins surprise. `cmd_new` enforces the same invariant.
+    let mut seen_fields = std::collections::HashSet::new();
+    for (k, _) in &args.custom_fields {
+        if !seen_fields.insert(k.clone()) {
+            bail!("--field {k:?} given more than once");
+        }
+    }
+    let mut seen_clears = std::collections::HashSet::new();
+    for k in &args.clear_fields {
+        if !seen_clears.insert(k.clone()) {
+            bail!("--clear-field {k:?} given more than once");
+        }
+    }
+    if let Some(overlap) = seen_fields.intersection(&seen_clears).next() {
+        bail!(
+            "field {overlap:?} appears in both --field and --clear-field"
+        );
+    }
+    for (k, v) in args.custom_fields {
+        req.custom_fields.insert(k, mutate::Patch::Set(v));
+    }
+    for k in args.clear_fields {
+        req.custom_fields.insert(k, mutate::Patch::Clear);
+    }
 
     let outcome =
         mutate::update_issue(root, &args.slug, req, None).map_err(|e| anyhow::anyhow!("{e}"))?;

@@ -100,6 +100,29 @@ pub struct UpdateIssueRequest {
     pub remove_related: Vec<String>,
     #[serde(default)]
     pub add_commits: Vec<CommitSpec>,
+    /// Per-key custom-frontmatter PATCH. Mirrors the top-level `Patch`
+    /// ternary: omitted (no entry) leaves the key alone; `null` removes
+    /// the key; a string sets it. Built-in keys (`status`, `priority`,
+    /// dates, etc.) are reserved here — use the dedicated request slots.
+    #[serde(default)]
+    pub custom_fields: std::collections::BTreeMap<String, Patch<String>>,
+}
+
+/// Keys that have dedicated handling on `UpdateIssueRequest` (or are
+/// auto-managed) and therefore must not appear in `custom_fields`. Sent
+/// via the dedicated slot, they would conflict with `status`/`priority`
+/// validation, label-list semantics, or the auto-stamped `updated:` /
+/// `closed:` machinery.
+const RESERVED_UPDATE_CUSTOM_FIELD_KEYS: &[&str] = &[
+    "type", "title", "slug", "reporter", "assignee", "owner", "priority", "epic", "status",
+    "labels", "related", "commits", "created", "updated", "closed",
+];
+
+fn is_valid_custom_field_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -125,6 +148,7 @@ impl UpdateIssueRequest {
             && self.add_related.is_empty()
             && self.remove_related.is_empty()
             && self.add_commits.is_empty()
+            && self.custom_fields.is_empty()
     }
 
     /// Reject empty-string Sets, type-set vs enum mismatches, and
@@ -183,6 +207,26 @@ impl UpdateIssueRequest {
             return Err(MutateError::ConflictingIntent(format!(
                 "related ref {overlap:?} appears in both add_related and remove_related"
             )));
+        }
+
+        for (key, patch) in &self.custom_fields {
+            if !is_valid_custom_field_key(key) {
+                return Err(MutateError::Validation(format!(
+                    "custom field key {key:?} must be alphanumeric / underscore / hyphen"
+                )));
+            }
+            if RESERVED_UPDATE_CUSTOM_FIELD_KEYS.iter().any(|k| *k == key) {
+                return Err(MutateError::Validation(format!(
+                    "custom field {key:?} is built-in: use the dedicated request slot"
+                )));
+            }
+            if let Patch::Set(v) = patch {
+                if v.is_empty() {
+                    return Err(MutateError::Validation(format!(
+                        "custom field {key:?}: empty-string Set is not allowed (use null to clear)"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -540,6 +584,18 @@ fn update_issue_under_lock(
         }
         write::add_commit(&mut item.frontmatter, &spec.hash, &spec.summary)
             .map_err(MutateError::Io)?;
+    }
+
+    // Custom-field patches. Reserved-key / shape checks already ran in
+    // `validate()`; here we just translate the ternary onto the YAML
+    // mapping. `Unspecified` shouldn't appear (BTreeMap entries imply
+    // the caller mentioned the key) but is handled defensively.
+    for (key, patch) in &req.custom_fields {
+        match patch {
+            Patch::Unspecified => {}
+            Patch::Clear => write::remove_key(&mut item.frontmatter, key),
+            Patch::Set(v) => write::set_string(&mut item.frontmatter, key, v),
+        }
     }
 
     write::set_string(&mut item.frontmatter, "updated", &write::today());
@@ -1696,6 +1752,159 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(req.validate(), Err(MutateError::Validation(_))));
+    }
+
+    #[test]
+    fn update_sets_custom_field_via_patch() {
+        let tmp = fresh_repo();
+        let _v0 = seed_issue(tmp.path(), "open", "cf-set", "open");
+        let mut req = UpdateIssueRequest::default();
+        req.custom_fields
+            .insert("triage".into(), Patch::Set("P1".into()));
+        let out = update_issue(tmp.path(), "cf-set", req, None).unwrap();
+        let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("triage: P1"), "got: {on_disk}");
+        assert_eq!(
+            out.issue.extra.get("triage"),
+            Some(&serde_json::Value::String("P1".into()))
+        );
+    }
+
+    #[test]
+    fn update_clears_custom_field_via_null_patch() {
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/cf-clear");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\n\
+             priority: normal\nowner_team: payments\n---\n\n# T\n",
+        )
+        .unwrap();
+        let mut req = UpdateIssueRequest::default();
+        req.custom_fields.insert("owner_team".into(), Patch::Clear);
+        let out = update_issue(tmp.path(), "cf-clear", req, None).unwrap();
+        let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
+        assert!(
+            !on_disk.contains("owner_team:"),
+            "owner_team should be removed; got: {on_disk}"
+        );
+    }
+
+    #[test]
+    fn update_custom_field_set_and_clear_atomic() {
+        // JSON `{"custom_fields": {"triage": "P1", "owner_team": null}}`
+        // sets one key and removes another in a single PATCH.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/cf-mixed");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\n\
+             priority: normal\nowner_team: payments\n---\n\n# T\n",
+        )
+        .unwrap();
+        let req: UpdateIssueRequest = serde_json::from_str(
+            r#"{"custom_fields": {"triage": "P1", "owner_team": null}}"#,
+        )
+        .unwrap();
+        let out = update_issue(tmp.path(), "cf-mixed", req, None).unwrap();
+        let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("triage: P1"));
+        assert!(!on_disk.contains("owner_team:"));
+    }
+
+    #[test]
+    fn update_custom_field_rejects_reserved_key() {
+        let mut req = UpdateIssueRequest::default();
+        req.custom_fields
+            .insert("status".into(), Patch::Set("done".into()));
+        let err = req.validate().unwrap_err();
+        match err {
+            MutateError::Validation(msg) => assert!(msg.contains("built-in"), "got: {msg}"),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_custom_field_rejects_invalid_key_shape() {
+        let mut req = UpdateIssueRequest::default();
+        req.custom_fields
+            .insert("bad key!".into(), Patch::Set("x".into()));
+        assert!(matches!(req.validate(), Err(MutateError::Validation(_))));
+    }
+
+    #[test]
+    fn update_custom_field_rejects_empty_string_set() {
+        let mut req = UpdateIssueRequest::default();
+        req.custom_fields
+            .insert("triage".into(), Patch::Set("".into()));
+        let err = req.validate().unwrap_err();
+        assert!(
+            matches!(err, MutateError::Validation(ref m) if m.contains("empty-string")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn update_custom_field_violating_schema_is_rejected() {
+        // Schema declares `triage` required + enum; the PATCH supplies a
+        // value outside the enum. Post-mutation schema validation must
+        // 422 it (no on-disk change).
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  triage:\n    enum: [P0, P1, P2]\n",
+        )
+        .unwrap();
+        let _v0 = seed_issue(tmp.path(), "open", "cf-schema", "open");
+        let dir = tmp.path().join("issues/cf-schema");
+        let before = fs::read_to_string(dir.join("item.md")).unwrap();
+        let mut req = UpdateIssueRequest::default();
+        req.custom_fields
+            .insert("triage".into(), Patch::Set("P9".into()));
+        let err = update_issue(tmp.path(), "cf-schema", req, None).unwrap_err();
+        assert!(
+            matches!(err, MutateError::SchemaViolation(_)),
+            "got: {err:?}"
+        );
+        let after = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert_eq!(before, after, "schema-rejected PATCH must not write");
+    }
+
+    #[test]
+    fn update_custom_field_bumps_canonical_version() {
+        let tmp = fresh_repo();
+        let v0 = seed_issue(tmp.path(), "open", "cf-bump", "open");
+        let mut req = UpdateIssueRequest::default();
+        req.custom_fields
+            .insert("triage".into(), Patch::Set("P1".into()));
+        let out = update_issue(tmp.path(), "cf-bump", req, None).unwrap();
+        assert_ne!(v0, out.version, "custom-field PATCH must change the hash");
+    }
+
+    #[test]
+    fn update_custom_field_with_stale_version_returns_409() {
+        let tmp = fresh_repo();
+        let _v0 = seed_issue(tmp.path(), "open", "cf-stale", "open");
+        let mut req = UpdateIssueRequest {
+            expected_version: Some("sha256:deadbeef".into()),
+            ..Default::default()
+        };
+        req.custom_fields
+            .insert("triage".into(), Patch::Set("P1".into()));
+        let err = update_issue(tmp.path(), "cf-stale", req, None).unwrap_err();
+        assert!(matches!(err, MutateError::VersionMismatch { .. }));
+    }
+
+    #[test]
+    fn deserialize_custom_fields_supports_set_clear() {
+        let r: UpdateIssueRequest = serde_json::from_str(
+            r#"{"custom_fields": {"a": "x", "b": null}}"#,
+        )
+        .unwrap();
+        assert!(matches!(r.custom_fields.get("a"), Some(Patch::Set(s)) if s == "x"));
+        assert!(matches!(r.custom_fields.get("b"), Some(Patch::Clear)));
     }
 
     #[test]
