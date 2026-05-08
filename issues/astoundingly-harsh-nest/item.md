@@ -3,9 +3,15 @@ created: 2026-05-08
 updated: 2026-05-08
 type: chore
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
+commits:
+- hash: 52cd755
+  summary: type do_new_locked errors instead of string-matching
+- hash: 397890b
+  summary: apply review fixes from llm-review round 1
+closed: 2026-05-08
 ---
 
 # do_new_locked: return typed error instead of stringly-typed anyhow
