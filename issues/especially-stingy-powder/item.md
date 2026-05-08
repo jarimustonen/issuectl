@@ -6,6 +6,11 @@ status: in-progress
 priority: normal
 epic: exorbitantly-ill-apples
 labels: [release-v0.5.0]
+commits:
+- hash: 6390ced
+  summary: 'test(mutate): regression test for new_issue publish-before-flock-release'
+- hash: 9c9d026
+  summary: 'test(mutate): apply review fixes (WouldBlock match, 4 mutation paths, error-path)'
 ---
 
 # mutate::new_issue publishes after releasing flock
