@@ -15,7 +15,7 @@ commits:
   summary: 'body-sections: fence-aware parsing, validate inputs, drop Notes alias'
 - hash: 3526f73
   summary: create spin-off virtually-dull-regret
-related: ['@virtually-dull-regret']
+related: ['@virtually-dull-regret', '@totally-placid-push']
 ---
 
 # Standardized markdown sections: comments, decisions, agent runs, reopen notes
