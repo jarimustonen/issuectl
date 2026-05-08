@@ -2,7 +2,7 @@
 created: 2026-05-06
 updated: 2026-05-08
 type: feature
-status: in-progress
+status: done
 priority: normal
 reporter: jari
 assignee: jari
@@ -20,6 +20,7 @@ commits:
 - hash: 90a66e4
   summary: spin-off totally-placid-push for parse_section diagnostics
 related: ['@virtually-dull-regret', '@totally-placid-push']
+closed: 2026-05-08
 ---
 
 # Standardized markdown sections: comments, decisions, agent runs, reopen notes

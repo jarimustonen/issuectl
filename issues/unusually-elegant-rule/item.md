@@ -2,7 +2,7 @@
 created: 2026-05-06
 updated: 2026-05-08
 type: feature
-status: in-progress
+status: done
 priority: high
 reporter: jari
 assignee: jari
@@ -15,6 +15,7 @@ commits:
   summary: apply review fixes (backwards-compat, semantics, perf, DoS caps)
 - hash: 379005f
   summary: apply round-2 review fixes (panic guard, quoted escape, date prefix)
+closed: 2026-05-08
 ---
 
 # Shared query engine (CLI + web + automation) with --json and full-text search

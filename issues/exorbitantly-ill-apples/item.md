@@ -78,17 +78,20 @@ to keep the epic in sync with the worktree:
   driver. Landed `230974d` + review fixes `49e7c0f`.
 - [ ] @vastly-lyrical-police — Declarative status transition rules +
   per-type body section linting. Small extension of doctor.
-- [ ] @overly-dreary-yak — Standardized markdown body sections (comments,
-  decisions, agent runs, reopen notes). Defines the conventions the
-  mutation CLI writes against.
+- [x] @overly-dreary-yak — Standardized markdown body sections (comments,
+  decisions, agent runs, reopen notes). Landed `39cabc5` + review fixes
+  (`6f4485f`, `122bec7`, `010bc3c`, `73c1a66`). Spin-offs:
+  @virtually-dull-regret (note --stdin), @totally-placid-push
+  (parse_section diagnostics).
 
 ### M3 — discoverability & agent integration
-- [ ] @unusually-elegant-rule — Shared query engine (CLI + web + automation)
-  with `--json` and full-text search.
+- [x] @unusually-elegant-rule — Shared query engine (CLI + web + automation)
+  with `--json` and full-text search. Landed `5af9f94` + review fixes
+  (`a8a643c`, `5ae510b`).
 - [ ] @profoundly-domineering-wound — Agent context bundle
   (`issuectl context <slug>`) + repo-local prompt templates.
-- [ ] @singularly-hulking-crown — Issues schema file (required + optional
-  fields). Powers doctor validation and schema-aware tooling.
+- [x] @singularly-hulking-crown — Issues schema file (required + optional
+  fields). Landed `62bcf00`.
 - [ ] @markedly-terrific-angle — `.issuectl/AGENTS.md` agent policy file.
   Agents read it automatically; small change, huge leverage now that
   M2 introduces a new CLI surface.
