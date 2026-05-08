@@ -437,11 +437,7 @@ client                              server
   |                                                  |
   |                 1. validate CSRF + Host          |
   |                 2. validate action_id ∈ manifest |
-  |                 3. RECHECK manifest+prompt       |
-  |                    digest against trust file     |  (review F4/F5)
-  |                    → 409 manifest_changed if     |
-  |                    re-trust required             |
-  |                 4. flock(queue.lock)             |
+  |                 3. flock(queue.lock)             |
   |                    a. check Idempotency-Key      |
   |                       → return existing run if   |
   |                       already accepted           |
@@ -450,21 +446,21 @@ client                              server
   |                       → 409 already_running      |
   |                    c. write preparing/<id>.json  |
   |                       (slug, action, idem, etc.) |
-  |                 5. release(queue.lock)           |
+  |                 4. release(queue.lock)           |
   |                                                  |
-  |                 6. flock(write.lock)             |
+  |                 5. flock(write.lock)             |
   |                    a. locate_issue(slug)         |
   |                    b. read item.md, hash         |
   |                    c. compare expected_version   |
   |                       → 409 version_mismatch +   |
   |                       transition preparing→failed|
   |                    d. SNAPSHOT issue (in mem)    |
-  |                 7. release(write.lock)           |
+  |                 6. release(write.lock)           |
   |                                                  |
-  |                 8. RENDER context bundle from    |  (outside flock per F2)
+  |                 7. RENDER context bundle from    |  (outside flock per F2)
   |                    snapshot to artifacts/.tmp-<id>|
   |                                                  |
-  |                 9. flock(queue.lock)             |
+  |                 8. flock(queue.lock)             |
   |                    a. atomic rename              |
   |                       artifacts/.tmp-<id>        |
   |                       → artifacts/<id>           |
@@ -472,9 +468,9 @@ client                              server
   |                       preparing/<id>.json        |
   |                       → queued/<id>.json         |
   |                       (or → failed/ on error)    |
-  |                10. release(queue.lock)           |
+  |                 9. release(queue.lock)           |
   |                                                  |
-  |                11. publish RunUpserted on        |
+  |                10. publish RunUpserted on        |
   |                    multiplexed /events channel   |  (F12 resolution)
   |  202 Accepted { run_id, status: "queued" }      |
   |  <------------------------------------------     |
@@ -494,9 +490,10 @@ Notes on the revised sequence:
   multi-file walks. (Review F2.)
 - **The queue lock is acquired twice** but always uncontended with
   the issue flock and never held across `.await` or render work.
-- **Manifest digest is re-checked** at step 3 against the
-  trust-file digest *plus* the digest of any prompt files the
-  manifest references. (Review F4/F5; see §6.)
+- **No manifest-digest re-check.** This design ships without a
+  repo-trust hashing layer; the manifest is treated as authored
+  code on the same footing as `Makefile`, npm scripts, or git
+  hooks. (See §6 for the explicit trust statement.)
 - **Idempotency** is enforced at the queue lock: a duplicated
   POST with the same key returns the original run id rather than
   creating a second run. (Review F10.)
@@ -634,64 +631,102 @@ the future multi-machine story and we don't speculatively reap.
 
 ## 6. Trust, security, blast radius
 
-Three distinct trust boundaries, each enforced separately:
+### 6.1 The repo-trust decision: no gating
 
-1. **Repo trust.** `.issuectl/actions.yaml` is in-repo and therefore
-   carried by `git checkout` and `git pull`. A drive-by clone of a
-   malicious repo followed by `issuectl serve --enable-actions` is
-   an RCE if we auto-trust. **Do not auto-trust, and do not treat
-   trust as set-and-forget** (review F4).
+The design **explicitly does not** include a `issuectl trust`
+content-hash gate. `.issuectl/actions.yaml` and the prompt files
+it references are treated as **authored code** on the same
+footing as `Makefile`, npm scripts, `pre-commit` hooks, or git
+hooks: if you clone a repo and run the tool inside it, the repo's
+checked-in instructions can run code on your machine.
 
-   The trust file
-   (`$XDG_CONFIG_HOME/issuectl/trusted-repos.json`) records, per
-   trusted repo: the canonical repo common-dir path, *the SHA-256
-   digest of `.issuectl/actions.yaml` plus the contents of every
-   prompt file the manifest references, concatenated in a
-   canonical order*, and a `trusted_at` timestamp. (Review F5:
-   prompt-file changes are equally dangerous as argv changes —
-   prompt injection is real.)
+This is a deliberate, named trade-off. The review's F4/F5/F23/F33
+findings flagged that without a content-hash gate, a `git pull`
+that swaps `actions.yaml` underneath an already-running `serve`
+process can silently change what actions execute. That is
+correct, and the project accepts it: the trust prompt's
+ergonomic cost (re-prompt on every legitimate manifest edit,
+trains users to click-through) is judged worse than the silent-
+swap risk it nominally protects against, given the threat model
+below.
 
-   On every `POST /api/actions/<id>/runs`, the server re-hashes
-   the manifest+prompt material and compares against the stored
-   digest. Mismatch → 409 `manifest_changed` with a diff in the
-   response, action UI disables, user must re-trust. The trust
-   prompt shows the resolved `argv` (not just labels) so users
-   review what will actually run, not a friendly description.
+### 6.2 Threat model the design *does* defend against
 
-   Until trusted, the kanban shows actions as visible-but-disabled
-   with a "this repo defines N actions; review and trust to
-   enable" affordance.
+- **Web → server injection** (a malicious browser tab, an npm
+  postinstall hitting loopback, a browser extension): per-process
+  CSRF token, `Host` allowlist matching the actual bound
+  socket, no shell-string interpolation of any web-supplied
+  field. Browser-supplied "extra instructions" land in a *file*,
+  never in argv (review F31).
+- **Network exposure**: loopback default; `--allow-remote-writes`
+  is an opt-in for issue mutations; `--allow-remote-actions` is
+  a *separate* additional opt-in not shipped in v0.6.0.
+- **Filesystem corruption from broken `flock` semantics**:
+  startup-time FS detection refuses to run on NFS / Dropbox /
+  iCloud / SMB without `--unsafe-shared-fs` (review F25).
 
-2. **Web → server trust.** Same as today: per-process CSRF token,
-   `Host` allowlist (loopback aliases only by default). Actions
-   inherit this surface; the new `--enable-actions` flag is an
-   *additional* opt-in on top of `--allow-remote-writes`, not a
-   reuse of it.
+### 6.3 Threat model the design does *not* defend against
 
-3. **Server → runner trust.** When the runner is in-process, this
-   is internal and trivial. When external (future), pairing
-   requires a runner token (`issuectl runner-token create`) and the
-   server gates `/api/runners/*` by it.
+Stated plainly so nobody is surprised:
 
-Other hardening that drops out cleanly. **Stating the actual
-security boundary plainly** (review F6): argv-only and template
-allowlists protect against *web-injected* command strings. They do
-*not* sandbox the action manifest itself. A trusted manifest can
-declare `command: ["sh", "-c", "rm -rf $HOME"]` or
-`["python", "-c", "..."]` and it will run. The trust gate is the
-only thing standing between a cloned repo and arbitrary code
-execution. Argv-only buys you "a malicious browser tab on the
-loopback can't inject metacharacters"; it does *not* buy you "a
-checked-in `actions.yaml` is sandboxed".
+- **Malicious manifests in cloned repos.** Cloning an untrusted
+  repo and running `issuectl serve --enable-actions` is RCE.
+  Same as `make`, same as `npm install`, same as opening the
+  repo in an IDE that auto-runs config files. The user is
+  responsible for reading `actions.yaml` and any referenced
+  prompt files before enabling actions in a given repo. The
+  startup banner (§6.4) makes this concrete.
+- **`git pull` that swaps actions underneath a running `serve`.**
+  The freshly-pulled manifest is in effect on the next click.
+  This is the F4 finding accepted.
+- **Prompt-injection content** in `.issuectl/prompts/*.md`. A
+  malicious prompt can instruct the agent to exfiltrate secrets
+  or modify code outside the issue's scope. We document this as
+  a known risk; the same risk applies to any agent reading any
+  in-repo file.
+
+The argv-only / template-allowlist mechanics do not change this
+trade-off either way. They protect the *web → server* boundary,
+not the *manifest → executor* boundary. The relevant security
+boundary is therefore explicit: **the user vouching for the
+repo by running `issuectl serve --enable-actions` inside it**.
+
+### 6.4 Startup banner (visibility, not gating)
+
+The first time `serve --enable-actions` runs in a given repo (or
+when the resolved manifest content has changed since last run),
+print a one-time banner before binding the listener:
+
+```
+issuectl: action surface enabled for /Users/jari/Sources/foo
+  3 actions defined in .issuectl/actions.yaml:
+    implement       kind: workmux       runs: workmux add …
+    send-to-active  kind: workmux-send  runs: workmux send …
+    context-dump    kind: exec          runs: issuectl context …
+  Loopback only (127.0.0.1:7878).
+```
+
+This is **not** a gate — `serve` proceeds regardless, no
+keystroke is required. It exists so the user can't be unaware of
+what `--enable-actions` activated. Suppress with
+`--quiet-actions-banner` after the first read.
+
+### 6.5 Other hardening that drops out cleanly
 
 - **No `kind: shell`.** Shell-string commands are not a v0.6.0
-  feature. If we ever add them, they live behind
-  `dangerous_shell: true` per-action plus a global
-  `--enable-shell-actions` flag, with a startup warning.
-- **Argv only.** Action commands are `["argv", "as", "list"]`,
-  never a single string.
+  feature. Note: this is a *manifest schema* restriction, not a
+  security boundary — a manifest can still declare
+  `command: ["sh", "-c", "..."]` since `sh` is just an executable.
+  The `kind: shell` ban prevents one common foot-gun (forgetting
+  that `command` is argv, not a string), nothing more.
+- **Argv only on the wire.** Action commands are `["argv", "as",
+  "list"]`, never a single string. This is the protection the
+  design *does* enforce: web-supplied fields cannot become shell
+  metacharacters.
 - **Template allowlist.** Closed set of variables; whole-argument
-  substitution only.
+  substitution only. Free-text from the browser
+  (`extra_instructions`) never enters argv — only a file path
+  does.
 - **Slug sanitisation for paths/branches.** `slug::is_valid`
   (`src/slug/mod.rs:99`) already rejects leading/trailing `-` and
   consecutive `--`, so option-injection via `--orphan` is blocked
@@ -823,11 +858,10 @@ that breaks at exactly the wrong time.
    - `issuectl run <action> <slug> [--instructions ...]
      [--expected-version ...] [--json]`.
    - `issuectl runs list|show|cancel|logs`.
-9. Trust gating: `issuectl trust` records repo + manifest+prompt
-   digest in `$XDG_CONFIG_HOME/issuectl/trusted-repos.json`.
-   Server re-hashes on every action invocation; mismatch → 409
-   `manifest_changed`. Trust prompt shows resolved argv (review
-   F4/F5/F23).
+9. **Startup banner** listing actions defined in
+   `.issuectl/actions.yaml` (and their resolved argv) when
+   `serve --enable-actions` is invoked. Visibility, not a gate.
+   See §6.4.
 10. Stale-run reaper using `host_id` + `started_at`-aware PID
     checks; for `kind: workmux`, reconciles against
     `workmux status --json` (review F29).
@@ -859,7 +893,6 @@ that breaks at exactly the wrong time.
 
 - Parent-terminal injection.
 - Any in-process `sh -c` of strings derived from web requests.
-- Action manifests trusted automatically on first checkout.
 - A second SSE channel just for runs.
 
 ## 10. Trade-offs the design accepts
@@ -895,11 +928,17 @@ that breaks at exactly the wrong time.
 - **No second SSE channel.** Run lifecycle multiplexes onto
   `/events`. (DISCUSS F12 → resolved towards multiplex.)
 - **`actions.yaml` lives in the repo, not in
-  `$XDG_CONFIG_HOME`.** This means trust must be content-hashed
-  and re-validated, which we accept (F4). The alternative
-  (user-config-only actions) was raised in DISCUSS F27 and
-  rejected: shared actions are the whole point. Show resolved
-  argv in the trust prompt; re-prompt on argv changes.
+  `$XDG_CONFIG_HOME`.** Shared, version-controlled actions are
+  the whole point of the feature.
+- **No content-hash trust gate.** `actions.yaml` is treated as
+  authored code (same as Makefile/npm scripts/git hooks). The
+  user is responsible for reading it before running
+  `serve --enable-actions` in a freshly-cloned repo. The startup
+  banner (§6.4) is the visibility primitive; it does not gate
+  execution. Review findings F4/F5/F23/F33 are accepted as
+  out-of-scope risks given this trade-off — the alternative
+  (re-prompt on every legitimate manifest edit) trains users to
+  click-through and was judged worse.
 
 ## 11. Open questions for follow-up review
 
@@ -952,12 +991,10 @@ itself.
    precursor @excessively-beneficial-owner.
 3. **CLI parity: `issuectl run` + `issuectl runs …`** — depends
    on (1).
-4. **Trust gating: `issuectl trust` + manifest+prompt digest +
-   per-request re-validation + UI argv preview** — depends on
-   (1). Review F4/F5 makes this a v0.6.0 must-have, not a
-   follow-up.
-5. **Filesystem detection + `--unsafe-shared-fs`** — small,
+4. **Filesystem detection + `--unsafe-shared-fs`** — small,
    self-contained, depends on (1).
+5. **Startup actions banner + `--quiet-actions-banner`** —
+   small, depends on (1) and the manifest parser.
 6. **Worktree/run GC story** — `issuectl runs gc`, integration
    with `workmux remove --gone`, retention policy. Spin-off F21.
 7. **External `issuectl runner` + capability + pairing** — the
@@ -980,10 +1017,11 @@ closing the precursor with a `Source: <issue>` cross-reference.
   @excessively-beneficial-owner uses it.
 - `history/review-web-control-surface.md` — full review +
   assessment table that drove the revisions in this version of
-  the note. F1, F2, F3, F4, F5, F6, F8, F9, F10, F11, F12, F14,
-  F17, F18, F19, F22, F25, F29, F31, F32 are integrated above;
-  F21 is the named SPIN-OFF; F26 and F28 are now resolved by the
-  `workmux` assumption.
+  the note. F1, F2, F3, F6, F8, F9, F10, F11, F12, F14, F17,
+  F18, F19, F22, F25, F29, F31, F32 are integrated above; F21
+  is the named SPIN-OFF; F26 and F28 are resolved by the
+  `workmux` assumption; **F4, F5, F23, F33 are accepted as
+  out-of-scope risks given the no-trust-gate decision in §6**.
 - `workmux --help` — local agent multiplexer; assumed dependency.
   Subcommands the design relies on: `add`, `send`, `status`,
   `wait`, `capture`, `merge`, `remove`.
