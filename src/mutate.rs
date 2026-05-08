@@ -260,6 +260,15 @@ pub enum MutateError {
     },
     Validation(String),
     ConflictingIntent(String),
+    /// Post-mutation frontmatter violates the repo schema. Mapped to
+    /// 422 — the client can fix it by adjusting the request (e.g.
+    /// supplying `--field team=...`).
+    SchemaViolation(String),
+    /// `.schema.yaml` is malformed or rejected at load time (bad
+    /// version, deny_unknown_fields, unsatisfiable required field).
+    /// Mapped to 5xx — the client cannot fix it from the request; an
+    /// operator must edit the schema file.
+    SchemaConfig(String),
     Io(anyhow::Error),
 }
 
@@ -286,6 +295,8 @@ impl std::fmt::Display for MutateError {
             }
             MutateError::Validation(s) => write!(f, "validation: {s}"),
             MutateError::ConflictingIntent(s) => write!(f, "conflicting intent: {s}"),
+            MutateError::SchemaViolation(s) => write!(f, "schema: {s}"),
+            MutateError::SchemaConfig(s) => write!(f, "schema config: {s}"),
             MutateError::Io(e) => write!(f, "io: {e}"),
         }
     }
@@ -412,11 +423,13 @@ pub fn update_issue(
     }
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
+    crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
 
     // 1) locate, then in-line migrate any legacy path under the flock
     //    so writes always land at the canonical flat path.
     let item_path = locate_and_migrate(root, slug)?;
-    update_issue_under_lock(slug, item_path, req, hub)
+    let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    update_issue_under_lock(slug, item_path, req, hub, &schema)
 }
 
 /// Body of `update_issue` that runs with the flock already held. Used
@@ -428,6 +441,7 @@ fn update_issue_under_lock(
     item_path: PathBuf,
     req: UpdateIssueRequest,
     hub: Option<&Arc<EventHub>>,
+    schema: &crate::schema::Schema,
 ) -> Result<UpdateOutcome, MutateError> {
     let folder = "open"; // placeholder; folder is derived from status post-write
 
@@ -540,6 +554,22 @@ fn update_issue_under_lock(
         item.body = crate::body_sections::canonicalise_body_leading(&with_section);
     }
 
+    // 4b) schema validation against the post-mutation frontmatter. The
+    //     built-in clap parsers already guard known enums; this layer
+    //     enforces user-declared required fields and custom enums
+    //     (e.g. a constrained `labels` enum). Schema is loaded once by
+    //     the caller and threaded in so we don't re-read the file on
+    //     each mutation.
+    let violations = crate::schema::validate(schema, &item.frontmatter);
+    if !violations.is_empty() {
+        let msg = violations
+            .iter()
+            .map(|v| v.message())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(MutateError::SchemaViolation(msg));
+    }
+
     // 5) atomic write. No directory rename — flat layout means
     //    `item_path` is the canonical location regardless of status.
     write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
@@ -595,6 +625,7 @@ pub fn close_issue(
     }
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
+    crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
 
     let item_path = locate_and_migrate(root, slug)?;
     let item = write::read_item(&item_path).map_err(MutateError::Io)?;
@@ -642,7 +673,8 @@ pub fn close_issue(
     req_normalized.add_related = normalized_add_related;
     req_normalized.remove_related = normalized_remove_related;
     req_normalized.validate()?;
-    update_issue_under_lock(slug, item_path, req_normalized, hub)
+    let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    update_issue_under_lock(slug, item_path, req_normalized, hub, &schema)
 }
 
 /// PUT-style replacement of an issue's body markdown. Same lock and
@@ -664,6 +696,7 @@ pub fn update_body(
     }
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
+    crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
 
     let item_path = locate_and_migrate(root, slug)?;
 
@@ -699,6 +732,20 @@ pub fn update_body(
         format!("\n{body}")
     };
     write::set_string(&mut item.frontmatter, "updated", &write::today());
+
+    // Schema validation: body-set doesn't change frontmatter shape but
+    // the schema may have tightened since the last write. Refusing here
+    // matches the `update_issue` contract.
+    let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let violations = crate::schema::validate(&schema, &item.frontmatter);
+    if !violations.is_empty() {
+        let msg = violations
+            .iter()
+            .map(|v| v.message())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(MutateError::SchemaViolation(msg));
+    }
 
     write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
 
@@ -930,6 +977,13 @@ pub struct NewIssueRequest {
     pub source: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// Custom frontmatter fields keyed by field name, mirroring CLI
+    /// `--field key=value`. Required for repos whose schema declares
+    /// custom required fields — without this, API creation cannot
+    /// satisfy the schema and falls into the same bricking failure
+    /// mode the CLI `--field` flag was added to fix.
+    #[serde(default)]
+    pub custom_fields: std::collections::BTreeMap<String, String>,
 }
 
 fn default_priority() -> String {
@@ -986,11 +1040,19 @@ pub fn new_issue(
             related: req.related,
             source: req.source,
             description: req.description,
+            custom_fields: req.custom_fields.into_iter().collect(),
         },
     )
     .map_err(|e| {
-        let s = e.to_string();
-        if s.contains("already") || s.contains("exists") {
+        // do_new_locked uses anyhow with stable string prefixes for the
+        // small set of typed failures the API needs to distinguish:
+        // `schema:` for validation, otherwise the historical conflict
+        // detection. Anything else is a true bug (IO, panic-recovered
+        // logic) and gets surfaced as Io.
+        let s = format!("{e:#}");
+        if s.starts_with("schema:") {
+            MutateError::SchemaViolation(s.trim_start_matches("schema:").trim().to_string())
+        } else if s.contains("already") || s.contains("exists") {
             MutateError::ConflictingIntent(s)
         } else {
             MutateError::Validation(s)
@@ -1238,7 +1300,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("item.md"),
-            "---\ntype: bug\nstatus: fixed\npriority: normal\n---\n\n# T\n",
+            "---\ntype: bug\ncreated: 2026-01-01\nstatus: fixed\npriority: normal\n---\n\n# T\n",
         )
         .unwrap();
         let req = UpdateIssueRequest {
@@ -1260,7 +1322,7 @@ mod tests {
         fs::create_dir_all(&legacy).unwrap();
         fs::write(
             legacy.join("item.md"),
-            "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n# T\n",
+            "---\ntype: bug\ncreated: 2026-01-01\nstatus: open\npriority: normal\n---\n\n# T\n",
         )
         .unwrap();
         let v0 = {
@@ -1317,7 +1379,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("item.md"),
-            "---\ntype: bug\nstatus: open\npriority: normal\nepic: foo-bar\n---\n\n# T\n",
+            "---\ntype: bug\ncreated: 2026-01-01\nstatus: open\npriority: normal\nepic: foo-bar\n---\n\n# T\n",
         )
         .unwrap();
         let req = UpdateIssueRequest {
@@ -1336,7 +1398,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("item.md"),
-            "---\ntype: bug\nstatus: open\npriority: normal\nepic: stay-here\n---\n\n# T\n",
+            "---\ntype: bug\ncreated: 2026-01-01\nstatus: open\npriority: normal\nepic: stay-here\n---\n\n# T\n",
         )
         .unwrap();
         let req = UpdateIssueRequest {
@@ -1536,6 +1598,158 @@ mod tests {
                 0o600,
                 "lock file should be 0o600 even if it pre-existed at 0o644"
             );
+        }
+    }
+
+    #[test]
+    fn update_writes_default_schema_on_first_use() {
+        let tmp = fresh_repo();
+        let _v0 = seed_issue(tmp.path(), "open", "bootstrap-target", "open");
+        assert!(!tmp.path().join("issues/.schema.yaml").exists());
+        let req = UpdateIssueRequest {
+            priority: Patch::Set("high".into()),
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "bootstrap-target", req, None).unwrap();
+        assert!(
+            tmp.path().join("issues/.schema.yaml").is_file(),
+            "schema file should be auto-written on first mutation"
+        );
+    }
+
+    #[test]
+    fn update_rejects_label_outside_schema_enum() {
+        let tmp = fresh_repo();
+        let _v0 = seed_issue(tmp.path(), "open", "label-enum-target", "open");
+        // Constrain labels to a fixed set.
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  type:\n    required: true\n  labels:\n    list: true\n    enum: [infra, frontend]\n",
+        )
+        .unwrap();
+        let req = UpdateIssueRequest {
+            add_labels: vec!["bogus".into()],
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "label-enum-target", req, None).unwrap_err();
+        match err {
+            MutateError::SchemaViolation(msg) => assert!(
+                msg.contains("labels") && msg.contains("bogus"),
+                "expected labels/bogus in error, got {msg:?}"
+            ),
+            other => panic!("expected SchemaViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_set_validates_against_schema() {
+        // A schema tightened after the issue was created should block
+        // body-set, matching the contract update_issue follows.
+        let tmp = fresh_repo();
+        let v0 = seed_issue(tmp.path(), "open", "body-schema-target", "open");
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: true\n",
+        )
+        .unwrap();
+        let err = update_body(
+            tmp.path(),
+            "body-schema-target",
+            Some(v0),
+            "# new body\n".into(),
+            None,
+        )
+        .unwrap_err();
+        match err {
+            MutateError::SchemaViolation(msg) => assert!(msg.contains("team"), "got {msg:?}"),
+            other => panic!("expected SchemaViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_issue_passes_custom_fields_through() {
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: true\n    enum: [payments, infra]\n",
+        )
+        .unwrap();
+        let mut req = NewIssueRequest::default();
+        req.issue_type = "bug".into();
+        req.title = "API new with custom field".into();
+        req.priority = "normal".into();
+        req.custom_fields.insert("team".into(), "payments".into());
+        let outcome = new_issue(tmp.path(), req, None).unwrap();
+        let on_disk = fs::read_to_string(outcome.issue_dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("team: payments"), "got {on_disk}");
+    }
+
+    #[test]
+    fn new_issue_schema_violation_returns_typed_error() {
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: true\n",
+        )
+        .unwrap();
+        let mut req = NewIssueRequest::default();
+        req.issue_type = "bug".into();
+        req.title = "Missing team".into();
+        req.priority = "normal".into();
+        let err = new_issue(tmp.path(), req, None).unwrap_err();
+        match err {
+            MutateError::SchemaViolation(msg) => assert!(
+                msg.contains("team"),
+                "expected `team` in error, got {msg:?}"
+            ),
+            other => panic!("expected SchemaViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_schema_surfaces_as_schema_error() {
+        let tmp = fresh_repo();
+        let _v0 = seed_issue(tmp.path(), "open", "broken-schema-target", "open");
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields: : :\n",
+        )
+        .unwrap();
+        let err = update_issue(
+            tmp.path(),
+            "broken-schema-target",
+            UpdateIssueRequest {
+                priority: Patch::Set("high".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, MutateError::SchemaConfig(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn update_rejects_when_custom_required_field_missing() {
+        let tmp = fresh_repo();
+        let _v0 = seed_issue(tmp.path(), "open", "custom-required-target", "open");
+        // Add a custom required field after the issue exists. Any
+        // mutation should now fail until the user adds the field.
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  type:\n    required: true\n  team:\n    required: true\n",
+        )
+        .unwrap();
+        let req = UpdateIssueRequest {
+            priority: Patch::Set("high".into()),
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "custom-required-target", req, None).unwrap_err();
+        match err {
+            MutateError::SchemaViolation(msg) => assert!(
+                msg.contains("team"),
+                "expected `team` in error, got {msg:?}"
+            ),
+            other => panic!("expected SchemaViolation, got {other:?}"),
         }
     }
 }

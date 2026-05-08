@@ -1,0 +1,67 @@
+# issuectl frontmatter schema (v1) — auto-generated; safe to edit and commit.
+#
+# Each field declares whether it is required and (optionally) an `enum`
+# of allowed values. Declare a custom field below to make `doctor` and
+# the mutation commands enforce it.
+#
+# - `required: true`   → an issue missing this field fails validation.
+# - `enum: [a, b, c]`  → only those values are accepted.
+# - `list: true`       → field is a list; `enum` applies element-wise.
+#
+# Merge semantics: this file is layered on top of the built-in default
+# schema. To override a built-in field, redeclare it here (your full
+# `FieldSpec` replaces the built-in one). To add a custom field, just
+# add an entry. Unknown fields in an issue are NOT errors, so agents
+# can attach extra metadata freely.
+#
+# `created` is intentionally NOT required by default — repos that
+# pre-date schema enforcement may have issues without it. Set it to
+# `required: true` once you are sure all issues have it (run
+# `issuectl doctor` first).
+version: 1
+fields:
+  type:
+    required: true
+    enum: [bug, task, feature, improvement, chore, epic]
+  status:
+    required: true
+    enum:
+      - open
+      - in-progress
+      - testing
+      - done
+      - fixed
+      - wontfix
+      - duplicate
+      - cannot-reproduce
+      - obsolete
+  priority:
+    required: true
+    enum: [normal, high]
+  created:
+    required: false
+  updated:
+    required: false
+  reporter:
+    required: false
+  assignee:
+    required: false
+  owner:
+    required: false
+  epic:
+    required: false
+  related:
+    required: false
+    list: true
+  labels:
+    required: false
+    list: true
+    # enum: [infra, frontend, backend]   # uncomment to constrain labels
+  closed:
+    required: false
+  slug:
+    required: false
+  # `commits` is intentionally not declared: it is a list of mapping
+  # entries (`{hash, summary}`), which the v1 schema's scalar/list-of-
+  # string model cannot describe. Unknown fields are allowed, so it
+  # passes validation either way.

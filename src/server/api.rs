@@ -791,6 +791,22 @@ fn mutate_error_to_response(err: MutateError) -> Response {
         MutateError::ConflictingIntent(msg) => {
             error_response(StatusCode::BAD_REQUEST, "conflicting_intent", &msg)
         }
+        MutateError::SchemaViolation(msg) => {
+            // 422: the request would produce frontmatter that violates
+            // the repo schema. Client-actionable — adjust the request
+            // (e.g. supply `--field`).
+            error_response(StatusCode::UNPROCESSABLE_ENTITY, "schema_violation", &msg)
+        }
+        MutateError::SchemaConfig(msg) => {
+            // 500: `.schema.yaml` is malformed or otherwise rejected at
+            // load. Not client-actionable — an operator must edit the
+            // schema file.
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "schema_config",
+                &msg,
+            )
+        }
         MutateError::Io(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",

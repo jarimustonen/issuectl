@@ -155,7 +155,13 @@ pub fn parse_item_md(path: &Path, slug: &str, folder: &str) -> crate::models::Is
     parsed.issue
 }
 
-fn split_frontmatter(text: &str) -> (Option<&str>, Option<&str>) {
+/// Split a markdown text into frontmatter and body. The closing `---`
+/// is matched on its own line (`\n---`) — note that this still
+/// mis-extracts when a YAML block scalar contains a `---` line. That
+/// fragility is shared with `write::split_text` and is tracked as a
+/// pre-existing issue; centralising the splitter here at least keeps
+/// the scope of the bug to one function.
+pub(crate) fn split_frontmatter(text: &str) -> (Option<&str>, Option<&str>) {
     let text = text.trim_start();
     if !text.starts_with("---") {
         return (None, Some(text));

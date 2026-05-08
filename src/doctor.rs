@@ -11,6 +11,7 @@ use anyhow::{bail, Context, Result};
 use regex::{Captures, Regex};
 
 use crate::parser;
+use crate::schema;
 use crate::slug;
 use crate::write;
 use crate::{execute_migrate_layout_plan, plan_migrate_layout, MigrateConflict, MigrateMove};
@@ -79,6 +80,17 @@ struct DoctorReport {
     /// Keeps `doctor` consistent with the web `/api/issues` response,
     /// which already surfaces the same warnings.
     parse_errors: Vec<(String, String)>,
+    /// Per-issue schema violations: (location, message). Populated by
+    /// validating each issue's frontmatter against `issues/.schema.yaml`
+    /// (or the built-in default if absent).
+    schema_violations: Vec<(String, String)>,
+    /// True if the schema file was missing at scan time. `--fix` writes
+    /// the default schema; without `--fix` this is reported as a hint.
+    schema_missing: bool,
+    /// True if the schema file is present but failed to parse. Causes
+    /// `--fix` to skip per-issue schema validation rather than treating
+    /// every issue as broken against an unparseable rule set.
+    schema_parse_error: Option<String>,
     fix_applied: bool,
     files_rewritten: usize,
     /// Slugs the read-only scan classified as safe to migrate from
@@ -224,6 +236,22 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
 
     detect_orphan_epic_refs(repo_root, &mut report)?;
 
+    // Schema validation. Walk the same set of dirs again — cheap; the
+    // alternative (interleaving with the legacy_dirs pass) muddles the
+    // flow and obscures that schema checks ignore legacy issues (their
+    // frontmatter is rewritten by --fix anyway).
+    report.schema_missing = !schema::schema_path(repo_root).is_file();
+    let schema = match schema::load(repo_root) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            report.schema_parse_error = Some(e.to_string());
+            None
+        }
+    };
+    if let Some(schema) = schema {
+        collect_schema_violations(repo_root, &schema, &mut report)?;
+    }
+
     let plan = plan_migrate_layout(repo_root)?;
     report.flat_layout_moves = plan.moves;
     report.flat_layout_conflicts = plan.conflicts;
@@ -261,6 +289,80 @@ fn plan_notes_migration(repo_root: &Path, report: &mut DoctorReport) -> Result<(
             NotesScan::Conflict => report.notes_conflicts.push(name),
         }
     }
+    Ok(())
+}
+
+fn collect_schema_violations(
+    repo_root: &Path,
+    schema: &schema::Schema,
+    report: &mut DoctorReport,
+) -> Result<()> {
+    let issues_dir = repo_root.join("issues");
+    let mut walk = |dir: &Path, folder: &str| -> Result<()> {
+        if !dir.is_dir() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(dir)?.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "open" || name == "closed" || name == "archive" {
+                continue;
+            }
+            let item = entry.path().join("item.md");
+            if !item.is_file() {
+                continue;
+            }
+            // Skip legacy <NN>-<slug> directories under the legacy
+            // `open/`/`closed/` folders — `--fix` rewrites their
+            // frontmatter, so flagging them is just noise. Don't apply
+            // the skip to the flat root: a flat issue named `7-alpha`
+            // is not legacy by location even though its name matches
+            // the legacy shape.
+            let in_legacy_folder = folder == "open" || folder == "closed";
+            if in_legacy_folder && parser::parse_legacy_dir(&name).is_some() {
+                continue;
+            }
+            let location = format!(
+                "{}",
+                item.strip_prefix(repo_root)
+                    .unwrap_or(&item)
+                    .display()
+            );
+            let text = match fs::read_to_string(&item) {
+                Ok(t) => t,
+                Err(e) => {
+                    report
+                        .parse_errors
+                        .push((location.clone(), format!("cannot read {}: {e}", item.display())));
+                    continue;
+                }
+            };
+            let Some(fm_text) = parser::split_frontmatter(&text).0 else {
+                report
+                    .parse_errors
+                    .push((location.clone(), "missing or unterminated frontmatter".into()));
+                continue;
+            };
+            let fm = match serde_yaml::from_str::<serde_yaml::Mapping>(fm_text) {
+                Ok(fm) => fm,
+                Err(e) => {
+                    report
+                        .parse_errors
+                        .push((location.clone(), format!("invalid frontmatter YAML: {e}")));
+                    continue;
+                }
+            };
+            for v in schema::validate(schema, &fm) {
+                report.schema_violations.push((location.clone(), v.message()));
+            }
+        }
+        Ok(())
+    };
+    walk(&issues_dir, "flat")?;
+    walk(&issues_dir.join("open"), "open")?;
+    walk(&issues_dir.join("closed"), "closed")?;
     Ok(())
 }
 
@@ -333,6 +435,21 @@ fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
     // files. Run it FIRST so layout-conflict bail-outs don't block
     // unrelated body fixes (round-2 finding O18).
     rename_notes_to_comments(repo_root, report)?;
+
+    // Auto-bootstrap the schema file on --fix. Cheap; idempotent. The
+    // bootstrap call also ensures the issues/ directory exists so a
+    // brand-new repo with `issuectl doctor --fix` ends in a usable
+    // state.
+    let issues_dir = repo_root.join("issues");
+    fs::create_dir_all(&issues_dir)
+        .with_context(|| format!("cannot create {}", issues_dir.display()))?;
+    let wrote_default = schema::ensure_default_written(repo_root)?;
+    report.schema_missing = false;
+    if wrote_default {
+        // We just laid down a known-good default; any pre-existing
+        // parse error from the report is now stale.
+        report.schema_parse_error = None;
+    }
 
     // Flat-layout migration runs next: any issue still under
     // `issues/{open,closed}/<slug>/` moves up to `issues/<slug>/`. The
@@ -791,20 +908,29 @@ fn rewrite_text(
 // ── Output rendering ────────────────────────────────────────────────────────
 
 fn render_text(report: &DoctorReport, fix: bool) {
-    if report.legacy_dirs.is_empty()
-        && report.flat_layout_moves.is_empty()
-        && report.flat_layout_migrated.is_empty()
-        && report.flat_layout_conflicts.is_empty()
-        && report.invalid_slugs.is_empty()
-        && report.duplicate_slugs.is_empty()
-        && report.missing_item_md.is_empty()
-        && report.orphan_epic_refs.is_empty()
-        && report.parse_errors.is_empty()
-        && report.notes_renamed.is_empty()
-        && report.notes_to_rename.is_empty()
-        && report.notes_conflicts.is_empty()
-    {
-        println!("Repository OK — no migrations or fixes needed.");
+    let has_problems = !report.legacy_dirs.is_empty()
+        || !report.flat_layout_moves.is_empty()
+        || !report.flat_layout_migrated.is_empty()
+        || !report.flat_layout_conflicts.is_empty()
+        || !report.invalid_slugs.is_empty()
+        || !report.duplicate_slugs.is_empty()
+        || !report.missing_item_md.is_empty()
+        || !report.orphan_epic_refs.is_empty()
+        || !report.parse_errors.is_empty()
+        || !report.notes_renamed.is_empty()
+        || !report.notes_to_rename.is_empty()
+        || !report.notes_conflicts.is_empty()
+        || !report.schema_violations.is_empty()
+        || report.schema_parse_error.is_some();
+    if !has_problems {
+        if report.schema_missing {
+            println!(
+                "Repository OK — no migrations or fixes needed.\nNote: {} not present yet (will be auto-created on first write or `--fix`).",
+                schema::SCHEMA_RELATIVE_PATH
+            );
+        } else {
+            println!("Repository OK — no migrations or fixes needed.");
+        }
         return;
     }
 
@@ -905,6 +1031,24 @@ fn render_text(report: &DoctorReport, fix: bool) {
         }
         println!();
     }
+    if report.schema_missing {
+        println!(
+            "Schema file missing at {} (will be auto-created on first `--fix` or write).",
+            schema::SCHEMA_RELATIVE_PATH
+        );
+        println!();
+    }
+    if let Some(err) = &report.schema_parse_error {
+        println!("Schema file parse error: {err}");
+        println!();
+    }
+    if !report.schema_violations.is_empty() {
+        println!("Schema violations:");
+        for (location, msg) in &report.schema_violations {
+            println!("  {location}: {msg}");
+        }
+        println!();
+    }
     if fix {
         println!(
             "Applied. {} dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s).",
@@ -971,6 +1115,12 @@ fn render_json(report: &DoctorReport, fix: bool) -> serde_json::Value {
         .map(|c| serde_json::json!({"slug": c.slug, "detail": c.detail}))
         .collect();
 
+    let schema_violations: Vec<serde_json::Value> = report
+        .schema_violations
+        .iter()
+        .map(|(loc, msg)| serde_json::json!({"location": loc, "message": msg}))
+        .collect();
+
     serde_json::json!({
         "fix_applied": fix && report.fix_applied,
         "migrations": migrations,
@@ -982,6 +1132,9 @@ fn render_json(report: &DoctorReport, fix: bool) -> serde_json::Value {
         "missing_item_md": report.missing_item_md,
         "orphan_epic_refs": orphans,
         "parse_errors": parse_errors,
+        "schema_missing": report.schema_missing,
+        "schema_parse_error": report.schema_parse_error,
+        "schema_violations": schema_violations,
         "files_rewritten": report.files_rewritten,
         "notes_to_rename": report.notes_to_rename,
         "notes_renamed": report.notes_renamed,
@@ -1258,6 +1411,176 @@ mod tests {
         assert!(
             after.contains("Fixed #1 regression"),
             "CHANGELOG outside issues/ must not be rewritten, got: {after}"
+        );
+    }
+
+    #[test]
+    fn scan_flags_schema_violation_for_missing_required_field() {
+        let tmp = fresh_repo();
+        // Issue missing `priority` (required by default schema).
+        let dir = tmp.path().join("issues/quiet-brave-otter");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: open\n---\n# T\n",
+        )
+        .unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.schema_violations
+                .iter()
+                .any(|(_, msg)| msg.contains("priority")),
+            "expected `priority` violation, got {:?}",
+            r.schema_violations
+        );
+    }
+
+    #[test]
+    fn scan_flags_schema_violation_for_invalid_enum() {
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/quiet-brave-otter");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: nonsense\ncreated: 2026-01-01\nstatus: open\npriority: normal\n---\n# T\n",
+        )
+        .unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.schema_violations
+                .iter()
+                .any(|(_, msg)| msg.contains("type") && msg.contains("nonsense")),
+            "expected enum violation, got {:?}",
+            r.schema_violations
+        );
+    }
+
+    #[test]
+    fn scan_reports_schema_missing_when_file_absent() {
+        let tmp = fresh_repo();
+        let r = scan(tmp.path()).unwrap();
+        assert!(r.schema_missing);
+        assert!(r.schema_parse_error.is_none());
+    }
+
+    #[test]
+    fn fix_writes_default_schema_when_missing() {
+        let tmp = fresh_repo();
+        let mut r = scan(tmp.path()).unwrap();
+        assert!(r.schema_missing);
+        apply(tmp.path(), &mut r).unwrap();
+        let path = tmp.path().join("issues/.schema.yaml");
+        assert!(path.is_file(), "schema file should be auto-written");
+        // Should contain the canonical built-in fields.
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("type:"));
+        assert!(content.contains("status:"));
+    }
+
+    #[test]
+    fn scan_skips_legacy_dirs_for_schema_violations() {
+        // A legacy <NN>-<slug> dir is rewritten by --fix; flagging it
+        // as schema-violating would just be noise.
+        let tmp = fresh_repo();
+        put_legacy(
+            &tmp,
+            "open",
+            7,
+            "alpha",
+            "---\nnumber: 7\nstatus: open\n---\n# A\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.schema_violations.is_empty(),
+            "legacy dirs should not generate schema violations, got {:?}",
+            r.schema_violations
+        );
+    }
+
+    #[test]
+    fn schema_walk_reports_malformed_yaml_as_parse_error() {
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/quiet-brave-otter");
+        fs::create_dir_all(&dir).unwrap();
+        // Frontmatter that the lenient `Mapping` parser also rejects.
+        fs::write(dir.join("item.md"), "---\nfoo: : :\n---\n# T\n").unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.parse_errors
+                .iter()
+                .any(|(_, msg)| msg.contains("YAML") || msg.contains("yaml") || msg.contains("invalid")),
+            "expected parse error report, got {:?}",
+            r.parse_errors
+        );
+    }
+
+    #[test]
+    fn schema_walk_uses_repo_relative_paths_not_flat_prefix() {
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/quiet-brave-otter");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: open\n---\n# T\n",
+        )
+        .unwrap();
+        let r = scan(tmp.path()).unwrap();
+        // Missing `priority`. Location must be a real path, not "flat/...".
+        let (loc, _) = r
+            .schema_violations
+            .iter()
+            .find(|(_, msg)| msg.contains("priority"))
+            .expect("expected priority violation");
+        assert!(loc.contains("issues/quiet-brave-otter"), "got {loc:?}");
+        assert!(!loc.starts_with("flat/"), "got {loc:?}");
+    }
+
+    #[test]
+    fn schema_walk_does_not_skip_flat_issue_with_legacy_shape_name() {
+        // A user who passes `--slug 12-things-to-do` ends up with a
+        // flat-layout issue whose name matches the legacy `<NN>-<slug>`
+        // shape. It must still be checked for schema violations.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/12-things-to-do");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: open\n---\n# T\n",
+        )
+        .unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.schema_violations
+                .iter()
+                .any(|(_, msg)| msg.contains("priority")),
+            "expected violation on flat NN-shaped slug, got {:?}",
+            r.schema_violations
+        );
+    }
+
+    #[test]
+    fn schema_validation_honours_user_edited_required_field() {
+        let tmp = fresh_repo();
+        // Custom schema requires a `team` field.
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: true\n",
+        )
+        .unwrap();
+        let dir = tmp.path().join("issues/quiet-brave-otter");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-01-01\nstatus: open\npriority: normal\n---\n# T\n",
+        )
+        .unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.schema_violations
+                .iter()
+                .any(|(_, msg)| msg.contains("team")),
+            "expected `team` violation, got {:?}",
+            r.schema_violations
         );
     }
 }

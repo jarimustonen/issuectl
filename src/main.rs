@@ -10,6 +10,7 @@ mod mutate;
 mod parser;
 mod query;
 mod repo;
+mod schema;
 mod server;
 mod skill;
 mod slug;
@@ -108,6 +109,54 @@ fn parse_non_empty(s: &str) -> std::result::Result<String, String> {
     } else {
         Ok(s.to_string())
     }
+}
+
+/// Built-in fields that have a dedicated CLI flag and must not be
+/// supplied via `--field key=value` (we want clap-level validation to
+/// run for them). The second column points at the dedicated flag —
+/// included in the rejection message so the user isn't sent looking
+/// for a `--commits` / `--closed` flag that doesn't exist.
+const RESERVED_CUSTOM_FIELDS: &[(&str, &str)] = &[
+    ("type", "--type"),
+    ("title", "--title"),
+    ("slug", "--slug"),
+    ("reporter", "--reporter"),
+    ("assignee", "--assignee"),
+    ("owner", "--owner"),
+    ("priority", "--priority"),
+    ("epic", "--epic"),
+    ("labels", "--label (repeatable)"),
+    ("related", "--related (repeatable)"),
+    ("status", "set automatically by `new` (always `open`)"),
+    ("created", "set automatically by `new` (today)"),
+    ("updated", "set automatically by `new`/`update` (today)"),
+    ("closed", "set automatically when status moves to a closing value"),
+    ("commits", "use `update --add-commit` after creation"),
+];
+
+fn parse_custom_field(s: &str) -> std::result::Result<(String, String), String> {
+    let (key, value) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected key=value, got {s:?}"))?;
+    let key = key.trim();
+    let value = value.trim();
+    if key.is_empty() || value.is_empty() {
+        return Err(format!("expected non-empty key=value, got {s:?}"));
+    }
+    if !key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "field key {key:?} must be alphanumeric / underscore / hyphen"
+        ));
+    }
+    if let Some((_, hint)) = RESERVED_CUSTOM_FIELDS.iter().find(|(k, _)| *k == key) {
+        return Err(format!(
+            "field {key:?} is built-in: {hint}"
+        ));
+    }
+    Ok((key.to_string(), value.to_string()))
 }
 
 /// Clap value parser for any slug-shaped CLI argument. Rejects anything
@@ -241,6 +290,13 @@ enum Command {
         /// Description body (free text)
         #[arg(long, value_parser = parse_non_empty)]
         description: Option<String>,
+
+        /// Set a custom frontmatter field (repeatable). Format `key=value`.
+        /// Use this for fields the schema declares but no built-in flag
+        /// covers (e.g. `--field team=payments`). Built-in fields use
+        /// their dedicated flags (`--type`, `--priority`, ...).
+        #[arg(long = "field", value_parser = parse_custom_field)]
+        custom_fields: Vec<(String, String)>,
     },
 
     /// Update fields of an existing issue or epic
@@ -544,6 +600,7 @@ fn main() -> Result<()> {
             related,
             source,
             description,
+            custom_fields,
         } => cmd_new(
             json_output,
             NewArgs {
@@ -559,6 +616,7 @@ fn main() -> Result<()> {
                 related,
                 source,
                 description,
+                custom_fields,
             },
         ),
         Command::Update {
@@ -973,6 +1031,7 @@ pub(crate) struct NewArgs {
     pub related: Vec<String>,
     pub source: Option<String>,
     pub description: Option<String>,
+    pub custom_fields: Vec<(String, String)>,
 }
 
 pub(crate) struct NewOutcome {
@@ -1021,6 +1080,7 @@ pub(crate) fn do_new_locked(
     root: &Path,
     args: NewArgs,
 ) -> Result<NewOutcome> {
+    schema::ensure_default_written(root)?;
     if args.issue_type == "epic" {
         if args.assignee.is_some() || args.reporter.is_some() {
             bail!("epics use --owner, not --reporter/--assignee");
@@ -1029,9 +1089,22 @@ pub(crate) fn do_new_locked(
         bail!("--owner is only valid with --type epic");
     }
 
+    {
+        // Reject `--field foo=a --field foo=b`. Silently letting the
+        // last occurrence win is a reasonable default for many CLI
+        // tools, but here it would mean the validated frontmatter and
+        // the user's apparent intent diverge — better to fail loudly.
+        let mut seen = std::collections::BTreeSet::new();
+        for (k, _) in &args.custom_fields {
+            if !seen.insert(k.as_str()) {
+                bail!("--field {k:?} given more than once");
+            }
+        }
+    }
+
     let related = normalize_related_refs(&args.related)?;
 
-    let render = write::render_new_item(&write::NewIssueArgs {
+    let new_args = write::NewIssueArgs {
         title: &args.title,
         issue_type: &args.issue_type,
         priority: &args.priority,
@@ -1043,7 +1116,26 @@ pub(crate) fn do_new_locked(
         related: &related,
         source: args.source.as_deref(),
         description: args.description.as_deref(),
-    });
+        custom_fields: &args.custom_fields,
+    };
+    // Build the frontmatter mapping and validate it BEFORE serializing.
+    // Validating the in-memory Mapping avoids the round-trip through
+    // string parsing that the previous version used (and that subtly
+    // duplicated the fragile `find("\n---")` splitter logic).
+    let frontmatter = write::build_new_frontmatter(&new_args);
+    {
+        let schema = schema::load(root)?;
+        let violations = schema::validate(&schema, &frontmatter);
+        if !violations.is_empty() {
+            let msg = violations
+                .iter()
+                .map(|v| v.message())
+                .collect::<Vec<_>>()
+                .join("; ");
+            bail!("schema: {msg}");
+        }
+    }
+    let render = write::render_new_item_from_fm(&new_args, &frontmatter);
 
     let issues_parent = root.join("issues");
     fs::create_dir_all(&issues_parent)
@@ -1753,6 +1845,7 @@ mod tests {
             related: vec![],
             source: None,
             description: None,
+            custom_fields: vec![],
         }
     }
 
@@ -2061,6 +2154,124 @@ mod tests {
         assert!(parse_non_empty("").is_err());
         assert!(parse_non_empty("  ").is_err());
         assert!(parse_non_empty(" a").is_err());
+    }
+
+    #[test]
+    fn new_writes_default_schema_on_first_use() {
+        let tmp = fresh_repo();
+        assert!(!tmp.path().join("issues/.schema.yaml").exists());
+        let args = new_args("bug", "First bug");
+        do_new(tmp.path(), args).unwrap();
+        assert!(
+            tmp.path().join("issues/.schema.yaml").is_file(),
+            "schema file should be auto-written on first new"
+        );
+    }
+
+    #[test]
+    fn new_rejects_when_custom_required_field_missing() {
+        let tmp = fresh_repo();
+        // Pre-write a schema demanding a `team` field. Without `--field`
+        // creation must fail loudly rather than silently producing an
+        // invalid issue.
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: true\n",
+        )
+        .unwrap();
+        let res = do_new(tmp.path(), new_args("bug", "Will fail"));
+        let err = res.err().expect("schema-required field missing should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("schema") && msg.contains("team"),
+            "expected schema/team in error, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn new_with_field_satisfies_custom_required_field() {
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: true\n    enum: [payments, infra]\n",
+        )
+        .unwrap();
+        let mut args = new_args("bug", "With team");
+        args.custom_fields = vec![("team".into(), "payments".into())];
+        let out = do_new(tmp.path(), args).unwrap();
+        let content = read(&out.item_path);
+        assert!(content.contains("team: payments"));
+    }
+
+    #[test]
+    fn new_rejects_field_outside_schema_enum() {
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: true\n    enum: [payments, infra]\n",
+        )
+        .unwrap();
+        let mut args = new_args("bug", "Bad team");
+        args.custom_fields = vec![("team".into(), "marketing".into())];
+        let err = do_new(tmp.path(), args).err().unwrap();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("schema") && msg.contains("team") && msg.contains("marketing"),
+            "expected schema/team/marketing in error, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn parse_custom_field_rejects_built_in_keys() {
+        // Built-in keys must use their dedicated flags so we don't
+        // shadow validation done by clap (e.g. `--field type=garbage`).
+        for k in ["type", "title", "slug", "status", "priority"] {
+            let s = format!("{k}=foo");
+            assert!(parse_custom_field(&s).is_err(), "{k} must be rejected");
+        }
+    }
+
+    #[test]
+    fn new_rejects_duplicate_field_keys() {
+        let tmp = fresh_repo();
+        let mut args = new_args("bug", "Dup");
+        args.custom_fields = vec![
+            ("team".into(), "a".into()),
+            ("team".into(), "b".into()),
+        ];
+        let err = do_new(tmp.path(), args).err().unwrap();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("team") && msg.contains("more than once"),
+            "expected duplicate-rejection, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn parse_custom_field_message_points_at_real_flag() {
+        // Round-2 review: previous message hardcoded `--<key>` for keys
+        // (`commits`, `closed`) that have no matching flag. The hint
+        // table now points at the real flag or behavior.
+        let err = parse_custom_field("commits=foo").unwrap_err();
+        assert!(
+            err.contains("--add-commit"),
+            "expected --add-commit hint, got {err:?}"
+        );
+        let err = parse_custom_field("closed=foo").unwrap_err();
+        assert!(
+            err.contains("status") || err.contains("closing"),
+            "expected status/closing hint, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_custom_field_accepts_kebab_and_underscore() {
+        assert!(parse_custom_field("team=payments").is_ok());
+        assert!(parse_custom_field("team-name=payments").is_ok());
+        assert!(parse_custom_field("severity_level=p1").is_ok());
+        assert!(parse_custom_field("=payments").is_err());
+        assert!(parse_custom_field("team=").is_err());
+        assert!(parse_custom_field("team:payments").is_err());
     }
 
     #[test]

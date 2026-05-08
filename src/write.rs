@@ -270,9 +270,18 @@ pub struct NewIssueArgs<'a> {
     pub related: &'a [String],
     pub source: Option<&'a str>,
     pub description: Option<&'a str>,
+    /// Custom frontmatter fields supplied by `issuectl new --field key=value`.
+    /// Built-in fields (`type`, `priority`, ...) are reserved at the parser
+    /// level (`parse_custom_field`), so these can only be names beyond the
+    /// built-in set.
+    pub custom_fields: &'a [(String, String)],
 }
 
-pub fn render_new_item(args: &NewIssueArgs<'_>) -> String {
+/// Build the frontmatter mapping for a new item. Split out from
+/// `render_new_item` so callers (e.g. `do_new_locked`) can validate the
+/// `Mapping` against the schema before serialization, avoiding a
+/// round-trip through string parsing.
+pub fn build_new_frontmatter(args: &NewIssueArgs<'_>) -> Mapping {
     let mut map = Mapping::new();
     let today = today();
     set_string(&mut map, "created", &today);
@@ -315,7 +324,19 @@ pub fn render_new_item(args: &NewIssueArgs<'_>) -> String {
         map.insert(Value::String("labels".into()), Value::Sequence(seq));
     }
 
-    let yaml = serialize_frontmatter(&map).expect("known-shape frontmatter must serialize");
+    for (key, value) in args.custom_fields {
+        set_string(&mut map, key, value);
+    }
+    map
+}
+
+#[cfg(test)]
+pub fn render_new_item(args: &NewIssueArgs<'_>) -> String {
+    render_new_item_from_fm(args, &build_new_frontmatter(args))
+}
+
+pub fn render_new_item_from_fm(args: &NewIssueArgs<'_>, map: &Mapping) -> String {
+    let yaml = serialize_frontmatter(map).expect("known-shape frontmatter must serialize");
 
     let mut body = String::new();
     body.push_str(&format!("# {}\n", args.title));
@@ -642,6 +663,7 @@ mod tests {
             related: &[],
             source: None,
             description: None,
+            custom_fields: &[],
         }
     }
 
@@ -686,6 +708,7 @@ mod tests {
             related: &related,
             source: Some("frontend/login"),
             description: Some("Stuck in loop."),
+            custom_fields: &[],
         };
         let out = render_new_item(&a);
         assert!(out.contains("priority: high"));
