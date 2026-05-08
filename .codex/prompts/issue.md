@@ -283,6 +283,31 @@ The board is read-only; keep using the CLI for any create / update /
 close action. For details (port/host flags, security model, routes),
 run `issuectl docs kanban`.
 
+### Action: Render an agent context bundle
+
+When you (or another agent) need a deterministic snapshot of an issue and
+its surroundings — parent epic, blockers, related issues, acceptance
+criteria, recorded commits, and schema rules — use `issuectl context`:
+
+- Markdown to stdout: `issuectl context <slug>`
+- JSON to stdout: `issuectl --json context <slug>`
+- Cache under `.issuectl/cache/agent/<slug>/` (gitignored): add `--write`
+
+The bundle is byte-deterministic for a given issue state, which makes it
+safe to cache. It is read-only — `issuectl context` never mutates files
+under `issues/`.
+
+### Action: Render a prompt template
+
+Repo-local prompt templates live at `.issuectl/prompts/<name>.md` and
+support `{{key}}` substitution against the context bundle (e.g.
+`{{slug}}`, `{{title}}`, `{{body}}`, `{{acceptance_criteria}}`,
+`{{epic_goal}}`, `{{related}}`, `{{commits}}`, `{{context}}` for the full
+markdown bundle). Unknown keys are left intact so typos surface.
+
+- Print rendered prompt: `issuectl prompt <template> <slug>`
+- Cache to `.issuectl/cache/agent/<slug>/prompts/<template>.md`: add `--write`
+
 ### Action: Doctor (repository health-check + migration)
 
 If the user asks to "check the repo" or "migrate legacy issues", use

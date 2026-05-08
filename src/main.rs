@@ -827,7 +827,7 @@ fn cmd_context(json: bool, slug: &str, write: bool) -> Result<()> {
         ("context.md", context::render_markdown(&bundle))
     };
     if write {
-        let path = context::write_artifact(&root, slug, filename, &content)?;
+        let path = context::write_artifact(&root, slug, &[filename], &content)?;
         if json {
             println!(
                 "{}",
@@ -851,12 +851,9 @@ fn cmd_prompt(json: bool, template: &str, slug: &str, write: bool) -> Result<()>
     let tpl = context::load_template(&root, template)?;
     let rendered = context::render_prompt(&tpl, &bundle);
     if write {
-        let filename = if template.ends_with(".md") {
-            format!("prompts/{template}")
-        } else {
-            format!("prompts/{template}.md")
-        };
-        let path = context::write_artifact(&root, slug, &filename, &rendered)?;
+        let segments = context::prompt_cache_segments(template)?;
+        let segs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
+        let path = context::write_artifact(&root, slug, &segs, &rendered)?;
         if json {
             println!(
                 "{}",
@@ -864,6 +861,7 @@ fn cmd_prompt(json: bool, template: &str, slug: &str, write: bool) -> Result<()>
                     "path": path.to_string_lossy(),
                     "slug": slug,
                     "template": template,
+                    "rendered": rendered,
                 }))?
             );
         } else {

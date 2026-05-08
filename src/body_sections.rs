@@ -396,16 +396,32 @@ pub fn parse_section(body: &str, section: &str) -> Vec<Block> {
 /// Used by `issuectl context` to lift sections like `Acceptance Criteria`
 /// or `Quick Test` out of an issue body without re-parsing markdown.
 pub fn extract_section_text(body: &str, section: &str) -> Option<String> {
+    all_h2_sections(body).remove(section)
+}
+
+/// Collect every fence-aware `## <name>` section in `body` into a map
+/// from heading name (verbatim, exact case) to the trimmed text between
+/// it and the next H2. If a heading appears more than once, the first
+/// occurrence wins — matching `extract_section_text`.
+pub fn all_h2_sections(body: &str) -> std::collections::BTreeMap<String, String> {
+    use std::collections::BTreeMap;
     let lines: Vec<&str> = body.split('\n').collect();
-    let start = scan_outside_fences(&lines, |_, l| is_h2_named(l, section))
-        .into_iter()
-        .next()?;
-    let after = &lines[start + 1..];
-    let next_offset = scan_outside_fences(after, |_, l| is_any_h2(l))
-        .into_iter()
-        .next()
-        .unwrap_or(after.len());
-    Some(trim_blank_borders(&after[..next_offset]))
+    let h2_indices = scan_outside_fences(&lines, |_, l| is_any_h2(l));
+    let mut out = BTreeMap::new();
+    for (i, idx) in h2_indices.iter().enumerate() {
+        let name = match lines[*idx].strip_prefix("## ") {
+            Some(rest) => rest.trim_end().to_string(),
+            None => continue,
+        };
+        let next = h2_indices
+            .get(i + 1)
+            .copied()
+            .unwrap_or(lines.len());
+        let body_lines = &lines[*idx + 1..next];
+        let text = trim_blank_borders(body_lines);
+        out.entry(name).or_insert(text);
+    }
+    out
 }
 
 #[allow(dead_code)]

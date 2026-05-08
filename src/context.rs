@@ -77,6 +77,10 @@ pub struct BundleIssue {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<Commit>,
     pub body: String,
+    /// Optimistic-concurrency token matching `issuectl show --json`.
+    /// Lets an agent that reads the bundle pass `--expected-version`
+    /// straight back to `update`/`close` without a separate `show` call.
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -132,14 +136,15 @@ pub fn build(root: &Path, slug: &str) -> Result<Bundle> {
     let related_issues = resolve_refs(&related_slugs, &all);
     let blocking_issues = resolve_refs(&blocked_by, &all);
 
-    let mut sections = BTreeMap::new();
-    for name in ACCEPTANCE_SECTIONS {
-        if let Some(text) = body_sections::extract_section_text(&issue.body, name) {
-            if !text.trim().is_empty() {
-                sections.insert((*name).to_string(), text);
-            }
-        }
-    }
+    // Surface every fence-aware H2 section in the body so templates can
+    // reference any heading the issue author chose (`{{risks}}`,
+    // `{{test_plan}}`, etc.) without a code change. The curated
+    // ACCEPTANCE_SECTIONS list still drives the order in which sections
+    // get a dedicated heading in the rendered markdown.
+    let sections: BTreeMap<String, String> = body_sections::all_h2_sections(&issue.body)
+        .into_iter()
+        .filter(|(_, text)| !text.trim().is_empty())
+        .collect();
 
     let epic = issue
         .epic
@@ -155,7 +160,14 @@ pub fn build(root: &Path, slug: &str) -> Result<Bundle> {
                 .filter(|s| !s.trim().is_empty()),
         });
 
-    let schema = load_schema_summary(root);
+    // Surface schema-load errors instead of silently masking them. A
+    // malformed `.schema.yaml` becomes a hard error; a missing one falls
+    // back to the built-in default (which is `schema::load`'s contract).
+    let schema = load_schema_summary(root)?;
+
+    let mut labels = issue.labels.clone().unwrap_or_default();
+    labels.sort();
+    labels.dedup();
 
     let bundle_issue = BundleIssue {
         slug: issue.slug.clone(),
@@ -170,11 +182,12 @@ pub fn build(root: &Path, slug: &str) -> Result<Bundle> {
         assignee: issue.assignee.clone(),
         owner: issue.owner.clone(),
         epic: issue.epic.clone(),
-        labels: issue.labels.clone().unwrap_or_default(),
+        labels,
         related: related_slugs,
         blocked_by,
         commits: issue.commits.clone().unwrap_or_default(),
         body: issue.body.clone(),
+        version: crate::canonical::canonical_hash(&issue),
     };
 
     Ok(Bundle {
@@ -188,19 +201,18 @@ pub fn build(root: &Path, slug: &str) -> Result<Bundle> {
 }
 
 /// Strip the leading `@` sigil that frontmatter uses for cross-references
-/// and drop legacy `#NN` numeric refs (those don't resolve to a slug).
+/// and drop anything that isn't a valid slug. Legacy `#NN` numeric refs
+/// and hand-edited garbage (`@../../etc/passwd`, `hello world`, …) are
+/// silently filtered out so they cannot leak into rendered markdown or
+/// template variables.
 fn normalise_ref(raw: &str) -> Option<String> {
     let t = raw.trim();
-    if let Some(slug) = t.strip_prefix('@') {
-        if !slug.is_empty() {
-            return Some(slug.to_string());
-        }
-    }
-    if t.starts_with('#') {
+    if t.is_empty() {
         return None;
     }
-    if !t.is_empty() {
-        Some(t.to_string())
+    let candidate = t.strip_prefix('@').unwrap_or(t);
+    if crate::slug::is_valid(candidate) {
+        Some(candidate.to_string())
     } else {
         None
     }
@@ -279,8 +291,12 @@ fn resolve_refs(slugs: &[String], all: &[Issue]) -> Vec<RelatedRef> {
         .collect()
 }
 
-fn load_schema_summary(root: &Path) -> SchemaSummary {
-    let s = schema::load(root).unwrap_or_else(|_| schema::default_schema());
+/// Surface schema-load errors instead of silently substituting the
+/// default. `schema::load` already returns the default when the file is
+/// missing, so any `Err` here means the file exists but is malformed —
+/// agents must not be fed fabricated rules.
+fn load_schema_summary(root: &Path) -> Result<SchemaSummary> {
+    let s = schema::load(root).context("loading issues/.schema.yaml for context bundle")?;
     let fields: Vec<_> = s
         .fields
         .iter()
@@ -291,10 +307,10 @@ fn load_schema_summary(root: &Path) -> SchemaSummary {
             allowed: spec.allowed.clone(),
         })
         .collect();
-    SchemaSummary {
+    Ok(SchemaSummary {
         version: s.version,
         fields,
-    }
+    })
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────
@@ -367,8 +383,15 @@ pub fn render_markdown(b: &Bundle) -> String {
         out.push('\n');
     }
 
-    for (name, text) in &b.sections {
-        out.push_str(&format!("## {name}\n\n{text}\n\n"));
+    // Render the curated sections in declared order so the rendered
+    // markdown is stable regardless of how `BTreeMap` happens to sort
+    // them. Other H2 sections in the body are reachable through
+    // `{{section_name}}` template variables and the `## Body` block
+    // below — replicating them here would just duplicate content.
+    for name in ACCEPTANCE_SECTIONS {
+        if let Some(text) = b.sections.get(*name) {
+            out.push_str(&format!("## {name}\n\n{text}\n\n"));
+        }
     }
 
     if !b.issue.commits.is_empty() {
@@ -424,12 +447,54 @@ pub fn render_json(b: &Bundle) -> Result<String> {
 
 const CACHE_RELATIVE: &str = ".issuectl/cache/agent";
 
-pub fn cache_path(root: &Path, slug: &str, file: &str) -> PathBuf {
-    root.join(CACHE_RELATIVE).join(slug).join(file)
+/// Reject anything but plain filename components — no `..`, no path
+/// separators, no absolute paths. Used by both the template loader and
+/// the cache writer to keep user input from escaping its directory.
+fn validate_path_segment(label: &str, segment: &str) -> Result<()> {
+    if segment.is_empty() {
+        bail!("{label} cannot be empty");
+    }
+    if segment.starts_with('.') {
+        bail!("{label} cannot start with '.': {segment:?}");
+    }
+    for ch in segment.chars() {
+        if matches!(ch, '/' | '\\') || ch.is_control() {
+            bail!("{label} cannot contain path separators or control chars: {segment:?}");
+        }
+    }
+    if segment.contains("..") {
+        bail!("{label} cannot contain '..': {segment:?}");
+    }
+    Ok(())
 }
 
-pub fn write_artifact(root: &Path, slug: &str, file: &str, content: &str) -> Result<PathBuf> {
-    let path = cache_path(root, slug, file);
+/// Build a cache path from validated components. `slug` is already
+/// clap-validated upstream; `subpath` is the relative file path inside
+/// the slug directory, where each component must be a plain filename.
+pub fn cache_path(root: &Path, slug: &str, subpath: &[&str]) -> Result<PathBuf> {
+    if !crate::slug::is_valid(slug) {
+        bail!("invalid slug shape for cache path: {slug:?}");
+    }
+    if subpath.is_empty() {
+        bail!("cache subpath cannot be empty");
+    }
+    for s in subpath {
+        validate_path_segment("cache path component", s)?;
+    }
+    let mut p = root.join(CACHE_RELATIVE).join(slug);
+    for s in subpath {
+        p.push(s);
+    }
+    Ok(p)
+}
+
+pub fn write_artifact(
+    root: &Path,
+    slug: &str,
+    subpath: &[&str],
+    content: &str,
+) -> Result<PathBuf> {
+    let path = cache_path(root, slug, subpath)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
@@ -443,21 +508,27 @@ pub fn write_artifact(root: &Path, slug: &str, file: &str, content: &str) -> Res
 
 const PROMPT_DIR: &str = ".issuectl/prompts";
 
-pub fn prompt_template_path(root: &Path, name: &str) -> PathBuf {
-    let filename = if name.ends_with(".md") {
-        name.to_string()
-    } else {
-        format!("{name}.md")
-    };
-    root.join(PROMPT_DIR).join(filename)
+/// Validate and canonicalise a template name. Strips the optional `.md`
+/// suffix, rejects path separators / `..` / leading-dot, then re-appends
+/// `.md`. Returns the safe basename so the caller can also use it for
+/// cache writes without re-validating.
+fn safe_template_filename(name: &str) -> Result<String> {
+    let stem = name.strip_suffix(".md").unwrap_or(name);
+    validate_path_segment("template name", stem)?;
+    Ok(format!("{stem}.md"))
+}
+
+pub fn prompt_template_path(root: &Path, name: &str) -> Result<PathBuf> {
+    Ok(root.join(PROMPT_DIR).join(safe_template_filename(name)?))
 }
 
 /// Render a template by substituting `{{key}}` placeholders against the
-/// bundle. Unknown keys are left intact (so typos surface in the
-/// rendered output). Whitespace inside the braces is tolerated:
-/// `{{ key }}` and `{{key}}` are equivalent.
+/// bundle. Keys are resolved lazily — `{{context}}` only triggers the
+/// full markdown render when the template actually references it.
+/// Unknown keys are left intact (so typos surface in the rendered
+/// output). Whitespace inside the braces is tolerated: `{{ key }}` and
+/// `{{key}}` are equivalent.
 pub fn render_prompt(template: &str, bundle: &Bundle) -> String {
-    let vars = template_vars(bundle);
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(open) = rest.find("{{") {
@@ -465,8 +536,8 @@ pub fn render_prompt(template: &str, bundle: &Bundle) -> String {
         let after = &rest[open + 2..];
         if let Some(close) = after.find("}}") {
             let key = after[..close].trim();
-            if let Some(val) = vars.get(key) {
-                out.push_str(val);
+            if let Some(val) = resolve_var(key, bundle) {
+                out.push_str(&val);
                 rest = &after[close + 2..];
                 continue;
             }
@@ -480,81 +551,65 @@ pub fn render_prompt(template: &str, bundle: &Bundle) -> String {
     out
 }
 
-fn template_vars(b: &Bundle) -> BTreeMap<String, String> {
-    let mut m = BTreeMap::new();
-    m.insert("slug".into(), b.issue.slug.clone());
-    m.insert("title".into(), b.issue.title.clone());
-    m.insert("type".into(), b.issue.issue_type.clone());
-    m.insert("status".into(), b.issue.status.clone());
-    m.insert("priority".into(), b.issue.priority.clone());
-    m.insert("body".into(), b.issue.body.clone());
-    m.insert("labels".into(), b.issue.labels.join(", "));
-    m.insert(
-        "related".into(),
-        b.issue
-            .related
+/// Look up one template variable. Returns `None` for unknown keys so the
+/// caller can leave the placeholder untouched. Section-derived keys are
+/// matched case-insensitively against the issue's H2 headings, and any
+/// H2 in the body is reachable via its snake-cased name.
+fn resolve_var(key: &str, b: &Bundle) -> Option<String> {
+    match key {
+        "slug" => Some(b.issue.slug.clone()),
+        "title" => Some(b.issue.title.clone()),
+        "type" => Some(b.issue.issue_type.clone()),
+        "status" => Some(b.issue.status.clone()),
+        "priority" => Some(b.issue.priority.clone()),
+        "body" => Some(b.issue.body.clone()),
+        "version" => Some(b.issue.version.clone()),
+        "labels" => Some(b.issue.labels.join(", ")),
+        "related" => Some(
+            b.issue
+                .related
+                .iter()
+                .map(|s| format!("@{s}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        "blocked_by" => Some(
+            b.issue
+                .blocked_by
+                .iter()
+                .map(|s| format!("@{s}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        "commits" => Some(
+            b.issue
+                .commits
+                .iter()
+                .map(|c| format!("{}: {}", c.hash, c.summary))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        "epic_slug" => Some(b.epic.as_ref().map(|e| e.slug.clone()).unwrap_or_default()),
+        "epic_title" => Some(b.epic.as_ref().map(|e| e.title.clone()).unwrap_or_default()),
+        "epic_goal" => Some(
+            b.epic
+                .as_ref()
+                .and_then(|e| e.goal.clone())
+                .unwrap_or_default(),
+        ),
+        "epic_scope" => Some(
+            b.epic
+                .as_ref()
+                .and_then(|e| e.scope.clone())
+                .unwrap_or_default(),
+        ),
+        "context" => Some(render_markdown(b)),
+        _ => b
+            .sections
             .iter()
-            .map(|s| format!("@{s}"))
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    m.insert(
-        "blocked_by".into(),
-        b.issue
-            .blocked_by
-            .iter()
-            .map(|s| format!("@{s}"))
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    m.insert(
-        "commits".into(),
-        b.issue
-            .commits
-            .iter()
-            .map(|c| format!("{}: {}", c.hash, c.summary))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
-    m.insert(
-        "epic_slug".into(),
-        b.epic
-            .as_ref()
-            .map(|e| e.slug.clone())
-            .unwrap_or_default(),
-    );
-    m.insert(
-        "epic_title".into(),
-        b.epic
-            .as_ref()
-            .map(|e| e.title.clone())
-            .unwrap_or_default(),
-    );
-    m.insert(
-        "epic_goal".into(),
-        b.epic
-            .as_ref()
-            .and_then(|e| e.goal.clone())
-            .unwrap_or_default(),
-    );
-    m.insert(
-        "epic_scope".into(),
-        b.epic
-            .as_ref()
-            .and_then(|e| e.scope.clone())
-            .unwrap_or_default(),
-    );
-    for name in ACCEPTANCE_SECTIONS {
-        let key = section_var_key(name);
-        m.insert(
-            key,
-            b.sections.get(*name).cloned().unwrap_or_default(),
-        );
+            .find(|(name, _)| section_var_key(name) == key)
+            .map(|(_, text)| text.clone()),
     }
-    // `context` exposes the full markdown bundle so a template can simply
-    // reference {{context}} and append its own framing prose.
-    m.insert("context".into(), render_markdown(b));
-    m
 }
 
 fn section_var_key(name: &str) -> String {
@@ -562,7 +617,7 @@ fn section_var_key(name: &str) -> String {
 }
 
 pub fn load_template(root: &Path, name: &str) -> Result<String> {
-    let path = prompt_template_path(root, name);
+    let path = prompt_template_path(root, name)?;
     if !path.is_file() {
         bail!(
             "prompt template {} not found (looked at {})",
@@ -571,6 +626,13 @@ pub fn load_template(root: &Path, name: &str) -> Result<String> {
         );
     }
     fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))
+}
+
+/// Build the cache subpath segments for a prompt template artefact:
+/// `prompts/<safe-name>.md`. Validates the template name in the process,
+/// so `cmd_prompt` cannot escape the cache via a malicious name.
+pub fn prompt_cache_segments(template: &str) -> Result<Vec<String>> {
+    Ok(vec!["prompts".to_string(), safe_template_filename(template)?])
 }
 
 #[cfg(test)]
@@ -739,7 +801,7 @@ mod tests {
         let p = write_artifact(
             tmp.path(),
             "amber-loud-fox",
-            "context.md",
+            &["context.md"],
             &render_markdown(&bundle),
         )
         .unwrap();
@@ -752,5 +814,179 @@ mod tests {
         let tmp = fresh_repo();
         let err = build(tmp.path(), "no-such-slug").unwrap_err();
         assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn load_template_rejects_path_traversal() {
+        let tmp = fresh_repo();
+        fs::create_dir_all(tmp.path().join(".issuectl/prompts")).unwrap();
+        // Plant a target file outside the prompts dir; the template
+        // loader must refuse to reach it via `..`.
+        fs::write(tmp.path().join("secret.md"), "SECRET").unwrap();
+
+        for evil in [
+            "../../secret",
+            "../secret",
+            "../../etc/passwd",
+            "/etc/passwd",
+            ".hidden",
+            "foo/bar",
+            "..",
+        ] {
+            let err = load_template(tmp.path(), evil).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("template name") || msg.contains("not found"),
+                "evil={evil:?}, err={msg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_artifact_rejects_traversal_in_subpath() {
+        let tmp = fresh_repo();
+        let err = write_artifact(
+            tmp.path(),
+            "amber-loud-fox",
+            &["..", "..", "issues", "victim-here", "item.md"],
+            "pwned",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'..'") || msg.contains("'.'"),
+            "expected dot/parent rejection, got {msg:?}"
+        );
+        // No file should have been written outside the cache dir.
+        assert!(!tmp.path().join("issues/victim-here/item.md").exists());
+    }
+
+    #[test]
+    fn prompt_cache_segments_validates_template_name() {
+        assert!(prompt_cache_segments("implement").is_ok());
+        assert!(prompt_cache_segments("implement.md").is_ok());
+        assert!(prompt_cache_segments("../../escape").is_err());
+        assert!(prompt_cache_segments("/etc/passwd").is_err());
+        assert!(prompt_cache_segments(".hidden").is_err());
+        assert!(prompt_cache_segments("foo/bar").is_err());
+    }
+
+    #[test]
+    fn build_propagates_schema_parse_error() {
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\n",
+            "\n# X\n",
+        );
+        fs::write(tmp.path().join("issues/.schema.yaml"), "not: [valid yaml").unwrap();
+        let err = build(tmp.path(), "amber-loud-fox").unwrap_err();
+        let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
+        assert!(
+            chain.iter().any(|m| m.contains("schema") || m.contains(".schema.yaml")),
+            "expected schema error context, got chain {chain:?}"
+        );
+    }
+
+    #[test]
+    fn normalise_ref_rejects_garbage_slugs() {
+        assert_eq!(normalise_ref("@amber-loud-fox"), Some("amber-loud-fox".into()));
+        assert_eq!(normalise_ref("amber-loud-fox"), Some("amber-loud-fox".into()));
+        // Path-shaped, single-word, whitespace, and legacy `#NN` are all dropped.
+        assert_eq!(normalise_ref("@../../etc/passwd"), None);
+        assert_eq!(normalise_ref("hello world"), None);
+        assert_eq!(normalise_ref("foo"), None);
+        assert_eq!(normalise_ref("#7"), None);
+        assert_eq!(normalise_ref(""), None);
+    }
+
+    #[test]
+    fn build_sorts_and_dedupes_labels() {
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\nlabels: [ui, backend, ui, api]\n",
+            "\n# X\n",
+        );
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        assert_eq!(b.issue.labels, vec!["api", "backend", "ui"]);
+    }
+
+    #[test]
+    fn build_surfaces_arbitrary_h2_sections() {
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\n",
+            "\n# X\n\n## Risks\n\nstuff happens\n\n## Test Plan\n\nrun the suite\n",
+        );
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        assert!(b.sections.contains_key("Risks"));
+        assert!(b.sections.contains_key("Test Plan"));
+        // Each H2 is reachable as a snake-cased template variable.
+        let out = render_prompt("R: {{risks}} | T: {{test_plan}}", &b);
+        assert!(out.contains("R: stuff happens"));
+        assert!(out.contains("T: run the suite"));
+    }
+
+    #[test]
+    fn render_markdown_orders_curated_sections_consistently() {
+        let tmp = fresh_repo();
+        // "Quick Test" sorts before "Acceptance Criteria" alphabetically;
+        // declared order must override that.
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\n",
+            "\n# X\n\n## Quick Test\n\nclick around\n\n## Acceptance Criteria\n\n- one\n",
+        );
+        let md = render_markdown(&build(tmp.path(), "amber-loud-fox").unwrap());
+        let i_ac = md.find("## Acceptance Criteria").unwrap();
+        let i_qt = md.find("## Quick Test").unwrap();
+        assert!(
+            i_ac < i_qt,
+            "Acceptance Criteria must render before Quick Test (declared order)"
+        );
+    }
+
+    #[test]
+    fn bundle_includes_version_field() {
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\n",
+            "\n# X\n",
+        );
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        assert!(!b.issue.version.is_empty());
+        // Version round-trips into JSON and the {{version}} template var.
+        let j = render_json(&b).unwrap();
+        assert!(j.contains("\"version\""));
+        let p = render_prompt("v={{version}}", &b);
+        assert_eq!(p, format!("v={}", b.issue.version));
+    }
+
+    #[test]
+    fn render_prompt_does_not_eagerly_build_context() {
+        // {{context}} is heavy; a template that doesn't reference it
+        // must not pay the cost. We can't directly observe non-call,
+        // but we can prove the template renders without expanding it.
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\n",
+            "\n# Title only\n",
+        );
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        let out = render_prompt("just slug: {{slug}}", &b);
+        assert_eq!(out, "just slug: amber-loud-fox");
+        // And {{context}} still works when actually requested.
+        let out_ctx = render_prompt("{{context}}", &b);
+        assert!(out_ctx.contains("# Context: amber-loud-fox"));
     }
 }

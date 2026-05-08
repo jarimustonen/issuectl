@@ -299,15 +299,21 @@ criteria, recorded commits, and schema rules — use `issuectl context`:
 
 The bundle is byte-deterministic for a given issue state, which makes it
 safe to cache. It is read-only — `issuectl context` never mutates files
-under `issues/`.
+under `issues/`. The JSON form includes a `version` token matching
+`show --json`, so an agent can pass it straight to `--expected-version`
+on a subsequent `update`/`close` without a separate `show` call.
 
 ### Action: Render a prompt template
 
 Repo-local prompt templates live at `.issuectl/prompts/<name>.md` and
 support `{{key}}` substitution against the context bundle (e.g.
-`{{slug}}`, `{{title}}`, `{{body}}`, `{{acceptance_criteria}}`,
-`{{epic_goal}}`, `{{related}}`, `{{commits}}`, `{{context}}` for the full
-markdown bundle). Unknown keys are left intact so typos surface.
+`{{slug}}`, `{{title}}`, `{{body}}`, `{{version}}`, `{{epic_goal}}`,
+`{{related}}`, `{{commits}}`, `{{context}}` for the full markdown
+bundle). Any `## H2` heading in the issue body is also reachable via
+its snake-cased name — `## Risks` → `{{risks}}`, `## Test Plan` →
+`{{test_plan}}` — so templates can pull arbitrary sections without a
+code change. Unknown keys are left intact so typos surface. Template
+names must be plain filenames (no `/`, `\`, `..`, leading `.`).
 
 - Print rendered prompt: `issuectl prompt <template> <slug>`
 - Cache to `.issuectl/cache/agent/<slug>/prompts/<template>.md`: add `--write`
