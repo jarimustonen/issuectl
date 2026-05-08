@@ -1,8 +1,8 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-08
 type: task
-status: open
+status: in-progress
 priority: high
 reporter: jari
 epic: exorbitantly-ill-apples
