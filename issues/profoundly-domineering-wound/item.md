@@ -2,12 +2,18 @@
 created: 2026-05-06
 updated: 2026-05-08
 type: feature
-status: in-progress
+status: done
 priority: normal
 reporter: jari
 assignee: jari
 epic: exorbitantly-ill-apples
 labels: [agent-friendly, cli]
+commits:
+- hash: a1fe3cb73d37859418806322dfffaf26621c5ca7
+  summary: 'feat(context): agent context bundle and prompt templates'
+- hash: d29967243418dd890825c822bdbf3ea3d6f1644b
+  summary: 'fix(context): address llm-review findings'
+closed: 2026-05-08
 ---
 
 # Agent context bundle (issuectl context <slug>) + repo-local prompt templates
