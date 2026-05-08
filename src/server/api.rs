@@ -154,6 +154,13 @@ pub async fn list_issues(
 /// shared evaluator can run against it without paying the body
 /// load cost. Used only on the no-text-term fast path; `body` is
 /// left empty because no `text:` term is being evaluated.
+///
+/// **MUST NOT be passed to `canonical_hash`** — `extra` is
+/// hard-coded to empty here, so the resulting `Issue` would hash
+/// to a wrong value for any issue that has unknown frontmatter
+/// keys. Today the only caller is `query::matches`, which never
+/// hashes; this comment exists to keep that invariant explicit
+/// for future callers.
 fn summary_as_issue(s: &repo::IssueSummary) -> crate::models::Issue {
     crate::models::Issue {
         slug: s.slug.clone(),

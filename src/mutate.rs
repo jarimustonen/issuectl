@@ -1147,13 +1147,15 @@ mod tests {
     }
 
     #[test]
-    fn unknown_frontmatter_field_round_trips_byte_identical() {
-        // A user-added `triage:` key set on a fresh issue must survive
-        // a no-op read→write cycle byte-identically. read_item /
-        // write_item already drove this on a literal file (see write
-        // tests); this test belt-and-braces the same property after
-        // routing through `parse_item_md` so the Issue model carries
-        // the field through.
+    fn simple_unknown_scalar_fields_survive_read_write_round_trip() {
+        // A user-added `triage:` key on a fresh issue with a simple
+        // scalar value survives a no-op read→write cycle without
+        // textual change, AND lands in `Issue::extra` so
+        // canonical_hash sees it. Byte identity is *not* a general
+        // contract — `serde_yaml` reformats comments, scalar styles,
+        // anchors, list flow style — but for the simple
+        // `key: scalar` case it's stable, and that's the case this
+        // test pins down.
         let tmp = fresh_repo();
         let dir = tmp.path().join("issues/keep-triage");
         fs::create_dir_all(&dir).unwrap();
@@ -1172,22 +1174,24 @@ mod tests {
             crate::parser::parse_item_md_with_warnings(&dir.join("item.md"), "keep-triage", "open");
         assert_eq!(
             parsed.issue.extra.get("triage"),
-            Some(&serde_yaml::Value::String("alice".into()))
+            Some(&serde_json::Value::String("alice".into()))
         );
         assert_eq!(
             parsed.issue.extra.get("reviewer"),
-            Some(&serde_yaml::Value::String("bob".into()))
+            Some(&serde_json::Value::String("bob".into()))
         );
     }
 
     #[test]
-    fn external_edit_to_distinct_unknown_fields_each_succeed_with_fresh_version() {
-        // Two edits land in sequence — first sets `triage:`, second
-        // sets `reviewer:`. Each is reading the *current* version
-        // before its mutation, so neither should 409. This is the
-        // "different custom keys" success path: the version-aware
-        // protocol does not introduce false conflicts when the
-        // unknowns participating in the hash are independent.
+    fn unknown_field_edits_with_refreshed_version_do_not_block_later_updates() {
+        // Two external writes land in sequence on different custom
+        // keys (`triage:` then `reviewer:`); the third writer takes
+        // the post-edit version and PATCHes a known field. No 409
+        // because the third writer didn't carry a stale view. This
+        // does NOT prove field-level merge — whole-document
+        // optimistic concurrency means a writer that *was* stale on
+        // either custom key would still 409 (covered separately by
+        // `external_edit_to_unknown_field_makes_stale_version_409`).
         let tmp = fresh_repo();
         let dir = tmp.path().join("issues/concurrent-distinct");
         fs::create_dir_all(&dir).unwrap();
@@ -1302,11 +1306,89 @@ mod tests {
                 assert_eq!(current.slug, "concurrent-same-key");
                 assert_eq!(
                     current.extra.get("triage"),
-                    Some(&serde_yaml::Value::String("bob".into())),
+                    Some(&serde_json::Value::String("bob".into())),
                     "current state surfaced to the caller must reflect the new unknown value"
                 );
             }
             other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn external_delete_of_unknown_field_makes_stale_version_409() {
+        // Symmetric to the same-key 409 test: a writer who saved
+        // `triage: alice` and didn't notice an external `git pull`
+        // wiped the key must still trip optimistic concurrency,
+        // because removal changes the hash too.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/concurrent-delete-key");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\n\
+             priority: normal\ntriage: alice\n---\n\n# Title\n",
+        )
+        .unwrap();
+        let v0 = crate::canonical::canonical_hash(
+            &crate::parser::parse_item_md_with_warnings(
+                &dir.join("item.md"),
+                "concurrent-delete-key",
+                "open",
+            )
+            .issue,
+        );
+
+        // External writer removes the unknown key entirely.
+        let mut item = crate::write::read_item(&dir.join("item.md")).unwrap();
+        crate::write::remove_key(&mut item.frontmatter, "triage");
+        crate::write::write_item(&dir.join("item.md"), &item).unwrap();
+
+        let req = UpdateIssueRequest {
+            expected_version: Some(v0),
+            priority: Patch::Set("high".into()),
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "concurrent-delete-key", req, None).unwrap_err();
+        assert!(
+            matches!(err, MutateError::VersionMismatch { .. }),
+            "expected VersionMismatch on stale view after unknown-key delete, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn non_string_nested_key_in_unknown_value_warns_not_panics() {
+        // YAML allows non-string mapping keys; JSON does not. The
+        // parser must surface that as a `MutateError::Corrupt`
+        // (carrying the warning) rather than letting the hash code
+        // panic on a `serde_json::to_value` failure.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/bad-nested-key");
+        fs::create_dir_all(&dir).unwrap();
+        // `? [1, 2]` is YAML's explicit-key syntax for a sequence
+        // key. Top-level keys are still strings (so the frontmatter
+        // parses); the offending non-string key lives inside
+        // `weird:`.
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\n\
+             priority: normal\nweird:\n  ? [1, 2]\n  : foo\n---\n\n# Title\n",
+        )
+        .unwrap();
+
+        let req = UpdateIssueRequest {
+            priority: Patch::Set("high".into()),
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "bad-nested-key", req, None).unwrap_err();
+        match err {
+            MutateError::Corrupt { warnings } => {
+                assert!(
+                    warnings.iter().any(|w| w.contains("weird")
+                        && (w.contains("string") || w.contains("mapping key"))),
+                    "expected a warning naming the bad key, got: {warnings:?}"
+                );
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
         }
     }
 

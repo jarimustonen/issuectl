@@ -111,6 +111,29 @@ pub fn parse_item_md_text_with_warnings(
         }
     }
 
+    // Convert unknown frontmatter values from YAML AST to JSON AST
+    // at this boundary. JSON cannot represent every YAML construct
+    // (non-string mapping keys, tags, etc.); converting here lets us
+    // surface those as warnings instead of panicking deep in
+    // canonical_hash or the HTTP serializer. Failed entries are
+    // dropped from `extra` and reported via the warnings list, which
+    // mutate.rs treats as `MutateError::Corrupt` — the file isn't
+    // overwritten and the user can fix it.
+    let mut extra = BTreeMap::new();
+    for (k, v) in fm.unknown {
+        match yaml_to_canonical_json(&v) {
+            Ok(json) => {
+                extra.insert(k, json);
+            }
+            Err(e) => warnings.push(format!(
+                "{}: unsupported value for unknown frontmatter key {:?}: {}",
+                source.display(),
+                k,
+                e
+            )),
+        }
+    }
+
     let title = extract_title(body);
     let issue = crate::models::Issue {
         slug: slug.to_string(),
@@ -128,11 +151,80 @@ pub fn parse_item_md_text_with_warnings(
         labels: fm.labels,
         closed: fm.closed,
         commits: fm.commits,
-        extra: fm.unknown,
+        extra,
         title,
         body: body.unwrap_or_default().trim().to_string(),
     };
     ParsedItem { issue, warnings }
+}
+
+#[cfg(test)]
+pub fn yaml_to_canonical_json_for_tests(
+    v: &serde_yaml::Value,
+) -> Result<serde_json::Value, String> {
+    yaml_to_canonical_json(v)
+}
+
+/// Convert a `serde_yaml::Value` into a JSON-shaped value with
+/// recursively sorted maps. Mapping keys that are not strings, YAML
+/// tags, and any other YAML construct that JSON cannot represent
+/// produce an `Err` — callers should record a parse warning and
+/// drop the offending entry. Recursive sort guarantees the output
+/// bytes are stable across processes regardless of insertion order
+/// (matches design doc §3.2's "sorted-key JSON" contract).
+fn yaml_to_canonical_json(v: &serde_yaml::Value) -> Result<serde_json::Value, String> {
+    use serde_json::Value as J;
+    match v {
+        serde_yaml::Value::Null => Ok(J::Null),
+        serde_yaml::Value::Bool(b) => Ok(J::Bool(*b)),
+        serde_yaml::Value::String(s) => Ok(J::String(s.clone())),
+        serde_yaml::Value::Number(n) => {
+            // Non-finite floats (NaN, Infinity) cannot round-trip
+            // through JSON; reject explicitly. `serde_json::to_value`
+            // happens to map NaN → Null silently, which would let two
+            // distinct frontmatters hash identically — surfacing an
+            // error here is the correct contract.
+            if let Some(i) = n.as_i64() {
+                Ok(J::Number(serde_json::Number::from(i)))
+            } else if let Some(u) = n.as_u64() {
+                Ok(J::Number(serde_json::Number::from(u)))
+            } else if let Some(f) = n.as_f64() {
+                serde_json::Number::from_f64(f)
+                    .map(J::Number)
+                    .ok_or_else(|| format!("non-finite float ({f}) is not JSON-representable"))
+            } else {
+                Err("YAML number is not representable as i64/u64/f64".into())
+            }
+        }
+        serde_yaml::Value::Sequence(xs) => xs
+            .iter()
+            .map(yaml_to_canonical_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map(J::Array),
+        serde_yaml::Value::Mapping(m) => {
+            let mut sorted: BTreeMap<String, J> = BTreeMap::new();
+            for (k, vv) in m {
+                let key = match k {
+                    serde_yaml::Value::String(s) => s.clone(),
+                    other => {
+                        return Err(format!(
+                            "mapping key {:?} must be a string in canonical JSON",
+                            other
+                        ));
+                    }
+                };
+                sorted.insert(key, yaml_to_canonical_json(vv)?);
+            }
+            Ok(J::Object(sorted.into_iter().collect()))
+        }
+        // `serde_yaml::Value::Tagged` exists on some versions; if the
+        // current dep doesn't surface it, the match is exhaustive
+        // without this arm. Keep it under cfg-style fallthrough so a
+        // future serde_yaml bump that adds the variant compiles
+        // without silently passing the tag through.
+        #[allow(unreachable_patterns)]
+        _ => Err("YAML tagged values are not supported in unknown frontmatter keys".into()),
+    }
 }
 
 fn default_issue(slug: &str, folder: &str) -> crate::models::Issue {

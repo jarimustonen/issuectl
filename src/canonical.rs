@@ -84,17 +84,12 @@ fn canonical_frontmatter_value(issue: &Issue) -> Value {
         );
     }
     for (k, v) in &issue.extra {
-        // `extra` only contains keys outside the schema (serde flatten
-        // catches the leftovers in the parser). A YAML value with a
-        // non-string mapping key would fail to serialize as JSON and
-        // panic here — that is a malformed frontmatter file the user
-        // should fix; treating it as a corrupt-file panic is louder
-        // than silently dropping the field, which is the bug we are
-        // closing.
-        m.insert(
-            k.clone(),
-            serde_json::to_value(v).expect("frontmatter values JSON-serialise"),
-        );
+        // `extra` is already JSON-shaped: the parser converts YAML to
+        // canonical JSON at the boundary, with recursively sorted
+        // maps. Inserting directly avoids any panic surface from
+        // YAML constructs JSON cannot represent — those are filtered
+        // upstream into `LoadWarning`s.
+        m.insert(k.clone(), v.clone());
     }
     // serde_json::Map preserves insertion order. To get a canonical
     // sort independent of insertion order we collect into a BTreeMap
@@ -182,9 +177,9 @@ mod tests {
         let mut a = issue("foo", "open", "open", "body");
         let mut b = issue("foo", "open", "open", "body");
         a.extra
-            .insert("triage".into(), serde_yaml::Value::String("alice".into()));
+            .insert("triage".into(), serde_json::Value::String("alice".into()));
         b.extra
-            .insert("triage".into(), serde_yaml::Value::String("bob".into()));
+            .insert("triage".into(), serde_json::Value::String("bob".into()));
         assert_ne!(canonical_hash(&a), canonical_hash(&b));
     }
 
@@ -193,25 +188,82 @@ mod tests {
         let a = issue("foo", "open", "open", "body");
         let mut b = issue("foo", "open", "open", "body");
         b.extra
-            .insert("reviewer".into(), serde_yaml::Value::String("dana".into()));
+            .insert("reviewer".into(), serde_json::Value::String("dana".into()));
         assert_ne!(canonical_hash(&a), canonical_hash(&b));
     }
 
     #[test]
-    fn unknown_key_order_does_not_affect_hash() {
+    fn unknown_top_level_btreemap_insertion_order_does_not_affect_hash() {
         // BTreeMap iteration is sorted, so insertion order at the
-        // call site cannot perturb the hash. Belt-and-braces: assert
-        // it directly.
+        // call site cannot perturb the hash. The interesting
+        // canonicalisation case (nested maps under an unknown key)
+        // is exercised by `unknown_nested_map_order_does_not_affect_hash`
+        // below.
         let mut a = issue("foo", "open", "open", "body");
         let mut b = issue("foo", "open", "open", "body");
         a.extra
-            .insert("triage".into(), serde_yaml::Value::String("x".into()));
+            .insert("triage".into(), serde_json::Value::String("x".into()));
         a.extra
-            .insert("reviewer".into(), serde_yaml::Value::String("y".into()));
+            .insert("reviewer".into(), serde_json::Value::String("y".into()));
         b.extra
-            .insert("reviewer".into(), serde_yaml::Value::String("y".into()));
+            .insert("reviewer".into(), serde_json::Value::String("y".into()));
         b.extra
-            .insert("triage".into(), serde_yaml::Value::String("x".into()));
+            .insert("triage".into(), serde_json::Value::String("x".into()));
+        assert_eq!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
+    fn unknown_key_removal_changes_hash() {
+        // Mirrors `unknown_key_presence_changes_hash` from the other
+        // direction. A concurrent writer who deletes a custom key
+        // must invalidate stale `expected_version`s.
+        let mut a = issue("foo", "open", "open", "body");
+        a.extra
+            .insert("triage".into(), serde_json::Value::String("alice".into()));
+        let b = issue("foo", "open", "open", "body");
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
+    fn unknown_nested_map_value_changes_hash() {
+        let mut a = issue("foo", "open", "open", "body");
+        let mut b = issue("foo", "open", "open", "body");
+        a.extra.insert(
+            "triage".into(),
+            serde_json::json!({ "reviewer": "alice", "eta": "2026-06-01" }),
+        );
+        b.extra.insert(
+            "triage".into(),
+            serde_json::json!({ "reviewer": "bob", "eta": "2026-06-01" }),
+        );
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
+    fn unknown_nested_map_order_does_not_affect_hash() {
+        // Two YAML documents differing only in nested-key insertion
+        // order must produce the same canonical hash. Today this
+        // works in practice because `serde_json::Map` defaults to
+        // BTreeMap-backed (sorted) storage, but a future
+        // `preserve_order` feature flip in the dep graph would
+        // silently break it. The parser pre-sorts via
+        // `yaml_to_canonical_json`, locking the invariant in.
+        let yaml_a = "x:\n  zebra: 1\n  apple: 2\n  mango: 3\n";
+        let yaml_b = "x:\n  mango: 3\n  apple: 2\n  zebra: 1\n";
+        let va: serde_yaml::Value = serde_yaml::from_str(yaml_a).unwrap();
+        let vb: serde_yaml::Value = serde_yaml::from_str(yaml_b).unwrap();
+        // Round-trip both through the parser's YAML→JSON converter
+        // by faking an issue with one unknown key.
+        let mut a = issue("foo", "open", "open", "body");
+        let mut b = issue("foo", "open", "open", "body");
+        a.extra.insert(
+            "triage".into(),
+            crate::parser::yaml_to_canonical_json_for_tests(&va).unwrap(),
+        );
+        b.extra.insert(
+            "triage".into(),
+            crate::parser::yaml_to_canonical_json_for_tests(&vb).unwrap(),
+        );
         assert_eq!(canonical_hash(&a), canonical_hash(&b));
     }
 

@@ -269,8 +269,17 @@ Notes on the projection:
   files differing only in `updated:` are treated as equal. This is fine
   because `updated:` is generated, not user-authored.
 - **Unknown fields included** — `Frontmatter::unknown: BTreeMap<String,
-  Value>` (loader preserves them). Without this, a rewrite would silently
-  drop user-added fields without 409, which is data loss.
+  Value>` (loader preserves them). The on-disk round-trip already
+  preserves unknown keys via the raw `Mapping` in `write::ItemFile`;
+  the gap closed here is the *version-hash* side. Without unknowns
+  in the canonical projection, a writer who didn't read a custom
+  key (`triage:`, `reviewer:`) could pass `expected_version` even
+  after that key changed under it, and a subsequent partial write
+  could clobber the change without surfacing a 409. Values are
+  converted to canonical JSON at the parser boundary; YAML
+  constructs JSON cannot represent (non-string mapping keys, tags,
+  non-finite floats) become `LoadWarning`s and flow through
+  `MutateError::Corrupt`, never panicking the hash path.
 - **`canonical_hash` is computed in `mutate.rs`** so CLI and server use
   the same function. The CLI exposes it via `issuectl show --json`
   (`version` field).

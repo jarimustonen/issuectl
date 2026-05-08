@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Commit {
@@ -43,14 +44,20 @@ pub struct Issue {
     pub title: String,
     pub body: String,
 
-    /// Frontmatter keys outside the schema above. Preserved so they
-    /// feed into `canonical_hash` (design doc §3.2) and survive
-    /// round-trip writes. Hidden from the JSON wire shape when empty
-    /// so existing `/api/issues` consumers see no change; surfaces as
-    /// an `extra: { ... }` object only when the file has user-added
-    /// keys (e.g. `triage:`, `reviewer:`).
+    /// Frontmatter keys outside the schema above. Stored as
+    /// `serde_json::Value` so the type is JSON-safe by construction
+    /// — the parser converts YAML → JSON at the boundary, emitting a
+    /// `LoadWarning` for shapes JSON cannot represent (non-string
+    /// mapping keys, YAML tags). That keeps `canonical_hash` and the
+    /// API serializer panic-free regardless of what users put in
+    /// frontmatter. Round-trip preservation rides on the raw
+    /// `serde_yaml::Mapping` in `write::ItemFile`, so unknowns are
+    /// preserved on disk byte-for-byte; this field exists only to
+    /// project them into the version hash and surface them on the
+    /// wire. Hidden from JSON when empty so issues without unknowns
+    /// keep the pre-PR API shape.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, serde_yaml::Value>,
+    pub extra: BTreeMap<String, JsonValue>,
 }
 
 impl Issue {
