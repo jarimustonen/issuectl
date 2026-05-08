@@ -1,13 +1,19 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-08
 type: feature
-status: open
+status: done
 priority: normal
 reporter: jari
 assignee: jari
 epic: exorbitantly-ill-apples
 labels: [format, git-native]
+closed: 2026-05-08
+commits:
+- hash: 230974d
+  summary: add issuectl fmt and opt-in YAML merge driver
+- hash: 49e7c0f
+  summary: apply review findings for fmt + merge driver
 ---
 
 # issuectl fmt + optional YAML merge driver for item.md

@@ -5,7 +5,7 @@ type: feature
 reporter: jari
 status: open
 priority: normal
-epic: exorbitantly-ill-apples
+epic: hugely-exciting-spiders
 labels: [agent-friendly, v0.6.0-candidate]
 ---
 

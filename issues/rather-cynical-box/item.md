@@ -1,10 +1,12 @@
 ---
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-05-08
 type: bug
-status: open
+status: duplicate
 priority: normal
 epic: exorbitantly-ill-apples
+related: ['@painfully-endurable-steel']
+closed: 2026-05-08
 ---
 
 # canonical_hash drops unknown frontmatter fields

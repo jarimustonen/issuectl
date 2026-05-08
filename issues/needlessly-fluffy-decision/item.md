@@ -1,13 +1,21 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-08
 type: feature
-status: open
+status: done
 priority: high
 reporter: jari
 assignee: jari
 epic: exorbitantly-ill-apples
 labels: [breaking, kanban, web-ui]
+closed: 2026-05-08
+commits:
+- hash: 32802d0
+  summary: drag-and-drop kanban write-back
+- hash: 88dfb85
+  summary: apply review findings from drag-and-drop write-back
+- hash: 1ddd09b
+  summary: apply round-2 review findings on drag-and-drop write-back
 ---
 
 # Drag-and-drop issues between kanban columns with write-back to item.md

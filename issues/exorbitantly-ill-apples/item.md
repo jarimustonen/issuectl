@@ -34,8 +34,7 @@ quality-of-life improvements are deferred to v0.6.0.
 ### M0 — architectural prerequisite (must land first)
 - [x] @awfully-faint-sound — Migrate to flat layout `issues/<slug>/item.md`
   (status only in YAML). Landed in `2809ded` + review fixes `501a1bd`;
-  layout migration folded into `doctor --fix` (`ea8250a`). Status
-  `testing` pending real-world soak.
+  layout migration folded into `doctor --fix` (`ea8250a`). Closed.
 
 ### M1 — web edit/sync
 
@@ -66,6 +65,7 @@ to keep the epic in sync with the worktree:
   `--watch-poll-ms`, `Degraded` banner, three-way merge UI.
 - [x] @needlessly-fluffy-decision — Drag-and-drop write-back on the
   kanban. Landed `32802d0` + review rounds `88dfb85` and `1ddd09b`.
+  Closed.
 - [ ] @amazingly-scattered-month — Startup reconciliation
   (subsumed by @slightly-finicky-heart; close when M2 lands).
 
@@ -75,7 +75,7 @@ to keep the epic in sync with the worktree:
 - [ ] @peculiarly-political-interest — Agent-safe mutation CLI
   (`set` / `note` / `check` / `label` / `apply` + `--dry-run`).
 - [x] @outright-homely-calendar — `issuectl fmt` + optional YAML merge
-  driver. Landed `230974d` + review fixes `49e7c0f`.
+  driver. Landed `230974d` + review fixes `49e7c0f`. Closed.
 - [ ] @vastly-lyrical-police — Declarative status transition rules +
   per-type body section linting. Small extension of doctor.
 - [x] @overly-dreary-yak — Standardized markdown body sections (comments,

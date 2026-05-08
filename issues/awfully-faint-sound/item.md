@@ -1,8 +1,8 @@
 ---
 created: 2026-05-06
-updated: 2026-05-07
+updated: 2026-05-08
 type: improvement
-status: testing
+status: done
 priority: high
 reporter: jari
 assignee: jari
@@ -13,6 +13,9 @@ commits:
   summary: 'refactor: flat layout (issues/<slug>/item.md, no open/closed split)'
 - hash: 501a1bd
   summary: 'fix: apply review findings from awfully-faint-sound flat-layout'
+- hash: ea8250a
+  summary: fold migrate-layout into doctor --fix
+closed: 2026-05-08
 ---
 
 # Migrate to flat layout: issues/<slug>/item.md (status only in YAML, not in path)
