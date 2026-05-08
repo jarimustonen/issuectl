@@ -429,6 +429,16 @@ fn push_issue_with_parse(
     issues.push(issue);
 }
 
+/// Body-free projection used by `GET /api/issues` when the query
+/// has no `text:` term — saves a per-issue body read+allocate.
+pub fn load_issue_summaries(repo_root: &Path) -> (Vec<IssueSummary>, Vec<LoadWarning>) {
+    let (issues, warnings) = load_issues_with_warnings(repo_root);
+    (
+        issues.into_iter().map(IssueSummary::from).collect(),
+        warnings,
+    )
+}
+
 /// Result of `locate_issue`: where the slug currently lives on disk and
 /// (for legacy paths) which compat folder it was found under.
 #[derive(Debug, Clone)]

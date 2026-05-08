@@ -805,30 +805,31 @@ fn cmd_list(
         });
     }
 
-    // Apply the implicit folder default unless the caller already
-    // expressed a scope (positional query, --all, --closed, or an
-    // explicit folder:/status: term).
+    // Implicit folder default depends only on the CLI flags, not on
+    // translated terms — otherwise `--status fixed` would silently
+    // surface closed issues, breaking backwards compat with the
+    // pre-query-engine `ls`. A *positional* query is the one
+    // surface where the caller has explicitly opted into "scope it
+    // yourself" mode.
     let folder_filter: Option<&'static str> = if all {
         None
     } else if closed {
         Some("closed")
-    } else if query_str.is_none()
-        && !q.mentions_field(query::FieldName::Folder)
-        && !q.mentions_field(query::FieldName::Status)
-    {
-        Some("open")
-    } else {
+    } else if query_str.is_some() {
         None
+    } else {
+        Some("open")
     };
 
     let issues = load();
-    let mut filtered: Vec<_> = issues
+    // `repo::load_issues` already returns issues sorted by slug, so
+    // we don't re-sort here.
+    let filtered: Vec<_> = issues
         .into_iter()
         .filter(|i| {
             folder_filter.map(|f| i.folder == f).unwrap_or(true) && query::matches(&q, i)
         })
         .collect();
-    filtered.sort_by(|a, b| a.slug.cmp(&b.slug));
 
     if json {
         let with_version: Vec<_> = filtered
@@ -883,14 +884,18 @@ fn cmd_search(json: bool, query_str: &str, all: bool) -> Result<()> {
     let q = query::parse(query_str).context("parsing search query")?;
     let issues = load();
 
+    // `search` keeps the historical scope rule: open-only unless
+    // `--all`. A positive `folder:`/`status:` term in the query
+    // can still expand scope, but a negated one (e.g.
+    // `-status:wontfix`) is exclusion, not scope expansion.
+    let scope_expanded = all
+        || q.has_positive_field(query::FieldName::Folder)
+        || q.has_positive_field(query::FieldName::Status);
+
     let mut filtered: Vec<_> = issues
         .into_iter()
         .filter(|i| {
-            if !all
-                && i.folder != "open"
-                && !q.mentions_field(query::FieldName::Folder)
-                && !q.mentions_field(query::FieldName::Status)
-            {
+            if !scope_expanded && i.folder != "open" {
                 return false;
             }
             query::matches(&q, i)
@@ -2107,6 +2112,90 @@ mod tests {
         let hits: Vec<_> = issues
             .iter()
             .filter(|i| query::matches(&q, i))
+            .map(|i| i.slug.clone())
+            .collect();
+        assert_eq!(hits, vec!["amber-loud-fox".to_string()]);
+    }
+
+    /// Regression for the `--status` flag scope: pre-query-engine
+    /// `ls -s fixed` returned nothing without `--all`/`--closed`
+    /// because the implicit "open only" filter ran first. The query
+    /// engine must preserve that — flag-translation must not flip
+    /// the default.
+    #[test]
+    fn ls_flag_status_still_scoped_to_open() {
+        let tmp = fresh_repo();
+        write_raw_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\n",
+            "# Open\n",
+        );
+        write_raw_issue(
+            tmp.path(),
+            "calm-bright-newt",
+            "type: bug\nstatus: fixed\nclosed: 2026-05-01\n",
+            "# Closed\n",
+        );
+
+        let issues = repo::load_issues(tmp.path());
+
+        // Reproduce the cmd_list folder-default rule for the
+        // flag-only path: open-only unless --all or --closed.
+        let mut q = query::Query::default();
+        q.push(query::Term::Field {
+            field: query::FieldName::Status,
+            m: query::FieldMatch::Equals("fixed".to_string()),
+            negated: false,
+        });
+        let folder_filter = Some("open"); // mirrors flag-only branch
+
+        let hits: Vec<_> = issues
+            .iter()
+            .filter(|i| {
+                folder_filter.map(|f| i.folder == f).unwrap_or(true) && query::matches(&q, i)
+            })
+            .map(|i| i.slug.clone())
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "ls -s fixed must not surface closed issues without --all/--closed; got {hits:?}"
+        );
+    }
+
+    /// `search -status:wontfix` should remain scoped to open. A
+    /// negated status term is exclusion, not scope expansion.
+    #[test]
+    fn search_negated_status_does_not_expand_scope() {
+        let tmp = fresh_repo();
+        write_raw_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\n",
+            "# Open\n",
+        );
+        write_raw_issue(
+            tmp.path(),
+            "calm-bright-newt",
+            "type: bug\nstatus: done\nclosed: 2026-05-01\n",
+            "# Done\n",
+        );
+
+        let issues = repo::load_issues(tmp.path());
+        let q = query::parse("-status:wontfix").unwrap();
+
+        let scope_expanded = q.has_positive_field(query::FieldName::Folder)
+            || q.has_positive_field(query::FieldName::Status);
+        assert!(!scope_expanded, "negation must not expand scope");
+
+        let hits: Vec<_> = issues
+            .iter()
+            .filter(|i| {
+                if !scope_expanded && i.folder != "open" {
+                    return false;
+                }
+                query::matches(&q, i)
+            })
             .map(|i| i.slug.clone())
             .collect();
         assert_eq!(hits, vec!["amber-loud-fox".to_string()]);

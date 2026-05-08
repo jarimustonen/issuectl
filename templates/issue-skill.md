@@ -68,10 +68,20 @@ Use the CLI rather than greppa hakemistoa. The CLI knows the frontmatter schema.
   - Supported fields: `status`, `type`, `priority`, `assignee`, `owner`,
     `epic`, `label`, `slug`, `folder`, `updated`, `created`, `closed`,
     `text`. Bareword (no `field:` prefix) is treated as `text:`.
-  - Date filters use relative offsets: `<-14d`, `>=-30d` (anchor: today UTC,
-    inclusive comparison). Multiple terms AND together; no OR / parens in v1.
-  - When a positional query is given, the implicit "open only" default
-    is dropped — say `folder:open` or `--all`/`--closed` to scope.
+  - Date filters use relative offsets: `<-14d` (strict), `<=-14d`
+    (inclusive), and the same for `>` / `>=`. Anchor is today
+    (local timezone — same as how `created`/`updated` are written).
+    Use `<=0d` for "today or earlier" (don't write `+0d` in URLs;
+    `+` URL-decodes to space).
+  - Multiple terms AND together; no OR / parens in v1.
+  - Escape inside an unquoted value: `\:` literal colon, `\\` literal
+    backslash, `\ ` literal space, `\"` literal quote, `\-` at token
+    start to escape negation. Or quote the whole value: `text:"foo:bar"`.
+  - When a positional query is given to `ls`, the implicit "open
+    only" default is dropped — combine with `--all`/`--closed` or
+    `folder:`/`status:` to scope. Plain `--status fixed` (no
+    positional query) still implies open-only, matching the old
+    behavior.
 - Include closed: `--all` (both) or `--closed` (only closed)
 - Show details for one: `issuectl --json show <slug>`
 - Search (same query syntax; bareword shorthand): `issuectl --json search KEYWORD [--all]`

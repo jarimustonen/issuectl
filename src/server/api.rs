@@ -83,9 +83,18 @@ pub struct ListQuery {
 pub async fn list_issues(
     State(state): State<AppState>,
     Query(params): Query<ListQuery>,
-) -> Result<Json<IssueListResponse>, StatusCode> {
+) -> Result<Json<IssueListResponse>, Response> {
     let parsed_query = match params.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(s) => Some(crate::query::parse(s).map_err(|_| StatusCode::BAD_REQUEST)?),
+        Some(s) => match crate::query::parse(s) {
+            Ok(q) => Some(q),
+            Err(e) => {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_query",
+                    &e.to_string(),
+                ));
+            }
+        },
         None => None,
     };
 
@@ -97,25 +106,74 @@ pub async fn list_issues(
     let instance_id = state.event_hub.instance_id();
     let root = state.root.clone();
     let (issues, warnings) = tokio::task::spawn_blocking(move || {
-        // We filter on full Issue (need body for text: matching), then
-        // project to the lighter IssueSummary the web client expects.
-        let (issues, warnings) = repo::load_issues_with_warnings(root.as_path());
-        let filtered: Vec<crate::models::Issue> = match parsed_query {
-            Some(q) => issues.into_iter().filter(|i| crate::query::matches(&q, i)).collect(),
-            None => issues,
-        };
-        let summaries: Vec<repo::IssueSummary> =
-            filtered.into_iter().map(repo::IssueSummary::from).collect();
-        (summaries, warnings)
+        // Body-free fast path: when the query has no text term (or
+        // is absent entirely), load only the lighter summaries —
+        // text matching is the only thing that needs `body`.
+        let needs_full_load = parsed_query
+            .as_ref()
+            .map(|q| q.has_text_term())
+            .unwrap_or(false);
+        if needs_full_load {
+            let q = parsed_query.expect("guarded by needs_full_load");
+            let (issues, warnings) = repo::load_issues_with_warnings(root.as_path());
+            let summaries: Vec<repo::IssueSummary> = issues
+                .into_iter()
+                .filter(|i| crate::query::matches(&q, i))
+                .map(repo::IssueSummary::from)
+                .collect();
+            (summaries, warnings)
+        } else {
+            let (summaries, warnings) = repo::load_issue_summaries(root.as_path());
+            let filtered: Vec<repo::IssueSummary> = match parsed_query {
+                Some(q) => summaries
+                    .into_iter()
+                    .filter(|s| crate::query::matches(&q, &summary_as_issue(s)))
+                    .collect(),
+                None => summaries,
+            };
+            (filtered, warnings)
+        }
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "join_error",
+            "task join failed",
+        )
+    })?;
     Ok(Json(IssueListResponse {
         issues,
         warnings,
         snapshot_seq,
         instance_id,
     }))
+}
+
+/// Adapt an `IssueSummary` to a temporary `Issue` shape so the
+/// shared evaluator can run against it without paying the body
+/// load cost. Used only on the no-text-term fast path; `body` is
+/// left empty because no `text:` term is being evaluated.
+fn summary_as_issue(s: &repo::IssueSummary) -> crate::models::Issue {
+    crate::models::Issue {
+        slug: s.slug.clone(),
+        folder: s.folder.clone(),
+        created: s.created.clone(),
+        status: s.status.clone(),
+        updated: s.updated.clone(),
+        priority: s.priority.clone(),
+        issue_type: s.issue_type.clone(),
+        reporter: s.reporter.clone(),
+        assignee: s.assignee.clone(),
+        owner: s.owner.clone(),
+        epic: s.epic.clone(),
+        related: s.related.clone(),
+        labels: s.labels.clone(),
+        closed: s.closed.clone(),
+        commits: s.commits.clone(),
+        title: s.title.clone(),
+        body: String::new(),
+    }
 }
 
 pub async fn get_issue(
