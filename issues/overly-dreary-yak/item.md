@@ -11,6 +11,10 @@ labels: [agent-friendly, v0.6.0-candidate, workflow]
 commits:
 - hash: 39cabc5
   summary: body section conventions + note CLI + reopen notes stub
+- hash: 6f4485f
+  summary: 'body-sections: fence-aware parsing, validate inputs, drop Notes alias'
+- hash: 3526f73
+  summary: create spin-off virtually-dull-regret
 related: ['@virtually-dull-regret']
 ---
 
