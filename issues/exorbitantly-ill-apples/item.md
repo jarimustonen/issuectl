@@ -88,8 +88,9 @@ to keep the epic in sync with the worktree:
 - [x] @unusually-elegant-rule — Shared query engine (CLI + web + automation)
   with `--json` and full-text search. Landed `5af9f94` + review fixes
   (`a8a643c`, `5ae510b`).
-- [ ] @profoundly-domineering-wound — Agent context bundle
-  (`issuectl context <slug>`) + repo-local prompt templates.
+- [x] @profoundly-domineering-wound — Agent context bundle
+  (`issuectl context <slug>`) + repo-local prompt templates. Landed
+  `a1fe3cb` + review fixes `d299672`.
 - [x] @singularly-hulking-crown — Issues schema file (required + optional
   fields). Landed `62bcf00`.
 - [ ] @markedly-terrific-angle — `.issuectl/AGENTS.md` agent policy file.
