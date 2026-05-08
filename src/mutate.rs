@@ -1952,52 +1952,84 @@ mod tests {
         }
     }
 
-    #[test]
-    fn new_issue_publishes_before_releasing_flock() {
-        // web-edit-sync §3.1 step 8: every server-mediated mutation must
-        // publish its IssueUpserted event WHILE the repo flock is still
-        // held, so the global seq order matches on-disk write order. The
-        // pre-fix `new_issue` delegated to `do_new` (which acquired and
-        // released the lock internally) and then published OUTSIDE the
-        // lock — a fast-following PATCH could land an event with a
-        // smaller seq, breaking dedupe-by-version on the client.
-        //
-        // We assert the invariant by registering a synchronous publish
-        // hook on the EventHub: the hook re-opens the lock file in a
-        // fresh fd and tries a non-blocking `flock(LOCK_EX)`. If
-        // `new_issue` is still inside its WriteLock, the try must fail
-        // with `WouldBlock`. (POSIX flock — both Linux and macOS — is
-        // per open-file-description, so a separate `open()` from the
-        // same process conflicts.)
+    // ── publish-before-release helpers ──────────────────────────────────
+    //
+    // web-edit-sync §3.1 step 8: every server-mediated mutation must publish
+    // its IssueUpserted event WHILE the repo flock is still held, so global
+    // seq order matches on-disk write order. The pre-fix `new_issue`
+    // delegated to `do_new` (which acquired and released the lock
+    // internally) and then published OUTSIDE the lock — a fast-following
+    // PATCH could land an event with a smaller seq, breaking dedupe-by-
+    // version on the client. The same contract binds `update_issue`,
+    // `update_body`, `note_issue`, and `close_issue`; the helpers below
+    // exercise the invariant on each.
+    //
+    // The probe re-opens `.issuectl/write.lock` on a fresh fd and tries a
+    // non-blocking `flock(LOCK_EX)`. POSIX `flock(2)` on Linux and macOS is
+    // per open-file-description, so a separate `open()` from the same
+    // process conflicts. We match `ErrorKind::WouldBlock` exactly so that
+    // any *other* error (permission, ENOENT, or a hypothetical `fs2`
+    // backend switch to per-process `fcntl` record locks) panics loudly
+    // instead of silently passing.
+
+    const PROBE_UNSEEN: u8 = 0;
+    const PROBE_HELD: u8 = 1;
+    const PROBE_RELEASED: u8 = 2;
+
+    fn install_lock_probe(
+        hub: &Arc<EventHub>,
+        lock_path: std::path::PathBuf,
+    ) -> Arc<std::sync::atomic::AtomicU8> {
         use fs2::FileExt;
         use std::sync::atomic::{AtomicU8, Ordering};
 
-        const UNSEEN: u8 = 0;
-        const HELD: u8 = 1;
-        const RELEASED: u8 = 2;
+        let observed = Arc::new(AtomicU8::new(PROBE_UNSEEN));
+        let probe_state = observed.clone();
+        hub.set_on_publish_for_test(Arc::new(move |_evt| {
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .expect("lock file must exist by publish time");
+            match f.try_lock_exclusive() {
+                Ok(()) => {
+                    let _ = FileExt::unlock(&f);
+                    probe_state.store(PROBE_RELEASED, Ordering::SeqCst);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    probe_state.store(PROBE_HELD, Ordering::SeqCst);
+                }
+                Err(e) => panic!(
+                    "unexpected error from try_lock_exclusive in publish probe: {e} \
+                     (kind={:?}); the test cannot tell whether the flock was held — \
+                     fix the probe or investigate fs2 lock semantics on this platform",
+                    e.kind()
+                ),
+            }
+        }));
+        observed
+    }
 
+    fn assert_probe_saw_held(observed: &std::sync::atomic::AtomicU8, mutation: &str) {
+        use std::sync::atomic::Ordering;
+        match observed.load(Ordering::SeqCst) {
+            PROBE_HELD => {}
+            PROBE_RELEASED => panic!(
+                "{mutation}: IssueUpserted was published AFTER the repo flock was released — \
+                 violates web-edit-sync §3.1 step 8 (publish-before-release)"
+            ),
+            _ => panic!(
+                "{mutation}: publish hook never fired — \
+                 mutation did not publish IssueUpserted"
+            ),
+        }
+    }
+
+    #[test]
+    fn new_issue_publishes_before_releasing_flock() {
         let tmp = fresh_repo();
         let hub = Arc::new(EventHub::new());
-        let lock_path = tmp.path().join(".issuectl/write.lock");
-        let observed = Arc::new(AtomicU8::new(UNSEEN));
-        {
-            let observed = observed.clone();
-            let lock_path = lock_path.clone();
-            hub.set_on_publish_for_test(Arc::new(move |_evt| {
-                let f = std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&lock_path)
-                    .expect("lock file must exist by publish time");
-                match f.try_lock_exclusive() {
-                    Ok(()) => {
-                        let _ = f.unlock();
-                        observed.store(RELEASED, Ordering::SeqCst);
-                    }
-                    Err(_) => observed.store(HELD, Ordering::SeqCst),
-                }
-            }));
-        }
+        let observed = install_lock_probe(&hub, tmp.path().join(".issuectl/write.lock"));
 
         let req = NewIssueRequest {
             issue_type: "bug".into(),
@@ -2007,14 +2039,116 @@ mod tests {
         };
         new_issue(tmp.path(), req, Some(&hub)).unwrap();
 
-        match observed.load(Ordering::SeqCst) {
-            HELD => {}
-            RELEASED => panic!(
-                "IssueUpserted was published AFTER the repo flock was released — \
-                 violates web-edit-sync §3.1 step 8 (publish-before-release)"
-            ),
-            _ => panic!("publish hook never fired — new_issue did not publish IssueUpserted"),
-        }
+        assert_probe_saw_held(&observed, "new_issue");
+    }
+
+    #[test]
+    fn update_issue_publishes_before_releasing_flock() {
+        let tmp = fresh_repo();
+        let v0 = seed_issue(tmp.path(), "open", "patch-publish-flock", "open");
+        let hub = Arc::new(EventHub::new());
+        let observed = install_lock_probe(&hub, tmp.path().join(".issuectl/write.lock"));
+
+        let req = UpdateIssueRequest {
+            expected_version: Some(v0),
+            priority: Patch::Set("high".into()),
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "patch-publish-flock", req, Some(&hub)).unwrap();
+
+        assert_probe_saw_held(&observed, "update_issue");
+    }
+
+    #[test]
+    fn close_issue_publishes_before_releasing_flock() {
+        let tmp = fresh_repo();
+        let v0 = seed_issue(tmp.path(), "open", "close-publish-flock", "open");
+        let hub = Arc::new(EventHub::new());
+        let observed = install_lock_probe(&hub, tmp.path().join(".issuectl/write.lock"));
+
+        close_issue(
+            tmp.path(),
+            "close-publish-flock",
+            None,
+            Vec::new(),
+            Some(v0),
+            Some(&hub),
+        )
+        .unwrap();
+
+        assert_probe_saw_held(&observed, "close_issue");
+    }
+
+    #[test]
+    fn update_body_publishes_before_releasing_flock() {
+        let tmp = fresh_repo();
+        let v0 = seed_issue(tmp.path(), "open", "body-publish-flock", "open");
+        let hub = Arc::new(EventHub::new());
+        let observed = install_lock_probe(&hub, tmp.path().join(".issuectl/write.lock"));
+
+        update_body(
+            tmp.path(),
+            "body-publish-flock",
+            Some(v0),
+            "# Replaced body\n".into(),
+            Some(&hub),
+        )
+        .unwrap();
+
+        assert_probe_saw_held(&observed, "update_body");
+    }
+
+    #[test]
+    fn note_issue_publishes_before_releasing_flock() {
+        let tmp = fresh_repo();
+        let v0 = seed_issue(tmp.path(), "open", "note-publish-flock", "open");
+        let hub = Arc::new(EventHub::new());
+        let observed = install_lock_probe(&hub, tmp.path().join(".issuectl/write.lock"));
+
+        note_issue(
+            tmp.path(),
+            "note-publish-flock",
+            "alice",
+            "hello from a probe",
+            Some(v0),
+            Some(&hub),
+        )
+        .unwrap();
+
+        assert_probe_saw_held(&observed, "note_issue");
+    }
+
+    #[test]
+    fn new_issue_does_not_publish_on_error_path() {
+        // Symmetric guarantee: when the mutation fails (here: a schema
+        // violation rejected before any write), no IssueUpserted may be
+        // emitted. Otherwise the API would announce a state change that
+        // never landed on disk.
+        use std::sync::atomic::Ordering;
+
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: true\n",
+        )
+        .unwrap();
+        let hub = Arc::new(EventHub::new());
+        let observed = install_lock_probe(&hub, tmp.path().join(".issuectl/write.lock"));
+
+        let req = NewIssueRequest {
+            issue_type: "bug".into(),
+            title: "missing required team".into(),
+            priority: "normal".into(),
+            ..Default::default()
+        };
+        let err = new_issue(tmp.path(), req, Some(&hub)).unwrap_err();
+        assert!(matches!(err, MutateError::SchemaViolation(_)));
+        assert_eq!(
+            observed.load(Ordering::SeqCst),
+            PROBE_UNSEEN,
+            "new_issue published an IssueUpserted on an error path — \
+             the API would announce a write that never happened"
+        );
     }
 
     #[test]
