@@ -84,18 +84,41 @@ fn canonical_frontmatter_value(issue: &Issue) -> Value {
         );
     }
     for (k, v) in &issue.extra {
-        // `extra` is already JSON-shaped: the parser converts YAML to
-        // canonical JSON at the boundary, with recursively sorted
-        // maps. Inserting directly avoids any panic surface from
-        // YAML constructs JSON cannot represent — those are filtered
-        // upstream into `LoadWarning`s.
-        m.insert(k.clone(), v.clone());
+        // `extra` is JSON-shaped (parser converted at the YAML
+        // boundary). The parser pre-sorts nested maps, but we
+        // re-canonicalise here defensively: an `Issue` constructed
+        // any other way (test fixture, future deserialisation under
+        // `serde_json/preserve_order`) might carry an
+        // insertion-ordered `Map` whose hash would diverge from a
+        // logically equal one. The hash is the optimistic-
+        // concurrency primitive — it must not trust upstream
+        // invariants.
+        m.insert(k.clone(), canonicalise_json(v));
     }
     // serde_json::Map preserves insertion order. To get a canonical
     // sort independent of insertion order we collect into a BTreeMap
     // and rebuild.
     let sorted: std::collections::BTreeMap<String, Value> = m.into_iter().collect();
     Value::Object(sorted.into_iter().collect())
+}
+
+/// Recursively rebuild a `serde_json::Value` so every map iterates
+/// in sorted-key order. Idempotent. Used at hash time so the
+/// canonical projection does not depend on whether `serde_json`
+/// was compiled with `preserve_order`, nor on how the input
+/// `Value` happened to be constructed.
+fn canonicalise_json(v: &Value) -> Value {
+    match v {
+        Value::Object(m) => {
+            let sorted: std::collections::BTreeMap<String, Value> = m
+                .iter()
+                .map(|(k, vv)| (k.clone(), canonicalise_json(vv)))
+                .collect();
+            Value::Object(sorted.into_iter().collect())
+        }
+        Value::Array(a) => Value::Array(a.iter().map(canonicalise_json).collect()),
+        other => other.clone(),
+    }
 }
 
 /// Normalize CRLF→LF and trim only trailing newlines (NOT arbitrary
@@ -265,6 +288,67 @@ mod tests {
             crate::parser::yaml_to_canonical_json_for_tests(&vb).unwrap(),
         );
         assert_eq!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
+    fn manually_unsorted_nested_json_map_in_extra_canonicalises() {
+        // The parser pre-sorts nested maps via `yaml_to_canonical_json`,
+        // so the YAML→JSON path is order-stable. This test bypasses
+        // the parser and constructs an `extra` entry directly with a
+        // deliberately insertion-ordered `serde_json::Map` to verify
+        // the *hash-time* recursive canonicalisation
+        // (`canonicalise_json`) actually re-sorts. Without that
+        // defence, an `Issue` built from any non-parser source
+        // (future API deserialisation, test fixture, etc.) could
+        // hash differently from a logically equal one.
+        let mut a = issue("foo", "open", "open", "body");
+        let mut b = issue("foo", "open", "open", "body");
+        let mut unsorted = serde_json::Map::new();
+        unsorted.insert("zebra".into(), serde_json::json!(1));
+        unsorted.insert("apple".into(), serde_json::json!(2));
+        let mut sorted = serde_json::Map::new();
+        sorted.insert("apple".into(), serde_json::json!(2));
+        sorted.insert("zebra".into(), serde_json::json!(1));
+        a.extra
+            .insert("triage".into(), serde_json::Value::Object(unsorted));
+        b.extra
+            .insert("triage".into(), serde_json::Value::Object(sorted));
+        assert_eq!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
+    fn unknown_scalar_types_round_trip_through_yaml_to_canonical_json() {
+        // The yaml→canonical-json conversion is exercised at the
+        // type level for booleans, integers, floats, sequences, and
+        // null — earlier tests only used string scalars.
+        use crate::parser::yaml_to_canonical_json_for_tests;
+        let cases = [
+            ("true", serde_json::json!(true)),
+            ("42", serde_json::json!(42)),
+            ("3.5", serde_json::json!(3.5)),
+            ("~", serde_json::Value::Null),
+            ("[a, b]", serde_json::json!(["a", "b"])),
+            (
+                "{a: 1, b: [c]}",
+                serde_json::json!({ "a": 1, "b": ["c"] }),
+            ),
+        ];
+        for (yaml, expected) in cases {
+            let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+            let got = yaml_to_canonical_json_for_tests(&v).unwrap();
+            assert_eq!(got, expected, "yaml {:?} produced {:?}", yaml, got);
+        }
+    }
+
+    #[test]
+    fn yaml_tag_in_unknown_value_is_rejected() {
+        use crate::parser::yaml_to_canonical_json_for_tests;
+        let v: serde_yaml::Value = serde_yaml::from_str("!mytag foo").unwrap();
+        let err = yaml_to_canonical_json_for_tests(&v).unwrap_err();
+        assert!(
+            err.contains("tag") && err.contains("mytag"),
+            "expected tag error, got: {err}"
+        );
     }
 
     #[test]

@@ -56,6 +56,16 @@ pub struct Issue {
     /// project them into the version hash and surface them on the
     /// wire. Hidden from JSON when empty so issues without unknowns
     /// keep the pre-PR API shape.
+    ///
+    /// **Known limitation:** any conversion failure (a single
+    /// non-string nested key, a YAML tag) trips
+    /// `MutateError::Corrupt` and refuses *all* writes to the
+    /// issue, not just writes that touch the offending key. The
+    /// user has to hand-edit the file to repair it. This is the
+    /// conservative default — a partial `extra` would let the hash
+    /// lie about file contents — but it does mean the web/API has
+    /// no path to fix a typo'd custom key. Tracked for revisit if
+    /// users hit it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, JsonValue>,
 }

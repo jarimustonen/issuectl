@@ -217,13 +217,10 @@ fn yaml_to_canonical_json(v: &serde_yaml::Value) -> Result<serde_json::Value, St
             }
             Ok(J::Object(sorted.into_iter().collect()))
         }
-        // `serde_yaml::Value::Tagged` exists on some versions; if the
-        // current dep doesn't surface it, the match is exhaustive
-        // without this arm. Keep it under cfg-style fallthrough so a
-        // future serde_yaml bump that adds the variant compiles
-        // without silently passing the tag through.
-        #[allow(unreachable_patterns)]
-        _ => Err("YAML tagged values are not supported in unknown frontmatter keys".into()),
+        serde_yaml::Value::Tagged(t) => Err(format!(
+            "YAML tag {} is not supported in unknown frontmatter keys",
+            t.tag
+        )),
     }
 }
 
