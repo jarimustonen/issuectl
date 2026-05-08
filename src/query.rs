@@ -48,6 +48,12 @@ pub const MAX_QUERY_BYTES: usize = 4096;
 /// rationale as [`MAX_QUERY_BYTES`].
 pub const MAX_QUERY_TERMS: usize = 64;
 
+/// Hard upper bound on the magnitude of a relative date offset in
+/// days. Sized at 1000 years — well outside any sane query and well
+/// inside `chrono::Duration::days`'s panic threshold (≈ ±106 M
+/// days), so callers can apply the offset without overflow checks.
+pub const MAX_RELATIVE_DATE_DAYS: i64 = 365 * 1000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldName {
     Status,
@@ -111,10 +117,12 @@ impl Query {
         self.terms.push(t);
     }
 
-    /// True when any term targets `field` *and* asserts a value
-    /// (i.e. it's not a negation). Used by callers that want to
-    /// know whether the user explicitly scoped a dimension; a
-    /// negated term excludes but does not scope.
+    /// True when the user explicitly constrained `field` with any
+    /// non-negated term: `field:value`, `field:any`, `field:none`,
+    /// or a relative-date comparison. A negated term (`-field:x`)
+    /// is exclusion, not scope, so it returns false. Callers use
+    /// this to decide whether the user has positively pinned a
+    /// dimension and the implicit default should step out of the way.
     pub fn has_positive_field(&self, field: FieldName) -> bool {
         self.terms.iter().any(|t| {
             matches!(t,
@@ -217,12 +225,27 @@ fn tokenize(input: &str) -> Result<Vec<RawToken>> {
                 break;
             }
 
-            // Backslash escape: take the next char literally and
-            // treat it as plain text regardless of context. Works
-            // both inside and outside quoted strings (consistency
-            // with most query languages).
-            if c == '\\' && i + 1 < chars.len() {
-                let next = chars[i + 1];
+            // Backslash escape. Outside quotes: `\` consumes the next
+            // char literally (works for `:`, `\`, ` `, `"`, `-`,
+            // and anything else — the escape is "treat the next char
+            // as plain text"). Inside quotes: only `\\` and `\"`
+            // are recognized; any other `\X` preserves the
+            // backslash literally so paths like `"C:\temp"` and
+            // regex fragments like `"\d+"` survive intact. A
+            // trailing `\` at end-of-input is a syntax error in
+            // both contexts.
+            if c == '\\' {
+                let Some(&next) = chars.get(i + 1) else {
+                    bail!("trailing backslash in query");
+                };
+                if in_quotes && next != '\\' && next != '"' {
+                    // Literal backslash; let the next iteration
+                    // process `next` normally.
+                    push_char('\\', seen_colon, &mut before, &mut after);
+                    started = true;
+                    i += 1;
+                    continue;
+                }
                 push_char(next, seen_colon, &mut before, &mut after);
                 started = true;
                 i += 2;
@@ -336,7 +359,13 @@ fn build_term(raw: RawToken) -> Result<Term> {
                 });
             }
 
-            if is_date_field(field) && starts_with_date_op(&value) {
+            if starts_with_date_op(&value) {
+                if !is_date_field(field) {
+                    bail!(
+                        "relative date comparison only valid on \
+                         updated/created/closed: {key}:{value}"
+                    );
+                }
                 return Ok(Term::Field {
                     field,
                     m: parse_date_match(&value)?,
@@ -409,6 +438,11 @@ fn parse_date_match(val: &str) -> Result<FieldMatch> {
     let days: i64 = rest
         .parse()
         .map_err(|_| anyhow!("invalid relative date offset: {rest:?}"))?;
+    if days.abs() > MAX_RELATIVE_DATE_DAYS {
+        bail!(
+            "relative date offset out of range: {days}d (max ±{MAX_RELATIVE_DATE_DAYS}d)"
+        );
+    }
     Ok(FieldMatch::DateRel { op, days })
 }
 
@@ -439,16 +473,13 @@ impl TextLc {
 fn eval_term(t: &Term, i: &Issue, today: NaiveDate, text_lc: Option<&TextLc>) -> bool {
     match t {
         Term::Text { needle_lc, negated } => {
-            // text_lc is Some whenever the query has text terms — by
-            // construction in `matches_at`. Defensive fallback for
-            // direct `eval_term` callers (none in tree).
-            let hit = match text_lc {
-                Some(lc) => lc.contains(needle_lc),
-                None => i.title.to_lowercase().contains(needle_lc)
-                    || i.slug.to_lowercase().contains(needle_lc)
-                    || i.body.to_lowercase().contains(needle_lc),
-            };
-            hit ^ *negated
+            // Invariant (enforced by `matches_at`): `text_lc` is
+            // `Some` whenever the query contains a text term, so a
+            // `Text` term is only ever evaluated with the cache in
+            // hand. Panicking here is the right behavior for an
+            // internal contract violation.
+            let lc = text_lc.expect("text_lc must be present when evaluating a Text term");
+            lc.contains(needle_lc) ^ *negated
         }
         Term::Field { field, m, negated } => eval_field(*field, m, i, today) ^ *negated,
     }
@@ -535,9 +566,18 @@ fn date_match(m: &FieldMatch, val: Option<&str>, today: NaiveDate) -> bool {
     }
 }
 
+/// Parse a `YYYY-MM-DD` date from the head of `s`. Accepts a bare
+/// date or a date followed by `T` / space (so ISO-8601 timestamps
+/// like `2026-05-07T12:34:56Z` parse to their date component).
+/// Anything else trailing — `2026-05-07garbage`, `2026-05-07x` —
+/// fails so a typo on the query side doesn't silently match.
 fn parse_date_prefix(s: &str) -> Option<NaiveDate> {
     let head = s.get(..10)?;
-    NaiveDate::parse_from_str(head, "%Y-%m-%d").ok()
+    let date = NaiveDate::parse_from_str(head, "%Y-%m-%d").ok()?;
+    match s.as_bytes().get(10) {
+        None | Some(b'T') | Some(b' ') => Some(date),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -828,6 +868,108 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(parse(&s).is_err());
+    }
+
+    #[test]
+    fn date_offset_out_of_range_errors() {
+        // R2-C1 regression: huge offsets must error at parse time
+        // instead of panicking inside `Duration::days` at eval.
+        assert!(parse("updated:<-9999999999999d").is_err());
+        assert!(parse(&format!(
+            "updated:<-{}d",
+            MAX_RELATIVE_DATE_DAYS + 1
+        ))
+        .is_err());
+        // Boundary value still parses.
+        assert!(parse(&format!("updated:<-{MAX_RELATIVE_DATE_DAYS}d")).is_ok());
+    }
+
+    #[test]
+    fn quoted_unknown_escape_preserves_backslash() {
+        // R2-C2 regression: inside `"..."`, only `\\` and `\"` are
+        // escapes. Anything else keeps the backslash literal.
+        let q = parse(r#"text:"C:\temp""#).unwrap();
+        match &q.terms[0] {
+            Term::Text { needle_lc, .. } => assert_eq!(needle_lc, r"c:\temp"),
+            other => panic!("expected text, got {other:?}"),
+        }
+
+        let q = parse(r#"text:"\d+\s+""#).unwrap();
+        match &q.terms[0] {
+            Term::Text { needle_lc, .. } => assert_eq!(needle_lc, r"\d+\s+"),
+            other => panic!("expected text, got {other:?}"),
+        }
+
+        // `\\` and `\"` still recognized inside quotes.
+        let q = parse(r#"text:"a\\b\"c""#).unwrap();
+        match &q.terms[0] {
+            Term::Text { needle_lc, .. } => assert_eq!(needle_lc, r#"a\b"c"#),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn date_prefix_rejects_garbage_suffix() {
+        // R2-C3 regression: query-side date with trailing garbage
+        // must not silently match a clean stored date.
+        let mut i = mk("a-b");
+        i.updated = Some("2026-05-07".to_string());
+        let q = parse("updated:2026-05-07garbage").unwrap();
+        assert!(!matches_at(&q, &i, today()));
+
+        // Real ISO-8601 timestamps still match cleanly.
+        i.updated = Some("2026-05-07T12:34:56Z".to_string());
+        let q = parse("updated:2026-05-07").unwrap();
+        assert!(matches_at(&q, &i, today()));
+    }
+
+    #[test]
+    fn trailing_backslash_errors() {
+        // R2-M1 regression.
+        assert!(parse(r"text:foo\").is_err());
+        assert!(parse(r"\").is_err());
+    }
+
+    #[test]
+    fn date_op_on_non_date_field_errors() {
+        // R2-M4 regression: `priority:<14d` must not silently
+        // become `Equals("<14d")` and match nothing.
+        assert!(parse("priority:<14d").is_err());
+        assert!(parse("status:>-7d").is_err());
+        // Date fields still accept the same syntax.
+        assert!(parse("updated:<-14d").is_ok());
+    }
+
+    #[test]
+    fn colon_at_token_start_errors() {
+        // R2-Min1: `:foo` should error rather than producing a
+        // confusing `unknown query field: ""`.
+        let err = parse(":foo").unwrap_err().to_string();
+        assert!(
+            err.contains("field") || err.contains("unknown"),
+            "expected field-name error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn quoted_and_unquoted_segments_concatenate() {
+        // R2-Min2: lock the tokenizer's segment-concatenation
+        // behavior so future rewrites can't silently regress it.
+        let q = parse(r#"text:"foo"bar"#).unwrap();
+        match &q.terms[0] {
+            Term::Text { needle_lc, .. } => assert_eq!(needle_lc, "foobar"),
+            other => panic!("expected text, got {other:?}"),
+        }
+
+        let q = parse(r#"label:foo" bar"baz"#).unwrap();
+        match &q.terms[0] {
+            Term::Field {
+                field: FieldName::Label,
+                m: FieldMatch::Equals(v),
+                ..
+            } => assert_eq!(v, "foo barbaz"),
+            other => panic!("expected label field, got {other:?}"),
+        }
     }
 
     #[test]

@@ -72,7 +72,10 @@ Use the CLI rather than greppa hakemistoa. The CLI knows the frontmatter schema.
   - Multiple terms AND together; no OR / parens in v1.
   - Escape inside an unquoted value: `\:` literal colon, `\\` literal
     backslash, `\ ` literal space, `\"` literal quote, `\-` at token
-    start to escape negation. Or quote the whole value: `text:"foo:bar"`.
+    start to escape negation. Or quote the whole value:
+    `text:"foo:bar"`. Inside `"..."` only `\\` and `\"` are escapes
+    — every other backslash is preserved literally, so paths and
+    regex fragments survive (`text:"C:\temp"` matches `C:\temp`).
   - When a positional query is given to `ls`, the implicit "open
     only" default is dropped — combine with `--all`/`--closed` or
     `folder:`/`status:` to scope. Plain `--status fixed` (no
