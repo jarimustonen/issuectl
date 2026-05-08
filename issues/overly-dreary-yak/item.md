@@ -1,6 +1,6 @@
 ---
 created: 2026-05-06
-updated: 2026-05-07
+updated: 2026-05-08
 type: feature
 status: in-progress
 priority: normal
@@ -8,6 +8,10 @@ reporter: jari
 assignee: jari
 epic: exorbitantly-ill-apples
 labels: [agent-friendly, v0.6.0-candidate, workflow]
+commits:
+- hash: 39cabc5
+  summary: body section conventions + note CLI + reopen notes stub
+related: ['@virtually-dull-regret']
 ---
 
 # Standardized markdown sections: comments, decisions, agent runs, reopen notes
