@@ -112,50 +112,28 @@ fn parse_non_empty(s: &str) -> std::result::Result<String, String> {
     }
 }
 
-/// Built-in fields that have a dedicated CLI flag and must not be
-/// supplied via `--field key=value` (we want clap-level validation to
-/// run for them). The second column points at the dedicated flag —
-/// included in the rejection message so the user isn't sent looking
-/// for a `--commits` / `--closed` flag that doesn't exist.
-const RESERVED_CUSTOM_FIELDS: &[(&str, &str)] = &[
-    ("type", "--type"),
-    ("title", "--title"),
-    ("slug", "--slug"),
-    ("reporter", "--reporter"),
-    ("assignee", "--assignee"),
-    ("owner", "--owner"),
-    ("priority", "--priority"),
-    ("epic", "--epic"),
-    ("labels", "--label (repeatable)"),
-    ("related", "--related (repeatable)"),
-    ("status", "set automatically by `new` (always `open`)"),
-    ("created", "set automatically by `new` (today)"),
-    ("updated", "set automatically by `new`/`update` (today)"),
-    ("closed", "set automatically when status moves to a closing value"),
-    ("commits", "use `update --add-commit` after creation"),
-];
-
 fn parse_custom_field(s: &str) -> std::result::Result<(String, String), String> {
     let (key, value) = s
         .split_once('=')
         .ok_or_else(|| format!("expected key=value, got {s:?}"))?;
-    let key = key.trim();
-    let value = value.trim();
     if key.is_empty() || value.is_empty() {
         return Err(format!("expected non-empty key=value, got {s:?}"));
     }
-    if !key
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
+    // Reject leading/trailing whitespace rather than silently trimming
+    // — matches `parse_non_empty` and keeps the CLI consistent with
+    // `UpdateIssueRequest::validate`'s API-side whitespace check.
+    if key.trim() != key || value.trim() != value {
+        return Err(format!(
+            "field {s:?} has leading or trailing whitespace; remove it"
+        ));
+    }
+    if !mutate::is_valid_custom_field_key(key) {
         return Err(format!(
             "field key {key:?} must be alphanumeric / underscore / hyphen"
         ));
     }
-    if let Some((_, hint)) = RESERVED_CUSTOM_FIELDS.iter().find(|(k, _)| *k == key) {
-        return Err(format!(
-            "field {key:?} is built-in: {hint}"
-        ));
+    if let Some(hint) = mutate::reserved_custom_field_hint(key) {
+        return Err(format!("field {key:?} is built-in: {hint}"));
     }
     Ok((key.to_string(), value.to_string()))
 }
@@ -163,22 +141,23 @@ fn parse_custom_field(s: &str) -> std::result::Result<(String, String), String> 
 /// Clap value parser for `--clear-field <key>`. Same shape and reserved
 /// rules as `parse_custom_field`, but consumes a bare key (no `=value`).
 fn parse_custom_field_key(s: &str) -> std::result::Result<String, String> {
-    let key = s.trim();
-    if key.is_empty() {
+    if s.is_empty() {
         return Err(format!("expected a non-empty field key, got {s:?}"));
     }
-    if !key
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
+    if s.trim() != s {
         return Err(format!(
-            "field key {key:?} must be alphanumeric / underscore / hyphen"
+            "field key {s:?} has leading or trailing whitespace; remove it"
         ));
     }
-    if let Some((_, hint)) = RESERVED_CUSTOM_FIELDS.iter().find(|(k, _)| *k == key) {
-        return Err(format!("field {key:?} is built-in: {hint}"));
+    if !mutate::is_valid_custom_field_key(s) {
+        return Err(format!(
+            "field key {s:?} must be alphanumeric / underscore / hyphen"
+        ));
     }
-    Ok(key.to_string())
+    if let Some(hint) = mutate::reserved_custom_field_hint(s) {
+        return Err(format!("field {s:?} is built-in: {hint}"));
+    }
+    Ok(s.to_string())
 }
 
 /// Clap value parser for any slug-shaped CLI argument. Rejects anything
@@ -1463,25 +1442,25 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
         })
         .collect::<Result<_, _>>()?;
 
-    // `--field foo=a --field foo=b` collapses silently in a BTreeMap; reject
-    // it explicitly so the user gets a precise error rather than the
-    // last-wins surprise. `cmd_new` enforces the same invariant.
-    let mut seen_fields = std::collections::HashSet::new();
+    // `--field foo=a --field foo=b` collapses silently in a BTreeMap;
+    // reject it explicitly so the user gets a precise error rather
+    // than the last-wins surprise. `cmd_new` enforces the same
+    // invariant — match its `BTreeSet<&str>` shape (no allocations,
+    // deterministic overlap iteration).
+    let mut seen_fields: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for (k, _) in &args.custom_fields {
-        if !seen_fields.insert(k.clone()) {
+        if !seen_fields.insert(k.as_str()) {
             bail!("--field {k:?} given more than once");
         }
     }
-    let mut seen_clears = std::collections::HashSet::new();
+    let mut seen_clears: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for k in &args.clear_fields {
-        if !seen_clears.insert(k.clone()) {
+        if !seen_clears.insert(k.as_str()) {
             bail!("--clear-field {k:?} given more than once");
         }
     }
     if let Some(overlap) = seen_fields.intersection(&seen_clears).next() {
-        bail!(
-            "field {overlap:?} appears in both --field and --clear-field"
-        );
+        bail!("field {overlap:?} appears in both --field and --clear-field");
     }
     for (k, v) in args.custom_fields {
         req.custom_fields.insert(k, mutate::Patch::Set(v));
@@ -2443,6 +2422,37 @@ mod tests {
         assert!(parse_custom_field("=payments").is_err());
         assert!(parse_custom_field("team=").is_err());
         assert!(parse_custom_field("team:payments").is_err());
+    }
+
+    #[test]
+    fn parse_custom_field_rejects_padded_input() {
+        // Aligns with `parse_non_empty`'s reject-padding policy so
+        // `--field` and `--clear-field` don't silently strip whitespace
+        // the user did not intend.
+        assert!(parse_custom_field(" team=payments").is_err());
+        assert!(parse_custom_field("team =payments").is_err());
+        assert!(parse_custom_field("team= payments").is_err());
+        assert!(parse_custom_field("team=payments ").is_err());
+    }
+
+    #[test]
+    fn parse_custom_field_key_accepts_valid_keys_and_rejects_built_ins() {
+        assert!(parse_custom_field_key("team").is_ok());
+        assert!(parse_custom_field_key("team-name").is_ok());
+        assert!(parse_custom_field_key("severity_level").is_ok());
+
+        for (k, _) in mutate::RESERVED_CUSTOM_FIELD_KEYS {
+            assert!(
+                parse_custom_field_key(k).is_err(),
+                "{k} must be rejected as built-in"
+            );
+        }
+
+        assert!(parse_custom_field_key("").is_err());
+        assert!(parse_custom_field_key(" team").is_err(), "padded key");
+        assert!(parse_custom_field_key("team ").is_err(), "padded key");
+        assert!(parse_custom_field_key("bad key").is_err());
+        assert!(parse_custom_field_key("team:name").is_err());
     }
 
     #[test]

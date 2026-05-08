@@ -108,17 +108,43 @@ pub struct UpdateIssueRequest {
     pub custom_fields: std::collections::BTreeMap<String, Patch<String>>,
 }
 
-/// Keys that have dedicated handling on `UpdateIssueRequest` (or are
-/// auto-managed) and therefore must not appear in `custom_fields`. Sent
-/// via the dedicated slot, they would conflict with `status`/`priority`
-/// validation, label-list semantics, or the auto-stamped `updated:` /
-/// `closed:` machinery.
-const RESERVED_UPDATE_CUSTOM_FIELD_KEYS: &[&str] = &[
-    "type", "title", "slug", "reporter", "assignee", "owner", "priority", "epic", "status",
-    "labels", "related", "commits", "created", "updated", "closed",
+/// Frontmatter keys that have dedicated CLI flags or request-shape
+/// slots, or are auto-managed by the mutation layer. Forbidden inside
+/// `custom_fields` (both new and update paths) — the second column is a
+/// user-facing hint pointing at the right slot.
+///
+/// Single source of truth: `parse_custom_field` /
+/// `parse_custom_field_key` in `main.rs` and
+/// `UpdateIssueRequest::validate` all consume this constant. Adding a
+/// new built-in field must update this list once.
+pub const RESERVED_CUSTOM_FIELD_KEYS: &[(&str, &str)] = &[
+    ("type", "--type"),
+    ("title", "--title"),
+    ("slug", "--slug"),
+    ("reporter", "--reporter"),
+    ("assignee", "--assignee"),
+    ("owner", "--owner"),
+    ("priority", "--priority"),
+    ("epic", "--epic"),
+    ("labels", "--label (repeatable)"),
+    ("related", "--related (repeatable)"),
+    ("status", "set automatically by `new` (always `open`)"),
+    ("created", "set automatically by `new` (today)"),
+    ("updated", "set automatically by `new`/`update` (today)"),
+    ("closed", "set automatically when status moves to a closing value"),
+    ("commits", "use `update --add-commit` after creation"),
 ];
 
-fn is_valid_custom_field_key(key: &str) -> bool {
+/// Returns the user-facing hint for a reserved key, or `None` if the
+/// key is free for custom use.
+pub fn reserved_custom_field_hint(key: &str) -> Option<&'static str> {
+    RESERVED_CUSTOM_FIELD_KEYS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, hint)| *hint)
+}
+
+pub fn is_valid_custom_field_key(key: &str) -> bool {
     !key.is_empty()
         && key
             .chars()
@@ -215,15 +241,24 @@ impl UpdateIssueRequest {
                     "custom field key {key:?} must be alphanumeric / underscore / hyphen"
                 )));
             }
-            if RESERVED_UPDATE_CUSTOM_FIELD_KEYS.iter().any(|k| *k == key) {
+            if let Some(hint) = reserved_custom_field_hint(key) {
                 return Err(MutateError::Validation(format!(
-                    "custom field {key:?} is built-in: use the dedicated request slot"
+                    "custom field {key:?} is built-in: {hint}"
                 )));
             }
             if let Patch::Set(v) = patch {
-                if v.is_empty() {
+                // Reject blank/whitespace-only Sets so the API and CLI
+                // agree (the CLI parser strips and rejects empty;
+                // without `trim()` here a JSON client could still slip
+                // a `"   "` through to disk).
+                if v.trim().is_empty() {
                     return Err(MutateError::Validation(format!(
                         "custom field {key:?}: empty-string Set is not allowed (use null to clear)"
+                    )));
+                }
+                if v.trim() != v.as_str() {
+                    return Err(MutateError::Validation(format!(
+                        "custom field {key:?}: leading or trailing whitespace is not allowed"
                     )));
                 }
             }
@@ -1895,6 +1930,70 @@ mod tests {
             .insert("triage".into(), Patch::Set("P1".into()));
         let err = update_issue(tmp.path(), "cf-stale", req, None).unwrap_err();
         assert!(matches!(err, MutateError::VersionMismatch { .. }));
+    }
+
+    #[test]
+    fn update_custom_field_repairs_missing_required_schema_field() {
+        // The motivating bug: a schema introduces a required custom
+        // field, an existing issue lacks it, and every PATCH 422s on
+        // SchemaViolation. The fix is exactly that the same PATCH can
+        // SUPPLY the missing field via `custom_fields` and succeed.
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: true\n    enum: [payments, infra]\n",
+        )
+        .unwrap();
+        let _ = seed_issue(tmp.path(), "open", "cf-required-repair", "open");
+
+        // Sanity: a no-custom-field PATCH is rejected.
+        let err = update_issue(
+            tmp.path(),
+            "cf-required-repair",
+            UpdateIssueRequest {
+                priority: Patch::Set("high".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, MutateError::SchemaViolation(_)),
+            "expected SchemaViolation without team set, got {err:?}"
+        );
+
+        // The repair PATCH supplies the missing key.
+        let mut req = UpdateIssueRequest::default();
+        req.custom_fields
+            .insert("team".into(), Patch::Set("payments".into()));
+        let out = update_issue(tmp.path(), "cf-required-repair", req, None).unwrap();
+        assert_eq!(
+            out.issue.extra.get("team"),
+            Some(&serde_json::Value::String("payments".into()))
+        );
+    }
+
+    #[test]
+    fn update_custom_field_rejects_whitespace_only_set() {
+        // `--field key=" "` is rejected by the CLI parser; the API
+        // path must reject it too so a JSON client cannot smuggle a
+        // blank value past `validate()`.
+        let mut req = UpdateIssueRequest::default();
+        req.custom_fields
+            .insert("triage".into(), Patch::Set("   ".into()));
+        let err = req.validate().unwrap_err();
+        assert!(
+            matches!(err, MutateError::Validation(ref m) if m.contains("empty-string")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn update_custom_field_rejects_padded_set() {
+        let mut req = UpdateIssueRequest::default();
+        req.custom_fields
+            .insert("triage".into(), Patch::Set(" P1".into()));
+        assert!(matches!(req.validate(), Err(MutateError::Validation(_))));
     }
 
     #[test]
