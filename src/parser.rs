@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Deserializer};
@@ -29,6 +30,14 @@ pub struct Frontmatter {
     /// Legacy numeric id; preserved only so doctor can read pre-migration files.
     #[allow(dead_code)]
     pub number: Option<u32>,
+    /// Any frontmatter keys outside the schema above. Captured so they
+    /// participate in `canonical_hash` (design doc §3.2) — without this
+    /// a user-added key like `triage:` would not contribute to the
+    /// version, and a writer that doesn't touch it could silently
+    /// overwrite a concurrent edit. BTreeMap keeps the projection
+    /// stable across processes.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_yaml::Value>,
 }
 
 fn deser_epic<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
@@ -119,6 +128,7 @@ pub fn parse_item_md_text_with_warnings(
         labels: fm.labels,
         closed: fm.closed,
         commits: fm.commits,
+        extra: fm.unknown,
         title,
         body: body.unwrap_or_default().trim().to_string(),
     };
@@ -142,6 +152,7 @@ fn default_issue(slug: &str, folder: &str) -> crate::models::Issue {
         labels: None,
         closed: None,
         commits: None,
+        extra: BTreeMap::new(),
         title: String::new(),
         body: String::new(),
     }

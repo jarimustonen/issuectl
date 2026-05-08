@@ -604,6 +604,7 @@ mod tests {
             commits: None,
             title: "Login redirect loop".to_string(),
             body: "User flock contention on flock(2) deadlock.".to_string(),
+            extra: std::collections::BTreeMap::new(),
         }
     }
 

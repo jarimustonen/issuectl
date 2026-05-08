@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +42,15 @@ pub struct Issue {
     // Derived from markdown body
     pub title: String,
     pub body: String,
+
+    /// Frontmatter keys outside the schema above. Preserved so they
+    /// feed into `canonical_hash` (design doc §3.2) and survive
+    /// round-trip writes. Hidden from the JSON wire shape when empty
+    /// so existing `/api/issues` consumers see no change; surfaces as
+    /// an `extra: { ... }` object only when the file has user-added
+    /// keys (e.g. `triage:`, `reviewer:`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_yaml::Value>,
 }
 
 impl Issue {

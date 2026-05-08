@@ -173,6 +173,7 @@ fn summary_as_issue(s: &repo::IssueSummary) -> crate::models::Issue {
         commits: s.commits.clone(),
         title: s.title.clone(),
         body: String::new(),
+        extra: std::collections::BTreeMap::new(),
     }
 }
 

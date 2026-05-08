@@ -10,12 +10,12 @@
 //! in identity, so there is no separate "directory authoritative"
 //! projection. One source of truth: `fm.status`.
 //!
-//! Known limitation: today's `Frontmatter` does not preserve unknown
-//! fields. The design's full canonical projection includes them so
-//! user-added keys participate in concurrency control. Future change:
-//! extend `Frontmatter` (BTreeMap "unknown" field) and update this
-//! function to project them — both producers stay consistent because
-//! both call this function.
+//! Unknown frontmatter keys (anything outside the schema in
+//! `parser::Frontmatter`) are projected through `Issue::extra` and
+//! sorted into the canonical map alongside the typed fields. This
+//! closes the silent-overwrite gap where a writer that doesn't touch
+//! a user-added key like `triage:` would otherwise produce a matching
+//! version hash even after the key changed under it.
 
 use std::borrow::Cow;
 
@@ -83,6 +83,19 @@ fn canonical_frontmatter_value(issue: &Issue) -> Value {
             serde_json::to_value(v).expect("Commit serializes"),
         );
     }
+    for (k, v) in &issue.extra {
+        // `extra` only contains keys outside the schema (serde flatten
+        // catches the leftovers in the parser). A YAML value with a
+        // non-string mapping key would fail to serialize as JSON and
+        // panic here — that is a malformed frontmatter file the user
+        // should fix; treating it as a corrupt-file panic is louder
+        // than silently dropping the field, which is the bug we are
+        // closing.
+        m.insert(
+            k.clone(),
+            serde_json::to_value(v).expect("frontmatter values JSON-serialise"),
+        );
+    }
     // serde_json::Map preserves insertion order. To get a canonical
     // sort independent of insertion order we collect into a BTreeMap
     // and rebuild.
@@ -126,6 +139,7 @@ mod tests {
             commits: None,
             title: String::new(),
             body: body.to_string(),
+            extra: std::collections::BTreeMap::new(),
         }
     }
 
@@ -161,6 +175,44 @@ mod tests {
         let a = issue("foo", "open", "open", "body\u{00A0}");
         let b = issue("foo", "open", "open", "body");
         assert_ne!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
+    fn unknown_key_value_changes_hash() {
+        let mut a = issue("foo", "open", "open", "body");
+        let mut b = issue("foo", "open", "open", "body");
+        a.extra
+            .insert("triage".into(), serde_yaml::Value::String("alice".into()));
+        b.extra
+            .insert("triage".into(), serde_yaml::Value::String("bob".into()));
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
+    fn unknown_key_presence_changes_hash() {
+        let a = issue("foo", "open", "open", "body");
+        let mut b = issue("foo", "open", "open", "body");
+        b.extra
+            .insert("reviewer".into(), serde_yaml::Value::String("dana".into()));
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
+    fn unknown_key_order_does_not_affect_hash() {
+        // BTreeMap iteration is sorted, so insertion order at the
+        // call site cannot perturb the hash. Belt-and-braces: assert
+        // it directly.
+        let mut a = issue("foo", "open", "open", "body");
+        let mut b = issue("foo", "open", "open", "body");
+        a.extra
+            .insert("triage".into(), serde_yaml::Value::String("x".into()));
+        a.extra
+            .insert("reviewer".into(), serde_yaml::Value::String("y".into()));
+        b.extra
+            .insert("reviewer".into(), serde_yaml::Value::String("y".into()));
+        b.extra
+            .insert("triage".into(), serde_yaml::Value::String("x".into()));
+        assert_eq!(canonical_hash(&a), canonical_hash(&b));
     }
 
     #[test]

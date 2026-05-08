@@ -1147,6 +1147,170 @@ mod tests {
     }
 
     #[test]
+    fn unknown_frontmatter_field_round_trips_byte_identical() {
+        // A user-added `triage:` key set on a fresh issue must survive
+        // a no-op read→write cycle byte-identically. read_item /
+        // write_item already drove this on a literal file (see write
+        // tests); this test belt-and-braces the same property after
+        // routing through `parse_item_md` so the Issue model carries
+        // the field through.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/keep-triage");
+        fs::create_dir_all(&dir).unwrap();
+        let original = "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\n\
+                        priority: normal\ntriage: alice\nreviewer: bob\n\
+                        ---\n\n# Title\n";
+        fs::write(dir.join("item.md"), original).unwrap();
+        let item = crate::write::read_item(&dir.join("item.md")).unwrap();
+        crate::write::write_item(&dir.join("item.md"), &item).unwrap();
+        let after = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert_eq!(original, after);
+
+        // The parsed Issue must carry the unknowns into `extra` so
+        // canonical_hash sees them.
+        let parsed =
+            crate::parser::parse_item_md_with_warnings(&dir.join("item.md"), "keep-triage", "open");
+        assert_eq!(
+            parsed.issue.extra.get("triage"),
+            Some(&serde_yaml::Value::String("alice".into()))
+        );
+        assert_eq!(
+            parsed.issue.extra.get("reviewer"),
+            Some(&serde_yaml::Value::String("bob".into()))
+        );
+    }
+
+    #[test]
+    fn external_edit_to_distinct_unknown_fields_each_succeed_with_fresh_version() {
+        // Two edits land in sequence — first sets `triage:`, second
+        // sets `reviewer:`. Each is reading the *current* version
+        // before its mutation, so neither should 409. This is the
+        // "different custom keys" success path: the version-aware
+        // protocol does not introduce false conflicts when the
+        // unknowns participating in the hash are independent.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/concurrent-distinct");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\n\
+             priority: normal\n---\n\n# Title\n",
+        )
+        .unwrap();
+
+        // Edit #1: external writer adds `triage: alice`. Then a
+        // mutate.rs PATCH with the *post-external-edit* version
+        // succeeds — no 409 because we picked up the new hash first.
+        let v0 = crate::canonical::canonical_hash(
+            &crate::parser::parse_item_md_with_warnings(
+                &dir.join("item.md"),
+                "concurrent-distinct",
+                "open",
+            )
+            .issue,
+        );
+        let mut item = crate::write::read_item(&dir.join("item.md")).unwrap();
+        item.frontmatter.insert(
+            serde_yaml::Value::String("triage".into()),
+            serde_yaml::Value::String("alice".into()),
+        );
+        crate::write::write_item(&dir.join("item.md"), &item).unwrap();
+        let v1 = crate::canonical::canonical_hash(
+            &crate::parser::parse_item_md_with_warnings(
+                &dir.join("item.md"),
+                "concurrent-distinct",
+                "open",
+            )
+            .issue,
+        );
+        assert_ne!(v0, v1, "adding unknown key must change the hash");
+
+        // Edit #2: another external writer adds `reviewer: bob` while
+        // *holding the fresh* v1, then `issuectl update --priority high
+        // --expected-version v2` lands cleanly.
+        let mut item = crate::write::read_item(&dir.join("item.md")).unwrap();
+        item.frontmatter.insert(
+            serde_yaml::Value::String("reviewer".into()),
+            serde_yaml::Value::String("bob".into()),
+        );
+        crate::write::write_item(&dir.join("item.md"), &item).unwrap();
+        let v2 = crate::canonical::canonical_hash(
+            &crate::parser::parse_item_md_with_warnings(
+                &dir.join("item.md"),
+                "concurrent-distinct",
+                "open",
+            )
+            .issue,
+        );
+        assert_ne!(v1, v2);
+
+        let req = UpdateIssueRequest {
+            expected_version: Some(v2),
+            priority: Patch::Set("high".into()),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "concurrent-distinct", req, None).unwrap();
+        assert_eq!(out.issue.priority, "high");
+        // Both unknown keys must survive the mutation round-trip.
+        let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("triage: alice"));
+        assert!(on_disk.contains("reviewer: bob"));
+    }
+
+    #[test]
+    fn external_edit_to_unknown_field_makes_stale_version_409() {
+        // The contract: an unknown field changing under a writer's
+        // feet must trip optimistic concurrency the same way a known
+        // field would. Without unknown-key projection in
+        // `canonical_hash`, this PATCH would silently succeed and
+        // could clobber a custom field the writer never read.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/concurrent-same-key");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\n\
+             priority: normal\ntriage: alice\n---\n\n# Title\n",
+        )
+        .unwrap();
+        let v0 = crate::canonical::canonical_hash(
+            &crate::parser::parse_item_md_with_warnings(
+                &dir.join("item.md"),
+                "concurrent-same-key",
+                "open",
+            )
+            .issue,
+        );
+
+        // External writer overwrites the same unknown key.
+        let mut item = crate::write::read_item(&dir.join("item.md")).unwrap();
+        item.frontmatter.insert(
+            serde_yaml::Value::String("triage".into()),
+            serde_yaml::Value::String("bob".into()),
+        );
+        crate::write::write_item(&dir.join("item.md"), &item).unwrap();
+
+        // Original writer comes back with v0 — must 409.
+        let req = UpdateIssueRequest {
+            expected_version: Some(v0),
+            priority: Patch::Set("high".into()),
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "concurrent-same-key", req, None).unwrap_err();
+        match err {
+            MutateError::VersionMismatch { current, .. } => {
+                assert_eq!(current.slug, "concurrent-same-key");
+                assert_eq!(
+                    current.extra.get("triage"),
+                    Some(&serde_yaml::Value::String("bob".into())),
+                    "current state surfaced to the caller must reflect the new unknown value"
+                );
+            }
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn status_only_patch_leaves_other_fields_untouched() {
         // Drag-and-drop kanban moves PATCH only `status`. Other fields
         // (priority, assignee, epic, …) must round-trip unchanged via
