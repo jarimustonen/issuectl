@@ -2,7 +2,7 @@
 created: 2026-05-07
 updated: 2026-05-08
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 epic: exorbitantly-ill-apples
 labels: [release-v0.5.0]
@@ -11,6 +11,7 @@ commits:
   summary: 'test(mutate): regression test for new_issue publish-before-flock-release'
 - hash: 9c9d026
   summary: 'test(mutate): apply review fixes (WouldBlock match, 4 mutation paths, error-path)'
+closed: 2026-05-08
 ---
 
 # mutate::new_issue publishes after releasing flock

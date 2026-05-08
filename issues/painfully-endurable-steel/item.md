@@ -2,10 +2,11 @@
 created: 2026-05-06
 updated: 2026-05-08
 type: task
-status: in-progress
+status: done
 priority: high
 reporter: jari
 epic: exorbitantly-ill-apples
+closed: 2026-05-08
 ---
 
 # Preserve unknown frontmatter fields in canonical hash

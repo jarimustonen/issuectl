@@ -97,6 +97,13 @@ to keep the epic in sync with the worktree:
   Agents read it automatically; small change, huge leverage now that
   M2 introduces a new CLI surface.
 
+### Concurrency / correctness (originally surfaced in M1 and M2 reviews)
+- [x] @painfully-endurable-steel — Preserve unknown frontmatter keys in
+  canonical hash. Landed `f20f443` + review fixes (`8845bc7`,
+  `3d3adbd`, `a6cdd4b`).
+- [x] @especially-stingy-powder — `mutate::new_issue` must publish
+  before releasing flock. Landed `a6d6755` + review fixes `4f319d6`.
+
 ### Bugs / polish (small, dropped into v0.5.0 because they hurt daily use)
 - [x] @peculiarly-truncated-title — `issuectl ls` drops the first
   character of the H1 title in CLI display. Fixed in `6549ce6`.
@@ -110,6 +117,10 @@ to keep the epic in sync with the worktree:
   prevents (the existing `new_issue_publishes_before_releasing_flock`
   test only covers the proxy invariant in a single-threaded setup).
   Spin-off from @especially-stingy-powder /llm-review.
+- [ ] @tolerably-beautiful-war — Add `custom_fields` to
+  `UpdateIssueRequest` so PATCH can set/clear custom keys (currently
+  only POST supports them). Spin-off from @painfully-endurable-steel
+  /llm-review.
 
 ## Phases
 
