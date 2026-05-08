@@ -1162,9 +1162,9 @@ pub(crate) struct NewOutcome {
 }
 
 /// Typed error surfaced by `do_new_locked`. The mutate boundary maps
-/// each variant directly to a `MutateError` counterpart so the API
-/// can pick the right HTTP status without string-matching the
-/// formatted `anyhow::Error`.
+/// each variant to a `MutateError` (`Conflict` is renamed to
+/// `ConflictingIntent`; the rest are 1:1) so the API picks the right
+/// HTTP status without string-matching the formatted `anyhow::Error`.
 #[derive(Debug)]
 pub(crate) enum DoNewError {
     Validation(String),
@@ -1172,18 +1172,6 @@ pub(crate) enum DoNewError {
     SchemaViolation(String),
     SchemaConfig(String),
     Io(anyhow::Error),
-}
-
-impl std::fmt::Display for DoNewError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DoNewError::Validation(s)
-            | DoNewError::Conflict(s)
-            | DoNewError::SchemaConfig(s) => write!(f, "{s}"),
-            DoNewError::SchemaViolation(s) => write!(f, "schema: {s}"),
-            DoNewError::Io(e) => write!(f, "{e:#}"),
-        }
-    }
 }
 
 impl From<DoNewError> for anyhow::Error {
@@ -1304,11 +1292,9 @@ pub(crate) fn do_new_locked(
     let render = write::render_new_item_from_fm(&new_args, &frontmatter);
 
     let issues_parent = root.join("issues");
-    fs::create_dir_all(&issues_parent).map_err(|e| {
-        DoNewError::Io(
-            anyhow::Error::from(e).context(format!("cannot create {}", issues_parent.display())),
-        )
-    })?;
+    fs::create_dir_all(&issues_parent)
+        .with_context(|| format!("cannot create {}", issues_parent.display()))
+        .map_err(DoNewError::Io)?;
 
     // Pick a slug atomically: try `fs::create_dir` (which fails on
     // EEXIST) so two concurrent `issuectl new` invocations cannot race.
@@ -1360,17 +1346,11 @@ pub(crate) fn do_new_locked(
             .write(true)
             .create_new(true)
             .open(&item_path)
-            .map_err(|e| {
-                DoNewError::Io(
-                    anyhow::Error::from(e)
-                        .context(format!("cannot create {}", item_path.display())),
-                )
-            })?;
-        f.write_all(render.as_bytes()).map_err(|e| {
-            DoNewError::Io(
-                anyhow::Error::from(e).context(format!("cannot write {}", item_path.display())),
-            )
-        })?;
+            .with_context(|| format!("cannot create {}", item_path.display()))
+            .map_err(DoNewError::Io)?;
+        f.write_all(render.as_bytes())
+            .with_context(|| format!("cannot write {}", item_path.display()))
+            .map_err(DoNewError::Io)?;
     }
 
     Ok(NewOutcome {

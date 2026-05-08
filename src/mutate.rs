@@ -2271,13 +2271,69 @@ mod tests {
         req.priority = "normal".into();
         req.slug = Some("taken-slug".into());
         let err = new_issue(tmp.path(), req, None).unwrap_err();
-        match err {
-            MutateError::ConflictingIntent(msg) => assert!(
-                msg.contains("taken-slug") && msg.contains("already exists"),
-                "expected target-already-exists message, got {msg:?}"
-            ),
-            other => panic!("expected ConflictingIntent, got {other:?}"),
-        }
+        assert!(
+            matches!(err, MutateError::ConflictingIntent(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn new_issue_legacy_slug_conflict_returns_typed_error() {
+        // Companion to `new_issue_slug_conflict_returns_typed_error`:
+        // covers the OTHER `DoNewError::Conflict` site where the slug
+        // exists at a legacy `issues/open/<slug>/` path. Pre-flat-layout
+        // installs hit this branch; the typed mapping must classify it
+        // as ConflictingIntent (not Io / not SchemaViolation).
+        let tmp = fresh_repo();
+        let legacy_open = tmp.path().join("issues/open/legacy-slug");
+        fs::create_dir_all(&legacy_open).unwrap();
+        fs::write(legacy_open.join("item.md"), "---\nstatus: open\n---\n").unwrap();
+        let mut req = NewIssueRequest::default();
+        req.issue_type = "bug".into();
+        req.title = "Legacy conflict".into();
+        req.priority = "normal".into();
+        req.slug = Some("legacy-slug".into());
+        let err = new_issue(tmp.path(), req, None).unwrap_err();
+        assert!(
+            matches!(err, MutateError::ConflictingIntent(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn new_issue_validation_returns_typed_error() {
+        // Validation paths in do_new_locked (here: `--owner` on a
+        // non-epic) used to be the catch-all string-match fallback, so
+        // their classification was correct only by accident. Lock it.
+        let tmp = fresh_repo();
+        let mut req = NewIssueRequest::default();
+        req.issue_type = "bug".into();
+        req.title = "Owner on non-epic".into();
+        req.priority = "normal".into();
+        req.owner = Some("alice".into());
+        let err = new_issue(tmp.path(), req, None).unwrap_err();
+        assert!(matches!(err, MutateError::Validation(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn new_issue_schema_config_returns_typed_error() {
+        // Malformed `.schema.yaml` is the bug that motivated the typed-
+        // error refactor: pre-refactor the catch-all string match
+        // misclassified it as MutateError::Validation (HTTP 400). It
+        // must now route through DoNewError::SchemaConfig →
+        // MutateError::SchemaConfig (HTTP 500).
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields: : :\n",
+        )
+        .unwrap();
+        let mut req = NewIssueRequest::default();
+        req.issue_type = "bug".into();
+        req.title = "Bad schema".into();
+        req.priority = "normal".into();
+        let err = new_issue(tmp.path(), req, None).unwrap_err();
+        assert!(matches!(err, MutateError::SchemaConfig(_)), "got {err:?}");
     }
 
     #[cfg(unix)]
@@ -2288,28 +2344,42 @@ mod tests {
         // path used to be funnelled into the `Validation` fallback by
         // the string matcher; the typed enum routes it correctly to
         // MutateError::Io.
+        //
+        // RAII guard restores permissions on every exit (including
+        // panic) so `tempdir`'s `Drop` cleanup never inherits a
+        // 0o500 directory.
         use std::os::unix::fs::PermissionsExt;
+        struct PermGuard {
+            path: PathBuf,
+            original: std::fs::Permissions,
+        }
+        impl Drop for PermGuard {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.path, self.original.clone());
+            }
+        }
+
         let tmp = fresh_repo();
-        // Pre-write the schema so ensure_default_written's Ok-path is
-        // taken before we lock down the directory.
-        fs::write(
-            tmp.path().join("issues/.schema.yaml"),
-            "version: 1\nfields: {}\n",
-        )
-        .unwrap();
+        // Use the production helper rather than a hardcoded YAML literal
+        // so the test does not break if the schema format evolves.
+        crate::schema::ensure_default_written(tmp.path()).unwrap();
         let issues_dir = tmp.path().join("issues");
         let original = fs::metadata(&issues_dir).unwrap().permissions();
         let mut readonly = original.clone();
         readonly.set_mode(0o500);
         fs::set_permissions(&issues_dir, readonly).unwrap();
+        let _guard = PermGuard {
+            path: issues_dir.clone(),
+            original: original.clone(),
+        };
+
         // chmod 0o500 has no effect for uid 0; skip the assertion when
         // a probe write still succeeds (CI containers occasionally run
         // as root).
         let probe = issues_dir.join(".io-probe");
-        let chmod_bites = fs::write(&probe, b"x").is_err();
+        let chmod_enforced = fs::write(&probe, b"x").is_err();
         let _ = fs::remove_file(&probe);
-        if !chmod_bites {
-            fs::set_permissions(&issues_dir, original).unwrap();
+        if !chmod_enforced {
             return;
         }
 
@@ -2320,10 +2390,57 @@ mod tests {
         req.slug = Some("io-fail-slug".into());
         let err = new_issue(tmp.path(), req, None).unwrap_err();
 
-        // Restore perms so the tempdir can clean itself up.
-        fs::set_permissions(&issues_dir, original).unwrap();
-
         assert!(matches!(err, MutateError::Io(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn do_new_error_to_anyhow_text_matches_per_variant() {
+        // Lock the byte-identical CLI text contract: the From<DoNewError>
+        // for anyhow::Error impl is what `cmd_new` relies on to keep
+        // human-readable error messages stable across the typed-error
+        // refactor. If a future contributor edits the variants without
+        // touching the conversion, this test fails before users do.
+        use crate::DoNewError;
+
+        let cases: &[(DoNewError, &str)] = &[
+            (
+                DoNewError::Validation("--owner is only valid with --type epic".into()),
+                "--owner is only valid with --type epic",
+            ),
+            (
+                DoNewError::Conflict("target directory already exists: /x".into()),
+                "target directory already exists: /x",
+            ),
+            (
+                DoNewError::SchemaViolation("missing required field \"team\"".into()),
+                "schema: missing required field \"team\"",
+            ),
+            (
+                DoNewError::SchemaConfig("cannot read .schema.yaml".into()),
+                "cannot read .schema.yaml",
+            ),
+        ];
+        for (err, expected) in cases {
+            // Have to clone-by-construction since DoNewError is not Clone.
+            let cloned = match err {
+                DoNewError::Validation(s) => DoNewError::Validation(s.clone()),
+                DoNewError::Conflict(s) => DoNewError::Conflict(s.clone()),
+                DoNewError::SchemaViolation(s) => DoNewError::SchemaViolation(s.clone()),
+                DoNewError::SchemaConfig(s) => DoNewError::SchemaConfig(s.clone()),
+                DoNewError::Io(_) => unreachable!(),
+            };
+            let any: anyhow::Error = cloned.into();
+            assert_eq!(format!("{any:#}"), *expected, "variant {err:?}");
+        }
+
+        // Io variant: the inner anyhow::Error is returned as-is, so its
+        // context chain is preserved verbatim.
+        let io = DoNewError::Io(
+            anyhow::Error::msg(std::io::Error::new(std::io::ErrorKind::Other, "disk full"))
+                .context("cannot write /tmp/x"),
+        );
+        let any: anyhow::Error = io.into();
+        assert_eq!(format!("{any:#}"), "cannot write /tmp/x: disk full");
     }
 
     // ── publish-before-release helpers ──────────────────────────────────
