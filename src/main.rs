@@ -4,6 +4,7 @@ mod context;
 mod docs;
 mod doctor;
 mod fmt;
+mod hooks;
 mod item_text;
 mod merge_driver;
 mod models;
@@ -423,6 +424,13 @@ enum Command {
         fix: bool,
     },
 
+    /// Install / uninstall the opt-in pre-commit hook that runs
+    /// `issuectl doctor` on staged issue files
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
+    },
+
     /// Install or preview the /issue skill template (Claude Code or Codex)
     Skill {
         #[command(subcommand)]
@@ -582,6 +590,17 @@ enum BodyAction {
 }
 
 #[derive(Subcommand)]
+enum HooksAction {
+    /// Install (or uninstall with --uninstall) the pre-commit hook
+    Install {
+        /// Remove the hook block + revert `core.hooksPath` instead of
+        /// installing
+        #[arg(long)]
+        uninstall: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum SkillAction {
     /// Install the /issue skill template into the current repo. By default
     /// installs the Claude Code skill; use --agent codex for Codex CLI, or
@@ -723,6 +742,9 @@ fn main() -> Result<()> {
             } => cmd_body_set(json_output, &slug, stdin, from_file, expected_version),
         },
         Command::Doctor { fix } => doctor::run(&find_root(), fix, json_output),
+        Command::Hooks { action } => match action {
+            HooksAction::Install { uninstall } => hooks::run(&find_root(), uninstall),
+        },
         Command::Skill { action } => match action {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
             SkillAction::Print { agent } => cmd_skill_print(&agent),

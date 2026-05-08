@@ -104,6 +104,48 @@ struct DoctorReport {
     /// multiple `## Notes` headings — merging needs human
     /// judgement, so doctor flags them and skips.
     notes_conflicts: Vec<String>,
+    /// Broken cross-references: `(slug, kind, target)` where `kind` is
+    /// "epic" / "related" / "blocked_by" and `target` is the unresolved
+    /// slug-form ref. (`orphan_epic_refs` is kept separately for
+    /// backwards-compat with existing JSON consumers; this list covers
+    /// the broader set.)
+    broken_refs: Vec<(String, String, String)>,
+    /// Dependency cycles via `blocked_by:`. Each inner Vec is a cycle
+    /// path (canonicalised so the lowest slug appears first).
+    blocked_by_cycles: Vec<Vec<String>>,
+    /// Status/closed-date consistency violations. `(slug, message)`.
+    status_consistency: Vec<(String, String)>,
+    /// Timestamp sanity violations (created > updated, future dates).
+    timestamp_issues: Vec<(String, String)>,
+    /// Frontmatter keys not declared by the schema (after merging the
+    /// user's `.schema.yaml` over the built-in defaults). Surfaced
+    /// separately from schema violations because unknown keys are
+    /// preserved verbatim by the round-trip; flagging them is purely
+    /// a hint that a typo or stray key may be lurking.
+    unknown_keys: Vec<(String, String)>,
+    /// `item.md` containing git merge-conflict markers. Logged only;
+    /// `--fix` never auto-resolves these.
+    conflict_markers: Vec<String>,
+    /// Orphan `.issuectl-tmp-*` files inside `issues/**` (atomic-write
+    /// tempfiles that survived a SIGKILL). `--fix` deletes them.
+    orphan_tempfiles: Vec<PathBuf>,
+    /// Tempfiles deleted during a fix pass. Subset of `orphan_tempfiles`.
+    orphan_tempfiles_removed: Vec<PathBuf>,
+    /// Symlinked issue directories — refused by `repo::resolve_layout`,
+    /// reported here for the user to either restore or remove.
+    symlinked_dirs: Vec<String>,
+    /// Slug present at both `issues/open/<slug>/` AND `issues/closed/<slug>/`.
+    /// Human-attention only; never auto-fixed.
+    both_open_and_closed: Vec<String>,
+    /// `issues/closed/<slug>` carrying an active status — legacy folder
+    /// repos only. With `--fix`: rewrite status to `done`, set `closed:`
+    /// to today if absent.
+    closed_with_active_status: Vec<(String, String, PathBuf)>,
+    /// `issues/open/<slug>` carrying a closing status — legacy folder
+    /// repos only. With `--fix`: rewrite status to `open`, drop `closed:`.
+    open_with_closing_status: Vec<(String, String, PathBuf)>,
+    /// Status reconciliation rewrites that actually ran during `--fix`.
+    status_reconciled: Vec<String>,
 }
 
 pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
@@ -126,7 +168,34 @@ pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
     } else {
         render_text(&report, fix);
     }
+    if has_critical_findings(&report) {
+        std::process::exit(1);
+    }
     Ok(())
+}
+
+/// "Critical" = the repo is in a state the user must intervene on.
+/// Routine migrations (legacy dirs, flat-layout moves, notes renames)
+/// are not critical: doctor handles them in `--fix`. Parse errors,
+/// schema violations, ambiguous slugs, dependency cycles, conflict
+/// markers, both-folders presence, broken refs, and status/closed
+/// inconsistencies are all critical.
+fn has_critical_findings(report: &DoctorReport) -> bool {
+    !report.parse_errors.is_empty()
+        || !report.schema_violations.is_empty()
+        || report.schema_parse_error.is_some()
+        || !report.duplicate_slugs.is_empty()
+        || !report.invalid_slugs.is_empty()
+        || !report.missing_item_md.is_empty()
+        || !report.broken_refs.is_empty()
+        || !report.blocked_by_cycles.is_empty()
+        || !report.status_consistency.is_empty()
+        || !report.timestamp_issues.is_empty()
+        || !report.conflict_markers.is_empty()
+        || !report.symlinked_dirs.is_empty()
+        || !report.both_open_and_closed.is_empty()
+        || !report.flat_layout_conflicts.is_empty()
+        || !report.notes_conflicts.is_empty()
 }
 
 fn scan(repo_root: &Path) -> Result<DoctorReport> {
@@ -261,7 +330,367 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
     // before running `--fix`. Read-only — no filesystem mutation.
     plan_notes_migration(repo_root, &mut report)?;
 
+    extended_validation(repo_root, &mut report)?;
+
     Ok(report)
+}
+
+/// Run the v0.5.0 validation suite (reference integrity, status/closed
+/// consistency, timestamp sanity, unknown-key flagging, conflict
+/// markers, orphan tempfiles, symlinked dirs, status-folder
+/// mismatches) over flat-layout and legacy-folder issues. Read-only.
+fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
+    use chrono::NaiveDate;
+
+    let issues_dir = repo_root.join("issues");
+    if !issues_dir.is_dir() {
+        return Ok(());
+    }
+
+    // Discover { slug → (folder, item_path) } across flat + legacy. Slugs
+    // present at both `open/` and `closed/` are surfaced separately; other
+    // multi-presence cases continue to flow through `duplicate_slugs` and
+    // the existing flat-layout migration plan.
+    let mut by_slug: BTreeMap<String, Vec<(String, PathBuf)>> = BTreeMap::new();
+    let mut symlinked: Vec<String> = Vec::new();
+    let mut tempfiles: Vec<PathBuf> = Vec::new();
+
+    let mut visit = |dir: &Path, folder: &str| -> Result<()> {
+        if !dir.is_dir() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(dir)?.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            // Orphan tempfiles can appear at any level. Filter early
+            // and recurse for tempfile collection too.
+            if name.starts_with(".issuectl-tmp-") {
+                tempfiles.push(path.clone());
+                continue;
+            }
+            let ftype = entry.file_type()?;
+            if ftype.is_symlink() {
+                let meta = std::fs::metadata(&path);
+                if meta.map(|m| m.is_dir()).unwrap_or(false) {
+                    symlinked.push(format!("{folder}/{name}"));
+                }
+                continue;
+            }
+            if !ftype.is_dir() {
+                continue;
+            }
+            if folder == "flat" && (name == "open" || name == "closed" || name == "archive") {
+                continue;
+            }
+            // Recurse one level into the issue dir to collect tempfiles
+            // sitting next to item.md.
+            if let Ok(rd) = fs::read_dir(&path) {
+                for inner in rd.flatten() {
+                    let iname = inner.file_name().to_string_lossy().to_string();
+                    if iname.starts_with(".issuectl-tmp-") {
+                        tempfiles.push(inner.path());
+                    }
+                }
+            }
+            let item = path.join("item.md");
+            if !item.is_file() {
+                continue;
+            }
+            by_slug
+                .entry(name.clone())
+                .or_default()
+                .push((folder.to_string(), item));
+        }
+        Ok(())
+    };
+    visit(&issues_dir, "flat")?;
+    visit(&issues_dir.join("open"), "open")?;
+    visit(&issues_dir.join("closed"), "closed")?;
+
+    report.symlinked_dirs = symlinked;
+    report.orphan_tempfiles = tempfiles;
+
+    // Both open/<slug> AND closed/<slug>: ambiguous; never auto-fix.
+    for (slug, hits) in &by_slug {
+        let has_open = hits.iter().any(|(f, _)| f == "open");
+        let has_closed = hits.iter().any(|(f, _)| f == "closed");
+        if has_open && has_closed {
+            report.both_open_and_closed.push(slug.clone());
+        }
+    }
+
+    // Schema-known field names for unknown-key flagging.
+    let schema_fields: BTreeSet<String> = match schema::load(repo_root) {
+        Ok(s) => s.fields.keys().cloned().collect(),
+        Err(_) => schema::default_schema().fields.keys().cloned().collect(),
+    };
+    let mut known: BTreeSet<String> = schema_fields;
+    // Frontmatter keys the parser/canonical layer recognises but the
+    // built-in schema may not declare (e.g. `commits`, `blocked_by`,
+    // `number`).
+    for k in [
+        "created",
+        "updated",
+        "type",
+        "reporter",
+        "assignee",
+        "owner",
+        "status",
+        "priority",
+        "epic",
+        "related",
+        "labels",
+        "closed",
+        "commits",
+        "slug",
+        "number",
+        "blocked_by",
+    ] {
+        known.insert(k.to_string());
+    }
+
+    let today = chrono::Local::now().date_naive();
+
+    // Per-issue inspection: parse YAML mapping once, check each rule.
+    let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let existing_slugs: BTreeSet<String> = by_slug.keys().cloned().collect();
+
+    for (slug, hits) in &by_slug {
+        // For status reconciliation we want to look at *every* legacy
+        // path occurrence; for the rest, the canonical (flat) hit if
+        // any, else the first legacy hit.
+        let primary = hits
+            .iter()
+            .find(|(f, _)| f == "flat")
+            .or_else(|| hits.first())
+            .unwrap();
+        let item_path = &primary.1;
+        let text = match fs::read_to_string(item_path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        if has_conflict_markers(&text) {
+            report.conflict_markers.push(slug.clone());
+        }
+
+        let Some(fm_text) = parser::split_frontmatter(&text).0 else {
+            continue;
+        };
+        let fm = match serde_yaml::from_str::<serde_yaml::Mapping>(fm_text) {
+            Ok(fm) => fm,
+            Err(_) => continue, // already surfaced as parse_errors elsewhere
+        };
+
+        // Unknown-key flagging.
+        for (k, _) in fm.iter() {
+            if let serde_yaml::Value::String(name) = k {
+                if !known.contains(name) {
+                    report.unknown_keys.push((slug.clone(), name.clone()));
+                }
+            }
+        }
+
+        let status = fm
+            .get(serde_yaml::Value::String("status".into()))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let closed = fm
+            .get(serde_yaml::Value::String("closed".into()))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+        let created = fm
+            .get(serde_yaml::Value::String("created".into()))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let updated = fm
+            .get(serde_yaml::Value::String("updated".into()))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Status/closed consistency.
+        if let Some(s) = &status {
+            let closing = crate::is_closing_status(s);
+            let active = crate::ACTIVE_STATUSES.contains(&s.as_str());
+            if closing && closed.is_none() {
+                report.status_consistency.push((
+                    slug.clone(),
+                    format!("closing status {s:?} requires `closed:` date"),
+                ));
+            }
+            if active && closed.is_some() {
+                report.status_consistency.push((
+                    slug.clone(),
+                    format!("active status {s:?} must not carry `closed:`"),
+                ));
+            }
+        }
+
+        // Timestamp sanity.
+        let parse = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok();
+        let cd = created.as_deref().and_then(parse);
+        let ud = updated.as_deref().and_then(parse);
+        let xd = closed.as_deref().and_then(parse);
+        if let (Some(c), Some(u)) = (cd, ud) {
+            if c > u {
+                report.timestamp_issues.push((
+                    slug.clone(),
+                    format!("created ({c}) is after updated ({u})"),
+                ));
+            }
+        }
+        for (label, d) in [("created", cd), ("updated", ud), ("closed", xd)] {
+            if let Some(d) = d {
+                if d > today {
+                    report
+                        .timestamp_issues
+                        .push((slug.clone(), format!("{label} date {d} is in the future")));
+                }
+            }
+        }
+        if let (Some(u), Some(x)) = (ud, xd) {
+            if x > u {
+                report.timestamp_issues.push((
+                    slug.clone(),
+                    format!("closed ({x}) is after updated ({u})"),
+                ));
+            }
+        }
+
+        // Reference integrity.
+        let check_ref = |raw: &str| -> Option<String> {
+            let bare = raw.trim().strip_prefix('@').unwrap_or(raw.trim());
+            if bare.is_empty() {
+                return None;
+            }
+            // Numeric legacy refs are surfaced by the legacy migration
+            // path; skip here.
+            if bare.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            if !crate::slug::is_valid(bare) {
+                return Some(bare.to_string());
+            }
+            if !existing_slugs.contains(bare) {
+                return Some(bare.to_string());
+            }
+            None
+        };
+
+        if let Some(epic) = fm
+            .get(serde_yaml::Value::String("epic".into()))
+            .and_then(|v| v.as_str())
+        {
+            if let Some(missing) = check_ref(epic) {
+                report
+                    .broken_refs
+                    .push((slug.clone(), "epic".into(), missing));
+            }
+        }
+        for key in ["related", "blocked_by"] {
+            if let Some(serde_yaml::Value::Sequence(seq)) =
+                fm.get(serde_yaml::Value::String(key.into()))
+            {
+                let mut deps = Vec::new();
+                for item in seq {
+                    if let Some(s) = item.as_str() {
+                        if let Some(missing) = check_ref(s) {
+                            report.broken_refs.push((
+                                slug.clone(),
+                                key.to_string(),
+                                missing,
+                            ));
+                        } else if key == "blocked_by" {
+                            let bare =
+                                s.trim().strip_prefix('@').unwrap_or(s.trim()).to_string();
+                            if existing_slugs.contains(&bare) {
+                                deps.push(bare);
+                            }
+                        }
+                    }
+                }
+                if key == "blocked_by" && !deps.is_empty() {
+                    graph.insert(slug.clone(), deps);
+                }
+            }
+        }
+
+        // Status/folder reconciliation (legacy folders only).
+        for (f, ipath) in hits {
+            match (f.as_str(), status.as_deref()) {
+                ("closed", Some(s)) if crate::ACTIVE_STATUSES.contains(&s) => {
+                    report
+                        .closed_with_active_status
+                        .push((slug.clone(), s.to_string(), ipath.clone()));
+                }
+                ("open", Some(s)) if crate::is_closing_status(s) => {
+                    report
+                        .open_with_closing_status
+                        .push((slug.clone(), s.to_string(), ipath.clone()));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    report.blocked_by_cycles = detect_cycles(&graph);
+
+    Ok(())
+}
+
+fn has_conflict_markers(text: &str) -> bool {
+    for line in text.lines() {
+        if line.starts_with("<<<<<<<") || line.starts_with(">>>>>>>") || line == "=======" {
+            return true;
+        }
+    }
+    false
+}
+
+/// Tarjan-style DFS: returns each unique elementary cycle once,
+/// rotated so the lexicographically-smallest slug appears first.
+fn detect_cycles(graph: &BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
+    let mut found: BTreeSet<Vec<String>> = BTreeSet::new();
+    let mut stack: Vec<String> = Vec::new();
+    let mut on_stack: BTreeSet<String> = BTreeSet::new();
+
+    fn dfs(
+        node: &str,
+        graph: &BTreeMap<String, Vec<String>>,
+        stack: &mut Vec<String>,
+        on_stack: &mut BTreeSet<String>,
+        found: &mut BTreeSet<Vec<String>>,
+    ) {
+        stack.push(node.to_string());
+        on_stack.insert(node.to_string());
+        if let Some(neigh) = graph.get(node) {
+            for n in neigh {
+                if on_stack.contains(n) {
+                    let start = stack.iter().position(|s| s == n).unwrap();
+                    let cycle: Vec<String> = stack[start..].to_vec();
+                    let min_idx = cycle
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, s)| (*s).clone())
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    let mut rotated: Vec<String> = cycle[min_idx..].to_vec();
+                    rotated.extend_from_slice(&cycle[..min_idx]);
+                    found.insert(rotated);
+                } else if graph.contains_key(n) {
+                    dfs(n, graph, stack, on_stack, found);
+                }
+            }
+        }
+        stack.pop();
+        on_stack.remove(node);
+    }
+
+    for node in graph.keys() {
+        dfs(node, graph, &mut stack, &mut on_stack, &mut found);
+    }
+    found.into_iter().collect()
 }
 
 fn plan_notes_migration(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
@@ -430,6 +859,11 @@ fn detect_orphan_epic_refs(repo_root: &Path, report: &mut DoctorReport) -> Resul
 }
 
 fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
+    // Status/folder reconciliation runs BEFORE the flat-layout
+    // migration so the rewrites land at the legacy path that scan()
+    // recorded; the subsequent migration moves the corrected file.
+    apply_status_reconciliation(repo_root, report)?;
+
     // Notes → Comments migration is independent of layout migration:
     // it touches body markdown of flat-layout dirs only, never moves
     // files. Run it FIRST so layout-conflict bail-outs don't block
@@ -477,6 +911,10 @@ fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
         report.legacy_dirs = fresh.legacy_dirs;
         report.duplicate_slugs = fresh.duplicate_slugs;
     }
+
+    // Orphan tempfile cleanup. Delete `.issuectl-tmp-*` survivors —
+    // these are atomic-write tempfiles a SIGKILL'd process left behind.
+    apply_orphan_tempfiles(report)?;
 
     if report.legacy_dirs.is_empty() {
         report.fix_applied = true;
@@ -571,6 +1009,51 @@ fn rename_notes_to_comments(repo_root: &Path, report: &mut DoctorReport) -> Resu
                 .with_context(|| format!("cannot write {}", item_path.display()))?;
             report.notes_renamed.push(slug);
         }
+    }
+    Ok(())
+}
+
+fn apply_orphan_tempfiles(report: &mut DoctorReport) -> Result<()> {
+    let planned = std::mem::take(&mut report.orphan_tempfiles);
+    let mut removed = Vec::new();
+    for path in planned {
+        match fs::remove_file(&path) {
+            Ok(_) => removed.push(path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::Error::from(e))
+                    .with_context(|| format!("cannot remove {}", path.display()));
+            }
+        }
+    }
+    report.orphan_tempfiles_removed = removed;
+    Ok(())
+}
+
+fn apply_status_reconciliation(_repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
+    let active_to_closed = std::mem::take(&mut report.closed_with_active_status);
+    let closing_to_open = std::mem::take(&mut report.open_with_closing_status);
+    for (slug, _old_status, item_path) in active_to_closed {
+        let mut item = write::read_item(&item_path)?;
+        write::set_string(&mut item.frontmatter, "status", "done");
+        let has_closed = item
+            .frontmatter
+            .get(serde_yaml::Value::String("closed".into()))
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if !has_closed {
+            write::set_string(&mut item.frontmatter, "closed", &write::today());
+        }
+        write::write_item(&item_path, &item)?;
+        report.status_reconciled.push(slug);
+    }
+    for (slug, _old_status, item_path) in closing_to_open {
+        let mut item = write::read_item(&item_path)?;
+        write::set_string(&mut item.frontmatter, "status", "open");
+        write::remove_key(&mut item.frontmatter, "closed");
+        write::write_item(&item_path, &item)?;
+        report.status_reconciled.push(slug);
     }
     Ok(())
 }
@@ -921,7 +1404,20 @@ fn render_text(report: &DoctorReport, fix: bool) {
         || !report.notes_to_rename.is_empty()
         || !report.notes_conflicts.is_empty()
         || !report.schema_violations.is_empty()
-        || report.schema_parse_error.is_some();
+        || report.schema_parse_error.is_some()
+        || !report.broken_refs.is_empty()
+        || !report.blocked_by_cycles.is_empty()
+        || !report.status_consistency.is_empty()
+        || !report.timestamp_issues.is_empty()
+        || !report.unknown_keys.is_empty()
+        || !report.conflict_markers.is_empty()
+        || !report.orphan_tempfiles.is_empty()
+        || !report.orphan_tempfiles_removed.is_empty()
+        || !report.symlinked_dirs.is_empty()
+        || !report.both_open_and_closed.is_empty()
+        || !report.closed_with_active_status.is_empty()
+        || !report.open_with_closing_status.is_empty()
+        || !report.status_reconciled.is_empty();
     if !has_problems {
         if report.schema_missing {
             println!(
@@ -1049,6 +1545,96 @@ fn render_text(report: &DoctorReport, fix: bool) {
         }
         println!();
     }
+    if !report.broken_refs.is_empty() {
+        println!("Broken cross-references:");
+        for (slug, kind, target) in &report.broken_refs {
+            println!("  {slug}: {kind} → {target}");
+        }
+        println!();
+    }
+    if !report.blocked_by_cycles.is_empty() {
+        println!("Dependency cycles via `blocked_by`:");
+        for cycle in &report.blocked_by_cycles {
+            println!("  {} → {}", cycle.join(" → "), cycle[0]);
+        }
+        println!();
+    }
+    if !report.status_consistency.is_empty() {
+        println!("Status / closed-date inconsistencies:");
+        for (slug, msg) in &report.status_consistency {
+            println!("  {slug}: {msg}");
+        }
+        println!();
+    }
+    if !report.timestamp_issues.is_empty() {
+        println!("Timestamp sanity issues:");
+        for (slug, msg) in &report.timestamp_issues {
+            println!("  {slug}: {msg}");
+        }
+        println!();
+    }
+    if !report.unknown_keys.is_empty() {
+        println!("Unknown frontmatter keys (not declared by schema):");
+        for (slug, key) in &report.unknown_keys {
+            println!("  {slug}: {key}");
+        }
+        println!();
+    }
+    if !report.conflict_markers.is_empty() {
+        println!("Files with git merge-conflict markers (manual fix required):");
+        for s in &report.conflict_markers {
+            println!("  {s}");
+        }
+        println!();
+    }
+    if !report.orphan_tempfiles_removed.is_empty() {
+        println!("Removed orphan tempfiles:");
+        for p in &report.orphan_tempfiles_removed {
+            println!("  {}", p.display());
+        }
+        println!();
+    } else if !report.orphan_tempfiles.is_empty() {
+        println!("Orphan `.issuectl-tmp-*` files:");
+        for p in &report.orphan_tempfiles {
+            println!("  {}", p.display());
+        }
+        println!();
+    }
+    if !report.symlinked_dirs.is_empty() {
+        println!("Symlinked issue directories (refused):");
+        for s in &report.symlinked_dirs {
+            println!("  {s}");
+        }
+        println!();
+    }
+    if !report.both_open_and_closed.is_empty() {
+        println!("Slugs present in BOTH `issues/open/` and `issues/closed/` (manual fix required):");
+        for s in &report.both_open_and_closed {
+            println!("  {s}");
+        }
+        println!();
+    }
+    if !report.closed_with_active_status.is_empty() {
+        println!("`closed/<slug>` with active status:");
+        for (slug, st, _) in &report.closed_with_active_status {
+            println!("  {slug} (status: {st})");
+        }
+        println!();
+    }
+    if !report.open_with_closing_status.is_empty() {
+        println!("`open/<slug>` with closing status:");
+        for (slug, st, _) in &report.open_with_closing_status {
+            println!("  {slug} (status: {st})");
+        }
+        println!();
+    }
+    if !report.status_reconciled.is_empty() {
+        println!("Reconciled status/folder mismatches:");
+        for s in &report.status_reconciled {
+            println!("  {s}");
+        }
+        println!();
+    }
     if fix {
         println!(
             "Applied. {} dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s).",
@@ -1121,6 +1707,49 @@ fn render_json(report: &DoctorReport, fix: bool) -> serde_json::Value {
         .map(|(loc, msg)| serde_json::json!({"location": loc, "message": msg}))
         .collect();
 
+    let broken_refs: Vec<serde_json::Value> = report
+        .broken_refs
+        .iter()
+        .map(|(slug, kind, target)| {
+            serde_json::json!({"slug": slug, "kind": kind, "target": target})
+        })
+        .collect();
+    let status_consistency: Vec<serde_json::Value> = report
+        .status_consistency
+        .iter()
+        .map(|(s, m)| serde_json::json!({"slug": s, "message": m}))
+        .collect();
+    let timestamp_issues: Vec<serde_json::Value> = report
+        .timestamp_issues
+        .iter()
+        .map(|(s, m)| serde_json::json!({"slug": s, "message": m}))
+        .collect();
+    let unknown_keys: Vec<serde_json::Value> = report
+        .unknown_keys
+        .iter()
+        .map(|(s, k)| serde_json::json!({"slug": s, "key": k}))
+        .collect();
+    let orphan_tempfiles: Vec<String> = report
+        .orphan_tempfiles
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let orphan_tempfiles_removed: Vec<String> = report
+        .orphan_tempfiles_removed
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let closed_with_active: Vec<serde_json::Value> = report
+        .closed_with_active_status
+        .iter()
+        .map(|(s, st, _)| serde_json::json!({"slug": s, "status": st}))
+        .collect();
+    let open_with_closing: Vec<serde_json::Value> = report
+        .open_with_closing_status
+        .iter()
+        .map(|(s, st, _)| serde_json::json!({"slug": s, "status": st}))
+        .collect();
+
     serde_json::json!({
         "fix_applied": fix && report.fix_applied,
         "migrations": migrations,
@@ -1139,6 +1768,19 @@ fn render_json(report: &DoctorReport, fix: bool) -> serde_json::Value {
         "notes_to_rename": report.notes_to_rename,
         "notes_renamed": report.notes_renamed,
         "notes_conflicts": report.notes_conflicts,
+        "broken_refs": broken_refs,
+        "blocked_by_cycles": report.blocked_by_cycles,
+        "status_consistency": status_consistency,
+        "timestamp_issues": timestamp_issues,
+        "unknown_keys": unknown_keys,
+        "conflict_markers": report.conflict_markers,
+        "orphan_tempfiles": orphan_tempfiles,
+        "orphan_tempfiles_removed": orphan_tempfiles_removed,
+        "symlinked_dirs": report.symlinked_dirs,
+        "both_open_and_closed": report.both_open_and_closed,
+        "closed_with_active_status": closed_with_active,
+        "open_with_closing_status": open_with_closing,
+        "status_reconciled": report.status_reconciled,
     })
 }
 
@@ -1556,6 +2198,349 @@ mod tests {
             "expected violation on flat NN-shaped slug, got {:?}",
             r.schema_violations
         );
+    }
+
+    fn put_flat(tmp: &TempDir, slug: &str, body: &str) {
+        let dir = tmp.path().join("issues").join(slug);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("item.md"), body).unwrap();
+    }
+
+    #[test]
+    fn flags_broken_epic_ref() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\nepic: nonexistent-ghost-fox\n---\n# T\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.broken_refs
+                .iter()
+                .any(|(s, k, t)| s == "quiet-brave-otter" && k == "epic" && t == "nonexistent-ghost-fox"),
+            "broken_refs={:?}",
+            r.broken_refs
+        );
+    }
+
+    #[test]
+    fn does_not_flag_existing_epic_ref() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "real-epic-here",
+            "---\ntype: epic\nstatus: open\npriority: normal\n---\n# E\n",
+        );
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\nepic: real-epic-here\n---\n# T\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(r.broken_refs.is_empty(), "got {:?}", r.broken_refs);
+    }
+
+    #[test]
+    fn flags_broken_blocked_by_ref() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\nblocked_by: ['@nope-not-here']\n---\n# T\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(r
+            .broken_refs
+            .iter()
+            .any(|(_, k, t)| k == "blocked_by" && t == "nope-not-here"));
+    }
+
+    #[test]
+    fn detects_blocked_by_cycle() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "alpha-bright-cat",
+            "---\ntype: bug\nstatus: open\npriority: normal\nblocked_by: ['@beta-bright-cat']\n---\n# A\n",
+        );
+        put_flat(
+            &tmp,
+            "beta-bright-cat",
+            "---\ntype: bug\nstatus: open\npriority: normal\nblocked_by: ['@alpha-bright-cat']\n---\n# B\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert_eq!(r.blocked_by_cycles.len(), 1);
+        let cycle = &r.blocked_by_cycles[0];
+        assert_eq!(cycle[0], "alpha-bright-cat");
+        assert!(cycle.contains(&"beta-bright-cat".to_string()));
+    }
+
+    #[test]
+    fn no_cycle_for_acyclic_chain() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "alpha-bright-cat",
+            "---\ntype: bug\nstatus: open\npriority: normal\nblocked_by: ['@beta-bright-cat']\n---\n# A\n",
+        );
+        put_flat(
+            &tmp,
+            "beta-bright-cat",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# B\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(r.blocked_by_cycles.is_empty());
+    }
+
+    #[test]
+    fn flags_closing_status_without_closed_date() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: done\npriority: normal\n---\n# T\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(r
+            .status_consistency
+            .iter()
+            .any(|(_, m)| m.contains("closing") && m.contains("closed")));
+    }
+
+    #[test]
+    fn flags_active_status_with_closed_date() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\nclosed: 2026-01-01\n---\n# T\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(r
+            .status_consistency
+            .iter()
+            .any(|(_, m)| m.contains("active") && m.contains("closed")));
+    }
+
+    #[test]
+    fn does_not_flag_consistent_status() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: done\npriority: normal\nclosed: 2026-01-01\n---\n# T\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(r.status_consistency.is_empty(), "{:?}", r.status_consistency);
+    }
+
+    #[test]
+    fn flags_created_after_updated() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2026-05-01\nupdated: 2026-04-01\n---\n# T\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(r
+            .timestamp_issues
+            .iter()
+            .any(|(_, m)| m.contains("created") && m.contains("after")));
+    }
+
+    #[test]
+    fn flags_future_dates() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2999-01-01\n---\n# T\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(r
+            .timestamp_issues
+            .iter()
+            .any(|(_, m)| m.contains("future")));
+    }
+
+    #[test]
+    fn does_not_flag_sane_dates() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2026-01-01\nupdated: 2026-02-01\n---\n# T\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(r.timestamp_issues.is_empty(), "{:?}", r.timestamp_issues);
+    }
+
+    #[test]
+    fn flags_unknown_frontmatter_key() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\nwhimsy: 1\n---\n# T\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(r.unknown_keys.iter().any(|(_, k)| k == "whimsy"));
+    }
+
+    #[test]
+    fn does_not_flag_schema_known_custom_key() {
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: false\n",
+        )
+        .unwrap();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\nteam: payments\n---\n# T\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            !r.unknown_keys.iter().any(|(_, k)| k == "team"),
+            "team is schema-known: {:?}",
+            r.unknown_keys
+        );
+    }
+
+    #[test]
+    fn flags_conflict_markers_and_does_not_auto_fix() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> branch\n",
+        );
+        let mut r = scan(tmp.path()).unwrap();
+        assert!(r.conflict_markers.iter().any(|s| s == "quiet-brave-otter"));
+        let before = fs::read_to_string(
+            tmp.path().join("issues/quiet-brave-otter/item.md"),
+        )
+        .unwrap();
+        apply(tmp.path(), &mut r).unwrap();
+        let after = fs::read_to_string(
+            tmp.path().join("issues/quiet-brave-otter/item.md"),
+        )
+        .unwrap();
+        assert_eq!(before, after, "conflict markers must not be auto-fixed");
+    }
+
+    #[test]
+    fn does_not_flag_clean_file() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(r.conflict_markers.is_empty());
+    }
+
+    #[test]
+    fn detects_and_removes_orphan_tempfiles_with_fix() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n",
+        );
+        let orphan = tmp
+            .path()
+            .join("issues/quiet-brave-otter/.issuectl-tmp-XYZ");
+        fs::write(&orphan, "leftover").unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert!(r.orphan_tempfiles.iter().any(|p| p == &orphan));
+        let mut r = scan(tmp.path()).unwrap();
+        apply(tmp.path(), &mut r).unwrap();
+        assert!(!orphan.exists(), "tempfile should be removed by --fix");
+        assert!(r.orphan_tempfiles_removed.iter().any(|p| p == &orphan));
+    }
+
+    #[test]
+    fn flags_both_open_and_closed_present() {
+        let tmp = fresh_repo();
+        let s = "quiet-brave-otter";
+        for f in ["open", "closed"] {
+            let dir = tmp.path().join("issues").join(f).join(s);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("item.md"),
+                "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n",
+            )
+            .unwrap();
+        }
+        let r = scan(tmp.path()).unwrap();
+        assert!(r.both_open_and_closed.iter().any(|x| x == s));
+    }
+
+    #[test]
+    fn reconciles_closed_with_active_status() {
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/closed/quiet-brave-otter");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n",
+        )
+        .unwrap();
+        let mut r = scan(tmp.path()).unwrap();
+        assert!(r
+            .closed_with_active_status
+            .iter()
+            .any(|(s, _, _)| s == "quiet-brave-otter"));
+        apply(tmp.path(), &mut r).unwrap();
+        // Flat-layout migration runs in the same apply pass and moves
+        // the file from `issues/closed/<slug>/` to `issues/<slug>/`.
+        let migrated = tmp.path().join("issues/quiet-brave-otter/item.md");
+        let after = fs::read_to_string(&migrated).unwrap();
+        assert!(after.contains("status: done"), "got: {after}");
+        assert!(after.contains("closed:"));
+    }
+
+    #[test]
+    fn reconciles_open_with_closing_status() {
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/open/quiet-brave-otter");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: done\npriority: normal\nclosed: 2026-01-01\n---\n# T\n",
+        )
+        .unwrap();
+        let mut r = scan(tmp.path()).unwrap();
+        apply(tmp.path(), &mut r).unwrap();
+        let migrated = tmp.path().join("issues/quiet-brave-otter/item.md");
+        let after = fs::read_to_string(&migrated).unwrap();
+        assert!(after.contains("status: open"), "got: {after}");
+        assert!(!after.contains("closed:"), "closed should be dropped: {after}");
+    }
+
+    #[test]
+    fn detects_symlinked_issue_dir() {
+        // Symlink target need not exist meaningfully; we just check
+        // that doctor surfaces the symlink.
+        let tmp = fresh_repo();
+        let target = tmp.path().join("elsewhere");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("item.md"), "---\n---\n# x\n").unwrap();
+        let link = tmp.path().join("issues/quiet-brave-otter");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(not(unix))]
+        return;
+        let r = scan(tmp.path()).unwrap();
+        assert!(r
+            .symlinked_dirs
+            .iter()
+            .any(|s| s.contains("quiet-brave-otter")));
     }
 
     #[test]
