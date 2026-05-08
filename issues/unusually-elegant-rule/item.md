@@ -1,6 +1,6 @@
 ---
 created: 2026-05-06
-updated: 2026-05-07
+updated: 2026-05-08
 type: feature
 status: in-progress
 priority: high
@@ -8,6 +8,13 @@ reporter: jari
 assignee: jari
 epic: exorbitantly-ill-apples
 labels: [foundation, query]
+commits:
+- hash: 7be33a4
+  summary: shared query engine for ls/search/api
+- hash: c731954
+  summary: apply review fixes (backwards-compat, semantics, perf, DoS caps)
+- hash: 379005f
+  summary: apply round-2 review fixes (panic guard, quoted escape, date prefix)
 ---
 
 # Shared query engine (CLI + web + automation) with --json and full-text search
