@@ -16,10 +16,14 @@ reserved names exactly (post-trim):
 | Heading              | Purpose                                                |
 | -------------------- | ------------------------------------------------------ |
 | `## Comments`        | Free-form comments / notes from humans or agents       |
-| `## Notes`           | Alias of `Comments`. Existing files keep this heading. |
 | `## Decisions`       | Architectural choices recorded so agents stop redoing  |
 | `## Agent Runs`      | Auto-appended audit trail of agent attempts            |
 | `## Reopen Notes — <YYYY-MM-DD>` | Rationale stub auto-appended on reopen     |
+
+`## Notes` is **not** a recognised section. Pre-existing files using
+`## Notes` are migrated to `## Comments` by `issuectl doctor --fix`.
+If both headings exist in the same file, doctor flags the slug as a
+conflict and skips the rewrite — manual merge is required.
 
 Other H2 sections (e.g. `## Description`, `## Acceptance Criteria`)
 are untouched by these tools — the convention is additive.
@@ -89,14 +93,39 @@ The companion safe-mutation CLI verbs (`decide`, `agent-run`,
 …) build on top of `body_sections::append_block` with the
 same shape.
 
+## Validation
+
+The `note_issue` mutation rejects inputs that would let the heading
+shape be fabricated:
+
+- `author` cannot contain whitespace, control characters, `@`, or the
+  middle-dot separator. Without this, `--as $'alice\n## Pwned'`
+  would mint a fake H2 section.
+- `message` cannot contain a line beginning with `## ` or `### `
+  outside a fenced code block. Quoting the same content inside a
+  fence is fine because the parser is fence-aware.
+
+Heading detection in both the writer (`append_block`,
+`insert_block_in_section`) and the reader (`parse_section`) tracks
+fenced code-block state. A user pasting a shell snippet whose
+comments start with `##` cannot accidentally truncate the section
+they're commenting on.
+
 ## Implementation
 
 `src/body_sections.rs` exposes:
 
-- `append_block(body, section, block) -> String` — append-or-create.
+- `append_block(body, section, block) -> String` — append-or-create
+  (writer).
 - `append_reopen_notes(body, date) -> String` — always creates a
   new section.
 - `render_note_block(ts, author, message) -> String` — block shape.
+- `parse_section(body, section) -> Vec<Block>` — reader. `Block`
+  carries `timestamp`, `author`, `body`.
+- `validate_author(author) -> Result<()>` and
+  `validate_message(message) -> Result<()>` — input guards.
+- `canonicalise_body_leading(body) -> String` — used after every
+  body edit so `serialize_item` always emits `---\n\n<body>`.
 - `now_iso() -> String` — UTC ISO-8601 timestamp.
 
 `src/mutate.rs::note_issue` wraps `append_block` under the repo

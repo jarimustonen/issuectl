@@ -534,15 +534,10 @@ fn update_issue_under_lock(
     // `## Reopen Notes — <date>` section so the rationale isn't
     // implicit. One section per transition (multiple reopens stack).
     if moved_to_open {
-        let leading = item.body.starts_with('\n');
         let trimmed_body = item.body.trim_start_matches('\n');
         let with_section =
             crate::body_sections::append_reopen_notes(trimmed_body, &write::today());
-        item.body = if leading {
-            format!("\n{with_section}")
-        } else {
-            with_section
-        };
+        item.body = crate::body_sections::canonicalise_body_leading(&with_section);
     }
 
     // 5) atomic write. No directory rename — flat layout means
@@ -750,12 +745,10 @@ pub fn note_issue(
             "invalid slug shape: {slug:?}"
         )));
     }
-    if author.trim().is_empty() {
-        return Err(MutateError::Validation("author cannot be empty".into()));
-    }
-    if message.trim().is_empty() {
-        return Err(MutateError::Validation("message cannot be empty".into()));
-    }
+    crate::body_sections::validate_author(author)
+        .map_err(|e| MutateError::Validation(e.to_string()))?;
+    crate::body_sections::validate_message(message)
+        .map_err(|e| MutateError::Validation(e.to_string()))?;
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
     let item_path = locate_and_migrate(root, slug)?;
@@ -784,18 +777,16 @@ pub fn note_issue(
         author.trim(),
         message,
     );
-    let leading = item.body.starts_with('\n');
     let trimmed_body = item.body.trim_start_matches('\n');
-    let new_body = crate::body_sections::append_block(
+    let appended = crate::body_sections::append_block(
         trimmed_body,
         crate::body_sections::COMMENTS,
         &block,
     );
-    item.body = if leading {
-        format!("\n{new_body}")
-    } else {
-        new_body
-    };
+    // Canonicalise leading-newline shape so `serialize_item` always
+    // produces `---\n\n<body>` rather than leaving a legacy
+    // no-blank-line file in a state `fmt` would still want to change.
+    item.body = crate::body_sections::canonicalise_body_leading(&appended);
     write::set_string(&mut item.frontmatter, "updated", &write::today());
 
     write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
