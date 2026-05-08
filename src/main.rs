@@ -1161,6 +1161,43 @@ pub(crate) struct NewOutcome {
     pub item_path: PathBuf,
 }
 
+/// Typed error surfaced by `do_new_locked`. The mutate boundary maps
+/// each variant directly to a `MutateError` counterpart so the API
+/// can pick the right HTTP status without string-matching the
+/// formatted `anyhow::Error`.
+#[derive(Debug)]
+pub(crate) enum DoNewError {
+    Validation(String),
+    Conflict(String),
+    SchemaViolation(String),
+    SchemaConfig(String),
+    Io(anyhow::Error),
+}
+
+impl std::fmt::Display for DoNewError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DoNewError::Validation(s)
+            | DoNewError::Conflict(s)
+            | DoNewError::SchemaConfig(s) => write!(f, "{s}"),
+            DoNewError::SchemaViolation(s) => write!(f, "schema: {s}"),
+            DoNewError::Io(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
+impl From<DoNewError> for anyhow::Error {
+    fn from(e: DoNewError) -> Self {
+        match e {
+            DoNewError::Io(e) => e,
+            DoNewError::Validation(s)
+            | DoNewError::Conflict(s)
+            | DoNewError::SchemaConfig(s) => anyhow::Error::msg(s),
+            DoNewError::SchemaViolation(s) => anyhow::Error::msg(format!("schema: {s}")),
+        }
+    }
+}
+
 fn cmd_new(json: bool, args: NewArgs) -> Result<()> {
     let root = find_root();
     let out = do_new(&root, args)?;
@@ -1188,7 +1225,7 @@ pub(crate) fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
     // the terminal would race against server-side mutations and
     // bypass the protocol's serialization guarantee.
     let lock = mutate::WriteLock::acquire(root)?;
-    do_new_locked(&lock, root, args)
+    Ok(do_new_locked(&lock, root, args)?)
 }
 
 /// Body of `do_new` that assumes the caller holds the repo `WriteLock`.
@@ -1200,14 +1237,18 @@ pub(crate) fn do_new_locked(
     _lock: &mutate::WriteLock,
     root: &Path,
     args: NewArgs,
-) -> Result<NewOutcome> {
-    schema::ensure_default_written(root)?;
+) -> std::result::Result<NewOutcome, DoNewError> {
+    schema::ensure_default_written(root).map_err(DoNewError::Io)?;
     if args.issue_type == "epic" {
         if args.assignee.is_some() || args.reporter.is_some() {
-            bail!("epics use --owner, not --reporter/--assignee");
+            return Err(DoNewError::Validation(
+                "epics use --owner, not --reporter/--assignee".into(),
+            ));
         }
     } else if args.owner.is_some() {
-        bail!("--owner is only valid with --type epic");
+        return Err(DoNewError::Validation(
+            "--owner is only valid with --type epic".into(),
+        ));
     }
 
     {
@@ -1218,12 +1259,15 @@ pub(crate) fn do_new_locked(
         let mut seen = std::collections::BTreeSet::new();
         for (k, _) in &args.custom_fields {
             if !seen.insert(k.as_str()) {
-                bail!("--field {k:?} given more than once");
+                return Err(DoNewError::Validation(format!(
+                    "--field {k:?} given more than once"
+                )));
             }
         }
     }
 
-    let related = normalize_related_refs(&args.related)?;
+    let related = normalize_related_refs(&args.related)
+        .map_err(|e| DoNewError::Validation(format!("{e:#}")))?;
 
     let new_args = write::NewIssueArgs {
         title: &args.title,
@@ -1245,7 +1289,8 @@ pub(crate) fn do_new_locked(
     // duplicated the fragile `find("\n---")` splitter logic).
     let frontmatter = write::build_new_frontmatter(&new_args);
     {
-        let schema = schema::load(root)?;
+        let schema =
+            schema::load(root).map_err(|e| DoNewError::SchemaConfig(format!("{e:#}")))?;
         let violations = schema::validate(&schema, &frontmatter);
         if !violations.is_empty() {
             let msg = violations
@@ -1253,14 +1298,17 @@ pub(crate) fn do_new_locked(
                 .map(|v| v.message())
                 .collect::<Vec<_>>()
                 .join("; ");
-            bail!("schema: {msg}");
+            return Err(DoNewError::SchemaViolation(msg));
         }
     }
     let render = write::render_new_item_from_fm(&new_args, &frontmatter);
 
     let issues_parent = root.join("issues");
-    fs::create_dir_all(&issues_parent)
-        .with_context(|| format!("cannot create {}", issues_parent.display()))?;
+    fs::create_dir_all(&issues_parent).map_err(|e| {
+        DoNewError::Io(
+            anyhow::Error::from(e).context(format!("cannot create {}", issues_parent.display())),
+        )
+    })?;
 
     // Pick a slug atomically: try `fs::create_dir` (which fails on
     // EEXIST) so two concurrent `issuectl new` invocations cannot race.
@@ -1269,35 +1317,37 @@ pub(crate) fn do_new_locked(
         Some(s) => {
             let normalized = write::slugify(s, 10);
             if !slug::is_valid(&normalized) {
-                bail!(
+                return Err(DoNewError::Validation(format!(
                     "--slug {:?} normalized to {:?}, which is not a valid slug \
                      (need ≥2 lowercase ASCII kebab segments, optional digits)",
-                    s,
-                    normalized
-                );
+                    s, normalized
+                )));
             }
             // Detect a pre-existing legacy copy of the slug so the
             // error message points at the migration command.
             let (_flat, legacy_open, legacy_closed) = repo::paths_for(root, &normalized);
             if legacy_open.exists() || legacy_closed.exists() {
-                bail!(
+                return Err(DoNewError::Conflict(format!(
                     "slug {normalized} already used at legacy path; run `issuectl doctor --fix` first"
-                );
+                )));
             }
             let dir = issues_parent.join(&normalized);
             match fs::create_dir(&dir) {
                 Ok(()) => (normalized, dir),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    bail!("target directory already exists: {}", dir.display())
+                    return Err(DoNewError::Conflict(format!(
+                        "target directory already exists: {}",
+                        dir.display()
+                    )));
                 }
                 Err(e) => {
-                    return Err(
-                        anyhow::Error::from(e).context(format!("cannot create {}", dir.display()))
-                    )
+                    return Err(DoNewError::Io(
+                        anyhow::Error::from(e).context(format!("cannot create {}", dir.display())),
+                    ));
                 }
             }
         }
-        None => claim_random_slug(root, &issues_parent)?,
+        None => claim_random_slug(root, &issues_parent).map_err(DoNewError::Io)?,
     };
 
     let item_path = dir.join("item.md");
@@ -1310,9 +1360,17 @@ pub(crate) fn do_new_locked(
             .write(true)
             .create_new(true)
             .open(&item_path)
-            .with_context(|| format!("cannot create {}", item_path.display()))?;
-        f.write_all(render.as_bytes())
-            .with_context(|| format!("cannot write {}", item_path.display()))?;
+            .map_err(|e| {
+                DoNewError::Io(
+                    anyhow::Error::from(e)
+                        .context(format!("cannot create {}", item_path.display())),
+                )
+            })?;
+        f.write_all(render.as_bytes()).map_err(|e| {
+            DoNewError::Io(
+                anyhow::Error::from(e).context(format!("cannot write {}", item_path.display())),
+            )
+        })?;
     }
 
     Ok(NewOutcome {

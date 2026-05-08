@@ -1134,20 +1134,12 @@ pub fn new_issue(
             custom_fields: req.custom_fields.into_iter().collect(),
         },
     )
-    .map_err(|e| {
-        // do_new_locked uses anyhow with stable string prefixes for the
-        // small set of typed failures the API needs to distinguish:
-        // `schema:` for validation, otherwise the historical conflict
-        // detection. Anything else is a true bug (IO, panic-recovered
-        // logic) and gets surfaced as Io.
-        let s = format!("{e:#}");
-        if s.starts_with("schema:") {
-            MutateError::SchemaViolation(s.trim_start_matches("schema:").trim().to_string())
-        } else if s.contains("already") || s.contains("exists") {
-            MutateError::ConflictingIntent(s)
-        } else {
-            MutateError::Validation(s)
-        }
+    .map_err(|e| match e {
+        crate::DoNewError::SchemaViolation(s) => MutateError::SchemaViolation(s),
+        crate::DoNewError::SchemaConfig(s) => MutateError::SchemaConfig(s),
+        crate::DoNewError::Conflict(s) => MutateError::ConflictingIntent(s),
+        crate::DoNewError::Validation(s) => MutateError::Validation(s),
+        crate::DoNewError::Io(e) => MutateError::Io(e),
     })?;
 
     // Re-read for canonical hash + Issue. Still holding the lock.
@@ -2258,6 +2250,80 @@ mod tests {
             ),
             other => panic!("expected SchemaViolation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn new_issue_slug_conflict_returns_typed_error() {
+        // do_new_locked rejects an explicit slug whose flat directory
+        // already exists. Pre-typed-error refactor this surfaced via a
+        // string match on `"already" / "exists"`; now it must come
+        // through DoNewError::Conflict → MutateError::ConflictingIntent.
+        let tmp = fresh_repo();
+        fs::create_dir_all(tmp.path().join("issues/taken-slug")).unwrap();
+        fs::write(
+            tmp.path().join("issues/taken-slug/item.md"),
+            "---\nstatus: open\n---\n",
+        )
+        .unwrap();
+        let mut req = NewIssueRequest::default();
+        req.issue_type = "bug".into();
+        req.title = "Conflict".into();
+        req.priority = "normal".into();
+        req.slug = Some("taken-slug".into());
+        let err = new_issue(tmp.path(), req, None).unwrap_err();
+        match err {
+            MutateError::ConflictingIntent(msg) => assert!(
+                msg.contains("taken-slug") && msg.contains("already exists"),
+                "expected target-already-exists message, got {msg:?}"
+            ),
+            other => panic!("expected ConflictingIntent, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_issue_io_failure_returns_typed_error() {
+        // Force `fs::create_dir(<root>/issues/<slug>)` to fail with
+        // EACCES by chmod'ing the issues parent to read-only. That
+        // path used to be funnelled into the `Validation` fallback by
+        // the string matcher; the typed enum routes it correctly to
+        // MutateError::Io.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = fresh_repo();
+        // Pre-write the schema so ensure_default_written's Ok-path is
+        // taken before we lock down the directory.
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields: {}\n",
+        )
+        .unwrap();
+        let issues_dir = tmp.path().join("issues");
+        let original = fs::metadata(&issues_dir).unwrap().permissions();
+        let mut readonly = original.clone();
+        readonly.set_mode(0o500);
+        fs::set_permissions(&issues_dir, readonly).unwrap();
+        // chmod 0o500 has no effect for uid 0; skip the assertion when
+        // a probe write still succeeds (CI containers occasionally run
+        // as root).
+        let probe = issues_dir.join(".io-probe");
+        let chmod_bites = fs::write(&probe, b"x").is_err();
+        let _ = fs::remove_file(&probe);
+        if !chmod_bites {
+            fs::set_permissions(&issues_dir, original).unwrap();
+            return;
+        }
+
+        let mut req = NewIssueRequest::default();
+        req.issue_type = "bug".into();
+        req.title = "Cannot write".into();
+        req.priority = "normal".into();
+        req.slug = Some("io-fail-slug".into());
+        let err = new_issue(tmp.path(), req, None).unwrap_err();
+
+        // Restore perms so the tempdir can clean itself up.
+        fs::set_permissions(&issues_dir, original).unwrap();
+
+        assert!(matches!(err, MutateError::Io(_)), "got {err:?}");
     }
 
     // ── publish-before-release helpers ──────────────────────────────────
