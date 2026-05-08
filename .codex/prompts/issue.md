@@ -49,20 +49,47 @@ Argument: $ARGUMENTS
 Use the CLI rather than greppa hakemistoa. The CLI knows the frontmatter schema.
 
 - List open issues: `issuectl --json ls`
-- Filter: `issuectl --json ls -t bug -p high -a alice`
+- Filter via flags: `issuectl --json ls -t bug -p high -a alice`
   - `-t/--type`: bug, task, feature, improvement, chore, epic
   - `-p/--priority`: normal, high
   - `-s/--status`: open, in-progress, testing, done, fixed, wontfix, duplicate, cannot-reproduce, obsolete
   - `-a/--assignee USERNAME` (matches `assignee` for issues, `owner` for epics)
   - `-l/--label LABEL`
   - `-e/--epic <slug>` (children of an epic)
+- Filter via query string (same syntax as `search` and web `?q=`):
+  - `issuectl --json ls "status:in-progress assignee:alice"`
+  - `issuectl --json ls "-label:wontfix updated:<-14d"` (negation, relative date)
+  - `issuectl --json ls "assignee:none"` (`any` / `none` for present/absent)
+  - `issuectl --json ls 'text:"phrase to match"'` (quote multi-word text)
+  - Supported fields: `status`, `type`, `priority`, `assignee`, `owner`,
+    `epic`, `label`, `slug`, `folder`, `updated`, `created`, `closed`,
+    `text`. Bareword (no `field:` prefix) is treated as `text:`.
+  - Date filters use relative offsets: `<-14d` (strict), `<=-14d`
+    (inclusive), and the same for `>` / `>=`. Anchor is today
+    (local timezone — same as how `created`/`updated` are written).
+    Use `<=0d` for "today or earlier" (don't write `+0d` in URLs;
+    `+` URL-decodes to space).
+  - Multiple terms AND together; no OR / parens in v1.
+  - Escape inside an unquoted value: `\:` literal colon, `\\` literal
+    backslash, `\ ` literal space, `\"` literal quote, `\-` at token
+    start to escape negation. Or quote the whole value:
+    `text:"foo:bar"`. Inside `"..."` only `\\` and `\"` are escapes
+    — every other backslash is preserved literally, so paths and
+    regex fragments survive (`text:"C:\temp"` matches `C:\temp`).
+  - When a positional query is given to `ls`, the implicit "open
+    only" default is dropped — combine with `--all`/`--closed` or
+    `folder:`/`status:` to scope. Plain `--status fixed` (no
+    positional query) still implies open-only, matching the old
+    behavior.
 - Include closed: `--all` (both) or `--closed` (only closed)
 - Show details for one: `issuectl --json show <slug>`
-- Keyword search across title/slug/body: `issuectl --json search KEYWORD [--all]`
+- Search (same query syntax; bareword shorthand): `issuectl --json search KEYWORD [--all]`
+  - Also: `issuectl --json search "deadlock text:flock"`
 - Stats: `issuectl --json stats`
 
-**Default scope**: `ls` and `search` cover open issues only. Add `--all` when
-the user asks for "all issues", "closed issues", or "history of @<slug>".
+**Default scope**: `ls` (without a positional query) and `search` cover open
+issues only. Add `--all` when the user asks for "all issues", "closed
+issues", or "history of @<slug>".
 
 Process the JSON with `jq` to extract what the user asked for. Format the
 result as a compact list when displaying back to the user (e.g.
@@ -136,6 +163,35 @@ Output shape:
 
 **Adding the issue to an epic**: also update the parent epic's `## Issues` list
 in its item.md (CLI handles frontmatter only, not body sections).
+
+### Action: Note
+
+Append a timestamped block to an issue's `## Comments` section
+(creating it if missing). Same flock + optimistic-version contract
+as `update`; body-only mutation.
+
+- `issuectl --json note <slug> --as <user> "<message>"`
+- `--expected-version <token>` is required with `--json` (fetch via
+  `show --json`).
+
+Block shape (auto-generated):
+
+```
+### 2026-05-07T12:00:00Z · @alice
+
+<message>
+```
+
+Reopen flow: `update --status <active>` on a closed issue
+auto-appends a `## Reopen Notes — <today>` section in the same
+write — no extra CLI step is needed.
+
+Output shape:
+
+```json
+{ "slug": "extremely-quiet-otter", "version": "sha256:...",
+  "issue_dir": "/abs/path/issues/extremely-quiet-otter" }
+```
 
 ### Action: Create
 
