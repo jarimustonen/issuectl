@@ -774,9 +774,10 @@ pub fn note_issue(
     let mut item = write::read_item(&item_path).map_err(MutateError::Io)?;
     let block = crate::body_sections::render_note_block(
         &crate::body_sections::now_iso(),
-        author.trim(),
+        author,
         message,
-    );
+    )
+    .map_err(|e| MutateError::Validation(e.to_string()))?;
     let trimmed_body = item.body.trim_start_matches('\n');
     let appended = crate::body_sections::append_block(
         trimmed_body,

@@ -81,11 +81,16 @@ struct DoctorReport {
     parse_errors: Vec<(String, String)>,
     fix_applied: bool,
     files_rewritten: usize,
-    /// `## Notes` body sections renamed to `## Comments` during a fix
-    /// pass. Tracked so the JSON report can show the migration count.
+    /// Slugs the read-only scan classified as safe to migrate from
+    /// `## Notes` → `## Comments`. Populated in `scan()`; consumed
+    /// (and emptied) by `rename_notes_to_comments()` during `--fix`.
+    notes_to_rename: Vec<String>,
+    /// `## Notes` body sections actually renamed during a fix pass.
+    /// Subset of `notes_to_rename` after the rewrite has run.
     notes_renamed: Vec<String>,
-    /// Slugs whose body has both `## Notes` and `## Comments` —
-    /// merging them needs human judgement, so doctor flags them.
+    /// Slugs whose body has both `## Notes` and `## Comments`, or
+    /// multiple `## Notes` headings — merging needs human
+    /// judgement, so doctor flags them and skips.
     notes_conflicts: Vec<String>,
 }
 
@@ -223,7 +228,40 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
     report.flat_layout_moves = plan.moves;
     report.flat_layout_conflicts = plan.conflicts;
 
+    // Round-2 finding O6: read-only `doctor` must surface pending
+    // Notes migrations and conflicts so users see the work even
+    // before running `--fix`. Read-only — no filesystem mutation.
+    plan_notes_migration(repo_root, &mut report)?;
+
     Ok(report)
+}
+
+fn plan_notes_migration(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
+    let issues = repo_root.join("issues");
+    let Ok(rd) = fs::read_dir(&issues) else {
+        return Ok(());
+    };
+    for entry in rd.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if matches!(name.as_str(), "open" | "closed" | "archive") {
+            continue;
+        }
+        let item_path = entry.path().join("item.md");
+        if !item_path.is_file() {
+            continue;
+        }
+        let text = fs::read_to_string(&item_path)
+            .with_context(|| format!("cannot read {}", item_path.display()))?;
+        match classify_notes(&text) {
+            NotesScan::NoOp => {}
+            NotesScan::SafeRename => report.notes_to_rename.push(name),
+            NotesScan::Conflict => report.notes_conflicts.push(name),
+        }
+    }
+    Ok(())
 }
 
 fn detect_orphan_epic_refs(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
@@ -290,7 +328,13 @@ fn detect_orphan_epic_refs(repo_root: &Path, report: &mut DoctorReport) -> Resul
 }
 
 fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
-    // Flat-layout migration runs first: any issue still under
+    // Notes → Comments migration is independent of layout migration:
+    // it touches body markdown of flat-layout dirs only, never moves
+    // files. Run it FIRST so layout-conflict bail-outs don't block
+    // unrelated body fixes (round-2 finding O18).
+    rename_notes_to_comments(repo_root, report)?;
+
+    // Flat-layout migration runs next: any issue still under
     // `issues/{open,closed}/<slug>/` moves up to `issues/<slug>/`. The
     // pre-acquired write lock in `run` covers this — `execute_migrate_layout_plan`
     // is the lock-free body and must not re-acquire.
@@ -318,7 +362,6 @@ fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
     }
 
     if report.legacy_dirs.is_empty() {
-        rename_notes_to_comments(repo_root, report)?;
         report.fix_applied = true;
         return Ok(());
     }
@@ -380,30 +423,19 @@ fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
         rewrite_markdown_in_scopes(&scopes, &number_to_slug, &dir_to_slug, &ambiguous_numbers)?;
     report.files_rewritten = files_rewritten;
 
-    rename_notes_to_comments(repo_root, report)?;
-
     report.fix_applied = true;
     Ok(())
 }
 
-/// Walk every flat-layout `issues/<slug>/item.md` and rename a
-/// top-level `## Notes` H2 to `## Comments`. The legacy `Notes`
-/// alias is dropped from the writer (P1-a from the body-sections
-/// review); this pass migrates pre-existing files in one place.
+/// Apply the Notes → Comments rename to every slug `scan()` flagged
+/// in `notes_to_rename`. Best-effort, sequential (per round-2
+/// decision: `O17` is intentionally not preflight-bail). Conflicts
+/// are populated by `scan()`; this function does not re-classify.
 fn rename_notes_to_comments(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
     let issues = repo_root.join("issues");
-    let Ok(rd) = fs::read_dir(&issues) else {
-        return Ok(());
-    };
-    for entry in rd.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if matches!(name.as_str(), "open" | "closed" | "archive") {
-            continue;
-        }
-        let item_path = entry.path().join("item.md");
+    let planned = std::mem::take(&mut report.notes_to_rename);
+    for slug in planned {
+        let item_path = issues.join(&slug).join("item.md");
         if !item_path.is_file() {
             continue;
         }
@@ -411,92 +443,114 @@ fn rename_notes_to_comments(repo_root: &Path, report: &mut DoctorReport) -> Resu
             .with_context(|| format!("cannot read {}", item_path.display()))?;
         let (rewritten, has_conflict) = migrate_notes_heading(&original);
         if has_conflict {
-            report.notes_conflicts.push(name);
+            // scan() already classified — but if the file changed
+            // between scan and apply (concurrent edit under flock is
+            // impossible, so this means a manual edit), surface it.
+            report.notes_conflicts.push(slug);
             continue;
         }
         if rewritten != original {
             fs::write(&item_path, rewritten)
                 .with_context(|| format!("cannot write {}", item_path.display()))?;
-            report.notes_renamed.push(name);
+            report.notes_renamed.push(slug);
         }
     }
     Ok(())
 }
 
+/// Classification of a file's `## Notes` / `## Comments` shape.
+#[derive(Debug, PartialEq, Eq)]
+enum NotesScan {
+    /// File has neither heading, or only `## Comments` — nothing to do.
+    NoOp,
+    /// File has exactly one `## Notes` and no `## Comments`. Safe to
+    /// rewrite to `## Comments`.
+    SafeRename,
+    /// File has both `## Notes` and `## Comments`, OR more than one
+    /// `## Notes`. Renaming silently would produce duplicate
+    /// `## Comments` sections (round-2 finding G5/O5), so we skip
+    /// and surface the slug for manual merge.
+    Conflict,
+}
+
+/// Classify a single item.md text. Uses the same fence-aware scanner
+/// as the body_sections writer so both agree on what counts as a
+/// real heading.
+fn classify_notes(text: &str) -> NotesScan {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let notes = body_sections_scan(&lines, "Notes");
+    let comments = body_sections_scan(&lines, "Comments");
+    if notes == 0 {
+        NotesScan::NoOp
+    } else if notes == 1 && comments == 0 {
+        NotesScan::SafeRename
+    } else {
+        NotesScan::Conflict
+    }
+}
+
+fn body_sections_scan(lines: &[&str], name: &str) -> usize {
+    use crate::body_sections::{closes_fence, opening_fence, Fence};
+    let mut fence: Option<Fence> = None;
+    let mut count = 0usize;
+    for l in lines {
+        match fence {
+            Some(open) if closes_fence(l, open) => fence = None,
+            Some(_) => {}
+            None => {
+                if let Some(o) = opening_fence(l) {
+                    fence = Some(o);
+                } else if l.strip_prefix("## ").map(|r| r.trim_end()) == Some(name) {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
 /// Pure function: rewrite `## Notes` → `## Comments` when there's no
 /// pre-existing `## Comments`. Fence-aware so a `## Notes` line
 /// inside a code block is preserved verbatim. Returns
-/// `(new_text, conflict)` — `conflict=true` when both headings exist
-/// (caller should skip and surface to the user).
+/// `(new_text, conflict)` — `conflict=true` when both headings
+/// exist or there are multiple `## Notes` headings (caller should
+/// skip and surface to the user).
 fn migrate_notes_heading(text: &str) -> (String, bool) {
+    use crate::body_sections::{closes_fence, opening_fence, Fence};
+    match classify_notes(text) {
+        NotesScan::NoOp => return (text.to_string(), false),
+        NotesScan::Conflict => return (text.to_string(), true),
+        NotesScan::SafeRename => {}
+    }
     let lines: Vec<&str> = text.split('\n').collect();
-    let mut fence: Option<String> = None;
-    let mut has_notes = false;
-    let mut has_comments = false;
-    for l in &lines {
-        if let Some(marker) = detect_fence_marker(l) {
-            match &fence {
-                Some(open) if open == &marker => fence = None,
-                None => fence = Some(marker),
-                _ => {}
-            }
-            continue;
-        }
-        if fence.is_some() {
-            continue;
-        }
-        let Some(rest) = l.strip_prefix("## ") else {
-            continue;
-        };
-        match rest.trim_end() {
-            "Notes" => has_notes = true,
-            "Comments" => has_comments = true,
-            _ => {}
-        }
-    }
-    if !has_notes {
-        return (text.to_string(), false);
-    }
-    if has_comments {
-        return (text.to_string(), true);
-    }
-
     let mut out = Vec::with_capacity(lines.len());
-    let mut fence: Option<String> = None;
+    let mut fence: Option<Fence> = None;
     for l in &lines {
-        if let Some(marker) = detect_fence_marker(l) {
-            match &fence {
-                Some(open) if open == &marker => fence = None,
-                None => fence = Some(marker),
-                _ => {}
+        match fence {
+            Some(open) if closes_fence(l, open) => {
+                fence = None;
+                out.push((*l).to_string());
+                continue;
             }
-            out.push((*l).to_string());
-            continue;
+            Some(_) => {
+                out.push((*l).to_string());
+                continue;
+            }
+            None => {
+                if let Some(o) = opening_fence(l) {
+                    fence = Some(o);
+                    out.push((*l).to_string());
+                    continue;
+                }
+            }
         }
-        if fence.is_none() && l.strip_prefix("## ").map(|r| r.trim_end()) == Some("Notes") {
+        if l.strip_prefix("## ").map(|r| r.trim_end()) == Some("Notes") {
             out.push("## Comments".to_string());
         } else {
             out.push((*l).to_string());
         }
     }
     (out.join("\n"), false)
-}
-
-fn detect_fence_marker(line: &str) -> Option<String> {
-    let trimmed = line.trim_start();
-    let leading = line.len() - trimmed.len();
-    if leading >= 4 {
-        return None;
-    }
-    let first = trimmed.chars().next()?;
-    if first != '`' && first != '~' {
-        return None;
-    }
-    let run: usize = trimmed.chars().take_while(|c| *c == first).count();
-    if run < 3 {
-        return None;
-    }
-    Some(first.to_string().repeat(run))
 }
 
 fn build_ambiguous(migrations: &[LegacyMigration]) -> BTreeSet<u32> {
@@ -747,6 +801,7 @@ fn render_text(report: &DoctorReport, fix: bool) {
         && report.orphan_epic_refs.is_empty()
         && report.parse_errors.is_empty()
         && report.notes_renamed.is_empty()
+        && report.notes_to_rename.is_empty()
         && report.notes_conflicts.is_empty()
     {
         println!("Repository OK — no migrations or fixes needed.");
@@ -826,6 +881,13 @@ fn render_text(report: &DoctorReport, fix: bool) {
         println!("Parse warnings:");
         for (location, msg) in &report.parse_errors {
             println!("  {location}: {msg}");
+        }
+        println!();
+    }
+    if !report.notes_to_rename.is_empty() {
+        println!("`## Notes` sections to rename to `## Comments`:");
+        for s in &report.notes_to_rename {
+            println!("  {s}");
         }
         println!();
     }
@@ -921,6 +983,7 @@ fn render_json(report: &DoctorReport, fix: bool) -> serde_json::Value {
         "orphan_epic_refs": orphans,
         "parse_errors": parse_errors,
         "files_rewritten": report.files_rewritten,
+        "notes_to_rename": report.notes_to_rename,
         "notes_renamed": report.notes_renamed,
         "notes_conflicts": report.notes_conflicts,
     })
@@ -1112,6 +1175,41 @@ mod tests {
         let (out, conflict) = migrate_notes_heading(body);
         assert!(conflict);
         assert_eq!(out, body, "no rewrite when conflict");
+    }
+
+    #[test]
+    fn migrate_notes_heading_flags_conflict_when_multiple_notes() {
+        // Round-2 finding G5/O5: rewriting two `## Notes` would
+        // produce two `## Comments`, leaving the second stranded.
+        let body = "## Notes\n\na\n\n## Decisions\n\nx\n\n## Notes\n\nb\n";
+        let (out, conflict) = migrate_notes_heading(body);
+        assert!(conflict, "multiple ## Notes must flag a conflict");
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn doctor_scan_surfaces_pending_notes_migrations() {
+        // Round-2 finding O6: read-only scan must populate
+        // `notes_to_rename` and `notes_conflicts` so users see the
+        // work even before running --fix.
+        let tmp = fresh_repo();
+        let safe = tmp.path().join("issues/safe-rename");
+        fs::create_dir_all(&safe).unwrap();
+        fs::write(
+            safe.join("item.md"),
+            "---\nstatus: open\n---\n\n## Notes\n\nold\n",
+        )
+        .unwrap();
+        let conflict = tmp.path().join("issues/has-both");
+        fs::create_dir_all(&conflict).unwrap();
+        fs::write(
+            conflict.join("item.md"),
+            "---\nstatus: open\n---\n\n## Notes\n\nx\n\n## Comments\n\ny\n",
+        )
+        .unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert_eq!(r.notes_to_rename, vec!["safe-rename".to_string()]);
+        assert_eq!(r.notes_conflicts, vec!["has-both".to_string()]);
     }
 
     #[test]

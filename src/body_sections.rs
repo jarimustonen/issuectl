@@ -30,12 +30,19 @@ pub fn now_iso() -> String {
 /// would mint additional lines. We also disallow `@` (we add the
 /// sigil ourselves) and the middle-dot separator we use as the
 /// heading delimiter.
+///
+/// Round-2 finding O9: previously `trim()` was applied before the
+/// whitespace check, so `" alice "` slipped through and rendered as
+/// a malformed heading. The author must be canonical on input —
+/// callers needing to be permissive should `.trim()` first.
 pub fn validate_author(author: &str) -> Result<()> {
-    let trimmed = author.trim();
-    if trimmed.is_empty() {
+    if author.is_empty() {
         bail!("author cannot be empty");
     }
-    for ch in trimmed.chars() {
+    if author != author.trim() {
+        bail!("author cannot have leading or trailing whitespace");
+    }
+    for ch in author.chars() {
         if ch.is_control() {
             bail!("author cannot contain control characters");
         }
@@ -51,63 +58,104 @@ pub fn validate_author(author: &str) -> Result<()> {
 
 /// Reject messages that would inject section / block headings. A
 /// legitimate user can still discuss headings by quoting them inside
-/// a fenced code block — the parser is fence-aware.
+/// a fenced code block — the parser is fence-aware. Round-2 finding
+/// O10: an unclosed fence would silently swallow later blocks once
+/// appended, so we reject those too.
 pub fn validate_message(message: &str) -> Result<()> {
     if message.trim().is_empty() {
         bail!("message cannot be empty");
     }
-    let mut fence: Option<String> = None;
-    for line in message.split('\n') {
-        if let Some(marker) = detect_fence_marker(line) {
-            match &fence {
-                Some(open) if open == &marker => fence = None,
-                None => fence = Some(marker),
-                _ => {}
-            }
-            continue;
+    let lines: Vec<&str> = message.split('\n').collect();
+    let mut injected: Option<String> = None;
+    let trailing_fence = scan_with_fence_state(&lines, |_, l| {
+        if injected.is_some() {
+            return;
         }
-        if fence.is_some() {
-            continue;
+        if is_any_h2(l) || is_h3(l) {
+            injected = Some(l.to_string());
         }
-        if line.starts_with("## ") || line.starts_with("### ") {
-            bail!(
-                "message line begins with `## ` or `### ` outside a code fence; \
-                 this would break out of the comment block — wrap it in a code fence"
-            );
-        }
+    });
+    if let Some(line) = injected {
+        bail!(
+            "message line {line:?} begins with `## ` or `### ` outside a code fence; \
+             this would break out of the comment block — wrap it in a code fence"
+        );
+    }
+    if trailing_fence.is_some() {
+        bail!(
+            "message contains an unclosed fenced code block; close it before appending \
+             so future blocks are not swallowed"
+        );
     }
     Ok(())
 }
 
 /// Render a block heading + body for a `Comments`-style section.
-pub fn render_note_block(ts: &str, author: &str, message: &str) -> String {
-    format!(
+/// Calls the validators internally so the shape on disk cannot drift
+/// from the input contract (round-2 finding O8). Callers that have
+/// already validated should pass canonical input — the call is
+/// cheap.
+pub fn render_note_block(ts: &str, author: &str, message: &str) -> Result<String> {
+    validate_author(author)?;
+    validate_message(message)?;
+    Ok(format!(
         "### {ts} · @{author}\n\n{}\n",
         message.trim_end_matches('\n')
-    )
+    ))
 }
 
 // ── Heading / fence detection ───────────────────────────────────────────
+//
+// CommonMark fence rules we honour:
+//   - opening fence: ≥3 backticks or tildes, <4 leading spaces;
+//   - closing fence: same fence char, length ≥ opener, <4 leading
+//     spaces, and only whitespace after the fence run.
+//
+// The whole-line state machine lives in `mark_fence_state` so every
+// caller (writer, reader, doctor migration, validators) shares one
+// implementation. Splitting opener-detection from close-matching is
+// what fixes round-2 finding G3/O2: a `` ```` `` close after a
+// `` ``` `` open used to leave the fence dangling.
 
-/// Recognise an opening or closing fenced-code-block delimiter. Same
-/// rules `fmt::detect_fence_marker` uses: ≥3 backticks or tildes,
-/// fewer than 4 leading spaces. Returns the marker so callers can
-/// match opens against closes.
-fn detect_fence_marker(line: &str) -> Option<String> {
-    let trimmed = line.trim_start();
-    let leading = line.len() - trimmed.len();
-    if leading >= 4 {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Fence {
+    ch: char,
+    len: usize,
+}
+
+pub(crate) fn opening_fence(line: &str) -> Option<Fence> {
+    let trimmed = line.trim_start_matches(' ');
+    let indent = line.len() - trimmed.len();
+    if indent >= 4 {
         return None;
     }
-    let first = trimmed.chars().next()?;
-    if first != '`' && first != '~' {
+    let ch = trimmed.chars().next()?;
+    if ch != '`' && ch != '~' {
         return None;
     }
-    let run: usize = trimmed.chars().take_while(|c| *c == first).count();
-    if run < 3 {
+    let len = trimmed.chars().take_while(|c| *c == ch).count();
+    if len < 3 {
         return None;
     }
-    Some(first.to_string().repeat(run))
+    Some(Fence { ch, len })
+}
+
+pub(crate) fn closes_fence(line: &str, open: Fence) -> bool {
+    let trimmed = line.trim_start_matches(' ');
+    let indent = line.len() - trimmed.len();
+    if indent >= 4 {
+        return false;
+    }
+    let mut chars = trimmed.chars();
+    if chars.next() != Some(open.ch) {
+        return false;
+    }
+    let run = trimmed.chars().take_while(|c| *c == open.ch).count();
+    if run < open.len {
+        return false;
+    }
+    let after = &trimmed[open.ch.len_utf8() * run..];
+    after.trim().is_empty()
 }
 
 fn is_h2_named(line: &str, name: &str) -> bool {
@@ -121,38 +169,57 @@ fn is_any_h2(line: &str) -> bool {
     line.starts_with("## ") && !line.starts_with("### ")
 }
 
-#[allow(dead_code)]
 fn is_h3(line: &str) -> bool {
     line.starts_with("### ") && !line.starts_with("#### ")
 }
 
-/// Walk `lines` outside fenced code blocks, calling `f` with the
-/// real-line index. Used to locate genuine H2/H3 boundaries while
-/// respecting code fences. Returns the indices for which `f`
-/// returned true.
+/// Walk `lines` and call `f(i, line)` for every line that lies
+/// outside a fenced code block. Returns indices where `f` returned
+/// true. Single source of truth for fence-aware scanning — every
+/// other function in this module routes through here.
 fn scan_outside_fences<F: FnMut(usize, &str) -> bool>(
     lines: &[&str],
     mut f: F,
 ) -> Vec<usize> {
     let mut hits = Vec::new();
-    let mut fence: Option<String> = None;
+    let mut fence: Option<Fence> = None;
     for (i, l) in lines.iter().enumerate() {
-        if let Some(marker) = detect_fence_marker(l) {
-            match &fence {
-                Some(open) if open == &marker => fence = None,
-                None => fence = Some(marker),
-                _ => {}
+        match fence {
+            Some(open) if closes_fence(l, open) => fence = None,
+            Some(_) => {}
+            None => {
+                if let Some(o) = opening_fence(l) {
+                    fence = Some(o);
+                } else if f(i, l) {
+                    hits.push(i);
+                }
             }
-            continue;
-        }
-        if fence.is_some() {
-            continue;
-        }
-        if f(i, l) {
-            hits.push(i);
         }
     }
     hits
+}
+
+/// Like `scan_outside_fences` but reports whether a fence is still
+/// open at EOF — used by `validate_message` to reject unclosed
+/// fences (round-2 finding O10) and by callers that need to check
+/// "the section truly ends at EOF" rather than "got swallowed by an
+/// unclosed fence".
+fn scan_with_fence_state<F: FnMut(usize, &str)>(lines: &[&str], mut f: F) -> Option<Fence> {
+    let mut fence: Option<Fence> = None;
+    for (i, l) in lines.iter().enumerate() {
+        match fence {
+            Some(open) if closes_fence(l, open) => fence = None,
+            Some(_) => {}
+            None => {
+                if let Some(o) = opening_fence(l) {
+                    fence = Some(o);
+                } else {
+                    f(i, l);
+                }
+            }
+        }
+    }
+    fence
 }
 
 // ── Public writer API ───────────────────────────────────────────────────
@@ -178,28 +245,12 @@ pub fn append_block(body: &str, section: &str, block: &str) -> String {
 /// Trailing blank lines inside the section are collapsed; we add
 /// exactly one blank line of separation before the new block.
 fn insert_block_in_section(lines: &[&str], start: usize, block: &str) -> String {
-    let next_h2 = {
-        let mut found = lines.len();
-        let mut fence: Option<String> = None;
-        for (i, l) in lines.iter().enumerate().skip(start + 1) {
-            if let Some(marker) = detect_fence_marker(l) {
-                match &fence {
-                    Some(open) if open == &marker => fence = None,
-                    None => fence = Some(marker),
-                    _ => {}
-                }
-                continue;
-            }
-            if fence.is_some() {
-                continue;
-            }
-            if is_any_h2(l) {
-                found = i;
-                break;
-            }
-        }
-        found
-    };
+    let after = &lines[start + 1..];
+    let next_h2 = scan_outside_fences(after, |_, l| is_any_h2(l))
+        .into_iter()
+        .next()
+        .map(|off| start + 1 + off)
+        .unwrap_or(lines.len());
 
     // Find the last non-blank line within (start, next_h2). We splice
     // in immediately after it so the new block sits flush against
@@ -290,79 +341,47 @@ pub struct Block {
 /// code blocks are treated as content (matching the writer).
 ///
 /// Block heading shape: `### <ts> · @<author>`. The middle-dot
-/// separator is U+00B7 with single ASCII spaces on each side. Lines
-/// that don't match the shape are skipped (with their content folded
-/// into the previous block's body) so a partially-malformed history
-/// is read forgivingly rather than producing zero results.
+/// separator is U+00B7 with single ASCII spaces on each side. Only
+/// well-formed H3 headings start a new block — a malformed `###`
+/// line is folded into the *previous* block's body so legacy /
+/// hand-edited content is preserved (round-2 finding G2/O3).
 #[allow(dead_code)] // sister tickets (`decide`, `agent-run`) consume this
 pub fn parse_section(body: &str, section: &str) -> Vec<Block> {
     let lines: Vec<&str> = body.split('\n').collect();
-    let Some(start) = scan_outside_fences(&lines, |_, l| is_h2_named(l, section))
-        .into_iter()
-        .next()
-    else {
+    let section_starts = scan_outside_fences(&lines, |_, l| is_h2_named(l, section));
+    let Some(&start) = section_starts.first() else {
         return Vec::new();
     };
 
-    let next_h2 = {
-        let mut found = lines.len();
-        let mut fence: Option<String> = None;
-        for (i, l) in lines.iter().enumerate().skip(start + 1) {
-            if let Some(marker) = detect_fence_marker(l) {
-                match &fence {
-                    Some(open) if open == &marker => fence = None,
-                    None => fence = Some(marker),
-                    _ => {}
-                }
-                continue;
-            }
-            if fence.is_some() {
-                continue;
-            }
-            if is_any_h2(l) {
-                found = i;
-                break;
-            }
-        }
-        found
-    };
+    // Section ends at the next H2 outside any fence, or at EOF.
+    let after = &lines[start + 1..];
+    let next_offset = scan_outside_fences(after, |_, l| is_any_h2(l))
+        .into_iter()
+        .next()
+        .unwrap_or(after.len());
+    let span = &after[..next_offset];
 
-    let block_starts = {
-        let span = &lines[start + 1..next_h2];
-        let mut hits = Vec::new();
-        let mut fence: Option<String> = None;
-        for (i, l) in span.iter().enumerate() {
-            if let Some(marker) = detect_fence_marker(l) {
-                match &fence {
-                    Some(open) if open == &marker => fence = None,
-                    None => fence = Some(marker),
-                    _ => {}
-                }
-                continue;
-            }
-            if fence.is_some() {
-                continue;
-            }
-            if is_h3(l) {
-                hits.push(i);
-            }
-        }
-        hits
-    };
+    // Only *valid* block headings become boundaries — malformed H3
+    // lines pass through as body content of the previous block. This
+    // is what the docstring promises; the previous version dropped
+    // the body of any malformed H3 entirely.
+    let valid_block_starts: Vec<(usize, (String, String))> =
+        scan_outside_fences(span, |_, l| is_h3(l))
+            .into_iter()
+            .filter_map(|i| parse_block_heading(span[i]).map(|p| (i, p)))
+            .collect();
 
-    let span = &lines[start + 1..next_h2];
-    let mut out = Vec::with_capacity(block_starts.len());
-    for (idx, &h_idx) in block_starts.iter().enumerate() {
-        let end_idx = block_starts.get(idx + 1).copied().unwrap_or(span.len());
-        let heading = span[h_idx];
-        let Some(parsed) = parse_block_heading(heading) else {
-            continue;
-        };
-        let body_lines = &span[h_idx + 1..end_idx];
+    let mut out = Vec::with_capacity(valid_block_starts.len());
+    for (idx, (h_idx, parsed)) in valid_block_starts.iter().enumerate() {
+        let end_idx = valid_block_starts
+            .get(idx + 1)
+            .map(|(i, _)| *i)
+            .unwrap_or(span.len());
+        let body_lines = &span[*h_idx + 1..end_idx];
         let body_text = trim_blank_borders(body_lines);
         out.push(Block {
-            timestamp: parsed.0,
-            author: parsed.1,
+            timestamp: parsed.0.clone(),
+            author: parsed.1.clone(),
             body: body_text,
         });
     }
@@ -542,7 +561,7 @@ mod tests {
     #[test]
     fn parse_section_round_trips_with_append() {
         let body0 = "\n# T\n";
-        let block = render_note_block("2026-05-07T12:00:00Z", "alice", "hello world");
+        let block = render_note_block("2026-05-07T12:00:00Z", "alice", "hello world").unwrap();
         let body1 = append_block(body0, COMMENTS, &block);
         let blocks = parse_section(&body1, COMMENTS);
         assert_eq!(blocks.len(), 1);
@@ -571,8 +590,94 @@ mod tests {
 
     #[test]
     fn render_note_block_strips_trailing_newlines() {
-        let b = render_note_block("2026-05-07T12:00:00Z", "alice", "hello\n\n");
+        let b = render_note_block("2026-05-07T12:00:00Z", "alice", "hello\n\n").unwrap();
         assert!(b.starts_with("### 2026-05-07T12:00:00Z · @alice\n\n"));
         assert!(b.ends_with("hello\n"));
+    }
+
+    #[test]
+    fn render_note_block_enforces_validators() {
+        // Round-2 finding O8: the renderer must reject what the
+        // validators reject so callers can't emit malformed
+        // headings by going around them.
+        assert!(render_note_block("ts", " alice ", "x").is_err());
+        assert!(render_note_block("ts", "alice", "## Decisions\n").is_err());
+        assert!(render_note_block("ts", "alice\n## Pwned", "x").is_err());
+    }
+
+    #[test]
+    fn fence_close_can_be_longer_than_open() {
+        // Round-2 finding G3/O2: per CommonMark, a closing fence
+        // may be longer than the opener. Previously the strict
+        // length match left the fence dangling, so headings after
+        // the longer close were misclassified as code-block content.
+        let body = "\n## Comments\n\n\
+            ### 2026-05-01T00:00:00Z · @bob\n\n\
+            ```rust\n\
+            code\n\
+            ````\n\
+            ## Decisions\n\n\
+            ### 2026-05-02T00:00:00Z · @cara\n\npicked X\n";
+        let coms = parse_section(body, COMMENTS);
+        let decs = parse_section(body, DECISIONS);
+        assert_eq!(coms.len(), 1, "Comments section parsed correctly");
+        assert_eq!(decs.len(), 1, "Decisions parsed after longer close fence");
+        assert_eq!(decs[0].author, "cara");
+    }
+
+    #[test]
+    fn close_fence_must_be_only_whitespace_after_run() {
+        // ` ``` not a close ` is content per CommonMark — the
+        // shared scanner must NOT treat it as closing the fence.
+        let body = "\n## Comments\n\n\
+            ### 2026-05-01T00:00:00Z · @bob\n\n\
+            ```\n\
+            ``` not a close\n\
+            ## still inside fence\n\
+            ```\n\
+            \n## Decisions\n\n\
+            ### 2026-05-02T00:00:00Z · @cara\n\npicked\n";
+        let decs = parse_section(body, DECISIONS);
+        assert_eq!(decs.len(), 1);
+        assert_eq!(decs[0].author, "cara");
+    }
+
+    #[test]
+    fn parse_section_folds_malformed_h3_into_previous_block() {
+        // Round-2 finding G2/O3: malformed H3 lines must not become
+        // boundaries — their content folds into the previous
+        // block's body rather than vanishing.
+        let body = "\n## Comments\n\n\
+            ### 2026-05-01T00:00:00Z · @alice\n\n\
+            first\n\n\
+            ### not a valid block heading\n\n\
+            legacy text that should remain visible\n\n\
+            ### 2026-05-02T00:00:00Z · @bob\n\n\
+            second\n";
+        let blocks = parse_section(body, COMMENTS);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].author, "alice");
+        assert!(
+            blocks[0].body.contains("first") && blocks[0].body.contains("legacy text"),
+            "alice's body should fold malformed-h3 content, got:\n{}",
+            blocks[0].body
+        );
+        assert_eq!(blocks[1].author, "bob");
+    }
+
+    #[test]
+    fn validate_message_rejects_unclosed_fence() {
+        // Round-2 finding O10: an unclosed fence in the message
+        // would silently swallow future blocks once appended.
+        assert!(validate_message("```rust\nunclosed").is_err());
+        assert!(validate_message("```rust\nclosed\n```\n").is_ok());
+    }
+
+    #[test]
+    fn validate_author_rejects_leading_trailing_whitespace() {
+        // Round-2 finding O9.
+        assert!(validate_author(" alice").is_err());
+        assert!(validate_author("alice ").is_err());
+        assert!(validate_author("alice").is_ok());
     }
 }
