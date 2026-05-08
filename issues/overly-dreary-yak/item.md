@@ -15,6 +15,10 @@ commits:
   summary: 'body-sections: fence-aware parsing, validate inputs, drop Notes alias'
 - hash: 3526f73
   summary: create spin-off virtually-dull-regret
+- hash: 010bc3c
+  summary: body-sections round-2 fixes (CommonMark fences, parse_section folding, multi-Notes conflict)
+- hash: 90a66e4
+  summary: spin-off totally-placid-push for parse_section diagnostics
 related: ['@virtually-dull-regret', '@totally-placid-push']
 ---
 
