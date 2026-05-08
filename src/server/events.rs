@@ -68,6 +68,13 @@ pub struct EventHub {
     tx: broadcast::Sender<Arc<BoardEvent>>,
     capacity: usize,
     instance_id: Uuid,
+    /// Test-only synchronous hook fired inside `publish` (after the
+    /// broadcast send, before `publish` returns). Used to assert
+    /// caller-side invariants — e.g. that the repo `flock` is still
+    /// held when `mutate::new_issue` reaches publish (web-edit-sync
+    /// §3.1 step 8). Production callers never set this.
+    #[cfg(test)]
+    on_publish: Mutex<Option<Arc<dyn Fn(&BoardEvent) + Send + Sync>>>,
 }
 
 struct EventHubInner {
@@ -92,7 +99,14 @@ impl EventHub {
             tx,
             capacity: ring_capacity,
             instance_id: Uuid::new_v4(),
+            #[cfg(test)]
+            on_publish: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    pub fn set_on_publish_for_test(&self, hook: Arc<dyn Fn(&BoardEvent) + Send + Sync>) {
+        *self.on_publish.lock() = Some(hook);
     }
 
     pub fn instance_id(&self) -> Uuid {
@@ -126,6 +140,13 @@ impl EventHub {
         // Drop lock before send so a slow subscriber can't stall
         // publishers (and so flock hold time stays bounded in M1).
         let _ = self.tx.send(evt.clone());
+        #[cfg(test)]
+        {
+            let hook = self.on_publish.lock().clone();
+            if let Some(h) = hook {
+                h(&evt);
+            }
+        }
         evt
     }
 

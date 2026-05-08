@@ -1953,6 +1953,71 @@ mod tests {
     }
 
     #[test]
+    fn new_issue_publishes_before_releasing_flock() {
+        // web-edit-sync §3.1 step 8: every server-mediated mutation must
+        // publish its IssueUpserted event WHILE the repo flock is still
+        // held, so the global seq order matches on-disk write order. The
+        // pre-fix `new_issue` delegated to `do_new` (which acquired and
+        // released the lock internally) and then published OUTSIDE the
+        // lock — a fast-following PATCH could land an event with a
+        // smaller seq, breaking dedupe-by-version on the client.
+        //
+        // We assert the invariant by registering a synchronous publish
+        // hook on the EventHub: the hook re-opens the lock file in a
+        // fresh fd and tries a non-blocking `flock(LOCK_EX)`. If
+        // `new_issue` is still inside its WriteLock, the try must fail
+        // with `WouldBlock`. (POSIX flock — both Linux and macOS — is
+        // per open-file-description, so a separate `open()` from the
+        // same process conflicts.)
+        use fs2::FileExt;
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        const UNSEEN: u8 = 0;
+        const HELD: u8 = 1;
+        const RELEASED: u8 = 2;
+
+        let tmp = fresh_repo();
+        let hub = Arc::new(EventHub::new());
+        let lock_path = tmp.path().join(".issuectl/write.lock");
+        let observed = Arc::new(AtomicU8::new(UNSEEN));
+        {
+            let observed = observed.clone();
+            let lock_path = lock_path.clone();
+            hub.set_on_publish_for_test(Arc::new(move |_evt| {
+                let f = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&lock_path)
+                    .expect("lock file must exist by publish time");
+                match f.try_lock_exclusive() {
+                    Ok(()) => {
+                        let _ = f.unlock();
+                        observed.store(RELEASED, Ordering::SeqCst);
+                    }
+                    Err(_) => observed.store(HELD, Ordering::SeqCst),
+                }
+            }));
+        }
+
+        let req = NewIssueRequest {
+            issue_type: "bug".into(),
+            title: "publish under flock".into(),
+            priority: "normal".into(),
+            ..Default::default()
+        };
+        new_issue(tmp.path(), req, Some(&hub)).unwrap();
+
+        match observed.load(Ordering::SeqCst) {
+            HELD => {}
+            RELEASED => panic!(
+                "IssueUpserted was published AFTER the repo flock was released — \
+                 violates web-edit-sync §3.1 step 8 (publish-before-release)"
+            ),
+            _ => panic!("publish hook never fired — new_issue did not publish IssueUpserted"),
+        }
+    }
+
+    #[test]
     fn malformed_schema_surfaces_as_schema_error() {
         let tmp = fresh_repo();
         let _v0 = seed_issue(tmp.path(), "open", "broken-schema-target", "open");
