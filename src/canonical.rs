@@ -281,11 +281,11 @@ mod tests {
         let mut b = issue("foo", "open", "open", "body");
         a.extra.insert(
             "triage".into(),
-            crate::parser::yaml_to_canonical_json_for_tests(&va).unwrap(),
+            crate::parser::yaml_to_canonical_json(&va).unwrap(),
         );
         b.extra.insert(
             "triage".into(),
-            crate::parser::yaml_to_canonical_json_for_tests(&vb).unwrap(),
+            crate::parser::yaml_to_canonical_json(&vb).unwrap(),
         );
         assert_eq!(canonical_hash(&a), canonical_hash(&b));
     }
@@ -321,7 +321,7 @@ mod tests {
         // The yaml→canonical-json conversion is exercised at the
         // type level for booleans, integers, floats, sequences, and
         // null — earlier tests only used string scalars.
-        use crate::parser::yaml_to_canonical_json_for_tests;
+        use crate::parser::yaml_to_canonical_json;
         let cases = [
             ("true", serde_json::json!(true)),
             ("42", serde_json::json!(42)),
@@ -335,16 +335,29 @@ mod tests {
         ];
         for (yaml, expected) in cases {
             let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-            let got = yaml_to_canonical_json_for_tests(&v).unwrap();
+            let got = yaml_to_canonical_json(&v).unwrap();
             assert_eq!(got, expected, "yaml {:?} produced {:?}", yaml, got);
         }
     }
 
     #[test]
+    fn unknown_key_set_to_null_hashes_distinct_from_absent() {
+        // `triage: ~` (explicit null) and an absent `triage:` key
+        // must hash differently — the projection includes an entry
+        // for the explicit-null case, which is the user-visible
+        // semantic difference between "intentionally cleared" and
+        // "never set".
+        let mut a = issue("foo", "open", "open", "body");
+        let b = issue("foo", "open", "open", "body");
+        a.extra.insert("triage".into(), serde_json::Value::Null);
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
     fn yaml_tag_in_unknown_value_is_rejected() {
-        use crate::parser::yaml_to_canonical_json_for_tests;
+        use crate::parser::yaml_to_canonical_json;
         let v: serde_yaml::Value = serde_yaml::from_str("!mytag foo").unwrap();
-        let err = yaml_to_canonical_json_for_tests(&v).unwrap_err();
+        let err = yaml_to_canonical_json(&v).unwrap_err();
         assert!(
             err.contains("tag") && err.contains("mytag"),
             "expected tag error, got: {err}"

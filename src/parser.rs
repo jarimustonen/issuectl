@@ -158,13 +158,6 @@ pub fn parse_item_md_text_with_warnings(
     ParsedItem { issue, warnings }
 }
 
-#[cfg(test)]
-pub fn yaml_to_canonical_json_for_tests(
-    v: &serde_yaml::Value,
-) -> Result<serde_json::Value, String> {
-    yaml_to_canonical_json(v)
-}
-
 /// Convert a `serde_yaml::Value` into a JSON-shaped value with
 /// recursively sorted maps. Mapping keys that are not strings, YAML
 /// tags, and any other YAML construct that JSON cannot represent
@@ -172,7 +165,9 @@ pub fn yaml_to_canonical_json_for_tests(
 /// drop the offending entry. Recursive sort guarantees the output
 /// bytes are stable across processes regardless of insertion order
 /// (matches design doc §3.2's "sorted-key JSON" contract).
-fn yaml_to_canonical_json(v: &serde_yaml::Value) -> Result<serde_json::Value, String> {
+pub(crate) fn yaml_to_canonical_json(
+    v: &serde_yaml::Value,
+) -> Result<serde_json::Value, String> {
     use serde_json::Value as J;
     match v {
         serde_yaml::Value::Null => Ok(J::Null),
