@@ -2609,6 +2609,192 @@ mod tests {
         assert_probe_saw_held(&observed, "note_issue");
     }
 
+    // ── two-thread seq-order regression ─────────────────────────────────
+    //
+    // The single-threaded `*_publishes_before_releasing_flock` tests above
+    // assert the proxy invariant (flock held when publish runs). They do
+    // NOT exercise the race the C3 fix actually prevents: a second
+    // mutation acquiring the lock between mutation-A's lock-release and
+    // mutation-A's publish, inverting global seq order vs. disk write
+    // order. The tests below choreograph two writer threads so the second
+    // races for the lock the moment the first publishes, and assert that
+    // the published seq order matches on-disk write order across many
+    // iterations.
+    //
+    // Choreography: thread A does the first mutation; the publish hook
+    // (which fires WHILE A still holds the flock) trips a Barrier that
+    // releases thread B. Thread B then races for the flock — typically
+    // parking on it until A drops the lock at end of scope, then grabbing
+    // it immediately. The hook also records every published event so we
+    // can verify seq order post-hoc.
+    //
+    // Regression mode: if a future change moves any publish back outside
+    // the lock, thread B can land its publish first (lower seq) while
+    // thread A's stale publish lands second (higher seq with older
+    // version), and the final-published-version-vs-disk assertion fails.
+
+    fn run_two_thread_seq_order_iteration(
+        op_a: impl FnOnce(&Path, &Arc<EventHub>) -> String + Send + 'static,
+        op_b: impl FnOnce(&Path, &Arc<EventHub>) -> String + Send + 'static,
+        slug: &'static str,
+        seed: Option<&dyn Fn(&Path) -> String>,
+    ) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc as StdArc, Barrier, Mutex as StdMutex};
+        use std::thread;
+
+        let tmp = fresh_repo();
+        if let Some(seed_fn) = seed {
+            seed_fn(tmp.path());
+        }
+
+        let hub = Arc::new(EventHub::new());
+
+        // (seq, slug, version) for every IssueUpserted seen.
+        let events: StdArc<StdMutex<Vec<(u64, String, String)>>> =
+            StdArc::new(StdMutex::new(Vec::new()));
+        let barrier = StdArc::new(Barrier::new(2));
+        let signaled = StdArc::new(AtomicBool::new(false));
+
+        let events_hook = events.clone();
+        let barrier_hook = barrier.clone();
+        let signaled_hook = signaled.clone();
+        hub.set_on_publish_for_test(Arc::new(move |evt| {
+            if let EventPayload::IssueUpserted { slug, version, .. } = &evt.payload {
+                events_hook
+                    .lock()
+                    .unwrap()
+                    .push((evt.seq, slug.clone(), version.clone()));
+            }
+            // Wake thread B on the FIRST publish (mutation A's). Fires
+            // while A still holds the flock — B will park on
+            // WriteLock::acquire and grab it the instant A drops it.
+            // Subsequent publishes (B's own) must not re-trip the
+            // barrier, so we guard with a single-shot AtomicBool.
+            if !signaled_hook.swap(true, Ordering::SeqCst) {
+                barrier_hook.wait();
+            }
+        }));
+
+        let root = tmp.path().to_path_buf();
+        let hub_a = hub.clone();
+        let root_a = root.clone();
+        let a = thread::spawn(move || op_a(&root_a, &hub_a));
+
+        let hub_b = hub.clone();
+        let root_b = root.clone();
+        let barrier_b = barrier.clone();
+        let b = thread::spawn(move || {
+            barrier_b.wait();
+            op_b(&root_b, &hub_b)
+        });
+
+        let version_a = a.join().expect("thread A panicked");
+        let version_b = b.join().expect("thread B panicked");
+
+        let evts = events.lock().unwrap();
+        assert_eq!(
+            evts.len(),
+            2,
+            "expected exactly 2 IssueUpserted events, got {evts:?}"
+        );
+        assert_eq!(evts[0].0, 1, "first event seq must be 1: {evts:?}");
+        assert_eq!(evts[1].0, 2, "second event seq must be 2: {evts:?}");
+        assert_eq!(evts[0].1, slug, "first event slug mismatch: {evts:?}");
+        assert_eq!(evts[1].1, slug, "second event slug mismatch: {evts:?}");
+        assert_eq!(
+            evts[0].2, version_a,
+            "seq=1 must carry mutation-A's version"
+        );
+        assert_eq!(
+            evts[1].2, version_b,
+            "seq=2 must carry mutation-B's version — if it carries A's \
+             instead, publish escaped the flock and seq order inverted vs. \
+             disk write order"
+        );
+
+        // Final on-disk version must equal the highest-seq event's
+        // version. If publish ever lands outside the lock, the last
+        // mutation's stale event wins seq order while a fresher write
+        // sits on disk — exactly the kanban-flicker mode C3 fixed.
+        let final_path = tmp.path().join("issues").join(slug).join("item.md");
+        let parsed = crate::parser::parse_item_md_with_warnings(&final_path, slug, "open");
+        let mut final_issue = parsed.issue;
+        final_issue.folder = folder_for_status(&final_issue.status).to_string();
+        let final_version = canonical_hash(&final_issue);
+        assert_eq!(
+            evts[1].2, final_version,
+            "final published version must match on-disk version"
+        );
+    }
+
+    #[test]
+    fn concurrent_post_then_patch_publishes_in_disk_order() {
+        // POST + PATCH on the same slug — the original C3 motivation.
+        const ITERATIONS: usize = 100;
+        const SLUG: &str = "concurrent-post-patch-target";
+
+        for i in 0..ITERATIONS {
+            run_two_thread_seq_order_iteration(
+                move |root, hub| {
+                    let req = NewIssueRequest {
+                        issue_type: "bug".into(),
+                        title: format!("concurrent post {i}"),
+                        priority: "normal".into(),
+                        slug: Some(SLUG.into()),
+                        ..Default::default()
+                    };
+                    new_issue(root, req, Some(hub)).unwrap().version
+                },
+                move |root, hub| {
+                    let req = UpdateIssueRequest {
+                        priority: Patch::Set("high".into()),
+                        ..Default::default()
+                    };
+                    update_issue(root, SLUG, req, Some(hub)).unwrap().version
+                },
+                SLUG,
+                None,
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_patch_then_patch_publishes_in_disk_order() {
+        // PATCH + PATCH on the same slug — the @incredibly-real-hour
+        // scenario. Same publish-vs-release race, different mutation
+        // pair. Both PATCHes leave expected_version=None so neither
+        // fails on a stale precondition; we're testing the seq/disk
+        // ordering invariant, not optimistic-concurrency rejection.
+        const ITERATIONS: usize = 100;
+        const SLUG: &str = "concurrent-patch-patch-target";
+
+        for _ in 0..ITERATIONS {
+            run_two_thread_seq_order_iteration(
+                move |root, hub| {
+                    let req = UpdateIssueRequest {
+                        priority: Patch::Set("high".into()),
+                        ..Default::default()
+                    };
+                    update_issue(root, SLUG, req, Some(hub)).unwrap().version
+                },
+                move |root, hub| {
+                    // Different mutation than A so the canonical hash
+                    // genuinely changes — without that, both seq=1 and
+                    // seq=2 would carry the same version and the order
+                    // assertion would be vacuously satisfied.
+                    let req = UpdateIssueRequest {
+                        assignee: Patch::Set("alice".into()),
+                        ..Default::default()
+                    };
+                    update_issue(root, SLUG, req, Some(hub)).unwrap().version
+                },
+                SLUG,
+                Some(&|root| seed_issue(root, "open", SLUG, "open")),
+            );
+        }
+    }
+
     #[test]
     fn new_issue_does_not_publish_on_error_path() {
         // Symmetric guarantee: when the mutation fails (here: a schema
