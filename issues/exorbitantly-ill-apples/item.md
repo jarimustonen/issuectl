@@ -100,6 +100,16 @@ to keep the epic in sync with the worktree:
 ### Bugs / polish (small, dropped into v0.5.0 because they hurt daily use)
 - [x] @peculiarly-truncated-title — `issuectl ls` drops the first
   character of the H1 title in CLI display. Fixed in `6549ce6`.
+- [ ] @astoundingly-harsh-nest — `do_new_locked` returns `anyhow::Error`
+  and `mutate::new_issue` reverse-engineers the typed `MutateError`
+  variant by string-matching the formatted message. Brittle; fix by
+  returning a typed enum. Spin-off from @especially-stingy-powder
+  /llm-review.
+- [ ] @strikingly-abandoned-stranger — Add a two-thread regression test
+  that exercises the actual seq-inversion failure mode the C3 fix
+  prevents (the existing `new_issue_publishes_before_releasing_flock`
+  test only covers the proxy invariant in a single-threaded setup).
+  Spin-off from @especially-stingy-powder /llm-review.
 
 ## Phases
 
