@@ -180,18 +180,20 @@ pub fn is_valid_custom_field_key(key: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// Single per-key gate shared by all four create/update paths: rejects
-/// invalid key shape and reserved built-in names with a uniform error
-/// message. Returns the formatted message so each call site can wrap it
-/// in the typed error variant that matches its return type
-/// (`MutateError::Validation` / `DoNewError::Validation`).
+/// Shared per-key predicate for all four create/update paths: rejects
+/// invalid key shape and reserved built-in names. Returns the formatted
+/// message so each call site wraps it in the typed error variant that
+/// matches its return type (`MutateError::Validation` /
+/// `DoNewError::Validation`).
 ///
 /// Routed through:
-/// - `UpdateIssueRequest::validate` (CLI + API update)
-/// - `do_new_locked` (CLI + API new)
+/// - clap parsers `parse_custom_field` / `parse_custom_field_key` (CLI new + update)
+/// - `UpdateIssueRequest::validate` (API update)
+/// - `do_new_locked` (API new — primary defense; CLI new is already covered by the parser)
 ///
-/// Keeping the message text identical across paths means agents / users
-/// see the same diagnostic regardless of how the request was submitted.
+/// "Shared" applies to *predicates*, not necessarily to every error
+/// string: the CLI parsers also do a separate leading/trailing-whitespace
+/// pre-check whose wording stays parser-local.
 pub fn validate_custom_field_key(key: &str) -> Result<(), String> {
     if !is_valid_custom_field_key(key) {
         return Err(format!(
@@ -200,6 +202,28 @@ pub fn validate_custom_field_key(key: &str) -> Result<(), String> {
     }
     if let Some(hint) = reserved_custom_field_hint(key) {
         return Err(format!("custom field {key:?} is built-in: {hint}"));
+    }
+    Ok(())
+}
+
+/// Shared per-value predicate. A `Set` value must be non-empty after
+/// trimming AND must equal its trim — leading or trailing whitespace is
+/// rejected, not silently stripped, so the on-disk frontmatter matches
+/// what the caller asked for. Mirrors the CLI parser's
+/// `parse_custom_field` post-`=` value check so all four create/update
+/// paths converge on the same value contract (closes the gap where API
+/// new previously accepted `{"team": "   "}` while CLI new and API
+/// update rejected it).
+pub fn validate_custom_field_value(key: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!(
+            "custom field {key:?}: empty-string Set is not allowed (use null to clear)"
+        ));
+    }
+    if value.trim() != value {
+        return Err(format!(
+            "custom field {key:?}: leading or trailing whitespace is not allowed"
+        ));
     }
     Ok(())
 }
@@ -324,20 +348,7 @@ impl UpdateIssueRequest {
         for (key, patch) in &self.custom_fields {
             validate_custom_field_key(key).map_err(MutateError::Validation)?;
             if let Patch::Set(v) = patch {
-                // Reject blank/whitespace-only Sets so the API and CLI
-                // agree (the CLI parser strips and rejects empty;
-                // without `trim()` here a JSON client could still slip
-                // a `"   "` through to disk).
-                if v.trim().is_empty() {
-                    return Err(MutateError::Validation(format!(
-                        "custom field {key:?}: empty-string Set is not allowed (use null to clear)"
-                    )));
-                }
-                if v.trim() != v.as_str() {
-                    return Err(MutateError::Validation(format!(
-                        "custom field {key:?}: leading or trailing whitespace is not allowed"
-                    )));
-                }
+                validate_custom_field_value(key, v).map_err(MutateError::Validation)?;
             }
         }
         Ok(())
@@ -2854,6 +2865,59 @@ mod tests {
             MutateError::Validation(msg) => assert!(
                 msg.contains("status") && msg.contains("built-in"),
                 "expected built-in rejection, got {msg:?}"
+            ),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_custom_field_value_rejects_blank_and_padded() {
+        assert!(validate_custom_field_value("team", "payments").is_ok());
+        let err = validate_custom_field_value("team", "   ").unwrap_err();
+        assert!(err.contains("empty-string Set"), "blank: {err:?}");
+        let err = validate_custom_field_value("team", " payments").unwrap_err();
+        assert!(err.contains("whitespace"), "leading ws: {err:?}");
+        let err = validate_custom_field_value("team", "payments ").unwrap_err();
+        assert!(err.contains("whitespace"), "trailing ws: {err:?}");
+    }
+
+    #[test]
+    fn new_issue_api_rejects_whitespace_only_custom_field_value() {
+        // Closes the value-validation asymmetry: API update already
+        // rejected `{"team":"   "}` via UpdateIssueRequest::validate,
+        // and CLI new rejected it via parse_custom_field. API new used
+        // to slip blank values through to frontmatter — now both key
+        // and value go through the shared validators inside
+        // `do_new_locked`.
+        let tmp = fresh_repo();
+        let mut req = NewIssueRequest::default();
+        req.issue_type = "bug".into();
+        req.title = "Blank value".into();
+        req.priority = "normal".into();
+        req.custom_fields = vec![("team".into(), "   ".into())];
+        let err = new_issue(tmp.path(), req, None).unwrap_err();
+        match err {
+            MutateError::Validation(msg) => assert!(
+                msg.contains("team") && msg.contains("empty-string Set"),
+                "expected blank-value rejection, got {msg:?}"
+            ),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_issue_api_rejects_padded_custom_field_value() {
+        let tmp = fresh_repo();
+        let mut req = NewIssueRequest::default();
+        req.issue_type = "bug".into();
+        req.title = "Padded value".into();
+        req.priority = "normal".into();
+        req.custom_fields = vec![("team".into(), " payments".into())];
+        let err = new_issue(tmp.path(), req, None).unwrap_err();
+        match err {
+            MutateError::Validation(msg) => assert!(
+                msg.contains("team") && msg.contains("whitespace"),
+                "expected whitespace rejection, got {msg:?}"
             ),
             other => panic!("expected Validation, got {other:?}"),
         }
