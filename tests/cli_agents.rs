@@ -113,4 +113,58 @@ fn doctor_fix_regenerates_drifted_managed_block() {
     assert_ne!(after, original);
     assert!(after.contains("`## Reproduction`"));
     assert!(after.contains("<!-- issuectl-managed:start -->"));
+
+    // Re-run scan-only doctor and assert drift is cleared.
+    let out = run(tmp.path(), &["--json", "doctor"]);
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json parse");
+    assert_eq!(v["agents_md_drift"], serde_json::Value::Bool(false));
+    assert!(v["agents_md_malformed"].is_null());
+    assert!(v["agents_md_check_skipped"].is_null());
+}
+
+#[test]
+fn doctor_refuses_malformed_agents_md_and_blocks_exit() {
+    let tmp = fresh_repo();
+    let path = tmp.path().join(".issuectl/AGENTS.md");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // Two managed blocks → malformed.
+    let bad = "Prose.\n\n<!-- issuectl-managed:start -->\nA\n<!-- issuectl-managed:end -->\n\n<!-- issuectl-managed:start -->\nB\n<!-- issuectl-managed:end -->\n";
+    std::fs::write(&path, bad).unwrap();
+
+    // Read-only doctor flags malformed and exits non-zero (critical).
+    let out = run(tmp.path(), &["doctor"]);
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("malformed"), "{stdout}");
+
+    // --fix refuses to mutate a malformed file. Bytes unchanged.
+    let out = run(tmp.path(), &["doctor", "--fix"]);
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(after, bad);
+}
+
+#[test]
+fn doctor_skips_drift_check_on_schema_parse_error() {
+    let tmp = fresh_repo();
+    // Bootstrap a clean AGENTS.md against the default schema first.
+    assert_eq!(run(tmp.path(), &["agents", "init"]).status.code(), Some(0));
+    let path = tmp.path().join(".issuectl/AGENTS.md");
+    let original = std::fs::read_to_string(&path).unwrap();
+
+    // Now corrupt the schema file with invalid YAML.
+    std::fs::write(
+        tmp.path().join("issues/.schema.yaml"),
+        "version: 1\nfields: not-a-mapping\n",
+    )
+    .unwrap();
+
+    // doctor --fix must NOT regenerate AGENTS.md from defaults; the
+    // file should be untouched.
+    let out = run(tmp.path(), &["doctor", "--fix"]);
+    // Schema parse error is critical → exit 1 expected.
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(after, original, "AGENTS.md must not be rewritten");
 }

@@ -161,6 +161,18 @@ struct DoctorReport {
     /// in place, preserving prose outside the sentinels. Absent file
     /// is NOT drift — `agents init` is opt-in.
     agents_md_drift: bool,
+    /// `.issuectl/AGENTS.md` is structurally malformed (multiple
+    /// managed-block pairs, dangling sentinel, end-before-start).
+    /// Critical: `--fix` refuses to touch malformed files because
+    /// auto-collapsing them would destroy ambiguous user content.
+    /// Holds the diagnostic reason for rendering.
+    agents_md_malformed: Option<String>,
+    /// `.issuectl/AGENTS.md` drift check skipped because the schema
+    /// or transition rules failed to parse. Critical: a regenerated
+    /// block from defaults would silently overwrite real policy when
+    /// the user fixes the unrelated YAML typo. Holds the loader
+    /// error message for rendering.
+    agents_md_check_skipped: Option<String>,
     /// Set to true after `--fix` regenerates the AGENTS.md managed
     /// block.
     agents_md_regenerated: bool,
@@ -251,6 +263,8 @@ fn has_critical_findings(report: &DoctorReport) -> bool {
         || !report.both_open_and_closed.is_empty()
         || !report.flat_layout_conflicts.is_empty()
         || !report.notes_conflicts.is_empty()
+        || report.agents_md_malformed.is_some()
+        || report.agents_md_check_skipped.is_some()
 }
 
 fn scan(repo_root: &Path) -> Result<DoctorReport> {
@@ -428,15 +442,28 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
     }
 
     // AGENTS.md drift. Only flag when the file already exists — the
-    // file itself is opt-in (`issuectl agents init`). Loader fall-back
-    // to default rules matches the rendering side.
+    // file itself is opt-in (`issuectl agents init`). Both loaders
+    // already return defaults on missing file, so a non-Err return
+    // means we can trust the values; an Err signals parse/version
+    // trouble and we MUST NOT regenerate from defaults (would
+    // overwrite real policy with empty rules).
     let agents_path = agents::agents_path(repo_root);
     if agents_path.is_file() {
         if let Ok(text) = fs::read_to_string(&agents_path) {
-            let s = schema::load(repo_root).unwrap_or_else(|_| schema::default_schema());
-            let r = crate::transitions::load(repo_root).unwrap_or_default();
-            if !agents::managed_in_sync(&text, &s, &r) {
-                report.agents_md_drift = true;
+            match (schema::load(repo_root), crate::transitions::load(repo_root)) {
+                (Ok(s), Ok(r)) => match agents::locate_managed_block(&text) {
+                    agents::BlockLocation::Malformed { reason } => {
+                        report.agents_md_malformed = Some(reason);
+                    }
+                    _ => {
+                        if !agents::managed_in_sync(&text, &s, &r) {
+                            report.agents_md_drift = true;
+                        }
+                    }
+                },
+                (Err(e), _) | (_, Err(e)) => {
+                    report.agents_md_check_skipped = Some(format!("{e:#}"));
+                }
             }
         }
     }
@@ -1338,10 +1365,17 @@ fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
 /// decision: `O17` is intentionally not preflight-bail). Conflicts
 /// are populated by `scan()`; this function does not re-classify.
 /// Regenerate the schema-derived block in `.issuectl/AGENTS.md` when
-/// scan flagged drift. No-op if the file is absent (init is opt-in)
-/// or the block is already in sync.
+/// scan flagged drift. No-op if the file is absent (init is opt-in),
+/// the block is already in sync, the file is malformed (refuse —
+/// auto-collapse would destroy user content), or the schema/rules
+/// failed to parse (would regenerate from defaults, overwriting real
+/// policy). Doctor's run() already holds `mutate::WriteLock` for the
+/// whole apply pass; this function does not re-acquire.
 fn regenerate_agents_md(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
     if !report.agents_md_drift {
+        return Ok(());
+    }
+    if report.agents_md_malformed.is_some() || report.agents_md_check_skipped.is_some() {
         return Ok(());
     }
     let path = agents::agents_path(repo_root);
@@ -1350,12 +1384,11 @@ fn regenerate_agents_md(repo_root: &Path, report: &mut DoctorReport) -> Result<(
     }
     let original = fs::read_to_string(&path)
         .with_context(|| format!("cannot read {}", path.display()))?;
-    let schema = schema::load(repo_root).unwrap_or_else(|_| schema::default_schema());
-    let rules = crate::transitions::load(repo_root).unwrap_or_default();
+    let schema = schema::load(repo_root)?;
+    let rules = crate::transitions::load(repo_root)?;
     let new_text = agents::regenerate_managed(&original, &schema, &rules);
     if new_text != original {
-        fs::write(&path, new_text)
-            .with_context(|| format!("cannot write {}", path.display()))?;
+        agents::atomic_write(&path, new_text.as_bytes())?;
         report.agents_md_regenerated = true;
     }
     report.agents_md_drift = false;
@@ -1797,6 +1830,8 @@ fn render_text(report: &DoctorReport, fix: bool) {
         || !report.transition_warnings.is_empty()
         || !report.missing_body_sections.is_empty()
         || report.agents_md_drift
+        || report.agents_md_malformed.is_some()
+        || report.agents_md_check_skipped.is_some()
         || report.agents_md_regenerated;
     if !has_problems {
         if report.schema_missing {
@@ -2029,6 +2064,22 @@ fn render_text(report: &DoctorReport, fix: bool) {
         }
         println!();
     }
+    if let Some(reason) = &report.agents_md_malformed {
+        println!(
+            "{} is malformed: {} — fix manually before re-running --fix.",
+            agents::AGENTS_RELATIVE_PATH,
+            reason
+        );
+        println!();
+    }
+    if let Some(err) = &report.agents_md_check_skipped {
+        println!(
+            "{} drift check skipped: {} (fix the schema/rules file first).",
+            agents::AGENTS_RELATIVE_PATH,
+            err
+        );
+        println!();
+    }
     if report.agents_md_regenerated {
         println!(
             "Regenerated schema-derived block in {}.",
@@ -2044,10 +2095,11 @@ fn render_text(report: &DoctorReport, fix: bool) {
     }
     if fix {
         println!(
-            "Applied. {} dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s).",
+            "Applied. {} dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} AGENTS.md block(s) regenerated.",
             report.legacy_dirs.len(),
             report.files_rewritten,
-            report.notes_renamed.len()
+            report.notes_renamed.len(),
+            if report.agents_md_regenerated { 1 } else { 0 }
         );
     } else {
         println!("Read-only — re-run with --fix to apply.");
@@ -2199,6 +2251,8 @@ fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json
             .map(|(s, sec)| serde_json::json!({"slug": s, "section": sec}))
             .collect::<Vec<_>>(),
         "agents_md_drift": report.agents_md_drift,
+        "agents_md_malformed": report.agents_md_malformed,
+        "agents_md_check_skipped": report.agents_md_check_skipped,
         "agents_md_regenerated": report.agents_md_regenerated,
     })
 }
