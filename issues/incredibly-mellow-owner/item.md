@@ -2,9 +2,10 @@
 created: 2026-05-09
 updated: 2026-05-09
 type: chore
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
+closed: 2026-05-09
 ---
 
 # doctor: single-pass issue scanner

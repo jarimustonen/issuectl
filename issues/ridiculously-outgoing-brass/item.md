@@ -3,7 +3,7 @@ created: 2026-05-09
 updated: 2026-05-09
 type: chore
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
 related: ['@partially-ahead-button']
@@ -17,6 +17,7 @@ commits:
   summary: round-2 review fixes (R1-R7,R10,R11,R13) + spin-off @greatly-flat-sleet
 - hash: 1e3844e
   summary: round-3 review fixes (R3.1-3.4,3.6); pre-existing legacy_number ambiguity deferred
+closed: 2026-05-09
 ---
 
 # Move issue-domain constants and helpers out of main.rs (and consider lib.rs split)

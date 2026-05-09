@@ -2,13 +2,14 @@
 created: 2026-05-09
 updated: 2026-05-09
 type: feature
-status: in-progress
+status: done
 priority: normal
 reporter: jari
 assignee: jari
 epic: exorbitantly-ill-apples
 labels: [agent-friendly, cli]
 related: ['@peculiarly-political-interest']
+closed: 2026-05-09
 ---
 
 # apply transactional body ops (note/check) in single flock

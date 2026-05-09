@@ -2,7 +2,7 @@
 created: 2026-05-09
 updated: 2026-05-09
 type: feature
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
 commits:
@@ -10,6 +10,7 @@ commits:
   summary: scaffold required body sections on update --type
 - hash: 86b3dd1
   summary: switch update --type to reject; add invariant + reopen guards
+closed: 2026-05-09
 ---
 
 # issuectl update --type: scaffold or reject when required body sections are missing

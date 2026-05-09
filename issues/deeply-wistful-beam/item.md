@@ -2,7 +2,7 @@
 created: 2026-05-09
 updated: 2026-05-09
 type: chore
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
 commits:
@@ -14,6 +14,7 @@ commits:
   summary: file thread-local cache spin-off (@hugely-madly-haircut) under v0.6.0 backlog
 - hash: ac87147
   summary: round-2 review fixes (NotFound-only stamp, re-stat under lock, !Send marker doc, root debug_assert, test pin assertions, 4 new tests)
+closed: 2026-05-09
 ---
 
 # server: cache schema + transitions config with mtime invalidation

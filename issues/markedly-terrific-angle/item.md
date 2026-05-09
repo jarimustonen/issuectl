@@ -2,7 +2,7 @@
 created: 2026-05-06
 updated: 2026-05-09
 type: feature
-status: in-progress
+status: done
 priority: normal
 reporter: jari
 assignee: jari
@@ -15,6 +15,7 @@ commits:
   summary: harden against malformed sentinels, schema parse errors, atomic write+lock+symlink, format-version marker
 - hash: a40a156
   summary: tighten parser (inner_span, fence-aware, Result-returning regenerate)
+closed: 2026-05-09
 ---
 
 # .issuectl/AGENTS.md — committed agent policy file

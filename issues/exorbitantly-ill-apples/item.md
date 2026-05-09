@@ -99,9 +99,8 @@ to keep the epic in sync with the worktree:
   `a1fe3cb` + review fixes `d299672`.
 - [x] @singularly-hulking-crown — Issues schema file (required + optional
   fields). Landed `62bcf00`.
-- [ ] @markedly-terrific-angle — `.issuectl/AGENTS.md` agent policy file.
-  Agents read it automatically; small change, huge leverage now that
-  M2 introduces a new CLI surface.
+- [x] @markedly-terrific-angle — `.issuectl/AGENTS.md` agent policy file.
+  Landed `cac12ca` + review fixes (`2786f32`, `fd7d1ff`).
 
 ### Concurrency / correctness (originally surfaced in M1 and M2 reviews)
 - [x] @painfully-endurable-steel — Preserve unknown frontmatter keys in
@@ -130,17 +129,34 @@ to keep the epic in sync with the worktree:
   @genuinely-magical-canvas (centralize custom-field validation).
 - [x] @relatively-entertaining-ticket — CLI golden-test harness for
   `cmd_new` error output. Landed `41df83d` + review fixes `96483be`.
-- [ ] @ridiculously-outgoing-brass — Move issue-domain constants/helpers
-  out of `main.rs`; consider `lib.rs` split.
-- [ ] @genuinely-magical-canvas — Centralize custom-field-key validation
-  across CLI and API create/update.
-- [ ] @incredibly-mellow-owner — `doctor` single-pass issue scanner.
-- [ ] @deeply-wistful-beam — Server: cache schema + transitions config
-  with mtime invalidation.
-- [ ] @fully-economic-grade — `issuectl update --type`: scaffold or
-  reject when required body sections are missing.
-- [ ] @massively-regular-market — `apply` transactional body ops
-  (`note` / `check`) in single flock.
+- [x] @ridiculously-outgoing-brass — `issuectl-core` workspace split +
+  constants relocation. Landed `6d4419d`. Spin-offs:
+  @greatly-flat-sleet (doctor apply-pipeline refactor),
+  @quite-rigid-horses (derive lifecycle from schema).
+- [x] @genuinely-magical-canvas — Centralize custom-field-key validation.
+  Landed `1a93b86` + review fixes `86295dc`.
+- [x] @incredibly-mellow-owner — `doctor` single-pass scanner. Landed
+  `891e2e7` + review fixes `711087f`.
+- [x] @deeply-wistful-beam — Server: cache schema + transitions config.
+  Landed `4c7c440` + review fixes (`7d26181`, `588f640`, `6c3ec18`).
+- [x] @fully-economic-grade — `issuectl update --type`: scaffold + reject
+  on missing required sections. Landed `79b6242` + review fixes `86b3dd1`.
+- [x] @massively-regular-market — `apply` transactional body ops. Landed
+  `fea2072` + review fixes (`3de9c62`, `fc790bd`).
+- [x] @remarkably-chivalrous-discovery — Coherent rewrite of
+  `web-edit-sync.md`. Landed `f90d345` + review fixes (`d0141c7`,
+  `39d4777`). Spin-off: @especially-unruly-crate (title in
+  canonical_hash).
+- [ ] @especially-unruly-crate — Add `title` to
+  `canonical_frontmatter_value` (concurrency-control gap). Spin-off
+  from @remarkably-chivalrous-discovery /llm-review.
+- [ ] @greatly-flat-sleet — Doctor: structural Findings + Actions +
+  ApplyOutcome refactor. Spin-off from @ridiculously-outgoing-brass
+  /llm-review round 2.
+- [ ] @quite-rigid-horses — Derive lifecycle status classification
+  (active vs closing) from schema/transitions instead of hardcoded
+  `CLOSING_STATUSES`. Spin-off from @ridiculously-outgoing-brass
+  /llm-review.
 
 ## Phases
 
