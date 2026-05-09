@@ -187,7 +187,21 @@ impl UpdateIssueRequest {
     /// Reject empty-string Sets, type-set vs enum mismatches, and
     /// add_X/remove_X intent collisions. Runs once after both serde
     /// and clap have produced the request.
+    ///
+    /// Runs *before* the lock + schema-bootstrap + legacy-migration
+    /// path so request-level validation failures don't leak side
+    /// effects (a `status: null` patch used to migrate legacy issues
+    /// and create `.schema.yaml` before erroring out — round-2 #1).
     pub fn validate(&self) -> Result<(), MutateError> {
+        // `status: null` / `--clear` is rejected here rather than
+        // deeper in `update_issue_under_lock` so the rejection short-
+        // circuits before any disk side effect. The under-lock check
+        // remains as defence in depth.
+        if matches!(self.status, Patch::Clear) {
+            return Err(MutateError::Validation(
+                "status cannot be cleared (issues always have a status)".into(),
+            ));
+        }
         check_set_nonempty("status", &self.status)?;
         check_set_nonempty("priority", &self.priority)?;
         check_set_nonempty("assignee", &self.assignee)?;
@@ -326,13 +340,16 @@ pub struct UpdateOutcome {
     /// been written so the CLI can render a unified diff. `None` for
     /// real writes — the file on disk is the authoritative version.
     pub pending_serialized: Option<String>,
-    /// Pre-mutation serialized bytes captured under the same flock as
-    /// `pending_serialized`. Lets the CLI render a dry-run diff
-    /// without re-reading the file outside the lock — without this,
-    /// a concurrent writer between flock release and the diff render
-    /// could yield a "before" that doesn't match what the mutation
-    /// planned against. `None` for real writes (the diff is the
-    /// final on-disk state, not a plan).
+    /// Raw pre-mutation `item.md` bytes captured under the same flock
+    /// as `pending_serialized`. Lets the CLI render a dry-run diff
+    /// against the same state the mutation planned against (no race
+    /// with concurrent writers), and faithfully shows YAML
+    /// normalization the real write would also apply (e.g. dropped
+    /// comments, scalar-style changes, key reordering) — using
+    /// `serialize_item(&item)` here would silently hide those
+    /// destructive normalizations from the dry-run preview.
+    /// `None` for real writes (the diff is the final on-disk state,
+    /// not a plan).
     pub before_serialized: Option<String>,
 }
 
@@ -549,14 +566,21 @@ pub fn update_issue(
         locate_and_migrate(root, slug)?
     };
     let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
-    update_issue_under_lock(slug, item_path, req, hub, &schema)
+    update_issue_under_lock(root, slug, item_path, req, hub, &schema)
 }
 
 /// Body of `update_issue` that runs with the flock already held. Used
 /// by `close_issue` to read+decide+mutate atomically without
 /// double-acquiring the lock (which deadlocks on Linux because fs2's
 /// advisory lock is per-fd).
+///
+/// `root` is threaded in (rather than derived from `item_path`) so the
+/// dry-run branch can predict the *flat* `issue_dir` even when the
+/// issue currently lives at a legacy path — a real write would migrate
+/// it to flat layout, and the JSON envelope's `final_dir` must agree
+/// (round-2 #3).
 fn update_issue_under_lock(
+    root: &Path,
     slug: &str,
     item_path: PathBuf,
     req: UpdateIssueRequest,
@@ -596,7 +620,14 @@ fn update_issue_under_lock(
     // the same state the mutation planned against — a concurrent
     // writer can't slip a different "before" into the diff.
     let before_serialized = if req.dry_run {
-        Some(write::serialize_item(&item).map_err(MutateError::Io)?)
+        // Raw on-disk bytes — not `serialize_item(&item)`. The
+        // canonicalised re-serialization would mask formatting
+        // changes (dropped YAML comments, key reordering, scalar-
+        // style shifts) that the real write would also apply,
+        // making the dry-run preview lie about disk impact (round-2 #2).
+        Some(fs::read_to_string(&item_path).map_err(|e| {
+            MutateError::Io(anyhow!("cannot read {}: {e}", item_path.display()))
+        })?)
     } else {
         None
     };
@@ -721,10 +752,7 @@ fn update_issue_under_lock(
         return Ok(UpdateOutcome {
             issue: new_issue,
             version: new_version,
-            issue_dir: item_path
-                .parent()
-                .expect("item.md has a parent")
-                .to_path_buf(),
+            issue_dir: predicted_flat_issue_dir(root, slug),
             moved_to_closed,
             moved_to_open,
             pending_serialized: Some(pending),
@@ -851,7 +879,7 @@ pub fn close_issue(
     req_normalized.remove_related = normalized_remove_related;
     req_normalized.validate()?;
     let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
-    update_issue_under_lock(slug, item_path, req_normalized, hub, &schema)
+    update_issue_under_lock(root, slug, item_path, req_normalized, hub, &schema)
 }
 
 /// PUT-style replacement of an issue's body markdown. Same lock and
@@ -905,7 +933,14 @@ pub fn update_body(
 
     let mut item = write::read_item(&item_path).map_err(MutateError::Io)?;
     let before_serialized = if dry_run {
-        Some(write::serialize_item(&item).map_err(MutateError::Io)?)
+        // Raw on-disk bytes — not `serialize_item(&item)`. The
+        // canonicalised re-serialization would mask formatting
+        // changes (dropped YAML comments, key reordering, scalar-
+        // style shifts) that the real write would also apply,
+        // making the dry-run preview lie about disk impact (round-2 #2).
+        Some(fs::read_to_string(&item_path).map_err(|e| {
+            MutateError::Io(anyhow!("cannot read {}: {e}", item_path.display()))
+        })?)
     } else {
         None
     };
@@ -943,10 +978,7 @@ pub fn update_body(
         return Ok(UpdateOutcome {
             issue: new_issue,
             version: new_version,
-            issue_dir: item_path
-                .parent()
-                .expect("item.md has a parent")
-                .to_path_buf(),
+            issue_dir: predicted_flat_issue_dir(root, slug),
             moved_to_closed: false,
             moved_to_open: false,
             pending_serialized: Some(pending),
@@ -1035,7 +1067,14 @@ pub fn note_issue(
 
     let mut item = write::read_item(&item_path).map_err(MutateError::Io)?;
     let before_serialized = if dry_run {
-        Some(write::serialize_item(&item).map_err(MutateError::Io)?)
+        // Raw on-disk bytes — not `serialize_item(&item)`. The
+        // canonicalised re-serialization would mask formatting
+        // changes (dropped YAML comments, key reordering, scalar-
+        // style shifts) that the real write would also apply,
+        // making the dry-run preview lie about disk impact (round-2 #2).
+        Some(fs::read_to_string(&item_path).map_err(|e| {
+            MutateError::Io(anyhow!("cannot read {}: {e}", item_path.display()))
+        })?)
     } else {
         None
     };
@@ -1066,10 +1105,7 @@ pub fn note_issue(
         return Ok(UpdateOutcome {
             issue: new_issue,
             version: new_version,
-            issue_dir: item_path
-                .parent()
-                .expect("item.md has a parent")
-                .to_path_buf(),
+            issue_dir: predicted_flat_issue_dir(root, slug),
             moved_to_closed: false,
             moved_to_open: false,
             pending_serialized: Some(pending),
@@ -1160,7 +1196,14 @@ pub fn toggle_checkbox(
 
     let mut item = write::read_item(&item_path).map_err(MutateError::Io)?;
     let before_serialized = if dry_run {
-        Some(write::serialize_item(&item).map_err(MutateError::Io)?)
+        // Raw on-disk bytes — not `serialize_item(&item)`. The
+        // canonicalised re-serialization would mask formatting
+        // changes (dropped YAML comments, key reordering, scalar-
+        // style shifts) that the real write would also apply,
+        // making the dry-run preview lie about disk impact (round-2 #2).
+        Some(fs::read_to_string(&item_path).map_err(|e| {
+            MutateError::Io(anyhow!("cannot read {}: {e}", item_path.display()))
+        })?)
     } else {
         None
     };
@@ -1177,10 +1220,7 @@ pub fn toggle_checkbox(
         return Ok(UpdateOutcome {
             issue: new_issue,
             version: new_version,
-            issue_dir: item_path
-                .parent()
-                .expect("item.md has a parent")
-                .to_path_buf(),
+            issue_dir: predicted_flat_issue_dir(root, slug),
             moved_to_closed: false,
             moved_to_open: false,
             pending_serialized: Some(pending),
@@ -1227,13 +1267,14 @@ fn toggle_checkbox_in_body(body: &str, substring: &str) -> Result<String, Mutate
     let lines: Vec<&str> = body.split('\n').collect();
     let mut matches: Vec<usize> = Vec::new();
     // Fence-aware enumeration so `- [ ]` examples inside ```fenced```
-    // code blocks aren't toggled. Shares the scanner with
-    // body_sections so a future fence-rule change updates both verbs.
-    for (i, line) in crate::body_sections::lines_outside_fences(body) {
-        if checkbox_state(&line).is_some() && line.contains(substring) {
+    // code blocks aren't toggled. Routes through the borrowing
+    // callback wrapper rather than `lines_outside_fences` so we don't
+    // allocate one `String` per scanned line.
+    crate::body_sections::for_each_line_outside_fences(body, |i, line| {
+        if checkbox_state(line).is_some() && line.contains(substring) {
             matches.push(i);
         }
-    }
+    });
     match matches.len() {
         0 => Err(MutateError::Validation(format!(
             "no checkbox line matched {substring:?}"
@@ -1371,6 +1412,16 @@ fn apply_string_patch(item: &mut ItemFile, key: &str, p: &Patch<String>) {
         Patch::Clear => write::remove_key(&mut item.frontmatter, key),
         Patch::Set(v) => write::set_string(&mut item.frontmatter, key, v),
     }
+}
+
+/// Where a real write to `slug` would land on disk after any legacy →
+/// flat migration. Used by dry-run paths so the JSON envelope's
+/// `final_dir` agrees with what a follow-up real write would produce
+/// — without this, dry-run on a legacy-layout issue reports the
+/// legacy directory, then the real write actually lands at the flat
+/// path (round-2 #3).
+fn predicted_flat_issue_dir(root: &Path, slug: &str) -> PathBuf {
+    root.join("issues").join(slug)
 }
 
 /// Locate the issue without migrating. Used by dry-run paths so that
@@ -3470,6 +3521,113 @@ mod tests {
         assert!(after.contains("priority: high"));
         assert!(after.contains("backend"));
         assert!(after.contains("triage: P1"));
+    }
+
+    // ── Round-2 review regressions ───────────────────────────────
+
+    #[test]
+    fn status_clear_validation_rejects_before_any_disk_writes() {
+        // Round-2 #1: dropping the CLI-side `status --clear` check
+        // exposed a hole — `Patch::Clear` for status passed
+        // `validate()` and only got rejected deeper inside
+        // `update_issue_under_lock`, *after* `ensure_default_written`
+        // and `locate_and_migrate` had already written `.schema.yaml`
+        // and migrated legacy directories.
+        let tmp = fresh_repo();
+        let legacy = tmp.path().join("issues/open/status-clear-legacy");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            legacy.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\n\
+             priority: normal\n---\n\n# T\n",
+        )
+        .unwrap();
+
+        let req = UpdateIssueRequest {
+            status: Patch::Clear,
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "status-clear-legacy", req, None).unwrap_err();
+        assert!(matches!(err, MutateError::Validation(_)));
+
+        assert!(
+            legacy.exists(),
+            "validation failure must not migrate the legacy directory"
+        );
+        assert!(
+            !tmp.path().join("issues/status-clear-legacy").exists(),
+            "validation failure must not create the flat-layout directory"
+        );
+        assert!(
+            !tmp.path().join("issues/.schema.yaml").exists(),
+            "validation failure must not bootstrap the default schema"
+        );
+    }
+
+    #[test]
+    fn dry_run_before_serialized_captures_raw_disk_bytes() {
+        // Round-2 #2: `before_serialized` used to be the canonicalised
+        // re-serialization of the parsed item, which silently hid
+        // formatting changes that the real write would also apply
+        // (dropped YAML comments, scalar-style shifts, etc.). Pin
+        // that the field now contains the raw on-disk bytes so the
+        // dry-run diff is a faithful preview.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/raw-bytes-target");
+        fs::create_dir_all(&dir).unwrap();
+        let raw = "---\ntype: bug\n# survives only on disk; serde_yaml drops it on round-trip\n\
+                   created: 2026-05-06\nstatus: open\npriority: normal\n---\n\n# T\n";
+        fs::write(dir.join("item.md"), raw).unwrap();
+
+        let req = UpdateIssueRequest {
+            priority: Patch::Set("high".into()),
+            dry_run: true,
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "raw-bytes-target", req, None).unwrap();
+        let before = out.before_serialized.expect("dry-run captures before");
+        assert_eq!(
+            before, raw,
+            "before_serialized must be the raw on-disk bytes, not a canonicalised re-serialization"
+        );
+        // And the after must NOT contain the comment, demonstrating
+        // that a real write would drop it — the dry-run diff visibly
+        // reflects that loss because we don't pre-canonicalise the
+        // before half.
+        let after = out.pending_serialized.expect("dry-run captures after");
+        assert!(!after.contains("survives only on disk"));
+    }
+
+    #[test]
+    fn dry_run_final_dir_predicts_flat_path_for_legacy_issue() {
+        // Round-2 #3: dry-run on a legacy-layout issue used to return
+        // `issue_dir = issues/open/<slug>` (where the file currently
+        // lives) but a real write would migrate to `issues/<slug>`.
+        // The JSON envelope's `final_dir` must agree with the real
+        // write's destination.
+        let tmp = fresh_repo();
+        let legacy = tmp.path().join("issues/open/legacy-finaldir");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            legacy.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\n\
+             priority: normal\n---\n\n# T\n",
+        )
+        .unwrap();
+
+        let req = UpdateIssueRequest {
+            priority: Patch::Set("high".into()),
+            dry_run: true,
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "legacy-finaldir", req, None).unwrap();
+        assert_eq!(
+            out.issue_dir,
+            tmp.path().join("issues/legacy-finaldir"),
+            "dry-run must report the flat-layout path even when the file currently lives at a legacy path"
+        );
+        // And legacy must remain untouched — no migration.
+        assert!(legacy.exists(), "dry-run must not migrate legacy layout");
     }
 
     #[test]

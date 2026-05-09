@@ -173,19 +173,27 @@ fn is_h3(line: &str) -> bool {
     line.starts_with("### ") && !line.starts_with("#### ")
 }
 
-/// Iterate body lines, yielding `(line_index, line)` for every line
-/// that lies outside a fenced code block. Used by `mutate.rs` to make
-/// the new `check` checkbox-toggle verb fence-aware so it doesn't
-/// silently mutate documentation snippets like `- [ ] example`
-/// inside a markdown code fence.
-pub(crate) fn lines_outside_fences(body: &str) -> Vec<(usize, String)> {
+/// Visit every body line that lies outside a fenced code block. The
+/// closure receives `(line_index, line)` and is called in source
+/// order. Used by `mutate.rs` to make the `check` checkbox-toggle
+/// verb fence-aware without copying every line — issues commonly
+/// have hundreds of lines and the previous helper allocated one
+/// `String` per non-fenced line for no reason.
+///
+/// Known limitation: matches CommonMark only at the document top
+/// level. Fences nested inside list items at 4+ spaces of
+/// indentation aren't recognised as code blocks, because
+/// `opening_fence` rejects `indent >= 4` to follow the spec for
+/// indented code. This is a deliberate scope choice — full
+/// container parsing (lists / blockquotes) would need a real
+/// CommonMark frontend, which is out of scope for the current
+/// mutation CLI.
+pub(crate) fn for_each_line_outside_fences<F: FnMut(usize, &str)>(body: &str, mut f: F) {
     let lines: Vec<&str> = body.split('\n').collect();
-    let mut out = Vec::new();
     scan_outside_fences(&lines, |i, l| {
-        out.push((i, l.to_string()));
+        f(i, l);
         false
     });
-    out
 }
 
 /// Walk `lines` and call `f(i, line)` for every line that lies

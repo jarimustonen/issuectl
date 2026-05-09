@@ -1937,8 +1937,26 @@ fn cmd_label(
 fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
     let yaml_text = fs::read_to_string(patch_path)
         .with_context(|| format!("cannot read patch file {}", patch_path.display()))?;
-    let mut yaml: serde_yaml::Value = serde_yaml::from_str(&yaml_text)
-        .with_context(|| format!("cannot parse {} as YAML", patch_path.display()))?;
+    let (slug, mut req) = parse_apply_patch(&yaml_text, json)
+        .with_context(|| format!("cannot parse patch fields in {}", patch_path.display()))?;
+    req.dry_run = dry_run;
+    let root = find_root();
+    let outcome =
+        mutate::update_issue(&root, &slug, req, None).map_err(|e| anyhow::anyhow!("{e}"))?;
+    finish_mutation(json, &slug, &outcome, dry_run, "Applied patch to")
+}
+
+/// Parse the YAML patch text into `(slug, UpdateIssueRequest)`,
+/// applying every CLI-side rule that doesn't require disk access.
+/// Extracted so tests can pin the `--json` `expected_version`
+/// rejection rules (round-2 #4) without spinning up `find_root` or
+/// the global `ROOT_OVERRIDE`.
+pub(crate) fn parse_apply_patch(
+    yaml_text: &str,
+    json: bool,
+) -> Result<(String, mutate::UpdateIssueRequest)> {
+    let mut yaml: serde_yaml::Value =
+        serde_yaml::from_str(yaml_text).context("cannot parse as YAML")?;
     let map = yaml
         .as_mapping_mut()
         .ok_or_else(|| anyhow::anyhow!("patch file must be a YAML mapping at the top level"))?;
@@ -1959,8 +1977,8 @@ fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
     if map.contains_key(serde_yaml::Value::String("dry_run".into())) {
         bail!("`dry_run` is a CLI flag; use `issuectl apply --dry-run`, not a patch field");
     }
-    let mut req: mutate::UpdateIssueRequest = serde_yaml::from_value(yaml)
-        .with_context(|| format!("cannot parse patch fields in {}", patch_path.display()))?;
+    let req: mutate::UpdateIssueRequest =
+        serde_yaml::from_value(yaml).context("cannot parse patch fields")?;
     // Validate `--json` D4=B contract AFTER deserialization so we
     // catch `expected_version: null` and empty/whitespace strings —
     // a presence-only `map.contains_key` check passed `null` through,
@@ -1974,11 +1992,7 @@ fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
             ),
         }
     }
-    req.dry_run = dry_run;
-    let root = find_root();
-    let outcome =
-        mutate::update_issue(&root, &slug, req, None).map_err(|e| anyhow::anyhow!("{e}"))?;
-    finish_mutation(json, &slug, &outcome, dry_run, "Applied patch to")
+    Ok((slug, req))
 }
 
 /// Shared CLI epilogue for the new mutation verbs. On `--dry-run`
@@ -3058,5 +3072,69 @@ mod tests {
             .map(|i| i.slug.clone())
             .collect();
         assert_eq!(hits, vec!["amber-loud-fox".to_string()]);
+    }
+
+    // ── parse_apply_patch (round-2 #4) ────────────────────────────
+
+    #[test]
+    fn parse_apply_patch_rejects_null_expected_version_under_json() {
+        let yaml = "slug: some-issue\nexpected_version: null\npriority: high\n";
+        let err = parse_apply_patch(yaml, true).unwrap_err();
+        assert!(
+            err.to_string().contains("expected_version"),
+            "expected expected_version error, got {err}"
+        );
+    }
+
+    #[test]
+    fn parse_apply_patch_rejects_missing_expected_version_under_json() {
+        let yaml = "slug: some-issue\npriority: high\n";
+        let err = parse_apply_patch(yaml, true).unwrap_err();
+        assert!(err.to_string().contains("expected_version"));
+    }
+
+    #[test]
+    fn parse_apply_patch_rejects_empty_and_padded_expected_version_under_json() {
+        for v in [
+            "expected_version: \"\"",
+            "expected_version: \"   \"",
+            "expected_version: \" sha256:abc \"",
+        ] {
+            let yaml = format!("slug: some-issue\n{v}\npriority: high\n");
+            let err = parse_apply_patch(&yaml, true).unwrap_err();
+            assert!(
+                err.to_string().contains("expected_version"),
+                "expected expected_version error for {v:?}, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_apply_patch_rejects_user_supplied_dry_run_field() {
+        let yaml = "slug: some-issue\ndry_run: true\npriority: high\n";
+        let err = parse_apply_patch(yaml, false).unwrap_err();
+        assert!(
+            err.to_string().contains("dry_run") && err.to_string().contains("CLI flag"),
+            "expected dry_run CLI-flag error, got {err}"
+        );
+    }
+
+    #[test]
+    fn parse_apply_patch_accepts_well_formed_json_patch() {
+        let yaml =
+            "slug: well-formed-issue\nexpected_version: sha256:abc123\npriority: high\n";
+        let (slug, req) = parse_apply_patch(yaml, true).unwrap();
+        assert_eq!(slug, "well-formed-issue");
+        assert_eq!(req.expected_version.as_deref(), Some("sha256:abc123"));
+    }
+
+    #[test]
+    fn parse_apply_patch_allows_missing_expected_version_when_not_json() {
+        // Non-JSON callers may opt into blind clobber: `flock` still
+        // serializes writes, but no version check is required.
+        let yaml = "slug: some-issue\npriority: high\n";
+        let (slug, req) = parse_apply_patch(yaml, false).unwrap();
+        assert_eq!(slug, "some-issue");
+        assert!(req.expected_version.is_none());
     }
 }
