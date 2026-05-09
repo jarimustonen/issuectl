@@ -1,19 +1,22 @@
 //! New-issue creation. Owns the typed input (`NewArgs`), output
-//! (`NewOutcome`), and error (`DoNewError`) shapes shared by the CLI
-//! `cmd_new` handler and the server-side `mutate::new_issue` boundary.
+//! (`WriteOutcome`), and error (`DoNewError`) shapes shared by the
+//! CLI `cmd_new` handler and the server-side `mutate::new_issue`
+//! boundary.
 //!
-//! Lives under `write/` because the on-disk write of `item.md` —
-//! including frontmatter rendering and slug claim — is the operation
-//! these symbols exist to perform; sibling helpers
-//! (`build_new_frontmatter`, `render_new_item_from_fm`, `slugify`)
-//! already live in `write::`.
+//! Lives under `mutate/` because `do_new_locked` is the third leg of
+//! the mutation triad alongside `update_issue` / `close_issue` /
+//! `note_issue` in `mutate/mod.rs` — same lock contract, same canonical
+//! versioning, same error taxonomy. The on-disk render helpers
+//! (`build_new_frontmatter`, `render_new_item_from_fm`, `slugify`) it
+//! calls remain in `crate::write::` as serialization primitives.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::{mutate, repo, schema, slug, write};
+use super::{MutateError, WriteLock};
+use crate::{refs, repo, schema, slug, write};
 
 pub(crate) struct NewArgs {
     pub issue_type: String,
@@ -31,16 +34,15 @@ pub(crate) struct NewArgs {
     pub custom_fields: Vec<(String, String)>,
 }
 
-pub(crate) struct NewOutcome {
+pub(crate) struct WriteOutcome {
     pub slug: String,
     pub title: String,
     pub item_path: PathBuf,
 }
 
-/// Typed error surfaced by `do_new_locked`. The mutate boundary maps
-/// each variant to a `MutateError` (`Conflict` is renamed to
-/// `ConflictingIntent`; the rest are 1:1) so the API picks the right
-/// HTTP status without string-matching the formatted `anyhow::Error`.
+/// Typed error surfaced by `do_new_locked`. Maps to `MutateError` via
+/// the `From` impl below so the API picks the right HTTP status without
+/// string-matching the formatted `anyhow::Error`.
 #[derive(Debug)]
 pub(crate) enum DoNewError {
     Validation(String),
@@ -50,6 +52,12 @@ pub(crate) enum DoNewError {
     Io(anyhow::Error),
 }
 
+/// **CLI-only** flattening for the `cmd_new` path, which still wants an
+/// `anyhow::Error`. The server-side `mutate::new_issue` boundary must
+/// keep using the explicit `MutateError::from(DoNewError)` mapping so
+/// HTTP status codes survive — never `?`-propagate a `DoNewError`
+/// through API code, since this impl collapses every variant into a
+/// flat string and the variant tag is lost.
 impl From<DoNewError> for anyhow::Error {
     fn from(e: DoNewError) -> Self {
         match e {
@@ -62,12 +70,24 @@ impl From<DoNewError> for anyhow::Error {
     }
 }
 
-pub(crate) fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
+impl From<DoNewError> for MutateError {
+    fn from(e: DoNewError) -> Self {
+        match e {
+            DoNewError::SchemaViolation(s) => MutateError::SchemaViolation(s),
+            DoNewError::SchemaConfig(s) => MutateError::SchemaConfig(s),
+            DoNewError::Conflict(s) => MutateError::ConflictingIntent(s),
+            DoNewError::Validation(s) => MutateError::Validation(s),
+            DoNewError::Io(e) => MutateError::Io(e),
+        }
+    }
+}
+
+pub(crate) fn do_new(root: &Path, args: NewArgs) -> Result<WriteOutcome> {
     // M1 contract: every issuectl-mediated writer holds the repo
     // `flock`. Without this acquire, concurrent `issuectl new` from
     // the terminal would race against server-side mutations and
     // bypass the protocol's serialization guarantee.
-    let lock = mutate::WriteLock::acquire(root)?;
+    let lock = WriteLock::acquire(root)?;
     Ok(do_new_locked(&lock, root, args)?)
 }
 
@@ -77,10 +97,10 @@ pub(crate) fn do_new(root: &Path, args: NewArgs) -> Result<NewOutcome> {
 /// sequence the synthetic `IssueUpserted` lands AFTER the lock is
 /// released, inverting seq order against concurrent writers (C3).
 pub(crate) fn do_new_locked(
-    _lock: &mutate::WriteLock,
+    _lock: &WriteLock,
     root: &Path,
     args: NewArgs,
-) -> std::result::Result<NewOutcome, DoNewError> {
+) -> std::result::Result<WriteOutcome, DoNewError> {
     schema::ensure_default_written(root).map_err(DoNewError::Io)?;
     if args.issue_type == "epic" {
         if args.assignee.is_some() || args.reporter.is_some() {
@@ -109,7 +129,7 @@ pub(crate) fn do_new_locked(
         }
     }
 
-    let related = crate::normalize_related_refs_pub(&args.related)
+    let related = refs::normalize_related_refs(&args.related)
         .map_err(|e| DoNewError::Validation(format!("{e:#}")))?;
 
     let new_args = write::NewIssueArgs {
@@ -208,7 +228,7 @@ pub(crate) fn do_new_locked(
             .map_err(DoNewError::Io)?;
     }
 
-    Ok(NewOutcome {
+    Ok(WriteOutcome {
         slug,
         title: args.title,
         item_path,
@@ -444,6 +464,54 @@ mod tests {
             msg.contains("team") && msg.contains("more than once"),
             "expected duplicate-rejection, got {msg:?}"
         );
+    }
+
+    #[test]
+    fn do_new_error_to_anyhow_text_matches_per_variant() {
+        // Lock the byte-identical CLI text contract: the From<DoNewError>
+        // for anyhow::Error impl is what `cmd_new` relies on to keep
+        // human-readable error messages stable across the typed-error
+        // refactor. If a future contributor edits the variants without
+        // touching the conversion, this test fails before users do.
+        let cases: &[(DoNewError, &str)] = &[
+            (
+                DoNewError::Validation("--owner is only valid with --type epic".into()),
+                "--owner is only valid with --type epic",
+            ),
+            (
+                DoNewError::Conflict("target directory already exists: /x".into()),
+                "target directory already exists: /x",
+            ),
+            (
+                DoNewError::SchemaViolation("missing required field \"team\"".into()),
+                "schema: missing required field \"team\"",
+            ),
+            (
+                DoNewError::SchemaConfig("cannot read .schema.yaml".into()),
+                "cannot read .schema.yaml",
+            ),
+        ];
+        for (err, expected) in cases {
+            // Have to clone-by-construction since DoNewError is not Clone.
+            let cloned = match err {
+                DoNewError::Validation(s) => DoNewError::Validation(s.clone()),
+                DoNewError::Conflict(s) => DoNewError::Conflict(s.clone()),
+                DoNewError::SchemaViolation(s) => DoNewError::SchemaViolation(s.clone()),
+                DoNewError::SchemaConfig(s) => DoNewError::SchemaConfig(s.clone()),
+                DoNewError::Io(_) => unreachable!(),
+            };
+            let any: anyhow::Error = cloned.into();
+            assert_eq!(format!("{any:#}"), *expected, "variant {err:?}");
+        }
+
+        // Io variant: the inner anyhow::Error is returned as-is, so its
+        // context chain is preserved verbatim.
+        let io = DoNewError::Io(
+            anyhow::Error::msg(std::io::Error::new(std::io::ErrorKind::Other, "disk full"))
+                .context("cannot write /tmp/x"),
+        );
+        let any: anyhow::Error = io.into();
+        assert_eq!(format!("{any:#}"), "cannot write /tmp/x: disk full");
     }
 
     #[test]

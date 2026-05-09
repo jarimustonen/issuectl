@@ -72,6 +72,20 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
   argument parsing + JSON / human formatting (≤30 lines is the
   target). Do **not** reach into `write::*` directly from `main.rs`
   for new write paths — that bypasses the lock and the schema check.
+- **Domain logic lives in domain modules, not in `main.rs`.**
+  Layering complement to the operational rule above. `main.rs` owns
+  CLI parsing (clap structs), the top-level `cmd_*` handlers, and
+  `find_root` — nothing else. State-changing logic (lock acquisition,
+  schema validation, slug claiming, atomic writes) lives in
+  `src/mutate/`. Pure on-disk render/serialize primitives live in
+  `src/write.rs`. Shared domain helpers (issue enums like
+  `ISSUE_TYPES`/`PRIORITIES`, ref normalization, status
+  classification) live in their own domain module (`src/refs.rs`,
+  etc.). **No module under `src/` other than `main.rs` may
+  reference items defined in the crate root** — if a `mutate::*` or
+  `write::*` site needs to call `crate::foo()`, `foo` belongs in a
+  domain module. The `_pub` re-export wrapper anti-pattern is the
+  warning sign that a private root helper is leaking.
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, repo layout,
   PR process, and commit-message conventions.
 - See [issues/AGENTS.md](issues/AGENTS.md) for how this project's own

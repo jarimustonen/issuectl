@@ -1,5 +1,3 @@
-pub mod new_issue;
-
 use std::fs;
 use std::path::Path;
 #[cfg(test)]

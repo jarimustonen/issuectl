@@ -11,6 +11,7 @@ mod models;
 mod mutate;
 mod parser;
 mod query;
+mod refs;
 mod repo;
 mod schema;
 mod server;
@@ -48,13 +49,6 @@ pub(crate) fn all_statuses() -> Vec<&'static str> {
 
 pub(crate) fn is_closing_status(status: &str) -> bool {
     CLOSING_STATUSES.contains(&status)
-}
-
-/// Public re-export of `normalize_related_refs` for the mutate module
-/// so it can validate `add_related` / `remove_related` exactly the way
-/// the CLI does, without duplicating the logic.
-pub(crate) fn normalize_related_refs_pub(refs: &[String]) -> anyhow::Result<Vec<String>> {
-    normalize_related_refs(refs)
 }
 
 const TOP_LEVEL_HELP: &str = "\
@@ -1318,7 +1312,7 @@ fn cmd_stats(json: bool) -> Result<()> {
     Ok(())
 }
 
-use write::new_issue::{do_new, NewArgs};
+use mutate::new_issue::{do_new, NewArgs};
 
 fn cmd_new(json: bool, args: NewArgs) -> Result<()> {
     let root = find_root();
@@ -1547,35 +1541,6 @@ fn parse_commit_spec(spec: &str) -> Result<(String, String)> {
         bail!("commit spec must be HASH:summary, got {spec:?}");
     }
     Ok((hash.to_string(), summary.to_string()))
-}
-
-/// Normalize a `--related`/`--add-related` reference. Accepts `@slug`, bare
-/// `slug`, or legacy `#NN`. Output is canonical `@slug` form (or `#NN` if the
-/// input was numeric — preserved verbatim so doctor can detect and migrate).
-fn normalize_related_refs(refs: &[String]) -> Result<Vec<String>> {
-    let mut out = Vec::with_capacity(refs.len());
-    for r in refs {
-        let trimmed = r.trim();
-        if trimmed.is_empty() {
-            bail!("related reference cannot be empty");
-        }
-        if let Some(rest) = trimmed.strip_prefix('#') {
-            if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
-                bail!("related reference {:?} looks like #NN but isn't numeric", r);
-            }
-            out.push(format!("#{rest}"));
-            continue;
-        }
-        let stripped = trimmed.strip_prefix('@').unwrap_or(trimmed);
-        if !slug::is_valid(stripped) {
-            bail!(
-                "related reference must be @slug or a kebab-case slug, got {:?}",
-                r
-            );
-        }
-        out.push(format!("@{stripped}"));
-    }
-    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2400,35 +2365,6 @@ mod tests {
     fn parse_commit_spec_rejects_no_colon() {
         assert!(parse_commit_spec("abc123 fix").is_err());
     }
-
-    #[test]
-    fn normalize_related_accepts_at_and_bare_slug() {
-        assert_eq!(
-            normalize_related_refs(&["@extremely-quiet-otter".to_string()]).unwrap(),
-            vec!["@extremely-quiet-otter".to_string()]
-        );
-        assert_eq!(
-            normalize_related_refs(&["amber-loud-fox".to_string()]).unwrap(),
-            vec!["@amber-loud-fox".to_string()]
-        );
-    }
-
-    #[test]
-    fn normalize_related_preserves_legacy_numeric() {
-        assert_eq!(
-            normalize_related_refs(&["#7".to_string()]).unwrap(),
-            vec!["#7".to_string()]
-        );
-    }
-
-    #[test]
-    fn normalize_related_rejects_garbage() {
-        assert!(normalize_related_refs(&["not a slug".to_string()]).is_err());
-        assert!(normalize_related_refs(&["@".to_string()]).is_err());
-        assert!(normalize_related_refs(&["#abc".to_string()]).is_err());
-        assert!(normalize_related_refs(&["foo".to_string()]).is_err()); // no hyphen
-    }
-
     #[test]
     fn parse_non_empty_rejects_empty_and_padded() {
         assert!(parse_non_empty("").is_err());

@@ -18,6 +18,8 @@
 //! token, and c) the web server never has to fork a second process to
 //! mutate state.
 
+pub mod new_issue;
+
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -496,9 +498,9 @@ pub fn update_issue(
     // Normalize related-ref shapes BEFORE validate() so a typo'd ref
     // like `add_related: ["123"]` + `remove_related: ["#123"]`
     // (which both normalize to `#123`) is caught by the overlap check.
-    let normalized_add_related = crate::normalize_related_refs_pub(&req.add_related)
+    let normalized_add_related = crate::refs::normalize_related_refs(&req.add_related)
         .map_err(|e| MutateError::Validation(e.to_string()))?;
-    let normalized_remove_related = crate::normalize_related_refs_pub(&req.remove_related)
+    let normalized_remove_related = crate::refs::normalize_related_refs(&req.remove_related)
         .map_err(|e| MutateError::Validation(e.to_string()))?;
     let mut req_normalized = req;
     req_normalized.add_related = normalized_add_related.clone();
@@ -870,10 +872,10 @@ pub fn close_issue(
     // (fs2 advisory flock is per-fd; nested `WriteLock::acquire` would
     // deadlock on Linux).
     let mut req_normalized = req;
-    let normalized_add_related = crate::normalize_related_refs_pub(&req_normalized.add_related)
+    let normalized_add_related = crate::refs::normalize_related_refs(&req_normalized.add_related)
         .map_err(|e| MutateError::Validation(e.to_string()))?;
     let normalized_remove_related =
-        crate::normalize_related_refs_pub(&req_normalized.remove_related)
+        crate::refs::normalize_related_refs(&req_normalized.remove_related)
             .map_err(|e| MutateError::Validation(e.to_string()))?;
     req_normalized.add_related = normalized_add_related;
     req_normalized.remove_related = normalized_remove_related;
@@ -1548,8 +1550,53 @@ pub struct NewIssueRequest {
     /// custom required fields — without this, API creation cannot
     /// satisfy the schema and falls into the same bricking failure
     /// mode the CLI `--field` flag was added to fix.
-    #[serde(default)]
-    pub custom_fields: std::collections::BTreeMap<String, String>,
+    ///
+    /// JSON shape: an object (`{"team": "payments"}`). Duplicate keys
+    /// in the wire payload are rejected during deserialization so
+    /// `POST /api/issues` enforces the same invariant the CLI
+    /// `--field foo=a --field foo=b` rejection enforces — calling
+    /// agents need a deterministic error rather than silent last-write-
+    /// wins behavior.
+    #[serde(default, deserialize_with = "deserialize_custom_fields_no_dups")]
+    pub custom_fields: Vec<(String, String)>,
+}
+
+fn deserialize_custom_fields_no_dups<'de, D>(de: D) -> Result<Vec<(String, String)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::{MapAccess, Visitor};
+    use std::fmt;
+
+    struct CustomFieldsVisitor;
+    impl<'de> Visitor<'de> for CustomFieldsVisitor {
+        type Value = Vec<(String, String)>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("an object of custom field key=value pairs with no duplicate keys")
+        }
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            // serde_json's MapAccess yields raw JSON object entries in
+            // input order — duplicates are NOT pre-deduplicated by the
+            // parser, so we see both and can reject. Switching to
+            // BTreeMap here would silently keep the last value.
+            let mut out: Vec<(String, String)> = Vec::new();
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some((k, v)) = map.next_entry::<String, String>()? {
+                if !seen.insert(k.clone()) {
+                    return Err(serde::de::Error::custom(format!(
+                        "custom field {k:?} given more than once"
+                    )));
+                }
+                out.push((k, v));
+            }
+            Ok(out)
+        }
+    }
+
+    de.deserialize_map(CustomFieldsVisitor)
 }
 
 fn default_priority() -> String {
@@ -1590,10 +1637,10 @@ pub fn new_issue(
     // `IssueUpserted` then published OUTSIDE the lock, inverting seq
     // against concurrent writers.
     let lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    let outcome = crate::write::new_issue::do_new_locked(
+    let outcome = new_issue::do_new_locked(
         &lock,
         root,
-        crate::write::new_issue::NewArgs {
+        new_issue::NewArgs {
             issue_type: req.issue_type,
             title: req.title,
             slug: req.slug,
@@ -1606,16 +1653,10 @@ pub fn new_issue(
             related: req.related,
             source: req.source,
             description: req.description,
-            custom_fields: req.custom_fields.into_iter().collect(),
+            custom_fields: req.custom_fields,
         },
     )
-    .map_err(|e| match e {
-        crate::write::new_issue::DoNewError::SchemaViolation(s) => MutateError::SchemaViolation(s),
-        crate::write::new_issue::DoNewError::SchemaConfig(s) => MutateError::SchemaConfig(s),
-        crate::write::new_issue::DoNewError::Conflict(s) => MutateError::ConflictingIntent(s),
-        crate::write::new_issue::DoNewError::Validation(s) => MutateError::Validation(s),
-        crate::write::new_issue::DoNewError::Io(e) => MutateError::Io(e),
-    })?;
+    .map_err(MutateError::from)?;
 
     // Re-read for canonical hash + Issue. Still holding the lock.
     let parsed =
@@ -2708,10 +2749,28 @@ mod tests {
         req.issue_type = "bug".into();
         req.title = "API new with custom field".into();
         req.priority = "normal".into();
-        req.custom_fields.insert("team".into(), "payments".into());
+        req.custom_fields.push(("team".into(), "payments".into()));
         let outcome = new_issue(tmp.path(), req, None).unwrap();
         let on_disk = fs::read_to_string(outcome.issue_dir.join("item.md")).unwrap();
         assert!(on_disk.contains("team: payments"), "got {on_disk}");
+    }
+
+    #[test]
+    fn new_issue_request_rejects_duplicate_custom_field_keys_at_deserialization() {
+        // Calling agents that build their JSON dynamically can produce a
+        // payload with two `team:` entries; rather than silent
+        // last-write-wins (BTreeMap behavior), the wire deserializer
+        // rejects duplicates to mirror CLI `--field foo=a --field foo=b`
+        // rejection. This is the API-side enforcement of the
+        // `do_new_locked` invariant.
+        let payload =
+            r#"{"type":"bug","title":"x","custom_fields":{"team":"a","team":"b"}}"#;
+        let err = serde_json::from_str::<NewIssueRequest>(payload).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("team") && msg.contains("more than once"),
+            "expected duplicate-key rejection, got {msg:?}"
+        );
     }
 
     #[test]
@@ -2875,56 +2934,6 @@ mod tests {
         let err = new_issue(tmp.path(), req, None).unwrap_err();
 
         assert!(matches!(err, MutateError::Io(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn do_new_error_to_anyhow_text_matches_per_variant() {
-        // Lock the byte-identical CLI text contract: the From<DoNewError>
-        // for anyhow::Error impl is what `cmd_new` relies on to keep
-        // human-readable error messages stable across the typed-error
-        // refactor. If a future contributor edits the variants without
-        // touching the conversion, this test fails before users do.
-        use crate::write::new_issue::DoNewError;
-
-        let cases: &[(DoNewError, &str)] = &[
-            (
-                DoNewError::Validation("--owner is only valid with --type epic".into()),
-                "--owner is only valid with --type epic",
-            ),
-            (
-                DoNewError::Conflict("target directory already exists: /x".into()),
-                "target directory already exists: /x",
-            ),
-            (
-                DoNewError::SchemaViolation("missing required field \"team\"".into()),
-                "schema: missing required field \"team\"",
-            ),
-            (
-                DoNewError::SchemaConfig("cannot read .schema.yaml".into()),
-                "cannot read .schema.yaml",
-            ),
-        ];
-        for (err, expected) in cases {
-            // Have to clone-by-construction since DoNewError is not Clone.
-            let cloned = match err {
-                DoNewError::Validation(s) => DoNewError::Validation(s.clone()),
-                DoNewError::Conflict(s) => DoNewError::Conflict(s.clone()),
-                DoNewError::SchemaViolation(s) => DoNewError::SchemaViolation(s.clone()),
-                DoNewError::SchemaConfig(s) => DoNewError::SchemaConfig(s.clone()),
-                DoNewError::Io(_) => unreachable!(),
-            };
-            let any: anyhow::Error = cloned.into();
-            assert_eq!(format!("{any:#}"), *expected, "variant {err:?}");
-        }
-
-        // Io variant: the inner anyhow::Error is returned as-is, so its
-        // context chain is preserved verbatim.
-        let io = DoNewError::Io(
-            anyhow::Error::msg(std::io::Error::new(std::io::ErrorKind::Other, "disk full"))
-                .context("cannot write /tmp/x"),
-        );
-        let any: anyhow::Error = io.into();
-        assert_eq!(format!("{any:#}"), "cannot write /tmp/x: disk full");
     }
 
     // ── publish-before-release helpers ──────────────────────────────────
