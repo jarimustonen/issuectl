@@ -66,6 +66,22 @@ pub struct ParsedItem {
     /// `Some(msg)` when the frontmatter block was found but YAML
     /// parsing into a `Mapping` failed.
     pub fm_yaml_error: Option<String>,
+    /// `Some(msg)` when the YAML parsed as a mapping but the typed
+    /// `Frontmatter` deserialisation failed (wrong shape — e.g.
+    /// `created: [1,2,3]` where a string was expected). Treated as a
+    /// HARD parse error by `doctor` — doctor cannot safely rewrite
+    /// frontmatter whose typed shape it could not understand.
+    pub fm_typed_error: Option<String>,
+}
+
+impl ParsedItem {
+    /// True when the frontmatter could not be read as a typed
+    /// `Frontmatter`. Used by `doctor` to classify parse errors as
+    /// HARD (block `--fix`) vs SOFT (proceed; migration may heal).
+    /// Replaces the older substring-match on warning text.
+    pub fn has_hard_frontmatter_error(&self) -> bool {
+        self.fm_missing || self.fm_yaml_error.is_some() || self.fm_typed_error.is_some()
+    }
 }
 
 pub fn parse_item_md_with_warnings(path: &Path, slug: &str, folder: &str) -> ParsedItem {
@@ -78,6 +94,7 @@ pub fn parse_item_md_with_warnings(path: &Path, slug: &str, folder: &str) -> Par
                 mapping: None,
                 fm_missing: false,
                 fm_yaml_error: None,
+                fm_typed_error: None,
             };
         }
     };
@@ -103,6 +120,7 @@ pub fn parse_item_md_text_with_warnings(
     let mut mapping: Option<serde_yaml::Mapping> = None;
     let mut fm_missing = false;
     let mut fm_yaml_error: Option<String> = None;
+    let mut fm_typed_error: Option<String> = None;
     let fm = match frontmatter {
         None => {
             fm_missing = true;
@@ -115,11 +133,13 @@ pub fn parse_item_md_text_with_warnings(
                 match serde_yaml::from_value::<Frontmatter>(value) {
                     Ok(fm) => fm,
                     Err(e) => {
-                        warnings.push(format!(
+                        let msg = format!(
                             "invalid YAML frontmatter in {}: {}",
                             source.display(),
                             e
-                        ));
+                        );
+                        fm_typed_error = Some(msg.clone());
+                        warnings.push(msg);
                         Frontmatter::default()
                     }
                 }
@@ -199,6 +219,7 @@ pub fn parse_item_md_text_with_warnings(
         mapping,
         fm_missing,
         fm_yaml_error,
+        fm_typed_error,
     }
 }
 

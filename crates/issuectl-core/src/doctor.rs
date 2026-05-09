@@ -10,6 +10,29 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use regex::{Captures, Regex};
 
+/// Severity tag for entries in `DoctorFindings::parse_errors`. Replaces
+/// the previous substring-matching classifier in `is_hard_parse_error`:
+/// classification is set at push-time using the typed parser state
+/// (`ParsedItem::has_hard_frontmatter_error`), so re-wording a parser
+/// message no longer reclassifies hard-fail as soft-warn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseSeverity {
+    /// File unreadable or frontmatter completely unparseable. `--fix`
+    /// must refuse — doctor cannot safely rewrite frontmatter whose
+    /// shape it could not understand.
+    Hard,
+    /// Recoverable warning that the migration pass is designed to
+    /// heal (legacy numeric refs, etc.). Does not block `--fix`.
+    Soft,
+}
+
+#[derive(Debug, Clone)]
+struct ParseError {
+    location: String,
+    message: String,
+    severity: ParseSeverity,
+}
+
 use crate::agents;
 use crate::parser;
 use crate::schema;
@@ -222,8 +245,15 @@ struct LegacyMigration {
     old_number: u32,
 }
 
+/// Stage 1: read-only output of `scan()`. No mutations recorded here.
+/// Compare to `ApplyOutcome` (stage 3) which records the result of
+/// writes and to `DoctorActions` (stage 2, derived inside `run`) which
+/// captures the planned writes. Splitting the three stages makes
+/// `fix_applied` reliable (it is computed from `ApplyOutcome` alone)
+/// and removes the brittle field-by-field splice list `run` used to
+/// maintain when a new applied-action variant was added.
 #[derive(Debug, Default)]
-struct DoctorReport {
+struct DoctorFindings {
     legacy_dirs: Vec<LegacyMigration>,
     /// Slug-shaped issues still living under `issues/{open,closed}/<slug>/`
     /// (post-flat-layout legacy). Planned moves to `issues/<slug>/`.
@@ -231,16 +261,16 @@ struct DoctorReport {
     /// so `apply` can hand it back to `execute_migrate_layout_plan`
     /// (which consumes it under `&WriteLock`).
     flat_layout_plan: Option<MigrateLayoutPlan>,
-    flat_layout_migrated: Vec<MigrateMove>,
     flat_layout_conflicts: Vec<MigrateConflict>,
     invalid_slugs: Vec<String>,
     duplicate_slugs: Vec<String>,
     missing_item_md: Vec<String>,
     orphan_epic_refs: Vec<(String, String)>,
     /// Per-issue parse warnings (malformed YAML, unreadable file, ...).
-    /// Keeps `doctor` consistent with the web `/api/issues` response,
-    /// which already surfaces the same warnings.
-    parse_errors: Vec<(String, String)>,
+    /// Each entry carries an explicit `severity` — Hard entries block
+    /// `--fix` (frontmatter unparseable), Soft entries do not (legacy
+    /// numeric refs the migration pass is designed to heal).
+    parse_errors: Vec<ParseError>,
     /// Per-issue schema violations: (location, message). Populated by
     /// validating each issue's frontmatter against `issues/.schema.yaml`
     /// (or the built-in default if absent).
@@ -252,15 +282,10 @@ struct DoctorReport {
     /// `--fix` to skip per-issue schema validation rather than treating
     /// every issue as broken against an unparseable rule set.
     schema_parse_error: Option<String>,
-    fix_applied: bool,
-    files_rewritten: usize,
     /// Slugs the read-only scan classified as safe to migrate from
     /// `## Notes` → `## Comments`. Populated in `scan()`; consumed
     /// (and emptied) by `rename_notes_to_comments()` during `--fix`.
     notes_to_rename: Vec<String>,
-    /// `## Notes` body sections actually renamed during a fix pass.
-    /// Subset of `notes_to_rename` after the rewrite has run.
-    notes_renamed: Vec<String>,
     /// Slugs whose body has both `## Notes` and `## Comments`, or
     /// multiple `## Notes` headings — merging needs human
     /// judgement, so doctor flags them and skips.
@@ -290,8 +315,6 @@ struct DoctorReport {
     /// Orphan `.issuectl-tmp-*` files inside `issues/**` (atomic-write
     /// tempfiles that survived a SIGKILL). `--fix` deletes them.
     orphan_tempfiles: Vec<PathBuf>,
-    /// Tempfiles deleted during a fix pass. Subset of `orphan_tempfiles`.
-    orphan_tempfiles_removed: Vec<PathBuf>,
     /// Symlinked issue directories — refused by `repo::resolve_layout`,
     /// reported here for the user to either restore or remove.
     symlinked_dirs: Vec<String>,
@@ -305,8 +328,6 @@ struct DoctorReport {
     /// `issues/open/<slug>` carrying a closing status — legacy folder
     /// repos only. With `--fix`: rewrite status to `open`, drop `closed:`.
     open_with_closing_status: Vec<(String, String, PathBuf)>,
-    /// Status reconciliation rewrites that actually ran during `--fix`.
-    status_reconciled: Vec<String>,
     /// Issues whose current status would fail the declarative
     /// transition rules in `.issuectl/transitions.yaml` (e.g. `done`
     /// without an assignee). Surfaced as warnings — these may be
@@ -333,9 +354,99 @@ struct DoctorReport {
     /// the user fixes the unrelated YAML typo. Holds the loader
     /// error message for rendering.
     agents_md_check_skipped: Option<String>,
-    /// Set to true after `--fix` regenerates the AGENTS.md managed
-    /// block.
+}
+
+/// Stage 2: planned writes derived from `DoctorFindings`. Built by
+/// `DoctorActions::from_findings` inside `run` when `--fix` is set.
+/// `apply` consumes this and never reads back from `DoctorFindings`,
+/// so a new applied-action variant is added by extending this struct
+/// + `ApplyOutcome` — no need to update a manual splice list in `run`.
+#[derive(Debug, Default)]
+struct DoctorActions {
+    legacy_dirs: Vec<LegacyMigration>,
+    flat_layout_plan: Option<MigrateLayoutPlan>,
+    notes_to_rename: Vec<String>,
+    orphan_tempfiles: Vec<PathBuf>,
+    closed_with_active_status: Vec<(String, String, PathBuf)>,
+    open_with_closing_status: Vec<(String, String, PathBuf)>,
+    /// True when scan flagged AGENTS.md drift AND the file is present
+    /// AND drift is regeneratable (not malformed / not check-skipped).
+    regenerate_agents_md: bool,
+    /// Always true on `--fix` — `schema::ensure_default_written` is
+    /// idempotent, so re-running is cheap even on a repo that already
+    /// has the file. Kept as an explicit field so `ApplyOutcome` can
+    /// faithfully report whether the bootstrap actually wrote.
+    bootstrap_schema: bool,
+    /// Critical findings that block `--fix`. Computed via
+    /// `critical_blockers` from the same predicate that drives the
+    /// run-time exit code, guaranteeing the two are aligned (no class
+    /// of finding is critical for one and not the other).
+    preflight_blockers: Vec<String>,
+}
+
+impl DoctorActions {
+    /// Move action triggers out of findings into a derived plan. After
+    /// this call, `findings` no longer carries the to-do data — it is
+    /// fresh-scanned again post-apply for the user-facing render, so
+    /// nothing depends on the cleared fields.
+    fn from_findings(findings: &mut DoctorFindings) -> Self {
+        let preflight_blockers = critical_blockers(findings);
+        DoctorActions {
+            legacy_dirs: std::mem::take(&mut findings.legacy_dirs),
+            flat_layout_plan: findings.flat_layout_plan.take(),
+            notes_to_rename: std::mem::take(&mut findings.notes_to_rename),
+            orphan_tempfiles: std::mem::take(&mut findings.orphan_tempfiles),
+            closed_with_active_status: std::mem::take(
+                &mut findings.closed_with_active_status,
+            ),
+            open_with_closing_status: std::mem::take(
+                &mut findings.open_with_closing_status,
+            ),
+            regenerate_agents_md: findings.agents_md_drift
+                && findings.agents_md_malformed.is_none()
+                && findings.agents_md_check_skipped.is_none(),
+            bootstrap_schema: true,
+            preflight_blockers,
+        }
+    }
+}
+
+/// Stage 3: result of running `apply`. The single source of truth for
+/// "what was actually written". `fix_applied` is computed from the
+/// outcome alone — no `report.fix_applied = true` early-return path
+/// can lie about it.
+#[derive(Debug, Default)]
+struct ApplyOutcome {
+    /// Preflight blockers — when non-empty, no writes were attempted.
+    /// `apply` returns `Ok(outcome)` (not `Err`) so callers in JSON
+    /// mode can still emit a structured envelope rather than an
+    /// anyhow-formatted stderr blob.
+    blockers: Vec<String>,
+    legacy_dirs_migrated: Vec<LegacyMigration>,
+    flat_layout_migrated: Vec<MigrateMove>,
+    notes_renamed: Vec<String>,
+    orphan_tempfiles_removed: Vec<PathBuf>,
+    status_reconciled: Vec<String>,
+    files_rewritten: usize,
     agents_md_regenerated: bool,
+    schema_bootstrapped: bool,
+}
+
+impl ApplyOutcome {
+    /// True iff at least one filesystem write actually happened.
+    /// Adding a new applied-action variant means adding one OR-clause
+    /// here — the field list is in one place, not spliced across `run`
+    /// and three other functions.
+    fn fix_applied(&self) -> bool {
+        !self.legacy_dirs_migrated.is_empty()
+            || !self.flat_layout_migrated.is_empty()
+            || !self.notes_renamed.is_empty()
+            || !self.orphan_tempfiles_removed.is_empty()
+            || !self.status_reconciled.is_empty()
+            || self.files_rewritten > 0
+            || self.agents_md_regenerated
+            || self.schema_bootstrapped
+    }
 }
 
 /// Project an absolute path under the repo root to a repo-relative
@@ -350,85 +461,171 @@ fn rel(repo_root: &Path, p: &Path) -> String {
 }
 
 pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
-    let mut report = scan(repo_root)?;
-
-    if fix {
+    let mut findings = scan(repo_root)?;
+    let outcome: Option<ApplyOutcome> = if fix {
         // D2: hold the repo write lock through the apply pass so doctor
         // doesn't race CLI/server mutations. Re-scan under the lock to
         // ensure the plan reflects the locked-state filesystem.
         let lock = crate::mutate::WriteLock::acquire(repo_root)?;
-        report = scan(repo_root)?;
-        apply(repo_root, &mut report, &lock)?;
-        // After mutation, the in-memory report mixes "what we planned"
-        // with "what's still true". Stale findings (e.g. broken refs we
-        // just fixed via legacy-migration rewrites) would mis-report
-        // the post-fix state and mis-compute the exit code. Take one
-        // clean snapshot and merge the just-applied actions back in
-        // for the user-facing summary.
-        let mut fresh = scan(repo_root)?;
-        fresh.legacy_dirs = std::mem::take(&mut report.legacy_dirs);
-        fresh.flat_layout_migrated = std::mem::take(&mut report.flat_layout_migrated);
-        fresh.notes_renamed = std::mem::take(&mut report.notes_renamed);
-        fresh.orphan_tempfiles_removed =
-            std::mem::take(&mut report.orphan_tempfiles_removed);
-        fresh.status_reconciled = std::mem::take(&mut report.status_reconciled);
-        fresh.files_rewritten = report.files_rewritten;
-        fresh.agents_md_regenerated = report.agents_md_regenerated;
-        // `fix_applied` means "a mutation actually happened", not "fix
-        // mode ran". A clean repo + `--fix` is a no-op; consumers
-        // (JSON, text rendering) should be able to distinguish.
-        fresh.fix_applied = !fresh.legacy_dirs.is_empty()
-            || !fresh.flat_layout_migrated.is_empty()
-            || !fresh.notes_renamed.is_empty()
-            || !fresh.orphan_tempfiles_removed.is_empty()
-            || !fresh.status_reconciled.is_empty()
-            || fresh.files_rewritten > 0
-            || fresh.agents_md_regenerated;
-        report = fresh;
-    }
+        findings = scan(repo_root)?;
+        let actions = DoctorActions::from_findings(&mut findings);
+        let outcome = apply(repo_root, actions, &lock)?;
+        // After mutation re-scan once: the outcome stands alone (it
+        // carries what was written) and the fresh scan supplies what
+        // is now true on disk. No field-by-field splice list — adding
+        // a new applied-action variant means extending `ApplyOutcome`
+        // and `DoctorActions`, not editing this function.
+        if outcome.fix_applied() {
+            findings = scan(repo_root)?;
+        }
+        Some(outcome)
+    } else {
+        None
+    };
 
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&render_json(&report, fix, repo_root))?
+            serde_json::to_string_pretty(&render_json(
+                &findings,
+                outcome.as_ref(),
+                fix,
+                repo_root
+            ))?
         );
     } else {
-        render_text(&report, fix);
+        render_text(&findings, outcome.as_ref(), fix);
     }
-    if has_critical_findings(&report) {
+    let has_critical = !critical_blockers(&findings).is_empty();
+    let preflight_blocked = outcome
+        .as_ref()
+        .map(|o| !o.blockers.is_empty())
+        .unwrap_or(false);
+    if has_critical || preflight_blocked {
         std::process::exit(1);
     }
     Ok(())
 }
 
-/// "Critical" = the repo is in a state the user must intervene on.
-/// Routine migrations (legacy dirs, flat-layout moves, notes renames)
-/// are not critical: doctor handles them in `--fix`. Parse errors,
-/// schema violations, ambiguous slugs, dependency cycles, conflict
-/// markers, both-folders presence, broken refs, and status/closed
-/// inconsistencies are all critical.
-fn has_critical_findings(report: &DoctorReport) -> bool {
-    !report.parse_errors.is_empty()
-        || !report.schema_violations.is_empty()
-        || report.schema_parse_error.is_some()
-        || !report.duplicate_slugs.is_empty()
-        || !report.invalid_slugs.is_empty()
-        || !report.missing_item_md.is_empty()
-        || !report.broken_refs.is_empty()
-        || !report.blocked_by_cycles.is_empty()
-        || !report.status_consistency.is_empty()
-        || !report.timestamp_issues.is_empty()
-        || !report.conflict_markers.is_empty()
-        || !report.symlinked_dirs.is_empty()
-        || !report.both_open_and_closed.is_empty()
-        || !report.flat_layout_conflicts.is_empty()
-        || !report.notes_conflicts.is_empty()
-        || report.agents_md_malformed.is_some()
-        || report.agents_md_check_skipped.is_some()
+/// Single-source-of-truth predicate for "the repo is in a state the
+/// user must intervene on". Drives both the exit code (`run` checks
+/// `!critical_blockers(&findings).is_empty()`) AND the `--fix`
+/// preflight check (`apply` populates `outcome.blockers` from the
+/// same list). Previously these two callers held drifting copies of
+/// the rule set, which produced two failure modes the spin-off
+/// flagged: (a) `--fix` would mutate a repo `has_critical_findings`
+/// rated critical (partial mutations on a critically-unhealthy
+/// repo), and (b) parse-error classification used a fragile
+/// substring matcher whose Hard/Soft split was easy to flip by
+/// re-wording the parser's message.
+fn critical_blockers(findings: &DoctorFindings) -> Vec<String> {
+    let mut blockers: Vec<String> = Vec::new();
+
+    if !findings.flat_layout_conflicts.is_empty() {
+        let detail = findings
+            .flat_layout_conflicts
+            .iter()
+            .map(|c| format!("    {}: {}", c.slug, c.detail))
+            .collect::<Vec<_>>()
+            .join("\n");
+        blockers.push(format!("flat-layout migration conflicts:\n{detail}"));
+    }
+    if !findings.duplicate_slugs.is_empty() {
+        blockers.push(format!("duplicate slugs: {:?}", findings.duplicate_slugs));
+    }
+    if !findings.both_open_and_closed.is_empty() {
+        blockers.push(format!(
+            "slugs present in BOTH issues/open/ and issues/closed/: {:?}",
+            findings.both_open_and_closed
+        ));
+    }
+    if !findings.conflict_markers.is_empty() {
+        blockers.push(format!(
+            "git merge-conflict markers in: {:?}",
+            findings.conflict_markers
+        ));
+    }
+    let hard_parse: Vec<&ParseError> = findings
+        .parse_errors
+        .iter()
+        .filter(|e| e.severity == ParseSeverity::Hard)
+        .collect();
+    if !hard_parse.is_empty() {
+        let detail = hard_parse
+            .iter()
+            .map(|e| format!("    {}: {}", e.location, e.message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        blockers.push(format!(
+            "unparseable issue file(s) ({}):\n{detail}",
+            hard_parse.len()
+        ));
+    }
+    if let Some(err) = &findings.schema_parse_error {
+        blockers.push(format!("schema file parse error: {err}"));
+    }
+    if !findings.schema_violations.is_empty() {
+        blockers.push(format!(
+            "schema violations: {} issue(s) fail validation",
+            findings.schema_violations.len()
+        ));
+    }
+    if !findings.invalid_slugs.is_empty() {
+        blockers.push(format!("invalid slugs: {:?}", findings.invalid_slugs));
+    }
+    if !findings.missing_item_md.is_empty() {
+        blockers.push(format!(
+            "directories missing item.md: {:?}",
+            findings.missing_item_md
+        ));
+    }
+    if !findings.broken_refs.is_empty() {
+        blockers.push(format!(
+            "broken cross-references: {} entry/entries",
+            findings.broken_refs.len()
+        ));
+    }
+    if !findings.blocked_by_cycles.is_empty() {
+        blockers.push(format!(
+            "dependency cycles via blocked_by: {} cycle(s)",
+            findings.blocked_by_cycles.len()
+        ));
+    }
+    if !findings.status_consistency.is_empty() {
+        blockers.push(format!(
+            "status/closed-date inconsistencies: {} entry/entries",
+            findings.status_consistency.len()
+        ));
+    }
+    if !findings.timestamp_issues.is_empty() {
+        blockers.push(format!(
+            "timestamp sanity issues: {} entry/entries",
+            findings.timestamp_issues.len()
+        ));
+    }
+    if !findings.symlinked_dirs.is_empty() {
+        blockers.push(format!(
+            "symlinked issue directories: {:?}",
+            findings.symlinked_dirs
+        ));
+    }
+    if !findings.notes_conflicts.is_empty() {
+        blockers.push(format!(
+            "## Notes / ## Comments conflicts (manual merge): {:?}",
+            findings.notes_conflicts
+        ));
+    }
+    if let Some(reason) = &findings.agents_md_malformed {
+        blockers.push(format!("AGENTS.md is malformed: {reason}"));
+    }
+    if let Some(err) = &findings.agents_md_check_skipped {
+        blockers.push(format!("AGENTS.md drift check skipped: {err}"));
+    }
+    blockers
 }
 
-fn scan(repo_root: &Path) -> Result<DoctorReport> {
-    let mut report = DoctorReport::default();
+fn scan(repo_root: &Path) -> Result<DoctorFindings> {
+    let mut report = DoctorFindings::default();
     let scan = scan_issues(repo_root)?;
 
     populate_slug_and_legacy(&scan, repo_root, &mut report);
@@ -455,10 +652,11 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
             if let Some(s) = schema_value.as_ref() {
                 let universe = schema::status_universe(s);
                 if let Err(e) = crate::transitions::validate_status_refs(&r, &universe) {
-                    report.parse_errors.push((
-                        crate::transitions::RULES_RELATIVE_PATH.to_string(),
-                        format!("{e:#}"),
-                    ));
+                    report.parse_errors.push(ParseError {
+                        location: crate::transitions::RULES_RELATIVE_PATH.to_string(),
+                        message: format!("{e:#}"),
+                        severity: ParseSeverity::Hard,
+                    });
                     None
                 } else {
                     Some(r)
@@ -468,10 +666,11 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
             }
         }
         Err(e) => {
-            report.parse_errors.push((
-                crate::transitions::RULES_RELATIVE_PATH.to_string(),
-                format!("{e:#}"),
-            ));
+            report.parse_errors.push(ParseError {
+                location: crate::transitions::RULES_RELATIVE_PATH.to_string(),
+                message: format!("{e:#}"),
+                severity: ParseSeverity::Hard,
+            });
             None
         }
     };
@@ -532,7 +731,7 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
 /// Slug uniqueness, legacy-migration plan, missing-item-md, parse
 /// warnings, invalid slug detection. Mirrors the original main scan
 /// loop but consumes `ScanResult` instead of re-reading from disk.
-fn populate_slug_and_legacy(scan: &ScanResult, repo_root: &Path, report: &mut DoctorReport) {
+fn populate_slug_and_legacy(scan: &ScanResult, repo_root: &Path, report: &mut DoctorFindings) {
     let issues_dir = repo_root.join("issues");
     let mut all_slugs: BTreeMap<String, usize> = BTreeMap::new();
 
@@ -574,8 +773,17 @@ fn populate_slug_and_legacy(scan: &ScanResult, repo_root: &Path, report: &mut Do
         // otherwise be flagged for every legacy issue.
         if s.legacy_number.is_none() {
             if let Some(parsed) = &s.parsed {
+                let severity = if parsed.has_hard_frontmatter_error() {
+                    ParseSeverity::Hard
+                } else {
+                    ParseSeverity::Soft
+                };
                 for w in &parsed.warnings {
-                    report.parse_errors.push((location.clone(), w.clone()));
+                    report.parse_errors.push(ParseError {
+                        location: location.clone(),
+                        message: w.clone(),
+                        severity,
+                    });
                 }
             }
         }
@@ -590,7 +798,7 @@ fn populate_slug_and_legacy(scan: &ScanResult, repo_root: &Path, report: &mut Do
 
 /// Orphan epic-reference detection. Uses the cached parser output for
 /// each issue rather than re-reading every `item.md`.
-fn populate_orphan_epic_refs(scan: &ScanResult, report: &mut DoctorReport) {
+fn populate_orphan_epic_refs(scan: &ScanResult, report: &mut DoctorFindings) {
     let mut existing_slugs: BTreeSet<String> = BTreeSet::new();
     for s in &scan.issues {
         existing_slugs.insert(s.dir_name.clone());
@@ -623,7 +831,7 @@ fn populate_orphan_epic_refs(scan: &ScanResult, report: &mut DoctorReport) {
 fn populate_extended_validation(
     scan: &ScanResult,
     schema: Option<&schema::Schema>,
-    report: &mut DoctorReport,
+    report: &mut DoctorFindings,
 ) {
     use chrono::NaiveDate;
 
@@ -708,6 +916,55 @@ fn populate_extended_validation(
         let Some(fm) = primary.parsed.as_ref().and_then(|p| p.mapping.as_ref()) else {
             continue;
         };
+
+        // Skip lints that flag findings critical_blockers treats as
+        // hard refusals when the issue is a legacy `<NN>-<slug>` dir
+        // under `issues/{open,closed}/`. Those issues are migrated
+        // wholesale by `--fix` (frontmatter rewritten, refs translated,
+        // file moved), so flagging their numeric epic refs as broken
+        // would refuse the very fix designed to heal them. Mirrors
+        // the existing skip in populate_schema_violations.
+        let primary_is_legacy = (primary.folder == "open" || primary.folder == "closed")
+            && parser::parse_legacy_dir(&primary.dir_name).is_some();
+        if primary_is_legacy {
+            // Still run the per-hit status/folder reconciliation pass
+            // below — that is exactly the legacy state `--fix` heals,
+            // and emitting `closed_with_active_status` /
+            // `open_with_closing_status` here is what triggers the
+            // reconciliation.
+            for hit in hits {
+                if hit.folder != "open" && hit.folder != "closed" {
+                    continue;
+                }
+                let Some(fm) = hit.parsed.as_ref().and_then(|p| p.mapping.as_ref()) else {
+                    continue;
+                };
+                let Some(hit_status) = fm
+                    .get(serde_yaml::Value::String("status".into()))
+                    .and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                match hit.folder.as_str() {
+                    "closed" if crate::issue_fields::ACTIVE_STATUSES.contains(&hit_status) => {
+                        report.closed_with_active_status.push((
+                            slug.clone(),
+                            hit_status.to_string(),
+                            hit.item_path.clone(),
+                        ));
+                    }
+                    "open" if crate::issue_fields::is_closing_status(hit_status) => {
+                        report.open_with_closing_status.push((
+                            slug.clone(),
+                            hit_status.to_string(),
+                            hit.item_path.clone(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
 
         // Unknown-key flagging.
         for (k, _) in fm.iter() {
@@ -978,7 +1235,7 @@ fn detect_cycles(graph: &BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
     found.into_iter().collect()
 }
 
-fn populate_notes_migration(scan: &ScanResult, report: &mut DoctorReport) {
+fn populate_notes_migration(scan: &ScanResult, report: &mut DoctorFindings) {
     for s in &scan.issues {
         if s.folder != "flat" || !s.item_present {
             continue;
@@ -998,7 +1255,7 @@ fn populate_schema_violations(
     scan: &ScanResult,
     repo_root: &Path,
     schema: &schema::Schema,
-    report: &mut DoctorReport,
+    report: &mut DoctorFindings,
 ) {
     for s in &scan.issues {
         if !s.item_present {
@@ -1021,20 +1278,30 @@ fn populate_schema_violations(
                 .display()
         );
         if let Some(err) = &s.read_error {
-            report.parse_errors.push((location, err.clone()));
+            report.parse_errors.push(ParseError {
+                location,
+                message: err.clone(),
+                severity: ParseSeverity::Hard,
+            });
             continue;
         }
         let Some(parsed) = s.parsed.as_ref() else {
             continue;
         };
         if parsed.fm_missing {
-            report
-                .parse_errors
-                .push((location, "missing or unterminated frontmatter".into()));
+            report.parse_errors.push(ParseError {
+                location,
+                message: "missing or unterminated frontmatter".into(),
+                severity: ParseSeverity::Hard,
+            });
             continue;
         }
         if let Some(err) = &parsed.fm_yaml_error {
-            report.parse_errors.push((location, err.clone()));
+            report.parse_errors.push(ParseError {
+                location,
+                message: err.clone(),
+                severity: ParseSeverity::Hard,
+            });
             continue;
         }
         let Some(fm) = parsed.mapping.as_ref() else {
@@ -1052,7 +1319,7 @@ fn populate_transition_warnings(
     scan: &ScanResult,
     rules: Option<&crate::transitions::TransitionRules>,
     schema: Option<&schema::Schema>,
-    report: &mut DoctorReport,
+    report: &mut DoctorFindings,
 ) {
     let rules_active = rules.map(|r| !r.status_rules.is_empty()).unwrap_or(false);
     let sections_active = schema
@@ -1107,166 +1374,102 @@ fn essential_frontmatter_absent_from_mapping(
     !has("status") || !has("type")
 }
 
-/// Bail before any filesystem mutation if the repo is in a state that
-/// `--fix` cannot safely heal. A mid-fix bail leaves the repo in a
-/// half-migrated state with no rollback path; surface *every* blocker
-/// up-front so the user can resolve them in one pass instead of
-/// iterating one preflight failure at a time.
-fn preflight_apply(report: &DoctorReport) -> Result<()> {
-    let mut blockers: Vec<String> = Vec::new();
-
-    if !report.flat_layout_conflicts.is_empty() {
-        let detail = report
-            .flat_layout_conflicts
-            .iter()
-            .map(|c| format!("    {}: {}", c.slug, c.detail))
-            .collect::<Vec<_>>()
-            .join("\n");
-        blockers.push(format!("flat-layout migration conflicts:\n{detail}"));
-    }
-    if !report.duplicate_slugs.is_empty() {
-        blockers.push(format!("duplicate slugs: {:?}", report.duplicate_slugs));
-    }
-    if !report.both_open_and_closed.is_empty() {
-        blockers.push(format!(
-            "slugs present in BOTH issues/open/ and issues/closed/: {:?}",
-            report.both_open_and_closed
-        ));
-    }
-    if !report.conflict_markers.is_empty() {
-        blockers.push(format!(
-            "git merge-conflict markers in: {:?}",
-            report.conflict_markers
-        ));
-    }
-    // Only HARD parse errors block — recoverable warnings (e.g.
-    // "legacy numeric epic ref" hints) would otherwise refuse `--fix`
-    // on the very repos the legacy migration was designed to heal.
-    let hard_parse_errors: Vec<&(String, String)> = report
-        .parse_errors
-        .iter()
-        .filter(|(_, msg)| is_hard_parse_error(msg))
-        .collect();
-    if !hard_parse_errors.is_empty() {
-        let detail = hard_parse_errors
-            .iter()
-            .map(|(loc, msg)| format!("    {loc}: {msg}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        blockers.push(format!(
-            "unparseable issue file(s) ({}):\n{detail}",
-            hard_parse_errors.len()
-        ));
-    }
-
-    if !blockers.is_empty() {
-        bail!(
-            "doctor: cannot safely apply --fix until these issues are resolved:\n\n  - {}",
-            blockers.join("\n\n  - ")
-        );
-    }
-    Ok(())
-}
-
-/// Distinguish hard parse failures (file unreadable, frontmatter
-/// completely unparseable) from soft warnings the legacy migration
-/// path is supposed to heal. Only hard failures block `--fix`.
-fn is_hard_parse_error(msg: &str) -> bool {
-    msg.contains("invalid frontmatter YAML")
-        || msg.contains("missing or unterminated frontmatter")
-        || msg.contains("invalid YAML frontmatter")
-        || msg.starts_with("cannot read")
-}
-
 fn apply(
     repo_root: &Path,
-    report: &mut DoctorReport,
+    mut actions: DoctorActions,
     lock: &crate::mutate::WriteLock,
-) -> Result<()> {
-    // Preflight: refuse to mutate before checking every condition that
-    // would force us to bail mid-way. A mid-fix bail leaves the repo in
-    // a half-migrated state with no rollback path, so all "manual
-    // attention required" findings must block at the top.
-    preflight_apply(report)?;
+) -> Result<ApplyOutcome> {
+    let mut outcome = ApplyOutcome::default();
+
+    // Preflight: refuse to mutate when ANY critical finding is
+    // present. Crucially we DO NOT bail — the blockers go into the
+    // outcome so `--json --fix` callers receive structured output
+    // instead of an anyhow-formatted stderr blob (the AGENTS.md
+    // "always `--json` when scripting" promise).
+    if !actions.preflight_blockers.is_empty() {
+        outcome.blockers = std::mem::take(&mut actions.preflight_blockers);
+        return Ok(outcome);
+    }
 
     // Orphan tempfile cleanup runs FIRST so paths recorded by scan()
     // are still valid: directory migration would invalidate them.
-    apply_orphan_tempfiles(report)?;
+    apply_orphan_tempfiles(&mut actions, &mut outcome)?;
 
     // Status/folder reconciliation runs BEFORE the flat-layout
     // migration so the rewrites land at the legacy path that scan()
     // recorded; the subsequent migration moves the corrected file.
-    apply_status_reconciliation(repo_root, report)?;
+    apply_status_reconciliation(&mut actions, &mut outcome)?;
 
     // Notes → Comments migration is independent of layout migration:
     // it touches body markdown of flat-layout dirs only, never moves
     // files. Run it FIRST so layout-conflict bail-outs don't block
     // unrelated body fixes (round-2 finding O18).
-    rename_notes_to_comments(repo_root, report)?;
+    rename_notes_to_comments(repo_root, &mut actions, &mut outcome)?;
 
-    regenerate_agents_md(repo_root, report)?;
+    regenerate_agents_md(repo_root, &actions, &mut outcome)?;
 
     // Auto-bootstrap the schema file on --fix. Cheap; idempotent. The
     // bootstrap call also ensures the issues/ directory exists so a
     // brand-new repo with `issuectl doctor --fix` ends in a usable
     // state.
-    let issues_dir = repo_root.join("issues");
-    fs::create_dir_all(&issues_dir)
-        .with_context(|| format!("cannot create {}", issues_dir.display()))?;
-    let wrote_default = schema::ensure_default_written(repo_root)?;
-    report.schema_missing = false;
-    if wrote_default {
-        // We just laid down a known-good default; any pre-existing
-        // parse error from the report is now stale.
-        report.schema_parse_error = None;
+    if actions.bootstrap_schema {
+        let issues_dir = repo_root.join("issues");
+        fs::create_dir_all(&issues_dir)
+            .with_context(|| format!("cannot create {}", issues_dir.display()))?;
+        // Report `schema_bootstrapped = true` only when we actually
+        // wrote bytes — `ensure_default_written` is idempotent and
+        // returns `false` when the file already existed. Previously
+        // `fix_applied` ignored schema bootstrap entirely; this lifts
+        // the value into the outcome so `--fix` runs that ONLY write
+        // `.schema.yaml` correctly report `fix_applied: true`.
+        outcome.schema_bootstrapped = schema::ensure_default_written(repo_root)?;
     }
 
     // Flat-layout migration: any issue still under
     // `issues/{open,closed}/<slug>/` moves up to `issues/<slug>/`. The
     // pre-acquired write lock in `run` covers this — `execute_migrate_layout_plan`
     // is the lock-free body and must not re-acquire.
-    if let Some(plan) = report.flat_layout_plan.take() {
+    let mut legacy_dirs = std::mem::take(&mut actions.legacy_dirs);
+    if let Some(plan) = actions.flat_layout_plan.take() {
         if !plan.moves().is_empty() {
             // `ExecuteOutcome` carries partial progress on mid-loop
             // failure so the user-facing summary can still render
             // "moved A, B before failing on C".
-            let outcome = execute_migrate_layout_plan(plan, lock);
-            report.flat_layout_migrated = outcome.migrated;
-            if let Some(err) = outcome.error {
+            let exec_outcome = execute_migrate_layout_plan(plan, lock);
+            outcome.flat_layout_migrated = exec_outcome.migrated;
+            if let Some(err) = exec_outcome.error {
                 return Err(err);
             }
             // Re-scan so the NN-rename pass operates on fresh
             // `old_path`s and picks up frontmatter-only legacy issues
             // that just moved into the flat layout.
             let fresh = scan(repo_root)?;
-            report.legacy_dirs = fresh.legacy_dirs;
-            report.duplicate_slugs = fresh.duplicate_slugs;
+            legacy_dirs = fresh.legacy_dirs;
         }
     }
 
-    if report.legacy_dirs.is_empty() {
-        report.fix_applied = true;
-        return Ok(());
+    if legacy_dirs.is_empty() {
+        return Ok(outcome);
     }
 
     // Build maps for reference rewriting.
     let mut number_to_slug: BTreeMap<u32, String> = BTreeMap::new();
     let mut dir_to_slug: BTreeMap<String, String> = BTreeMap::new();
-    for m in &report.legacy_dirs {
+    for m in &legacy_dirs {
         let _prev = number_to_slug.insert(m.old_number, m.new_slug.clone());
         // Duplicate legacy numbers are flagged via build_ambiguous below;
         // rewrites for those numbers will be skipped.
         dir_to_slug.insert(m.old_dir_name.clone(), m.new_slug.clone());
     }
 
-    let ambiguous_numbers = build_ambiguous(&report.legacy_dirs);
+    let ambiguous_numbers = build_ambiguous(&legacy_dirs);
 
     // Single-phase atomic rename: old dirname (`<NN>-<slug>`) and new
     // slug (`<intensifier-adj-noun>`) cannot collide, so the temp-suffix
     // shuffle that the previous version did is unnecessary — and worse,
     // an interruption mid-shuffle would leave `*.issuectl-doctor-<pid>`
     // dirs that no subsequent doctor run could recognize.
-    for m in &report.legacy_dirs {
+    for m in &legacy_dirs {
         if m.new_path.exists() {
             bail!("target slug dir already exists: {}", m.new_path.display());
         }
@@ -1279,7 +1482,7 @@ fn apply(
         })?;
     }
 
-    for m in &report.legacy_dirs {
+    for m in &legacy_dirs {
         let item_path = m.new_path.join("item.md");
         rewrite_item_frontmatter(&item_path, &m.new_slug, &number_to_slug, &ambiguous_numbers)?;
     }
@@ -1293,7 +1496,8 @@ fn apply(
     let scopes = vec![issues_path];
     let files_rewritten =
         rewrite_markdown_in_scopes(&scopes, &number_to_slug, &dir_to_slug, &ambiguous_numbers)?;
-    report.files_rewritten = files_rewritten;
+    outcome.files_rewritten = files_rewritten;
+    outcome.legacy_dirs_migrated = legacy_dirs;
 
     // Prune now-empty `issues/{open,closed}` parent dirs after any
     // kind of legacy migration. Lives here (not inside
@@ -1301,9 +1505,9 @@ fn apply(
     // — which the flat-layout planner skips — still gets cleaned.
     crate::migrate_layout::prune_empty_legacy_parents(&repo_root.join("issues"));
 
-    report.fix_applied = true;
-    Ok(())
+    Ok(outcome)
 }
+
 
 /// Apply the Notes → Comments rename to every slug `scan()` flagged
 /// in `notes_to_rename`. Best-effort, sequential (per round-2
@@ -1316,11 +1520,12 @@ fn apply(
 /// failed to parse (would regenerate from defaults, overwriting real
 /// policy). Doctor's run() already holds `mutate::WriteLock` for the
 /// whole apply pass; this function does not re-acquire.
-fn regenerate_agents_md(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
-    if !report.agents_md_drift {
-        return Ok(());
-    }
-    if report.agents_md_malformed.is_some() || report.agents_md_check_skipped.is_some() {
+fn regenerate_agents_md(
+    repo_root: &Path,
+    actions: &DoctorActions,
+    outcome: &mut ApplyOutcome,
+) -> Result<()> {
+    if !actions.regenerate_agents_md {
         return Ok(());
     }
     let path = agents::agents_path(repo_root);
@@ -1334,15 +1539,18 @@ fn regenerate_agents_md(repo_root: &Path, report: &mut DoctorReport) -> Result<(
     let new_text = agents::regenerate_managed(&original, &schema, &rules)?;
     if new_text != original {
         agents::atomic_write(&path, new_text.as_bytes())?;
-        report.agents_md_regenerated = true;
+        outcome.agents_md_regenerated = true;
     }
-    report.agents_md_drift = false;
     Ok(())
 }
 
-fn rename_notes_to_comments(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
+fn rename_notes_to_comments(
+    repo_root: &Path,
+    actions: &mut DoctorActions,
+    outcome: &mut ApplyOutcome,
+) -> Result<()> {
     let issues = repo_root.join("issues");
-    let planned = std::mem::take(&mut report.notes_to_rename);
+    let planned = std::mem::take(&mut actions.notes_to_rename);
     for slug in planned {
         let item_path = issues.join(&slug).join("item.md");
         if !item_path.is_file() {
@@ -1352,23 +1560,25 @@ fn rename_notes_to_comments(repo_root: &Path, report: &mut DoctorReport) -> Resu
             .with_context(|| format!("cannot read {}", item_path.display()))?;
         let (rewritten, has_conflict) = migrate_notes_heading(&original);
         if has_conflict {
-            // scan() already classified — but if the file changed
-            // between scan and apply (concurrent edit under flock is
-            // impossible, so this means a manual edit), surface it.
-            report.notes_conflicts.push(slug);
+            // Conflict surfaced during apply (file changed between
+            // scan and apply — manual edit). The post-apply re-scan
+            // in `run` will pick this up and emit it via findings.
             continue;
         }
         if rewritten != original {
             fs::write(&item_path, rewritten)
                 .with_context(|| format!("cannot write {}", item_path.display()))?;
-            report.notes_renamed.push(slug);
+            outcome.notes_renamed.push(slug);
         }
     }
     Ok(())
 }
 
-fn apply_orphan_tempfiles(report: &mut DoctorReport) -> Result<()> {
-    let planned = std::mem::take(&mut report.orphan_tempfiles);
+fn apply_orphan_tempfiles(
+    actions: &mut DoctorActions,
+    outcome: &mut ApplyOutcome,
+) -> Result<()> {
+    let planned = std::mem::take(&mut actions.orphan_tempfiles);
     let mut removed = Vec::new();
     for path in planned {
         match fs::remove_file(&path) {
@@ -1380,13 +1590,16 @@ fn apply_orphan_tempfiles(report: &mut DoctorReport) -> Result<()> {
             }
         }
     }
-    report.orphan_tempfiles_removed = removed;
+    outcome.orphan_tempfiles_removed = removed;
     Ok(())
 }
 
-fn apply_status_reconciliation(_repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
-    let active_to_closed = std::mem::take(&mut report.closed_with_active_status);
-    let closing_to_open = std::mem::take(&mut report.open_with_closing_status);
+fn apply_status_reconciliation(
+    actions: &mut DoctorActions,
+    outcome: &mut ApplyOutcome,
+) -> Result<()> {
+    let active_to_closed = std::mem::take(&mut actions.closed_with_active_status);
+    let closing_to_open = std::mem::take(&mut actions.open_with_closing_status);
     for (slug, _old_status, item_path) in active_to_closed {
         let mut item = write::read_item(&item_path)?;
         write::set_string(&mut item.frontmatter, "status", "done");
@@ -1400,14 +1613,14 @@ fn apply_status_reconciliation(_repo_root: &Path, report: &mut DoctorReport) -> 
             write::set_string(&mut item.frontmatter, "closed", &write::today());
         }
         write::write_item(&item_path, &item)?;
-        report.status_reconciled.push(slug);
+        outcome.status_reconciled.push(slug);
     }
     for (slug, _old_status, item_path) in closing_to_open {
         let mut item = write::read_item(&item_path)?;
         write::set_string(&mut item.frontmatter, "status", "open");
         write::remove_key(&mut item.frontmatter, "closed");
         write::write_item(&item_path, &item)?;
-        report.status_reconciled.push(slug);
+        outcome.status_reconciled.push(slug);
     }
     Ok(())
 }
@@ -1744,7 +1957,7 @@ fn rewrite_text(
 
 // ── Output rendering ────────────────────────────────────────────────────────
 
-fn planned_moves(report: &DoctorReport) -> &[PlannedMove] {
+fn planned_moves(report: &DoctorFindings) -> &[PlannedMove] {
     report
         .flat_layout_plan
         .as_ref()
@@ -1752,17 +1965,19 @@ fn planned_moves(report: &DoctorReport) -> &[PlannedMove] {
         .unwrap_or(&[])
 }
 
-fn render_text(report: &DoctorReport, fix: bool) {
+fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: bool) {
+    let outcome_default = ApplyOutcome::default();
+    let oc = outcome.unwrap_or(&outcome_default);
     let has_problems = !report.legacy_dirs.is_empty()
         || !planned_moves(report).is_empty()
-        || !report.flat_layout_migrated.is_empty()
+        || !oc.flat_layout_migrated.is_empty()
         || !report.flat_layout_conflicts.is_empty()
         || !report.invalid_slugs.is_empty()
         || !report.duplicate_slugs.is_empty()
         || !report.missing_item_md.is_empty()
         || !report.orphan_epic_refs.is_empty()
         || !report.parse_errors.is_empty()
-        || !report.notes_renamed.is_empty()
+        || !oc.notes_renamed.is_empty()
         || !report.notes_to_rename.is_empty()
         || !report.notes_conflicts.is_empty()
         || !report.schema_violations.is_empty()
@@ -1774,18 +1989,26 @@ fn render_text(report: &DoctorReport, fix: bool) {
         || !report.unknown_keys.is_empty()
         || !report.conflict_markers.is_empty()
         || !report.orphan_tempfiles.is_empty()
-        || !report.orphan_tempfiles_removed.is_empty()
+        || !oc.orphan_tempfiles_removed.is_empty()
         || !report.symlinked_dirs.is_empty()
         || !report.both_open_and_closed.is_empty()
         || !report.closed_with_active_status.is_empty()
         || !report.open_with_closing_status.is_empty()
-        || !report.status_reconciled.is_empty()
+        || !oc.status_reconciled.is_empty()
         || !report.transition_warnings.is_empty()
         || !report.missing_body_sections.is_empty()
         || report.agents_md_drift
         || report.agents_md_malformed.is_some()
         || report.agents_md_check_skipped.is_some()
-        || report.agents_md_regenerated;
+        || oc.agents_md_regenerated
+        || !oc.blockers.is_empty();
+    if !oc.blockers.is_empty() {
+        println!("doctor: cannot safely apply --fix until these issues are resolved:");
+        for b in &oc.blockers {
+            println!("  - {b}");
+        }
+        println!();
+    }
     if !has_problems {
         if report.schema_missing {
             println!(
@@ -1798,9 +2021,9 @@ fn render_text(report: &DoctorReport, fix: bool) {
         return;
     }
 
-    if !report.flat_layout_migrated.is_empty() {
+    if !oc.flat_layout_migrated.is_empty() {
         println!("Migrated to flat layout:");
-        for m in &report.flat_layout_migrated {
+        for m in &oc.flat_layout_migrated {
             println!("  {}  ({} → {})", m.slug, m.from.display(), m.to.display());
         }
         println!();
@@ -1874,8 +2097,8 @@ fn render_text(report: &DoctorReport, fix: bool) {
     }
     if !report.parse_errors.is_empty() {
         println!("Parse warnings:");
-        for (location, msg) in &report.parse_errors {
-            println!("  {location}: {msg}");
+        for e in &report.parse_errors {
+            println!("  {}: {}", e.location, e.message);
         }
         println!();
     }
@@ -1886,9 +2109,9 @@ fn render_text(report: &DoctorReport, fix: bool) {
         }
         println!();
     }
-    if !report.notes_renamed.is_empty() {
+    if !oc.notes_renamed.is_empty() {
         println!("Renamed `## Notes` → `## Comments`:");
-        for s in &report.notes_renamed {
+        for s in &oc.notes_renamed {
             println!("  {s}");
         }
         println!();
@@ -1960,9 +2183,9 @@ fn render_text(report: &DoctorReport, fix: bool) {
         }
         println!();
     }
-    if !report.orphan_tempfiles_removed.is_empty() {
+    if !oc.orphan_tempfiles_removed.is_empty() {
         println!("Removed orphan tempfiles:");
-        for p in &report.orphan_tempfiles_removed {
+        for p in &oc.orphan_tempfiles_removed {
             println!("  {}", p.display());
         }
         println!();
@@ -2001,9 +2224,9 @@ fn render_text(report: &DoctorReport, fix: bool) {
         }
         println!();
     }
-    if !report.status_reconciled.is_empty() {
+    if !oc.status_reconciled.is_empty() {
         println!("Reconciled status/folder mismatches:");
-        for s in &report.status_reconciled {
+        for s in &oc.status_reconciled {
             println!("  {s}");
         }
         println!();
@@ -2038,7 +2261,7 @@ fn render_text(report: &DoctorReport, fix: bool) {
         );
         println!();
     }
-    if report.agents_md_regenerated {
+    if oc.agents_md_regenerated {
         println!(
             "Regenerated schema-derived block in {}.",
             agents::AGENTS_RELATIVE_PATH
@@ -2054,19 +2277,26 @@ fn render_text(report: &DoctorReport, fix: bool) {
     if fix {
         println!(
             "Applied. {} dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} AGENTS.md block(s) regenerated.",
-            report.legacy_dirs.len(),
-            report.files_rewritten,
-            report.notes_renamed.len(),
-            if report.agents_md_regenerated { 1 } else { 0 }
+            oc.legacy_dirs_migrated.len(),
+            oc.files_rewritten,
+            oc.notes_renamed.len(),
+            if oc.agents_md_regenerated { 1 } else { 0 }
         );
     } else {
         println!("Read-only — re-run with --fix to apply.");
     }
 }
 
-fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json::Value {
-    let migrations: Vec<serde_json::Value> = report
-        .legacy_dirs
+fn render_json(
+    report: &DoctorFindings,
+    outcome: Option<&ApplyOutcome>,
+    fix: bool,
+    repo_root: &Path,
+) -> serde_json::Value {
+    let outcome_default = ApplyOutcome::default();
+    let oc = outcome.unwrap_or(&outcome_default);
+    let migrated_legacy: Vec<serde_json::Value> = oc
+        .legacy_dirs_migrated
         .iter()
         .map(|m| {
             serde_json::json!({
@@ -2077,6 +2307,22 @@ fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json
             })
         })
         .collect();
+    let migrations: Vec<serde_json::Value> = if !oc.legacy_dirs_migrated.is_empty() {
+        migrated_legacy.clone()
+    } else {
+        report
+            .legacy_dirs
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "folder": m.folder,
+                    "old_dir": m.old_dir_name,
+                    "old_number": m.old_number,
+                    "new_slug": m.new_slug,
+                })
+            })
+            .collect()
+    };
 
     let orphans: Vec<serde_json::Value> = report
         .orphan_epic_refs
@@ -2087,7 +2333,7 @@ fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json
     let parse_errors: Vec<serde_json::Value> = report
         .parse_errors
         .iter()
-        .map(|(loc, msg)| serde_json::json!({"location": loc, "message": msg}))
+        .map(|e| serde_json::json!({"location": e.location, "message": e.message}))
         .collect();
 
     let flat_layout_planned: Vec<serde_json::Value> = planned_moves(report)
@@ -2100,7 +2346,7 @@ fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json
             })
         })
         .collect();
-    let flat_layout_migrated: Vec<serde_json::Value> = report
+    let flat_layout_migrated: Vec<serde_json::Value> = oc
         .flat_layout_migrated
         .iter()
         .map(|m| {
@@ -2150,7 +2396,7 @@ fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json
         .iter()
         .map(|p| rel(repo_root, p))
         .collect();
-    let orphan_tempfiles_removed: Vec<String> = report
+    let orphan_tempfiles_removed: Vec<String> = oc
         .orphan_tempfiles_removed
         .iter()
         .map(|p| rel(repo_root, p))
@@ -2166,8 +2412,8 @@ fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json
         .map(|(s, st, _)| serde_json::json!({"slug": s, "status": st}))
         .collect();
 
-    serde_json::json!({
-        "fix_applied": fix && report.fix_applied,
+    let mut json_obj = serde_json::json!({
+        "fix_applied": fix && oc.fix_applied(),
         "migrations": migrations,
         "flat_layout_planned": flat_layout_planned,
         "flat_layout_migrated": flat_layout_migrated,
@@ -2180,9 +2426,9 @@ fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json
         "schema_missing": report.schema_missing,
         "schema_parse_error": report.schema_parse_error,
         "schema_violations": schema_violations,
-        "files_rewritten": report.files_rewritten,
+        "files_rewritten": oc.files_rewritten,
         "notes_to_rename": report.notes_to_rename,
-        "notes_renamed": report.notes_renamed,
+        "notes_renamed": oc.notes_renamed,
         "notes_conflicts": report.notes_conflicts,
         "broken_refs": broken_refs,
         "blocked_by_cycles": report.blocked_by_cycles,
@@ -2196,7 +2442,7 @@ fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json
         "both_open_and_closed": report.both_open_and_closed,
         "closed_with_active_status": closed_with_active,
         "open_with_closing_status": open_with_closing,
-        "status_reconciled": report.status_reconciled,
+        "status_reconciled": oc.status_reconciled,
         "transition_warnings": report
             .transition_warnings
             .iter()
@@ -2210,8 +2456,50 @@ fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json
         "agents_md_drift": report.agents_md_drift,
         "agents_md_malformed": report.agents_md_malformed,
         "agents_md_check_skipped": report.agents_md_check_skipped,
-        "agents_md_regenerated": report.agents_md_regenerated,
-    })
+        "agents_md_regenerated": oc.agents_md_regenerated,
+    });
+    // `apply_outcome` is the new structured envelope: emitted only on
+    // `--fix` runs so the read-only JSON shape (golden snapshot) stays
+    // byte-identical. Carries `fix_applied` (computed from the outcome
+    // alone — no early-return path can lie about it), the preflight
+    // `blockers` list (which makes `--json --fix` a structured bail
+    // instead of an anyhow text on stderr), and a rollup of every
+    // applied-action variant for scripts that prefer reading one
+    // sub-object instead of N top-level keys.
+    if fix {
+        if let serde_json::Value::Object(map) = &mut json_obj {
+            map.insert(
+                "apply_outcome".to_string(),
+                serde_json::json!({
+                    "fix_applied": oc.fix_applied(),
+                    "blockers": oc.blockers,
+                    "schema_bootstrapped": oc.schema_bootstrapped,
+                    "agents_md_regenerated": oc.agents_md_regenerated,
+                    "files_rewritten": oc.files_rewritten,
+                    "legacy_dirs_migrated": migrated_legacy,
+                    "flat_layout_migrated": oc
+                        .flat_layout_migrated
+                        .iter()
+                        .map(|m| {
+                            serde_json::json!({
+                                "slug": m.slug,
+                                "from": rel(repo_root, &m.from),
+                                "to": rel(repo_root, &m.to),
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                    "notes_renamed": oc.notes_renamed,
+                    "orphan_tempfiles_removed": oc
+                        .orphan_tempfiles_removed
+                        .iter()
+                        .map(|p| rel(repo_root, p))
+                        .collect::<Vec<_>>(),
+                    "status_reconciled": oc.status_reconciled,
+                }),
+            );
+        }
+    }
+    json_obj
 }
 
 #[cfg(test)]
@@ -2318,20 +2606,22 @@ mod tests {
             "---\nnumber: 3\nstatus: open\n---\n# Third\n",
         );
         let mut r = scan(tmp.path()).unwrap();
-        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
-        assert!(r.fix_applied);
+        let actions = DoctorActions::from_findings(&mut r);
+        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        assert!(outcome.fix_applied());
+        assert!(outcome.blockers.is_empty(), "blockers={:?}", outcome.blockers);
         // Find the migrated 1-first directory.
-        let mig1 = r.legacy_dirs.iter().find(|m| m.old_number == 1).unwrap();
+        let mig1 = outcome.legacy_dirs_migrated.iter().find(|m| m.old_number == 1).unwrap();
         let item = mig1.new_path.join("item.md");
         let content = fs::read_to_string(&item).unwrap();
         assert!(content.contains(&format!("slug: {}", mig1.new_slug)));
         assert!(!content.contains("number:"));
         assert!(content.contains("# First"), "heading rewritten: {content}");
         // epic: 2 → epic: <slug-of-2>
-        let mig2 = r.legacy_dirs.iter().find(|m| m.old_number == 2).unwrap();
+        let mig2 = outcome.legacy_dirs_migrated.iter().find(|m| m.old_number == 2).unwrap();
         assert!(content.contains(&format!("epic: {}", mig2.new_slug)));
         // related: ['#3'] → ['@<slug-of-3>']
-        let mig3 = r.legacy_dirs.iter().find(|m| m.old_number == 3).unwrap();
+        let mig3 = outcome.legacy_dirs_migrated.iter().find(|m| m.old_number == 3).unwrap();
         assert!(content.contains(&format!("@{}", mig3.new_slug)));
     }
 
@@ -2456,12 +2746,13 @@ mod tests {
         )
         .unwrap();
         let mut r = scan(tmp.path()).unwrap();
-        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        let actions = DoctorActions::from_findings(&mut r);
+        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         let after = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(after.contains("## Comments"));
         assert!(!after.contains("## Notes"));
         assert!(after.contains("old note"));
-        assert_eq!(r.notes_renamed, vec!["legacy-notes-here".to_string()]);
+        assert_eq!(outcome.notes_renamed, vec!["legacy-notes-here".to_string()]);
     }
 
     #[test]
@@ -2478,7 +2769,8 @@ mod tests {
         let changelog = tmp.path().join("CHANGELOG.md");
         fs::write(&changelog, "# CHANGELOG\n\n- Fixed #1 regression\n").unwrap();
         let mut r = scan(tmp.path()).unwrap();
-        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        let actions = DoctorActions::from_findings(&mut r);
+        apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         let after = fs::read_to_string(&changelog).unwrap();
         assert!(
             after.contains("Fixed #1 regression"),
@@ -2540,13 +2832,26 @@ mod tests {
         let tmp = fresh_repo();
         let mut r = scan(tmp.path()).unwrap();
         assert!(r.schema_missing);
-        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        let actions = DoctorActions::from_findings(&mut r);
+        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         let path = tmp.path().join("issues/.schema.yaml");
         assert!(path.is_file(), "schema file should be auto-written");
         // Should contain the canonical built-in fields.
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("type:"));
         assert!(content.contains("status:"));
+        // Bug #3: schema bootstrap must surface in `fix_applied`.
+        // Previously a `--fix` that only wrote `.schema.yaml` reported
+        // `fix_applied: false`; with `ApplyOutcome::schema_bootstrapped`
+        // pulled into the predicate, it now reports `true`.
+        assert!(
+            outcome.schema_bootstrapped,
+            "expected schema bootstrap to be recorded"
+        );
+        assert!(
+            outcome.fix_applied(),
+            "schema-only --fix must report fix_applied=true"
+        );
     }
 
     #[test]
@@ -2580,8 +2885,16 @@ mod tests {
         assert!(
             r.parse_errors
                 .iter()
-                .any(|(_, msg)| msg.contains("YAML") || msg.contains("yaml") || msg.contains("invalid")),
+                .any(|e| e.message.contains("YAML") || e.message.contains("yaml") || e.message.contains("invalid")),
             "expected parse error report, got {:?}",
+            r.parse_errors
+        );
+        // Bug #6: hard parse errors are typed at the source — no
+        // substring matching. Re-wording the parser message no longer
+        // reclassifies a hard fail as a soft warn.
+        assert!(
+            r.parse_errors.iter().any(|e| e.severity == ParseSeverity::Hard),
+            "unparseable frontmatter must classify as Hard: {:?}",
             r.parse_errors
         );
     }
@@ -2907,12 +3220,20 @@ mod tests {
         )
         .unwrap();
         let mut r = scan(tmp.path()).unwrap();
-        let err = apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap_err().to_string();
-        assert!(err.contains("BOTH"), "missing both-folders blocker: {err}");
+        let actions = DoctorActions::from_findings(&mut r);
+        // Bug #1: preflight blockers MUST NOT bail — they ride on
+        // ApplyOutcome.blockers so `--json --fix` consumers receive
+        // structured output instead of an anyhow stderr blob.
+        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        assert!(!outcome.blockers.is_empty(), "expected preflight blockers");
+        let joined = outcome.blockers.join("\n");
+        assert!(joined.contains("BOTH"), "missing both-folders blocker: {joined}");
         assert!(
-            err.contains("merge-conflict markers"),
-            "missing conflict-marker blocker: {err}"
+            joined.contains("merge-conflict markers"),
+            "missing conflict-marker blocker: {joined}"
         );
+        // No writes happened.
+        assert!(!outcome.fix_applied(), "preflight-blocked apply must not write");
     }
 
     #[test]
@@ -2931,7 +3252,9 @@ mod tests {
         let mut r = scan(tmp.path()).unwrap();
         // Pre-fix: there are likely parser warnings in `parse_errors`.
         // None of them should trip the hard-error preflight check.
-        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).expect("--fix should not refuse on soft parse warnings");
+        let actions = DoctorActions::from_findings(&mut r);
+        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).expect("--fix should not refuse on soft parse warnings");
+        assert!(outcome.blockers.is_empty(), "soft parse warnings must not block: {:?}", outcome.blockers);
     }
 
     #[test]
@@ -2948,12 +3271,16 @@ mod tests {
             tmp.path().join("issues/quiet-brave-otter/item.md"),
         )
         .unwrap();
-        // Preflight bails before any mutation runs.
-        let err = apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap_err();
+        // Preflight blocks before any mutation runs — but produces
+        // a structured `ApplyOutcome.blockers` rather than an Err.
+        let actions = DoctorActions::from_findings(&mut r);
+        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         assert!(
-            err.to_string().contains("merge-conflict markers"),
-            "got: {err}"
+            outcome.blockers.iter().any(|b| b.contains("merge-conflict markers")),
+            "got: {:?}",
+            outcome.blockers
         );
+        assert!(!outcome.fix_applied());
         let after = fs::read_to_string(
             tmp.path().join("issues/quiet-brave-otter/item.md"),
         )
@@ -2988,9 +3315,10 @@ mod tests {
         let r = scan(tmp.path()).unwrap();
         assert!(r.orphan_tempfiles.iter().any(|p| p == &orphan));
         let mut r = scan(tmp.path()).unwrap();
-        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        let actions = DoctorActions::from_findings(&mut r);
+        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         assert!(!orphan.exists(), "tempfile should be removed by --fix");
-        assert!(r.orphan_tempfiles_removed.iter().any(|p| p == &orphan));
+        assert!(outcome.orphan_tempfiles_removed.iter().any(|p| p == &orphan));
     }
 
     #[test]
@@ -3025,7 +3353,8 @@ mod tests {
             .closed_with_active_status
             .iter()
             .any(|(s, _, _)| s == "quiet-brave-otter"));
-        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        let actions = DoctorActions::from_findings(&mut r);
+        apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         // Flat-layout migration runs in the same apply pass and moves
         // the file from `issues/closed/<slug>/` to `issues/<slug>/`.
         let migrated = tmp.path().join("issues/quiet-brave-otter/item.md");
@@ -3045,7 +3374,8 @@ mod tests {
         )
         .unwrap();
         let mut r = scan(tmp.path()).unwrap();
-        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        let actions = DoctorActions::from_findings(&mut r);
+        apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         let migrated = tmp.path().join("issues/quiet-brave-otter/item.md");
         let after = fs::read_to_string(&migrated).unwrap();
         assert!(after.contains("status: open"), "got: {after}");
@@ -3193,8 +3523,9 @@ mod tests {
 
         let mut report = scan(tmp.path()).unwrap();
         assert!(report.agents_md_drift);
-        apply(tmp.path(), &mut report, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
-        assert!(report.agents_md_regenerated);
+        let actions = DoctorActions::from_findings(&mut report);
+        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        assert!(outcome.agents_md_regenerated);
 
         let after = fs::read_to_string(&path).unwrap();
         assert!(after.starts_with("# My custom heading\n\nMy hand-written notes.\n\n"));
@@ -3206,7 +3537,7 @@ mod tests {
 
     /// Single-pass `scan_issues` powers every check. This fixture wires
     /// up many independent findings in one repo and asserts the merged
-    /// `DoctorReport` looks the same as the multi-walk produced — a
+    /// `DoctorFindings` looks the same as the multi-walk produced — a
     /// regression guard for the D7 refactor.
     #[test]
     fn single_pass_scan_surfaces_all_categories() {
@@ -3319,7 +3650,7 @@ mod tests {
         fs::create_dir_all(tmp.path().join("issues/charlie-empty-dir")).unwrap();
 
         let report = scan(tmp.path()).unwrap();
-        let json = render_json(&report, false, tmp.path());
+        let json = render_json(&report, None, false, tmp.path());
         let actual = serde_json::to_string_pretty(&json).unwrap();
         // Normalise the tempdir prefix so the snapshot is portable.
         let actual = actual.replace(
@@ -3397,6 +3728,142 @@ mod tests {
             actual, expected,
             "render_json output drifted from the golden snapshot.\n\
              If the change is intentional, update the snapshot."
+        );
+    }
+
+    /// Bug #1 (`apply()` returns `Result<()>` and `bail!`s — `--json
+    /// --fix` when preflight blocks → no JSON, anyhow text on stderr):
+    /// the new `apply` returns `Ok(outcome)` with `outcome.blockers`
+    /// populated instead of `Err`, and the JSON envelope carries the
+    /// blockers under `apply_outcome` so scripted callers can read a
+    /// structured response.
+    #[test]
+    fn json_fix_with_preflight_block_emits_structured_outcome() {
+        let tmp = fresh_repo();
+        // Slug present in BOTH legacy folders → preflight blocker.
+        for f in ["open", "closed"] {
+            let dir = tmp.path().join("issues").join(f).join("quiet-brave-otter");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("item.md"),
+                "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n",
+            )
+            .unwrap();
+        }
+        let mut findings = scan(tmp.path()).unwrap();
+        let actions = DoctorActions::from_findings(&mut findings);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        assert!(!outcome.blockers.is_empty());
+        assert!(!outcome.fix_applied());
+
+        let json = render_json(&findings, Some(&outcome), true, tmp.path());
+        let ao = json
+            .get("apply_outcome")
+            .expect("apply_outcome must be present on --fix");
+        assert_eq!(ao["fix_applied"], serde_json::Value::Bool(false));
+        let blockers = ao["blockers"].as_array().unwrap();
+        assert!(!blockers.is_empty(), "blockers must surface in JSON");
+        assert!(
+            blockers
+                .iter()
+                .any(|v| v.as_str().unwrap_or("").contains("BOTH")),
+            "expected `BOTH issues/open/...` blocker, got {blockers:?}"
+        );
+    }
+
+    /// Bug #4 (manual splice list): the post-apply rendering pulls
+    /// from `ApplyOutcome` directly. Adding a new applied-action
+    /// variant means extending `ApplyOutcome` + `DoctorActions::
+    /// fix_applied` — no field-by-field copy in `run`.
+    #[test]
+    fn fix_applied_predicate_is_centralised_on_outcome() {
+        let mut o = ApplyOutcome::default();
+        assert!(!o.fix_applied(), "default outcome reports false");
+        o.schema_bootstrapped = true;
+        assert!(
+            o.fix_applied(),
+            "schema_bootstrapped alone must flip fix_applied (bug #3)"
+        );
+        let mut o = ApplyOutcome::default();
+        o.notes_renamed.push("foo".into());
+        assert!(o.fix_applied(), "notes_renamed must flip fix_applied");
+    }
+
+    /// Bug #5 (preflight ↔ has_critical_findings drift): both call
+    /// sites now share `critical_blockers` as the predicate, so any
+    /// class of finding that triggers exit-1 also blocks `--fix`.
+    #[test]
+    fn critical_blockers_aligns_preflight_with_exit_code() {
+        let tmp = fresh_repo();
+        // Conflict-marker repo — currently classified as critical.
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> branch\n",
+        );
+        let findings = scan(tmp.path()).unwrap();
+        let blockers = critical_blockers(&findings);
+        assert!(
+            !blockers.is_empty(),
+            "conflict markers should be a blocker"
+        );
+
+        let mut findings_for_apply = scan(tmp.path()).unwrap();
+        let actions = DoctorActions::from_findings(&mut findings_for_apply);
+        // `DoctorActions::from_findings` snapshots `critical_blockers`
+        // — the same list the run-time exit code uses.
+        assert_eq!(
+            blockers, actions.preflight_blockers,
+            "preflight_blockers must be equal to critical_blockers output"
+        );
+    }
+
+    /// Bug #6 (substring matcher): typed `ParseSeverity` set at the
+    /// push site means re-wording the parser's message no longer
+    /// reclassifies a hard fail as a soft warn. The legacy-numeric
+    /// epic-ref warning is emitted Soft, the unparseable frontmatter
+    /// is emitted Hard.
+    #[test]
+    fn parse_error_severity_is_typed_not_substring_matched() {
+        let tmp = fresh_repo();
+        // Soft: legacy numeric epic ref on a flat-layout issue.
+        put_flat(
+            &tmp,
+            "alpha-bright-cat",
+            "---\ntype: bug\nstatus: open\npriority: normal\nepic: 7\n---\n# A\n",
+        );
+        // Hard: unparseable frontmatter.
+        let dir = tmp.path().join("issues/quiet-brave-otter");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("item.md"), "---\nfoo: : :\n---\n# T\n").unwrap();
+
+        let r = scan(tmp.path()).unwrap();
+        let any_soft = r
+            .parse_errors
+            .iter()
+            .any(|e| e.severity == ParseSeverity::Soft);
+        let any_hard = r
+            .parse_errors
+            .iter()
+            .any(|e| e.severity == ParseSeverity::Hard);
+        assert!(any_soft, "legacy numeric ref must be Soft: {:?}", r.parse_errors);
+        assert!(any_hard, "unparseable YAML must be Hard: {:?}", r.parse_errors);
+
+        // Soft alone does NOT block; only the Hard entries appear in
+        // critical_blockers.
+        let blockers = critical_blockers(&r);
+        let hard_blocker = blockers
+            .iter()
+            .find(|b| b.contains("unparseable issue file"));
+        assert!(
+            hard_blocker.is_some(),
+            "hard parse error must produce a blocker, got {:?}",
+            blockers
         );
     }
 }
