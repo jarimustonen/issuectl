@@ -5,6 +5,9 @@ type: chore
 status: in-progress
 priority: normal
 epic: exorbitantly-ill-apples
+commits:
+- hash: 55c19cb
+  summary: 'docs(web-edit-sync): rewrite as coherent flat-layout contract'
 ---
 
 # Coherent rewrite of web-edit-sync.md after flat-layout

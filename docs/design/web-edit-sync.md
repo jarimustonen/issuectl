@@ -7,7 +7,10 @@ The on-disk layout is flat: every issue lives at `issues/<slug>/item.md`.
 Status is read from frontmatter; the kanban-bucket label
 (`open` / `closed`) seen in API payloads is derived from
 `is_closing_status(fm.status)` — purely a presentation detail, not a
-parallel state. Legacy `issues/{open,closed}/<slug>/` paths are still
+parallel state. (`is_closing_status` is the predicate defined in
+`src/main.rs` that returns true for terminal-status values like
+`fixed`, `closed`, `wontfix`; see `is_closing_status_classifies_correctly`
+test for the canonical set.) Legacy `issues/{open,closed}/<slug>/` paths are still
 accepted on read (compat layer in `repo::locate_issue_full` +
 `mutate::locate_and_migrate`); writes always migrate the slug to the
 flat path under `flock`. The one-shot bulk migration is `issuectl
@@ -178,16 +181,42 @@ Outcomes:
   canonical-path-prefix check) containing `item.md`. If the hit was at
   a legacy `issues/{open,closed}/<slug>/` path, the directory is moved
   to the canonical `issues/<slug>/` path under the same `flock` before
-  any subsequent read or write.
+  any subsequent read or write. After the rename the parent `issues/`
+  directory is `fsync`ed so the new location is durable on crash.
 - `Err(NotFound)` — neither canonical nor legacy paths exist. Mutation
   handlers map to 404.
 - `Err(AmbiguousSlug)` — multiple locations exist (canonical + legacy,
   or both legacy folders simultaneously). Mutation handlers map to 409
-  with `code: "ambiguous_slug"`. Silently picking one side would hide
-  divergence introduced by a partially-completed migration; the
-  reconciler surfaces the case and refuses.
+  with `code: "ambiguous_slug"` and a `detail` pointing the user at
+  `issuectl doctor migrate-layout`. Silently picking one side would
+  hide divergence introduced by a partially-completed migration.
 - `Err(Symlink | Invalid)` — symlink escape attempt or non-directory at
   the slug path. 403 / 400, same as today's `repo::locate_issue`.
+
+**Side-effect ordering.** `locate_and_migrate` runs at step 2 of the
+mutation sequence (§3.1), *before* the `expected_version` check at
+step 4. A stale-version PATCH that ends in 409 still leaves the
+directory permanently migrated. This is intentional — migration is a
+strict layout cleanup, independent of mutation success — but it
+means a 409 client cannot assume the on-disk path was unchanged.
+
+**Watcher event suppression during migration.** The directory rename
+in step 2 produces filesystem events the watcher would otherwise
+translate into `IssueRemoved(slug)` (legacy path) +
+`IssueUpserted(slug)` (canonical path), arriving alongside the
+mutator's synthetic `IssueUpserted(slug, V_new)`. To avoid a
+disappear/reappear flicker on connected clients, `mutate.rs` records
+`(slug, V_new)` in a short-lived (≥ debounce window + slack) ignore
+set; the watcher drops events whose `(slug, computed_version)` matches
+*and* drops the paired `IssueRemoved` for the same slug within the
+same debounce batch.
+
+**`POST /api/issues` (create) collision behavior.** The create path
+also runs `locate_and_migrate` first. If it returns `Ok(_)` —
+canonical or legacy — the create is rejected with 409
+`slug_conflict`. If it returns `Err(NotFound)`, the create proceeds
+under the same flock. This makes "new" deterministic in the presence
+of legacy paths.
 
 ### 3.2 Canonical hash
 
@@ -201,7 +230,7 @@ PATCH.
 fn canonical_hash(item: &Item) -> String {
     let json = canonical_frontmatter_value(&item.frontmatter);
     let mut h = Sha256::new();
-    h.update(serde_json_canonical::to_vec(&json).unwrap()); // sorted keys, no whitespace
+    h.update(serde_jcs::to_vec(&json).unwrap()); // RFC 8785 JCS: sorted keys, no whitespace
     h.update(b"\n---\n");
     h.update(normalize_body(&item.body).as_bytes());
     format!("sha256:{}", hex::encode(h.finalize()))           // full 64-char hex
@@ -216,6 +245,7 @@ fn canonical_frontmatter_value(fm: &Frontmatter) -> serde_json::Value {
     m.insert("type".into(),     fm.issue_type.clone().into());
     m.insert("status".into(),   fm.status.clone().into());
     m.insert("priority".into(), fm.priority.clone().into());
+    m.insert("title".into(),    fm.title.clone().into());
     if let Some(v) = &fm.created   { m.insert("created".into(),   v.clone().into()); }
     if let Some(v) = &fm.closed    { m.insert("closed".into(),    v.clone().into()); }
     if let Some(v) = &fm.reporter  { m.insert("reporter".into(),  v.clone().into()); }
@@ -247,24 +277,31 @@ Notes on the projection:
 
 - **Status comes straight from frontmatter.** There is no folder axis to
   reconcile, so no `directory_authoritative_status` indirection.
-- **Sorted keys + no whitespace**: use `serde_json_canonical` (RFC 8785
-  JCS) or equivalent. Two correct implementations must produce identical
-  bytes for identical content.
+- **Sorted keys + no whitespace**: use `serde_jcs` (RFC 8785 JCS) or
+  another conforming implementation. Two correct implementations must
+  produce identical bytes for identical content.
+- **`title` included.** `title` is a frontmatter field (`Issue.title`)
+  and must participate in concurrency control. Although the web/CLI
+  PATCH paths do not currently expose title mutation, hand-edits to
+  `item.md` and `issuectl new` write title bytes; without it in the
+  hash, two concurrent writers could clobber each other's title with
+  no 409.
 - **`updated:` excluded** — `do_update` bumps it on every save. Two
   files differing only in `updated:` are treated as equal. This is fine
   because `updated:` is generated, not user-authored.
-- **Unknown fields included** — `Frontmatter::unknown: BTreeMap<String,
-  Value>` (loader preserves them). The on-disk round-trip already
-  preserves unknown keys via the raw `Mapping` in `write::ItemFile`;
-  the gap closed here is the *version-hash* side. Without unknowns
-  in the canonical projection, a writer who didn't read a custom
-  key (`triage:`, `reviewer:`) could pass `expected_version` even
-  after that key changed under it, and a subsequent partial write
-  could clobber the change without surfacing a 409. Values are
-  converted to canonical JSON at the parser boundary; YAML
-  constructs JSON cannot represent (non-string mapping keys, tags,
-  non-finite floats) become `LoadWarning`s and flow through
-  `MutateError::Corrupt`, never panicking the hash path.
+- **Unknown fields included.** `Frontmatter::unknown: BTreeMap<String,
+  serde_json::Value>` is populated at *load time*: the YAML→JSON
+  conversion happens inside the parser. JSON-incompatible YAML
+  constructs (non-string mapping keys, YAML tags, non-finite floats)
+  fail this conversion and surface as `LoadWarning`s on the issue;
+  the affected file is then refused at mutation entry as
+  `MutateError::Corrupt` and never reaches the hash function. By the
+  time `canonical_frontmatter_value` runs, every value in `unknown`
+  is a well-formed `serde_json::Value`. Including unknowns in the
+  projection prevents silent clobbers of fields the writer didn't
+  read (`triage:`, `reviewer:`, etc.); the on-disk round-trip already
+  preserves them via the raw `Mapping` in `write::ItemFile`, so this
+  closes the version-hash side of the same gap.
 - **`canonical_hash` is computed in `mutate.rs`** so CLI and server use
   the same function. The CLI exposes it via `issuectl show --json`
   (`version` field).
@@ -294,8 +331,18 @@ fn write_item_atomic(target: &Path, content: &str) -> Result<()> {
   temp files before debouncing (§5.1).
 - On SIGKILL, `Drop` doesn't run; orphan tempfiles are swept on next
   startup (`doctor` extension).
-- On Windows, `fsync_dir` is a no-op — `std::fs::File::open(dir)` returns
-  `Err`, so the call is gated `#[cfg(unix)]`.
+- **Body line endings are normalised to LF before write.** The same
+  CRLF→LF conversion that `normalize_body` performs for hashing
+  (§3.2) is applied to the bytes written to disk — i.e. the on-disk
+  body is the canonical form, and round-tripping through this code
+  cannot introduce noisy CRLF↔LF diffs. Editors that paste CRLF into
+  the textarea silently land LF on disk; this is intentional product
+  policy.
+- On Windows, `fsync_dir` is a no-op — `std::fs::File::open(dir)` is
+  not portable to directories — so the call is gated `#[cfg(unix)]`.
+  The atomic-rename and tempfile-cleanup paths still work; the only
+  thing missing is parent-directory durability on power loss, which
+  is acceptable for issue metadata.
 
 ### 3.4 Status change is a frontmatter PATCH
 
@@ -369,15 +416,22 @@ Validation runs once after both clap and serde conversion via
 
 - `add_X` and `remove_X` cannot share a value → 400 `conflicting_intent`.
 - `add_X`/`remove_X` cannot contain duplicates within themselves.
+- `add_X`/`remove_X` Vec entries that are empty or whitespace-only
+  → 400 `validation` (same rule as scalar `Patch::Set("")`). This
+  prevents `add_labels: [""]` from landing an empty label.
 - Removing an absent value → no-op (idempotent).
-- `status`, `priority`, `type` must be in the enum value sets.
-- Slug-shaped fields validate against `slug::is_valid`.
+- `status`, `priority` must be in their enum value sets (`STATUSES` /
+  `PRIORITIES`).
 
 **Immutable fields** not in the request type: `slug` (identity),
 `created` (set at `new` time only), `reporter` (currently — could be
-added if the use case appears). `closed:` is set/cleared automatically
-by the status-change logic; not user-settable via PATCH. `updated:` is
-set by every successful mutation.
+added if the use case appears), `title` (set at `new` time;
+hand-editable in `item.md` but not exposed via PATCH), `type` (set at
+`new` time, deliberately not mutable post-creation — type changes are
+rare enough to warrant a CLI-only reset path if ever needed).
+`closed:` is set/cleared automatically by the status-change logic; not
+user-settable via PATCH. `updated:` is set by every successful
+mutation.
 
 The current `do_new`, `do_update`, `do_close` move into `mutate.rs`
 exporting structured `Result` types; both `cmd_*` and the axum handlers
@@ -467,7 +521,7 @@ shared with body PUT. CSRF-protected like other state-changing routes
 
 ```json
 {
-  "type":   "https://issuectl/errors/version_mismatch",
+  "type":   "urn:issuectl:errors:version_mismatch",
   "title":  "Version mismatch",
   "status": 409,
   "code":   "version_mismatch",
@@ -477,9 +531,11 @@ shared with body PUT. CSRF-protected like other state-changing routes
 ```
 
 `code` is stable; `title`/`detail` are human strings. Concrete codes:
-`version_mismatch` (409), `ambiguous_slug` (409), `validation` (400),
-`conflicting_intent` (400), `not_found` (404), `forbidden` (403),
-`rate_limited` (429), `storage_full` (507), `internal` (500).
+`version_mismatch` (409), `ambiguous_slug` (409), `slug_conflict`
+(409, from `POST /api/issues` against an existing canonical or legacy
+slug), `validation` (400), `conflicting_intent` (400), `not_found`
+(404), `forbidden` (403), `rate_limited` (429), `storage_full` (507),
+`internal` (500).
 
 For `version_mismatch` (and only for it), the response includes
 `issue: IssueDetailResponse` — same shape as `GET /api/issues/{slug}`,
@@ -521,6 +577,14 @@ To uphold "anything the web does is reachable from CLI":
   `.issuectl-tmp-*` so our own atomic-write tempfiles never reach the
   parser. Editor swap files (`.foo.swp`, `.foo~`) are not filtered —
   they don't match valid issue paths so the slug resolver rejects them.
+- **Path-shape filter.** Only file events on `<root>/issues/<slug>/item.md`
+  (or its legacy `<root>/issues/{open,closed}/<slug>/item.md` form)
+  trigger `IssueUpserted`; only directory create/remove of
+  `<root>/issues/<slug>` (or legacy) trigger `IssueUpserted` /
+  `IssueRemoved` for slug add/remove. Side-doc files
+  (`issues/<slug>/docs/foo.md`) and other non-`item.md` content do
+  *not* fire issue events — otherwise editing a side doc would
+  spam the broadcast channel with phantom upserts.
 - Debounce window: 100–200 ms.
 - All parse / sanitise / hash work runs in `tokio::task::spawn_blocking`,
   so a `git checkout` of 200 issues doesn't stall the watcher's event
@@ -530,9 +594,12 @@ To uphold "anything the web does is reachable from CLI":
 
 The slug is the first component under `issues/`. The legacy
 `open`/`closed` prefix is still accepted so compat-read repos still
-light up the watcher; if a slug is found under a legacy path,
-`parse_slug_state` surfaces a `legacy_layout` (or `ambiguous_slug`)
-warning to the client.
+light up the watcher; if a slug resolves to a legacy path, the
+broadcast `IssueUpserted` carries a `legacy_layout` `LoadWarning` (or
+`ambiguous_slug`, when both canonical and legacy locations exist)
+alongside the issue summary. Clients render the warning chip; the
+next mutation against that slug migrates it via `locate_and_migrate`
+(§3.1.1).
 
 ```rust
 fn issue_slug_from_event(issues_root: &Path, path: &Path) -> Option<String> {
@@ -559,9 +626,9 @@ IssueRemoved  { slug: "old-slug" }
 IssueUpserted { slug: "new-slug", ... }
 ```
 
-Status crossings are not a separate event class — they are a single
-`IssueUpserted` from the mutate layer (with the new `version`); clients
-re-bucket from `summary.status` / `summary.folder`.
+Status changes are ordinary `IssueUpserted` events — there is no
+disk-layout move involved. Clients re-bucket from `summary.status` and
+the derived `is_closing_status` label.
 
 ### 5.4 Transport: SSE
 
@@ -719,6 +786,12 @@ same mechanism. Browsers can't set `Last-Event-ID` on the *initial*
 params exist — first connect uses them, subsequent reconnects use
 `Last-Event-ID`.
 
+On the very first connection the client has no prior `instance_id`;
+it omits the `?instance=` parameter entirely. A missing parameter is
+treated as "match anything" — no synthetic `Resync` is prepended. The
+client adopts the `instance_id` from the SSE handshake's first
+event/handshake frame and uses it on subsequent reconnects.
+
 ### 5.6 Event types
 
 The wire envelope is `BoardEvent { seq, payload }` with a `#[serde(tag
@@ -737,6 +810,25 @@ Notable points:
   `repo::LoadWarning` shape; web UI already renders these in the
   `#warnings` strip. Card stays visible with an error badge instead
   of vanishing.
+- **Lifecycle.** `IssueInvalid` for slug X is cleared when the next
+  successful re-parse of X publishes an `IssueUpserted` (the issue
+  is valid again) or the slug is deleted (`IssueRemoved`). Clients
+  drop the error badge in either case.
+
+**Client dedup contract** (single rule, applies regardless of event
+origin):
+
+- `IssueUpserted { slug, version }` is idempotent on `(slug, version)`.
+  A tab that already shows version `V` for slug `S` skips re-render
+  on any subsequent `IssueUpserted { slug: S, version: V }` — including
+  the synthetic event from a self-originated PATCH and the watcher's
+  follow-up event for the same write.
+- `IssueRemoved { slug }` is idempotent on `slug`. A tab that already
+  shows slug `S` as removed (or never had it) skips re-render. The
+  mutator never publishes `IssueRemoved` (it always writes via
+  `locate_and_migrate` + `write_item_atomic`); only the watcher does.
+  Migration-driven `IssueRemoved` events are suppressed by the rule
+  in §3.1.1, so the contract stays slug-only.
 
 ### 5.7 Bulk-change coalescing
 
@@ -784,11 +876,8 @@ acquisition order risk for no concurrency win (see §2).
 
 ### 6.2 Status authority
 
-Status is stored in frontmatter and only in frontmatter. There is no
-parallel folder axis, so nothing is "authoritative over" anything else.
-The kanban-bucket label (`open` / `closed`) appearing in API payloads
-is derived from `is_closing_status(fm.status)` — strictly a presentation
-detail.
+`fm.status` is the single source of truth. The bucket label
+(`open` / `closed`) on API payloads is derived: `is_closing_status(fm.status)`.
 
 ### 6.3 Body conflict UX (M2)
 
@@ -811,18 +900,46 @@ For **metadata** PATCHes (status, priority, etc.), the simpler
 
 ### 6.4 Echo suppression
 
-Server-side write-token machinery is not used. Mechanism:
+Server-side write-token / request-id machinery is deliberately not
+used; the dedup contract in §5.6 is symmetric across tabs and origins.
+Concretely:
 
-1. PATCH 200 response includes the new canonical `version`.
-2. Client stores `local_version = response.version`.
-3. SSE delivers `IssueUpserted { version: V, ... }`.
-4. If `V === local_version`: the originating tab silently reconciles
-   in place ("Saved" indicator instead of full re-render flash).
-5. If `V !== local_version`: full re-render, treat as external edit.
+1. Every tab tracks `local_version[slug]` — the version it currently
+   shows for each slug, regardless of how that version arrived (REST
+   GET, SSE, own PATCH 200).
+2. When an `IssueUpserted { slug, version }` arrives, if
+   `version == local_version[slug]` the tab silently reconciles
+   (updates "Saved" indicator if appropriate, no re-render flash).
+   If different, full re-render and `local_version[slug] = version`.
+3. The PATCH 200 response carries the new `version`, which the
+   originating tab also writes into `local_version[slug]`.
 
-This works for the originating tab. Other tabs (same user, different
-tab) treat the event as external — correct, because from their
-perspective it *is* external. No server state required.
+**SSE-vs-PATCH-200 race.** The SSE event and PATCH 200 travel over
+independent TCP connections; either can arrive first at the
+originating tab. If SSE wins, the naive tab would see
+`version != local_version[slug]` (still pre-PATCH) and full-rerender,
+potentially flashing the user's just-clicked card. The originating
+tab MUST therefore **buffer SSE events for slug `S` while a PATCH
+request for `S` is in flight from this tab**, draining the buffer
+when the PATCH completes (success or failure). Combined with the
+dedup rule in step 2 and the active-textarea-preservation rule
+below, this closes the data-loss path: the SSE event cannot replace
+the textarea or full-rerender behind a click while the user's own
+write is mid-flight.
+
+**Active-textarea preservation.** A re-render driven by an
+`IssueUpserted` (regardless of origin) MUST NOT overwrite the
+contents of an open `<textarea>` for the same slug. Metadata
+re-renders (status drag, label chips, etc.) update freely; the body
+textarea has its own state machine — its content is only replaced
+when the user explicitly accepts a server version in the conflict UX
+(§6.3). Combined with `localStorage` per-keystroke (§6.5), there is
+no path that loses an in-progress draft.
+
+Other tabs (same user, different tab) treat the event as external
+(`version != local_version[slug]`) — correct, because from their
+perspective it *is* external — and re-render under the same
+textarea-preservation rule. No server state required.
 
 ### 6.5 Body autosave (M2)
 
@@ -830,8 +947,9 @@ perspective it *is* external. No server state required.
 - Save on `blur`.
 - `localStorage` written on every keystroke (independent of network).
 - Manual `Ctrl+S` / save button always available.
-- No save on `tab-hide` / `pagehide` — `EventSource`-style loss is
-  too unreliable; `localStorage` covers crash/close anyway.
+- No save on `tab-hide` / `pagehide` — `sendBeacon` /
+  `fetch(keepalive: true)` are too unreliable to count on, and
+  `localStorage` already covers crash/close.
 
 ### 6.6 Rate limiting
 
@@ -895,11 +1013,19 @@ large. See §5.5.
 ### 8.4 Crash mid-write
 
 Atomic write guarantees readers see either the pre- or post-image,
-never half. The only other on-disk side effect is the orphan tempfile
-(`.issuectl-tmp-*`) left behind if `Drop` was skipped; the startup
-sweep handles it. There is no rename-then-write sequence anywhere — a
-status change is just `write_item_atomic` (§3.4) — so there is no
-"half-renamed" state to reconcile.
+never half. Status changes are just `write_item_atomic` (§3.4) — no
+rename, no half-state.
+
+The one rename in the mutation path is the legacy→canonical directory
+move performed by `locate_and_migrate` (§3.1.1). `rename(2)` is
+atomic, so the on-disk slug is unambiguously at one path or the other
+at any instant. A crash *between* the rename and the subsequent
+`write_item_atomic` leaves the slug at the canonical path with its
+pre-write content — a perfectly valid state, indistinguishable from
+"a migration ran but no edit followed." No reconciliation is required.
+
+Orphan tempfiles (`.issuectl-tmp-*`) left behind when `Drop` was
+skipped (e.g. SIGKILL) are swept on next startup (`doctor` extension).
 
 ### 8.5 Watcher itself crashes
 
@@ -931,6 +1057,16 @@ raises the stakes:
 - **Network exposure**: `--host 0.0.0.0` for read-only is documented
   as "trusted networks only"; with writes it must be opt-in.
 
+**Read-side boundary.** Any local process that can connect to
+`127.0.0.1:<port>` can read all issues, regardless of the running
+uid's filesystem permissions on the repo. Loopback bind does not
+enforce uid separation: CSRF / `SameSite` cookies protect the
+*browser context* (cross-origin / cross-site requests from a real
+browser), not native local processes (`curl`, scripts) that can
+read `Set-Cookie` and replay cookies at will. This is in scope as a
+documented limitation; running `serve` on a uid that the user does
+not trust is unsupported.
+
 ### 9.2 Mechanism
 
 Per-process CSRF token:
@@ -954,12 +1090,24 @@ Per-process CSRF token:
 `X-Issuectl-CSRF`. Instead:
 
 - A `SameSite=Strict; HttpOnly` cookie is set on `GET /api/session`,
-  carrying a session ID.
-- `/events` requires the session cookie; rejects without it.
-- `Host` validation applies.
+  carrying the same per-process random token used for the CSRF
+  header — there is no separate session store. The cookie's value is
+  validated by string-comparing against `AppState.csrf_token`.
+- `/events` requires the cookie; rejects without it. `Host`
+  validation applies.
+- **Server restart invalidates the cookie** because `csrf_token` is
+  regenerated. `/events` returns 401; `EventSource` treats this as
+  an error, the client falls back to `GET /api/session` to refresh
+  the token+cookie pair, then re-opens `/events`. The client SHOULD
+  catch the 401 explicitly rather than relying on `EventSource`'s
+  default reconnect loop.
+- The HTML shell unconditionally hits `GET /api/session` on page
+  load before any other API call, so the cookie is set before the
+  first `/events` connect.
 
-The cookie and the `X-Issuectl-CSRF` header serve different purposes
-(SSE vs state-change) and must not be conflated.
+The cookie and the `X-Issuectl-CSRF` header serve different
+transport purposes (SSE vs state-change) but carry the same per-process
+secret — their lifetimes are tied.
 
 ### 9.4 Non-loopback bind
 
@@ -980,13 +1128,17 @@ This is a future feature; M0–M3 stays loopback-only for writes.
   limit cuts the layer wiring complexity. If a future route needs a
   tighter cap (e.g. an audit-log endpoint), apply
   `route_layer(DefaultBodyLimit)` there.
-- Atomic-write target re-canonicalised inside `locate_issue`-style
-  guard before persist (`symlink_metadata` + canonical-prefix check).
-  Note: `flock` is *not* a symlink-swap defence — it's advisory and
-  only excludes other `flock`-holding processes. A non-cooperating
-  attacker can still race a swap. Threat model is local-trusted
-  filesystem, so this is acceptable; harden via `*at` syscalls
-  (`openat(O_NOFOLLOW)`, `renameat2`) only if the threat model changes.
+- The atomic-write target path is canonicalised once at
+  `locate_and_migrate` time (§3.1.1) — `symlink_metadata` +
+  canonical-prefix check. The path is *not* re-checked between
+  `locate_and_migrate` and `tf.persist(target)`; an attacker who can
+  swap the directory under us during the gap can defeat the check.
+  This is intentional: `flock` is advisory and does not exclude
+  non-`flock`-holding processes, so an additional check at persist
+  time would not provide real defence either. The threat model is
+  local-trusted filesystem; harden via `*at` syscalls
+  (`openat(O_NOFOLLOW)`, `renameat2`) only if the threat model
+  changes.
 - Watcher does not follow symlinks (`with_follow_symlinks(false)`).
 - `NamedTempFile` placement inside the watched dir is fine because
   the tempfile prefix is filtered (§5.1).
@@ -996,9 +1148,9 @@ This is a future feature; M0–M3 stays loopback-only for writes.
 | Phase | Scope | Ship value |
 | --- | --- | --- |
 | **M0** | `EventHub` (single-mutex seq+ring), `notify-debouncer-full` watcher, `/events` SSE with `subscribe_since` race-free handoff, `snapshot_seq` + `instance_id` in `/api/issues`. No writes. | Live read-side updates: `$EDITOR` saves, `git pull`, agent edits all show up in the board immediately. |
-| **M1** | `mutate.rs` refactor with `Patch<T>` + `UpdateIssueRequest` + `flock` + canonical hash + `locate_and_migrate` (flat-layout writes with legacy compat reads). CSRF token + `Host` validation. PATCH metadata routes. CLI: `--expected-version`, `version` field in `--json` output. Drag-to-move in UI. | Status drag, label/assignee edits — most-requested ergonomic gap. Issues live at `issues/<slug>/item.md`; status changes are pure frontmatter PATCHes. |
+| **M1** | `mutate.rs` refactor with `Patch<T>` + `UpdateIssueRequest` + `flock` + canonical hash + `locate_and_migrate` (flat-layout writes with legacy compat reads). `issuectl doctor migrate-layout` for one-shot bulk migration of legacy repos (ships alongside per-write migration so users have a clean recovery path for `ambiguous_slug`). CSRF token + `Host` validation. PATCH metadata routes. CLI: `--expected-version`, `version` field in `--json` output. Drag-to-move in UI. | Status drag, label/assignee edits, deterministic legacy-layout migration. |
 | **M2** | `PUT /body` + textarea + `POST /api/preview` + `localStorage` draft + body conflict UX. `IssueInvalid` event surfacing. CLI: `issuectl body set`. | Full edit-in-place. |
-| **M3** | `--watch-poll-ms`, `--no-watch`, `Degraded` banner, three-way merge UI for body conflicts. `issuectl doctor migrate-layout` for one-shot bulk migration of legacy repos. | Robustness for real multi-client use. |
+| **M3** | `--watch-poll-ms`, `--no-watch`, `Degraded` banner, three-way merge UI for body conflicts. | Robustness for real multi-client use. |
 
 **Spin-offs** (own issues, off the M0–M3 path):
 
@@ -1028,7 +1180,6 @@ exotic perms).
 | Replay mechanism | broadcast::Sender alone / explicit EventHub | **EventHub** | broadcast can't replay by `Last-Event-ID` |
 | Initial state ↔ stream | Snapshot-then-stream / cursor handoff | **`replay_from_seq` cursor in REST** | Closes the lost-event window |
 | CSRF | Punt to v2 / per-process token / persistent token | **Per-process token from M1** | Loopback ≠ trusted; npm postinstall is realistic |
-| Status axis | Folder / frontmatter | **Frontmatter** | Single source of truth; no rename surface; `git mv` slug-rename still trivial |
 | Body autosave | None / 750 ms / 5 s + localStorage | **5 s + localStorage + manual** | Covers tab-close + avoids 409 storms |
 
 ## 12. Out of scope / open questions
@@ -1186,5 +1337,8 @@ Dropped:
 - **#27** Watcher heartbeat marker file: writes to repo to test itself.
 - **#28** Mode-bit preservation: no real users with exotic perms on
   issue files.
-- **#29** Windows fsync edge: gated `#[cfg(unix)]`; Windows path is
-  documented as undefined.
+- **#29** Windows parent-directory `fsync`: defined as a no-op
+  (gated `#[cfg(unix)]`, see §3.3). Atomic rename and tempfile
+  cleanup work on Windows; only post-rename parent-directory
+  durability under power loss is missing. Acceptable for issue
+  metadata.
