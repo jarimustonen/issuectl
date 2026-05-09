@@ -217,7 +217,19 @@ diff, no write).
 - **`issuectl apply <patch.yaml>`** — multi-field transactional
   patch. The YAML file declares `slug:` plus any combination of
   built-in fields, `custom_fields:`, label / related list ops,
-  and commits. Rolls back cleanly on schema violation.
+  commits, and a `body_ops:` list of body mutations applied in
+  order under the same flock. Each body op is one of:
+
+  ```yaml
+  body_ops:
+    - toggle_checkbox: "tests passing"
+    - append_note:
+        author: ci-bot
+        message: "all checks green"
+        section: agent_runs   # or comments (default) / decisions
+  ```
+
+  Rolls back cleanly on schema violation or any failed body op.
 
 JSON output shape (same envelope as `update`):
 

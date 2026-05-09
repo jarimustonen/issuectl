@@ -499,8 +499,9 @@ enum Command {
 
     /// Apply a multi-field YAML patch in a single transaction.
     /// The file declares `slug:` plus any combination of built-in
-    /// fields, `custom_fields:`, label/related list ops, and commits
-    /// — all applied under one flock with one schema-validation pass.
+    /// fields, `custom_fields:`, label/related list ops, commits,
+    /// and `body_ops:` (toggle_checkbox / append_note) — all
+    /// applied under one flock with one schema-validation pass.
     Apply {
         /// Path to the YAML patch file
         #[arg(value_name = "PATCH")]

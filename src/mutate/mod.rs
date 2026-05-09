@@ -128,6 +128,15 @@ pub struct UpdateIssueRequest {
     /// happens to see last.
     #[serde(default, deserialize_with = "deserialize_patch_map_no_dups")]
     pub custom_fields: std::collections::BTreeMap<String, Patch<String>>,
+    /// In-order body mutations applied under the same flock as the
+    /// frontmatter PATCHes above. Each op is one of `append_note` or
+    /// `toggle_checkbox`; ops apply in vector order so a patch can
+    /// (e.g.) append a note that documents a checkbox flip happening
+    /// right after it. Schema + transition validation runs once on
+    /// the post-body state, matching the all-or-nothing contract of
+    /// the rest of `UpdateIssueRequest`.
+    #[serde(default)]
+    pub body_ops: Vec<BodyOp>,
     /// CLI-only: compute the post-mutation bytes and return them via
     /// `UpdateOutcome::pending_serialized` instead of writing or
     /// publishing. The flock is still acquired so the read+plan is
@@ -235,6 +244,84 @@ pub struct CommitSpec {
     pub summary: String,
 }
 
+/// Body-mutation operation carried inside an `UpdateIssueRequest`.
+/// Externally tagged so `apply` patch.yaml entries read like
+/// `- toggle_checkbox: "needle"` and `- append_note: { ... }`. JSON
+/// clients send the same shape (`{"toggle_checkbox": "needle"}`).
+#[derive(Debug, Clone)]
+pub enum BodyOp {
+    /// Toggle the unique `- [ ]` / `- [x]` line whose text contains
+    /// the needle (substring match, fence-aware). Errors when zero or
+    /// multiple lines match — same contract as `cmd_check`.
+    ToggleCheckbox(String),
+    /// Append a timestamped block to the named section, creating the
+    /// section if missing. Same shape as `cmd_note`.
+    AppendNote(AppendNoteOp),
+}
+
+// Manual external-tag deserialize so the wire shape is the same one-
+// key-mapping form under both `serde_json` and `serde_yaml`. The
+// derive-based `Deserialize` works for serde_json's external-tag
+// representation but serde_yaml requires `!Tag` directives, which
+// don't read well in a hand-edited patch.yaml. Going through a
+// helper map gives us identical wire format on both ends.
+impl<'de> Deserialize<'de> for BodyOp {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as DeError;
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(default)]
+            toggle_checkbox: Option<serde_yaml::Value>,
+            #[serde(default)]
+            append_note: Option<AppendNoteOp>,
+        }
+        let w = Wire::deserialize(d)?;
+        match (w.toggle_checkbox, w.append_note) {
+            (Some(v), None) => {
+                let needle = v.as_str().ok_or_else(|| {
+                    D::Error::custom("toggle_checkbox value must be a string")
+                })?;
+                Ok(BodyOp::ToggleCheckbox(needle.to_string()))
+            }
+            (None, Some(note)) => Ok(BodyOp::AppendNote(note)),
+            (None, None) => Err(D::Error::custom(
+                "body_ops entry must be `toggle_checkbox: <needle>` or `append_note: { ... }`",
+            )),
+            (Some(_), Some(_)) => Err(D::Error::custom(
+                "body_ops entry must declare exactly one of `toggle_checkbox` / `append_note`",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct AppendNoteOp {
+    pub author: String,
+    pub message: String,
+    #[serde(default)]
+    pub section: NoteSection,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteSection {
+    #[default]
+    Comments,
+    Decisions,
+    AgentRuns,
+}
+
+impl NoteSection {
+    fn as_str(self) -> &'static str {
+        match self {
+            NoteSection::Comments => crate::body_sections::COMMENTS,
+            NoteSection::Decisions => crate::body_sections::DECISIONS,
+            NoteSection::AgentRuns => crate::body_sections::AGENT_RUNS,
+        }
+    }
+}
+
 impl UpdateIssueRequest {
     /// True when no field would actually change on disk — every patch
     /// slot is `Unspecified` and every list/commit collection is empty.
@@ -253,6 +340,7 @@ impl UpdateIssueRequest {
             && self.remove_related.is_empty()
             && self.add_commits.is_empty()
             && self.custom_fields.is_empty()
+            && self.body_ops.is_empty()
     }
 
     /// Reject empty-string Sets, type-set vs enum mismatches, and
@@ -349,6 +437,26 @@ impl UpdateIssueRequest {
             validate_custom_field_key(key).map_err(MutateError::Validation)?;
             if let Patch::Set(v) = patch {
                 validate_custom_field_value(key, v).map_err(MutateError::Validation)?;
+            }
+        }
+
+        for (i, op) in self.body_ops.iter().enumerate() {
+            match op {
+                BodyOp::ToggleCheckbox(needle) => {
+                    if needle.trim().is_empty() {
+                        return Err(MutateError::Validation(format!(
+                            "body_ops[{i}]: toggle_checkbox needle cannot be empty"
+                        )));
+                    }
+                }
+                BodyOp::AppendNote(note) => {
+                    crate::body_sections::validate_author(&note.author).map_err(|e| {
+                        MutateError::Validation(format!("body_ops[{i}].author: {e}"))
+                    })?;
+                    crate::body_sections::validate_message(&note.message).map_err(|e| {
+                        MutateError::Validation(format!("body_ops[{i}].message: {e}"))
+                    })?;
+                }
             }
         }
         Ok(())
@@ -898,6 +1006,16 @@ fn update_issue_under_lock(
                 )));
             }
         }
+    }
+
+    // Body ops apply in vector order so a patch's narrative reads top-
+    // to-bottom: the user can toggle a checkbox and append a note that
+    // refers to the toggle, all under the single flock above. Schema
+    // and transition validation below run on the post-body state, so a
+    // failing op rolls back the entire transaction (the in-memory
+    // `item` is dropped without writing).
+    for (i, op) in req.body_ops.iter().enumerate() {
+        apply_body_op(&mut item, i, op)?;
     }
 
     // 4b) schema validation against the post-mutation frontmatter. The
@@ -1455,6 +1573,37 @@ pub fn toggle_checkbox(
         pending_serialized: None,
         before_serialized: None,
     })
+}
+
+/// Apply a single `BodyOp` against the in-flight `ItemFile`. Shared by
+/// the `body_ops` vector in `UpdateIssueRequest` so the same primitives
+/// `cmd_note` / `cmd_check` use also drive the transactional `apply`
+/// path — keeping the rendering, fence handling, and error messages
+/// identical across surfaces.
+fn apply_body_op(item: &mut ItemFile, index: usize, op: &BodyOp) -> Result<(), MutateError> {
+    match op {
+        BodyOp::ToggleCheckbox(needle) => {
+            let new_body = toggle_checkbox_in_body(&item.body, needle).map_err(|e| match e {
+                MutateError::Validation(s) => {
+                    MutateError::Validation(format!("body_ops[{index}]: {s}"))
+                }
+                other => other,
+            })?;
+            item.body = new_body;
+        }
+        BodyOp::AppendNote(note) => {
+            let block = crate::body_sections::render_note_block(
+                &crate::body_sections::now_iso(),
+                &note.author,
+                &note.message,
+            )
+            .map_err(|e| MutateError::Validation(format!("body_ops[{index}]: {e}")))?;
+            let trimmed = item.body.trim_start_matches('\n');
+            let appended = crate::body_sections::append_block(trimmed, note.section.as_str(), &block);
+            item.body = crate::body_sections::canonicalise_body_leading(&appended);
+        }
+    }
+    Ok(())
 }
 
 /// Find a unique checkbox line containing `substring` and return the
@@ -4098,6 +4247,152 @@ mod tests {
             before, after,
             "schema violation must leave the file unchanged"
         );
+    }
+
+    #[test]
+    fn body_ops_apply_atomically_with_frontmatter() {
+        // Multi-op patch: status change + label add + checkbox toggle +
+        // note append must produce a single canonical-hash bump for the
+        // entire transaction (one write under one flock).
+        let tmp = fresh_repo();
+        let body =
+            "# T\n\n## Tasks\n\n- [ ] tests passing\n\n## Description\n\nbody.\n";
+        let v0 = seed_with_body(tmp.path(), "body-ops-mix", body);
+        let req = UpdateIssueRequest {
+            expected_version: Some(v0),
+            status: Patch::Set("testing".into()),
+            add_labels: vec!["agent-friendly".into()],
+            body_ops: vec![
+                BodyOp::ToggleCheckbox("tests passing".into()),
+                BodyOp::AppendNote(AppendNoteOp {
+                    author: "ci-bot".into(),
+                    message: "all checks green".into(),
+                    section: NoteSection::AgentRuns,
+                }),
+            ],
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "body-ops-mix", req, None).unwrap();
+        assert!(out.version.starts_with("sha256:"));
+        let after = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
+        assert!(after.contains("status: testing"));
+        assert!(after.contains("agent-friendly"));
+        assert!(after.contains("- [x] tests passing"));
+        assert!(after.contains("## Agent Runs"));
+        assert!(after.contains("@ci-bot"));
+        assert!(after.contains("all checks green"));
+    }
+
+    #[test]
+    fn body_ops_dry_run_emits_diff_without_writing() {
+        let tmp = fresh_repo();
+        let body = "# T\n\n- [ ] only one\n";
+        let _ = seed_with_body(tmp.path(), "body-ops-dry", body);
+        let before = fs::read_to_string(tmp.path().join("issues/body-ops-dry/item.md")).unwrap();
+        let req = UpdateIssueRequest {
+            body_ops: vec![BodyOp::ToggleCheckbox("only one".into())],
+            dry_run: true,
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "body-ops-dry", req, None).unwrap();
+        let pending = out.pending_serialized.expect("dry-run carries pending");
+        assert!(pending.contains("- [x] only one"));
+        assert!(out.before_serialized.is_some());
+        let after = fs::read_to_string(tmp.path().join("issues/body-ops-dry/item.md")).unwrap();
+        assert_eq!(before, after, "dry-run must not touch disk");
+    }
+
+    #[test]
+    fn body_ops_rollback_on_failed_op() {
+        // A failing checkbox match must surface as Validation and leave
+        // disk untouched — even when the patch also changes the
+        // frontmatter (status, labels). The whole transaction rolls
+        // back; nothing partial leaks.
+        let tmp = fresh_repo();
+        let body = "# T\n\n- [ ] alpha\n- [ ] beta\n";
+        let _ = seed_with_body(tmp.path(), "body-ops-rollback", body);
+        let before =
+            fs::read_to_string(tmp.path().join("issues/body-ops-rollback/item.md")).unwrap();
+        let req = UpdateIssueRequest {
+            status: Patch::Set("testing".into()),
+            body_ops: vec![BodyOp::ToggleCheckbox("nope".into())],
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "body-ops-rollback", req, None).unwrap_err();
+        assert!(
+            matches!(&err, MutateError::Validation(s) if s.contains("body_ops[0]") && s.contains("no checkbox")),
+            "got {err:?}"
+        );
+        let after =
+            fs::read_to_string(tmp.path().join("issues/body-ops-rollback/item.md")).unwrap();
+        assert_eq!(before, after, "failed body op must roll back frontmatter changes too");
+    }
+
+    #[test]
+    fn body_ops_deserialize_external_tag_yaml_shape() {
+        // The patch.yaml shape is externally tagged: each list entry is
+        // a single-key mapping. Pin the wire format so a future serde
+        // refactor can't silently change the agent contract.
+        let yaml = r#"
+body_ops:
+  - toggle_checkbox: "tests passing"
+  - append_note:
+      section: agent_runs
+      author: ci-bot
+      message: "all green"
+"#;
+        let req: UpdateIssueRequest = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(req.body_ops.len(), 2);
+        match &req.body_ops[0] {
+            BodyOp::ToggleCheckbox(s) => assert_eq!(s, "tests passing"),
+            other => panic!("expected ToggleCheckbox, got {other:?}"),
+        }
+        match &req.body_ops[1] {
+            BodyOp::AppendNote(n) => {
+                assert_eq!(n.author, "ci-bot");
+                assert_eq!(n.section, NoteSection::AgentRuns);
+            }
+            other => panic!("expected AppendNote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_ops_deserialize_external_tag_json_shape() {
+        // PATCH /api/issues/<slug> body must accept the same external-
+        // tag shape over JSON. Pin both arms so the server contract
+        // round-trips with the YAML one above.
+        let json = r#"{
+            "body_ops": [
+                {"toggle_checkbox": "ship it"},
+                {"append_note": {"author": "alice", "message": "done"}}
+            ]
+        }"#;
+        let req: UpdateIssueRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.body_ops.len(), 2);
+        match &req.body_ops[1] {
+            BodyOp::AppendNote(n) => {
+                assert_eq!(n.author, "alice");
+                // Default section is Comments when omitted on the wire.
+                assert_eq!(n.section, NoteSection::Comments);
+            }
+            other => panic!("expected AppendNote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_ops_validate_rejects_bad_author() {
+        let tmp = fresh_repo();
+        let _ = seed_issue(tmp.path(), "open", "body-ops-bad-author", "open");
+        let req = UpdateIssueRequest {
+            body_ops: vec![BodyOp::AppendNote(AppendNoteOp {
+                author: "alice\n## Pwned".into(),
+                message: "hi".into(),
+                section: NoteSection::Comments,
+            })],
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "body-ops-bad-author", req, None).unwrap_err();
+        assert!(matches!(err, MutateError::Validation(s) if s.contains("body_ops[0].author")));
     }
 
     #[test]
