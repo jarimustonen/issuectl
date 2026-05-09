@@ -7,6 +7,11 @@ status: in-progress
 priority: normal
 epic: exorbitantly-ill-apples
 labels: [release-v0.5.0]
+commits:
+- hash: 5aa3f3d
+  summary: extract do_new_locked into src/write/new_issue.rs; rewire mutate
+- hash: a1debda
+  summary: round-2 layering fixes (refs.rs; mutate/new_issue; API dup-key rejection)
 ---
 
 # Extract do_new_locked + NewArgs out of main.rs into domain module
