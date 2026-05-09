@@ -1,35 +1,20 @@
 # Web ↔ File bidirectional sync — design
 
-Status: **revision 3** after two multi-LLM panel review passes. Implementation
-lives in a separate worktree; this doc is a contract for that work, not code.
+Status: current contract for the web edit/sync work. Implementation lives in
+a separate worktree; this doc is a contract for that work, not code.
 
-- Pass 1 (full document) findings synthesized in
-  `history/review-web-edit-sync.md`.
-- Pass 2 (focused on the new §3 mutation protocol and §5.5 EventHub) led
-  to the corrections in this revision: in-lock seq advancement (§5.5),
-  publish-before-flock-release (§3.1 step 8), `subscribe_since` race-free
-  handoff (§5.5), `instance_id` for server-restart detection,
-  algorithmic canonical-hash spec (§3.2), CRLF-aware body normalisation,
-  removal of the per-slug async mutex (§2), tightened `Patch<T>` serde
-  semantics (§3.5), and dropping the false `flock`-as-symlink-defence
-  claim (§9.5).
+The on-disk layout is flat: every issue lives at `issues/<slug>/item.md`.
+Status is read from frontmatter; the kanban-bucket label
+(`open` / `closed`) seen in API payloads is derived from
+`is_closing_status(fm.status)` — purely a presentation detail, not a
+parallel state. Legacy `issues/{open,closed}/<slug>/` paths are still
+accepted on read (compat layer in `repo::locate_issue_full` +
+`mutate::locate_and_migrate`); writes always migrate the slug to the
+flat path under `flock`. The one-shot bulk migration is `issuectl
+doctor migrate-layout`.
 
-Decisions on disputed/discussion items are recorded in §12.
-
-> **Post-flat-layout note (issue `awfully-faint-sound`):** The
-> on-disk layout is now `issues/<slug>/item.md` (flat). The
-> `issues/{open,closed}/<slug>/` split this document was originally
-> written against has been retired. Sections that referred to the
-> split — §3.2 (canonical hash), §3.4 (status change = directory
-> rename), §5.2/§5.3 (slug resolution / folder moves), §6.2
-> (status/folder authority) — have been rewritten or struck through
-> with replacement notes inline. Status is authoritative from
-> frontmatter; the kanban-bucket label (`open`/`closed`) is derived
-> from `is_closing_status(status)`. Legacy paths are still accepted
-> for reads (compat layer in `repo::locate_issue_full` +
-> `mutate::locate_and_migrate`); writes always migrate the slug to
-> the flat path under `flock`. The one-shot migration is `issuectl
-> doctor migrate-layout`.
+Design history (review passes, superseded decisions, what shaped the
+current shape) is in Appendix C.
 
 ## 1. Goals & non-goals
 
@@ -68,7 +53,6 @@ Decisions on disputed/discussion items are recorded in §12.
    │                        │  AppState        │
    │                        │   ├ root         │
    │                        │   ├ event_hub    │  seq + ring + broadcast
-   │                        │   ├ slug_locks   │  DashMap<Slug, Mutex>
    │                        │   └ csrf_token   │  per-process
    │                        └────────┬─────────┘
    │                                 │
@@ -93,7 +77,7 @@ Decisions on disputed/discussion items are recorded in §12.
    └─── re-render ◀─────────── /events SSE ◀── EventHub ◀────┘
 ```
 
-`AppState` (today: `{ root: Arc<PathBuf> }`) grows two things:
+`AppState`:
 
 ```rust
 // illustrative, not final
@@ -105,11 +89,12 @@ pub struct AppState {
 ```
 
 The repo-wide `flock` (§3.1) serialises all writes for a single user's
-local tool; a per-slug `tokio::sync::Mutex` would add zero concurrency
-on top of it. If profiling later shows contention, switch the `flock`
-to per-issue lock files instead of layering an async mutex on top.
+local tool. There is no in-process per-slug mutex on top of it: `flock`
+already serialises everything, so a per-slug `tokio::sync::Mutex` would
+add zero concurrency. If profiling later shows contention, switch the
+`flock` to per-issue lock files instead.
 
-Two new long-running tokio tasks alongside `axum::serve`:
+Two long-running tokio tasks alongside `axum::serve`:
 
 1. `watcher_task` — owns a `notify::RecommendedWatcher` rooted at
    `<root>/issues/`, debounces with `notify-debouncer-full`, filters
@@ -131,7 +116,7 @@ arbitrary scripts — can still race. A concurrent `$EDITOR` save between
 this protocol's read and rename can be overwritten. Documented as
 unavoidable for the local-FS-as-source-of-truth model; mitigation is
 optimistic concurrency surfacing the conflict to the user (§6.3) and
-startup reconciliation (§13 spin-off).
+startup reconciliation (spin-off).
 
 ### 3.1 Sequence
 
@@ -140,12 +125,11 @@ For any mutation, all blocking I/O runs inside `tokio::task::spawn_blocking`
 
 ```
 1. acquire flock(LOCK_EX) on <root>/.issuectl/write.lock
-2. locate_issue(slug)              ← see 3.1.1
+2. locate_and_migrate(slug)        ← see 3.1.1
 3. read item.md, compute canonical_hash (§3.2)
 4. if request supplied expected_version: compare; mismatch → 409
 5. apply mutation in memory (mutate.rs)
-6. if status change crosses open↔closed: rename dir then write (§3.4);
-   else: write_item_atomic (§3.3) in place
+6. write_item_atomic (§3.3) to <root>/issues/<slug>/item.md
 7. compute new canonical_hash from final on-disk content
 8. event_hub.publish(IssueUpserted { version: V_new, ... })
    ← still holding flock, before release; closes the reorder window in §5.5
@@ -160,12 +144,12 @@ the dedup-by-version invariant in §6.4.
 
 The lock guard is RAII-bound: any panic or `tokio::task` cancellation
 between 1 and 9 unwinds and drops the file handle, releasing the lock.
-After-the-fact recovery (e.g. cancelled mid-§3.4 between rename and
-write) is the startup reconciler's job (§13 spin-off).
+After-the-fact recovery (e.g. a partially-written tempfile) is the
+startup reconciler's job.
 
-**Lock acquisition order** is documented as: only one lock — the repo
-`flock`. There is no second lock to deadlock against. CLI and server
-both acquire only `flock`, so no inversion possible.
+**Lock acquisition order**: only one lock — the repo `flock`. There is
+no second lock to deadlock against. CLI and server both acquire only
+`flock`, so no inversion possible.
 
 The lock file `<root>/.issuectl/write.lock` is created with mode `0o600`
 on Unix:
@@ -184,20 +168,26 @@ fs2::FileExt::lock_exclusive(&file)?;
 The `.issuectl/` directory is excluded from the issues tree by
 construction; `doctor --fix` adds it to `.gitignore` if missing.
 
-#### 3.1.1 `locate_issue(slug)` semantics
+#### 3.1.1 `locate_and_migrate(slug)` semantics
 
-Returns:
+The slug resolver runs inside the lock, before any read or write.
+Outcomes:
 
-- `Ok(folder)` — exactly one of `issues/open/<slug>` or `issues/closed/<slug>`
-  exists, is a directory (not a symlink — verified by `symlink_metadata`
-  + canonical-path-prefix check), and contains `item.md`.
-- `Err(NotFound)` — neither exists. Mutation handlers map to 404.
-- `Err(AmbiguousSlug)` — both `open/<slug>` and `closed/<slug>` exist
-  (e.g. mid-merge, manual chaos). Mutation handlers map to 409 with
-  `code: "ambiguous_slug"`. The reconciler (§13 spin-off) surfaces this
-  and refuses to silently pick a side.
+- `Ok(folder)` — exactly one canonical or legacy location resolves to a
+  directory (verified non-symlink via `symlink_metadata` +
+  canonical-path-prefix check) containing `item.md`. If the hit was at
+  a legacy `issues/{open,closed}/<slug>/` path, the directory is moved
+  to the canonical `issues/<slug>/` path under the same `flock` before
+  any subsequent read or write.
+- `Err(NotFound)` — neither canonical nor legacy paths exist. Mutation
+  handlers map to 404.
+- `Err(AmbiguousSlug)` — multiple locations exist (canonical + legacy,
+  or both legacy folders simultaneously). Mutation handlers map to 409
+  with `code: "ambiguous_slug"`. Silently picking one side would hide
+  divergence introduced by a partially-completed migration; the
+  reconciler surfaces the case and refuses.
 - `Err(Symlink | Invalid)` — symlink escape attempt or non-directory at
-  the slug path. 403 / 400 as today's `repo::locate_issue`.
+  the slug path. 403 / 400, same as today's `repo::locate_issue`.
 
 ### 3.2 Canonical hash
 
@@ -221,10 +211,6 @@ fn canonical_hash(item: &Item) -> String {
 /// `updated:` is excluded — it is bumped on every save and would re-introduce
 /// false-409s. Unknown keys preserved by the loader are included so
 /// undocumented user fields participate in concurrency control.
-///
-/// Post-flat-layout: `status` is taken straight from frontmatter; there
-/// is no `directory_authoritative_status` indirection because there is
-/// no parallel folder axis to reconcile.
 fn canonical_frontmatter_value(fm: &Frontmatter) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     m.insert("type".into(),     fm.issue_type.clone().into());
@@ -259,9 +245,8 @@ fn normalize_body(body: &str) -> Cow<'_, str> {
 
 Notes on the projection:
 
-- **Computed over `fm.status`.** Pre-flat-layout this paragraph
-  described folder-derived status; post-flat-layout there is no folder
-  axis, so frontmatter is the single source of truth.
+- **Status comes straight from frontmatter.** There is no folder axis to
+  reconcile, so no `directory_authoritative_status` indirection.
 - **Sorted keys + no whitespace**: use `serde_json_canonical` (RFC 8785
   JCS) or equivalent. Two correct implementations must produce identical
   bytes for identical content.
@@ -308,41 +293,27 @@ fn write_item_atomic(target: &Path, content: &str) -> Result<()> {
 - `.issuectl-tmp-` prefix is the signal that lets the watcher filter our
   temp files before debouncing (§5.1).
 - On SIGKILL, `Drop` doesn't run; orphan tempfiles are swept on next
-  startup (`doctor` extension, §11).
+  startup (`doctor` extension).
 - On Windows, `fsync_dir` is a no-op — `std::fs::File::open(dir)` returns
   `Err`, so the call is gated `#[cfg(unix)]`.
 
-### 3.4 Status change is a frontmatter PATCH (post-flat-layout)
+### 3.4 Status change is a frontmatter PATCH
 
-> **Replaces the original §3.4 ("Status change = directory rename").**
-> The pre-flat-layout sequence — rename the directory across
-> `open/` ↔ `closed/`, then write content — is gone. With the flat
-> layout there is no directory to rename: the issue lives at
-> `issues/<slug>/item.md` regardless of status.
-
-Sequence inside the lock simplifies to:
+A status transition is a plain frontmatter mutation. The issue lives at
+`issues/<slug>/item.md` regardless of status; nothing renames, nothing
+moves. Inside the lock:
 
 ```
-1. update frontmatter in memory (new status, closed: today if
-   closing; remove `closed:` if reopening)
+1. update frontmatter in memory:
+   - new status
+   - closed: today (if transitioning to a closing status)
+   - remove `closed:` (if reopening)
 2. write_item_atomic(<root>/issues/<slug>/item.md, content)
 ```
 
-`mutate::locate_and_migrate` runs before step 1: if the slug is found
-at a legacy `issues/{open,closed}/<slug>/` path (compat read), the
-directory is moved to the canonical flat path under the same flock
-before the write. Ambiguous state (flat AND legacy both present, or
-both legacy folders both present) is rejected with
-`MutateError::AmbiguousSlug` — silently picking one side hides
-divergence introduced by, e.g., a partially-completed migration.
-
-**Reconciler rules deleted.** The old table — closing-folder with
-active frontmatter, open-folder with closing frontmatter, both
-folders present — described mismatch states that no longer exist
-because there is no folder axis. The remaining startup-reconciliation
-work (item.md missing, malformed YAML, merge markers) is covered by
-`load_issues_with_warnings` and `parse_slug_state` directly; the
-spin-off issue tracked in §13 has a smaller surface as a result.
+The kanban-bucket label that surfaces in API payloads
+(`open` / `closed`) is derived from `is_closing_status(fm.status)` —
+not stored, not authoritative.
 
 ### 3.5 Shared mutation DTO
 
@@ -518,11 +489,9 @@ not include `issue`.
 
 ### 4.4 Server-internal call vs CLI shell-out
 
-The server calls `mutate::update_issue(...)` directly. Reviewer GPT-5.5
-correctly noted that the original "structural-equivalence test" was
-hand-wavy; replaced with a real mechanism: one `UpdateIssueRequest` type,
-clap and serde both derive into it, no test needed. Dogfooding remains
-because the CLI uses the same Rust functions — the symbolic value of
+The server calls `mutate::update_issue(...)` directly. Dogfooding holds
+because the CLI uses the same Rust functions: one `UpdateIssueRequest`
+type, clap and serde both derive into it. The symbolic value of
 "shells out" doesn't justify its 30–80 ms fork+exec cost or its locking
 races with the watcher.
 
@@ -532,9 +501,9 @@ To uphold "anything the web does is reachable from CLI":
 
 - `issuectl show <slug> --json` and `issuectl list --json` add a
   `version: "sha256:…"` field per issue.
-- `issuectl update --json …` **requires** `--expected-version sha256:…`
-  (DISCUSS D4 = B). Human invocations without `--json` keep working
-  without it; `flock` still prevents corruption.
+- `issuectl update --json …` **requires** `--expected-version sha256:…`.
+  Human invocations without `--json` keep working without it; `flock`
+  still prevents corruption.
 - `issuectl close --json` similarly requires it.
 - New: `issuectl body set <slug> --stdin --expected-version sha256:…
   --json` (or `--from-file`) for body editing parity. Without this,
@@ -557,7 +526,13 @@ To uphold "anything the web does is reachable from CLI":
   so a `git checkout` of 200 issues doesn't stall the watcher's event
   loop.
 
-### 5.2 Slug resolution from event paths (post-flat-layout)
+### 5.2 Slug resolution from event paths
+
+The slug is the first component under `issues/`. The legacy
+`open`/`closed` prefix is still accepted so compat-read repos still
+light up the watcher; if a slug is found under a legacy path,
+`parse_slug_state` surfaces a `legacy_layout` (or `ambiguous_slug`)
+warning to the client.
 
 ```rust
 fn issue_slug_from_event(issues_root: &Path, path: &Path) -> Option<String> {
@@ -567,47 +542,38 @@ fn issue_slug_from_event(issues_root: &Path, path: &Path) -> Option<String> {
     let slug = if first == "open" || first == "closed" {
         comps.next()?.as_os_str().to_str()? // legacy compat
     } else {
-        first                                 // flat layout (canonical)
+        first                                 // canonical flat layout
     };
     if !slug::is_valid(slug) { return None; }
     Some(slug.to_owned())
 }
 ```
 
-The flat layout puts the slug as the first component under
-`issues/`. The legacy `open`/`closed` prefix is still accepted so
-compat-read repos light up the watcher; `parse_slug_state` then
-surfaces a `legacy_layout` (or `ambiguous_slug`) warning to the
-client.
-
-### 5.3 Slug renames (post-flat-layout)
+### 5.3 Slug renames
 
 `git mv issues/old-slug issues/new-slug` produces a rename event with
-both paths (full debouncer preserves them). Watcher emits both:
+both paths (the full debouncer preserves them). The watcher emits:
 
 ```
 IssueRemoved  { slug: "old-slug" }
 IssueUpserted { slug: "new-slug", ... }
 ```
 
-There is no longer a separate "folder move" event class — closing or
-reopening an issue does not move its directory. Status crossings are a
-single `IssueUpserted` from the mutate layer (with the new
-`version`); clients re-bucket from `summary.status`/`summary.folder`.
+Status crossings are not a separate event class — they are a single
+`IssueUpserted` from the mutate layer (with the new `version`); clients
+re-bucket from `summary.status` / `summary.folder`.
 
 ### 5.4 Transport: SSE
 
-Decision unchanged: SSE wins for one-way push. axum's `Sse` plus
-`EventSource` covers reconnect.
+SSE wins for one-way push. axum's `Sse` plus `EventSource` covers
+reconnect.
 
 ### 5.5 EventHub and replay cursor
 
-The original §2 sketch used `events: broadcast::Sender<BoardEvent>` plus
-a separate "ring buffer of 256 events" — two contradictory mechanisms.
-Replaced with one explicit type. **All seq advancement and ring writes
-happen inside one critical section** so seq order matches ring order;
-splitting them across an `AtomicU64` and a separate mutex creates an
-out-of-order publish bug.
+One explicit type. **All seq advancement and ring writes happen inside
+one critical section** so seq order matches ring order; splitting them
+across an `AtomicU64` and a separate mutex creates an out-of-order
+publish bug.
 
 ```rust
 pub struct EventHub {
@@ -755,43 +721,18 @@ params exist — first connect uses them, subsequent reconnects use
 
 ### 5.6 Event types
 
-```rust
-#[derive(Serialize, Clone)]
-#[serde(tag = "type")]
-pub enum BoardEvent {
-    IssueUpserted {
-        seq: u64,
-        slug: String,
-        version: String,           // full canonical hash
-        issue: IssueSummary,        // summary only — no body_html
-    },
-    IssueRemoved {
-        seq: u64,
-        slug: String,
-    },
-    IssueInvalid {
-        seq: u64,
-        slug: String,
-        warnings: Vec<LoadWarning>,  // reuse existing shape from repo.rs
-    },
-    Resync {
-        seq: u64,
-        reason: String,              // "bulk_change" | "watcher_restart" | "lagged" | "gap"
-    },
-}
-```
+The wire envelope is `BoardEvent { seq, payload }` with a `#[serde(tag
+= "type")]` payload (see §5.5 and Appendix A).
 
-Notable changes from the original:
+Notable points:
 
-- **No `body_html` in events.** The doc previously had
-  `body_html: Option<String> // present iff a detail subscriber asked`,
-  which is incompatible with a single broadcast channel. Detail dialogs
-  refetch `/api/issues/{slug}` on relevant events. Bodies are short;
-  fetch is cheap.
+- **No `body_html` in events.** Detail dialogs refetch
+  `/api/issues/{slug}` on relevant events. Bodies are short; fetch is
+  cheap. This keeps the broadcast channel single-shape.
 - **No `origin` / `WriteToken`.** Echo suppression is client-side
   (§6.4) — server sends the same event to everyone, the originating
   tab recognises its own `version` from the PATCH 200 response.
-- **`IssueInvalid`** (new) — for malformed YAML, missing `item.md`,
+- **`IssueInvalid`** — for malformed YAML, missing `item.md`,
   `<<<<<<<` merge markers, partially-written files. Reuses
   `repo::LoadWarning` shape; web UI already renders these in the
   `#warnings` strip. Card stays visible with an error badge instead
@@ -824,33 +765,30 @@ manual refresh button works).
 
 ### 6.1 Lost-update protection
 
-Three layers, in order of strength:
+Two layers, in order of strength:
 
 1. **`flock(LOCK_EX)`** on `<root>/.issuectl/write.lock` — cross-process,
    shared by CLI and server. The only mechanism that survives "user runs
    `issuectl update` from terminal while server is up." Note: does not
    protect against `$EDITOR` saves or `git pull` — those are outside the
    tool's control and documented as such.
-2. **Per-slug `tokio::sync::Mutex`** inside the server — serialises
-   concurrent PATCHes to the same issue. Held across the whole
-   lock→read→hash→write→rename sequence.
-3. **`expected_version` optimistic check** — surfaces conflicts to the
+2. **`expected_version` optimistic check** — surfaces conflicts to the
    browser tab that started its edit before another writer changed the
    file. Required on AI-agent (`--json`) calls.
 
-Layers 1 and 2 prevent corruption; layer 3 surfaces *user-visible*
-conflicts. Removing layer 3 would silently overwrite changes; removing
-1 or 2 would corrupt the file.
+Layer 1 prevents corruption; layer 2 surfaces *user-visible* conflicts.
+Removing layer 2 would silently overwrite changes; removing layer 1
+would corrupt the file. There is no in-process per-slug mutex: `flock`
+already serialises everything and a second async lock would only add
+acquisition order risk for no concurrency win (see §2).
 
-### 6.2 Status authority (post-flat-layout)
+### 6.2 Status authority
 
-> **Replaces the original §6.2 ("directory wins").** Without a parallel
-> folder axis, there is nothing to be authoritative *over*: status is
-> read from frontmatter and written by frontmatter PATCH. Period.
-
-The kanban-bucket label (`open` / `closed`) appearing in API
-payloads is derived from `is_closing_status(fm.status)` and is
-strictly a presentation detail — not a parallel state.
+Status is stored in frontmatter and only in frontmatter. There is no
+parallel folder axis, so nothing is "authoritative over" anything else.
+The kanban-bucket label (`open` / `closed`) appearing in API payloads
+is derived from `is_closing_status(fm.status)` — strictly a presentation
+detail.
 
 ### 6.3 Body conflict UX (M2)
 
@@ -859,11 +797,11 @@ When `PUT /body` returns 409:
 1. The server's fresh `IssueDetailResponse` is shown alongside the user's
    current draft (split pane).
 2. The textarea **is not overwritten**. The user's typed content stays
-   exactly where they put it. Reviewer concern: silently wiping a body
-   into an "in-memory clipboard" is data-loss UX.
+   exactly where they put it. Silently wiping a body into an "in-memory
+   clipboard" is data-loss UX.
 3. `localStorage` already has a backup keyed by
    `(slug, started_editing_at)` — written every keystroke (free,
-   synchronous, survives tab-close, kraashes, network failure).
+   synchronous, survives tab-close, crashes, network failure).
 4. User picks: "keep mine" (PATCH again with new `expected_version`),
    "keep theirs" (discard local, accept server), or manually merge in
    the textarea then save.
@@ -873,9 +811,7 @@ For **metadata** PATCHes (status, priority, etc.), the simpler
 
 ### 6.4 Echo suppression
 
-DISCUSS #6 + paneeli: drop server-side `WriteToken` machinery.
-
-Mechanism:
+Server-side write-token machinery is not used. Mechanism:
 
 1. PATCH 200 response includes the new canonical `version`.
 2. Client stores `local_version = response.version`.
@@ -889,8 +825,6 @@ tab) treat the event as external — correct, because from their
 perspective it *is* external. No server state required.
 
 ### 6.5 Body autosave (M2)
-
-DISCUSS D3 = C:
 
 - 5 s debounce after last keystroke.
 - Save on `blur`.
@@ -961,9 +895,11 @@ large. See §5.5.
 ### 8.4 Crash mid-write
 
 Atomic write guarantees readers see either the pre- or post-image,
-never half. Crash between rename and content write (status change
-sequence §3.4) leaves a renamed dir with stale content; reconciler
-fixes on next startup.
+never half. The only other on-disk side effect is the orphan tempfile
+(`.issuectl-tmp-*`) left behind if `Drop` was skipped; the startup
+sweep handles it. There is no rename-then-write sequence anywhere — a
+status change is just `write_item_atomic` (§3.4) — so there is no
+"half-renamed" state to reconcile.
 
 ### 8.5 Watcher itself crashes
 
@@ -997,7 +933,7 @@ raises the stakes:
 
 ### 9.2 Mechanism
 
-DISCUSS #17 = A: per-process CSRF token.
+Per-process CSRF token:
 
 1. Server generates a random 256-bit token at startup, kept in
    `AppState.csrf_token`. Not persisted; restart → new token.
@@ -1039,13 +975,11 @@ This is a future feature; M0–M3 stays loopback-only for writes.
 
 ### 9.5 Other hardening
 
-- Request size: a single global 1 MiB envelope on every route. The
-  earlier per-route plan (PATCH 64 KiB / PUT 1 MiB / preview 1 MiB)
-  was simplified after M2 review — PATCH metadata payloads in
-  practice are well under 64 KiB anyway, and one global limit cuts
-  the layer wiring complexity. If a future route needs a tighter cap
-  (e.g. an audit-log endpoint), apply `route_layer(DefaultBodyLimit)`
-  there.
+- Request size: a single global 1 MiB envelope on every route. PATCH
+  metadata payloads in practice sit well under 64 KiB; one global
+  limit cuts the layer wiring complexity. If a future route needs a
+  tighter cap (e.g. an audit-log endpoint), apply
+  `route_layer(DefaultBodyLimit)` there.
 - Atomic-write target re-canonicalised inside `locate_issue`-style
   guard before persist (`symlink_metadata` + canonical-prefix check).
   Note: `flock` is *not* a symlink-swap defence — it's advisory and
@@ -1062,16 +996,14 @@ This is a future feature; M0–M3 stays loopback-only for writes.
 | Phase | Scope | Ship value |
 | --- | --- | --- |
 | **M0** | `EventHub` (single-mutex seq+ring), `notify-debouncer-full` watcher, `/events` SSE with `subscribe_since` race-free handoff, `snapshot_seq` + `instance_id` in `/api/issues`. No writes. | Live read-side updates: `$EDITOR` saves, `git pull`, agent edits all show up in the board immediately. |
-| **M1** | `mutate.rs` refactor with `Patch<T>` + `UpdateIssueRequest` + `flock` + per-slug mutex + canonical hash. CSRF token + `Host` validation. PATCH metadata routes. CLI: `--expected-version`, `version` field in `--json` output. Drag-to-move in UI. | Status drag, label/assignee edits — most-requested ergonomic gap. |
+| **M1** | `mutate.rs` refactor with `Patch<T>` + `UpdateIssueRequest` + `flock` + canonical hash + `locate_and_migrate` (flat-layout writes with legacy compat reads). CSRF token + `Host` validation. PATCH metadata routes. CLI: `--expected-version`, `version` field in `--json` output. Drag-to-move in UI. | Status drag, label/assignee edits — most-requested ergonomic gap. Issues live at `issues/<slug>/item.md`; status changes are pure frontmatter PATCHes. |
 | **M2** | `PUT /body` + textarea + `POST /api/preview` + `localStorage` draft + body conflict UX. `IssueInvalid` event surfacing. CLI: `issuectl body set`. | Full edit-in-place. |
-| **M3** | `--watch-poll-ms`, `--no-watch`, `Degraded` banner, three-way merge UI for body conflicts. | Robustness for real multi-client use. |
-| **Flat layout** | `issues/<slug>/item.md` (no `open`/`closed` split). Status is pure frontmatter PATCH; legacy paths read-compat with in-line migrate-on-write; one-shot `issuectl doctor --fix`. | Eliminates §3.4's rename surface; collapses §5.2/§5.3/§6.2 into trivia. |
+| **M3** | `--watch-poll-ms`, `--no-watch`, `Degraded` banner, three-way merge UI for body conflicts. `issuectl doctor migrate-layout` for one-shot bulk migration of legacy repos. | Robustness for real multi-client use. |
 
 **Spin-offs** (own issues, off the M0–M3 path):
 
-- Startup reconciliation (extends `issuectl doctor`) — surface
-  shrunk post-flat-layout (no folder/status mismatch class), but
-  `item.md`-missing / merge-marker / orphan-epic cleanup remain.
+- Startup reconciliation (extends `issuectl doctor`) — `item.md`-missing
+  / merge-marker / orphan-epic / orphan-tempfile cleanup.
 - Field-level merge for commuting metadata PATCHes — only build if
   M2 user reports show 409 friction is real.
 
@@ -1096,42 +1028,10 @@ exotic perms).
 | Replay mechanism | broadcast::Sender alone / explicit EventHub | **EventHub** | broadcast can't replay by `Last-Event-ID` |
 | Initial state ↔ stream | Snapshot-then-stream / cursor handoff | **`replay_from_seq` cursor in REST** | Closes the lost-event window |
 | CSRF | Punt to v2 / per-process token / persistent token | **Per-process token from M1** | Loopback ≠ trusted; npm postinstall is realistic |
-| ~~Status/folder authority~~ | ~~Directory / frontmatter / diagnose-only~~ | ~~**Directory**~~ | ~~`git mv` works; reconciler rule is one line~~ — **superseded post-flat-layout: frontmatter is the only axis.** |
+| Status axis | Folder / frontmatter | **Frontmatter** | Single source of truth; no rename surface; `git mv` slug-rename still trivial |
 | Body autosave | None / 750 ms / 5 s + localStorage | **5 s + localStorage + manual** | Covers tab-close + avoids 409 storms |
 
-## 12. Decisions record
-
-DISCUSS items resolved during review:
-
-- **D3 (body autosave)** = **C**: 5 s debounce + `localStorage` + manual save.
-- **D4 (CLI `--expected-version`)** = **B**: required when `--json`,
-  optional otherwise. `flock` covers corruption either way.
-- **D5 (PATCH array semantics)** = **A**: keep `add_*`/`remove_*` for
-  CLI parity; specify edge cases (duplicate add+remove → 400; absent
-  remove → no-op).
-- **#17 (CSRF token persistence)** = **A**: per-process. Non-loopback
-  uses a separate persistent `--auth-token-file`.
-- **#19 (status/folder authority)** = **A**: directory wins; reconciler
-  rewrites frontmatter to match; web UI surfaces a `LoadWarning`.
-
-Spin-offs filed (won't block M0–M3):
-
-- **#23**: Startup reconciliation — extends `issuectl doctor`.
-- **#24**: Field-level merge for commuting metadata PATCHes — only
-  build if real-world 409 friction shows up post-M2.
-
-Dropped:
-
-- **#25** Idempotency keys: cosmic ray on loopback.
-- **#26** SSE schema versioning: same-binary deployment + client
-  "unknown type → Resync" fallback is enough.
-- **#27** Watcher heartbeat marker file: writes to repo to test itself.
-- **#28** Mode-bit preservation: no real users with exotic perms on
-  issue files.
-- **#29** Windows fsync edge: gated `#[cfg(unix)]`; Windows path is
-  documented as undefined.
-
-## 13. Out of scope / open questions
+## 12. Out of scope / open questions
 
 These are genuine open questions, not deferred decisions:
 
@@ -1207,10 +1107,11 @@ client                              server
   |    status: "in-progress" }       |
   |  -------------------------->     |
   |                                  |  flock(LOCK_EX)
+  |                                  |  locate_and_migrate(foo)
   |                                  |  read item.md, hash
   |                                  |  check expected_version
   |                                  |  apply mutation in memory
-  |                                  |  write_item_atomic (or rename+write)
+  |                                  |  write_item_atomic
   |                                  |  recompute hash → V_new
   |                                  |  hub.publish(IssueUpserted{V_new})
   |                                  |    — STILL holding flock so seq
@@ -1231,8 +1132,59 @@ client                              server
   |  show "saved" indicator instead of re-render.
 ```
 
----
+## Appendix C — design history
 
-*Last revised: 2026-05-06 after two multi-LLM panel review passes (full
-doc, then focused on §3 + §5.5). Implementation starts in a separate
-worktree.*
+This document went through two multi-LLM panel review passes against the
+original `open`/`closed`-folder-split layout, plus a third pass after
+the flat-layout migration. Findings synthesized in
+`history/review-web-edit-sync.md` and `history/review-flat-layout.md`.
+
+Pass 2 corrections that shaped §3 and §5.5: in-lock seq advancement
+(§5.5), publish-before-flock-release (§3.1 step 8), `subscribe_since`
+race-free handoff (§5.5), `instance_id` for server-restart detection,
+algorithmic canonical-hash spec (§3.2), CRLF-aware body normalisation,
+removal of the per-slug async mutex (§2 / §6.1), tightened `Patch<T>`
+serde semantics (§3.5), and dropping the false `flock`-as-symlink-defence
+claim (§9.5).
+
+The flat-layout migration (issue `awfully-faint-sound`) retired
+`issues/{open,closed}/<slug>/`. Sections that moved or collapsed:
+
+- §3.4 was "status change = directory rename"; now a frontmatter PATCH.
+- §3.1.1 was `locate_issue` over two folder roots; now `locate_and_migrate`.
+- §5.2 / §5.3 lost the folder-move event class.
+- §6.2 lost the "directory wins, frontmatter rewritten to match" rule.
+- The startup reconciler's surface shrank — no folder/frontmatter
+  mismatch class to repair.
+
+Resolved discussion items (numbered against the original review
+threads):
+
+- **D3 (body autosave)** = **C**: 5 s debounce + `localStorage` + manual save.
+- **D4 (CLI `--expected-version`)** = **B**: required when `--json`,
+  optional otherwise. `flock` covers corruption either way.
+- **D5 (PATCH array semantics)** = **A**: keep `add_*`/`remove_*` for
+  CLI parity; specify edge cases (duplicate add+remove → 400; absent
+  remove → no-op).
+- **#17 (CSRF token persistence)** = **A**: per-process. Non-loopback
+  uses a separate persistent `--auth-token-file`.
+- **#19 (status/folder authority)** = originally **A** (directory wins
+  + reconciler rewrites frontmatter). **Superseded** by the flat-layout
+  migration: there is no folder axis to be authoritative over.
+
+Spin-offs filed (won't block M0–M3):
+
+- **#23**: Startup reconciliation — extends `issuectl doctor`.
+- **#24**: Field-level merge for commuting metadata PATCHes — only
+  build if real-world 409 friction shows up post-M2.
+
+Dropped:
+
+- **#25** Idempotency keys: cosmic ray on loopback.
+- **#26** SSE schema versioning: same-binary deployment + client
+  "unknown type → Resync" fallback is enough.
+- **#27** Watcher heartbeat marker file: writes to repo to test itself.
+- **#28** Mode-bit preservation: no real users with exotic perms on
+  issue files.
+- **#29** Windows fsync edge: gated `#[cfg(unix)]`; Windows path is
+  documented as undefined.
