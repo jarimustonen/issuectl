@@ -1590,10 +1590,10 @@ pub fn new_issue(
     // `IssueUpserted` then published OUTSIDE the lock, inverting seq
     // against concurrent writers.
     let lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    let outcome = crate::do_new_locked(
+    let outcome = crate::write::new_issue::do_new_locked(
         &lock,
         root,
-        crate::NewArgs {
+        crate::write::new_issue::NewArgs {
             issue_type: req.issue_type,
             title: req.title,
             slug: req.slug,
@@ -1610,11 +1610,11 @@ pub fn new_issue(
         },
     )
     .map_err(|e| match e {
-        crate::DoNewError::SchemaViolation(s) => MutateError::SchemaViolation(s),
-        crate::DoNewError::SchemaConfig(s) => MutateError::SchemaConfig(s),
-        crate::DoNewError::Conflict(s) => MutateError::ConflictingIntent(s),
-        crate::DoNewError::Validation(s) => MutateError::Validation(s),
-        crate::DoNewError::Io(e) => MutateError::Io(e),
+        crate::write::new_issue::DoNewError::SchemaViolation(s) => MutateError::SchemaViolation(s),
+        crate::write::new_issue::DoNewError::SchemaConfig(s) => MutateError::SchemaConfig(s),
+        crate::write::new_issue::DoNewError::Conflict(s) => MutateError::ConflictingIntent(s),
+        crate::write::new_issue::DoNewError::Validation(s) => MutateError::Validation(s),
+        crate::write::new_issue::DoNewError::Io(e) => MutateError::Io(e),
     })?;
 
     // Re-read for canonical hash + Issue. Still holding the lock.
@@ -2884,7 +2884,7 @@ mod tests {
         // human-readable error messages stable across the typed-error
         // refactor. If a future contributor edits the variants without
         // touching the conversion, this test fails before users do.
-        use crate::DoNewError;
+        use crate::write::new_issue::DoNewError;
 
         let cases: &[(DoNewError, &str)] = &[
             (
