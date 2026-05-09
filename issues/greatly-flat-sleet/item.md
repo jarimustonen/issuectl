@@ -3,11 +3,19 @@ created: 2026-05-09
 updated: 2026-05-09
 type: chore
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
 related: ['@ridiculously-outgoing-brass']
 labels: [release-v0.5.0]
+commits:
+- hash: 8cdf554
+  summary: 'refactor(doctor): split apply pipeline into Findings/Actions/Outcome'
+- hash: f96afc6
+  summary: 'fix(doctor): apply round-2 /llm-review fixes to apply pipeline'
+- hash: b2cc230
+  summary: 'chore(issues): file round-2 review spin-offs from @greatly-flat-sleet'
+closed: 2026-05-09
 ---
 
 # Doctor: rakenteellinen apply-pipeline (Findings + Actions + ApplyOutcome)
