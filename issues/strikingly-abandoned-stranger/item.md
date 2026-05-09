@@ -1,11 +1,17 @@
 ---
 created: 2026-05-08
-updated: 2026-05-08
+updated: 2026-05-09
 type: task
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
+commits:
+- hash: fe6761c
+  summary: add two-thread seq-order regression tests
+- hash: b423e99
+  summary: revert two-thread tests after /llm-review found structural flaw
+closed: 2026-05-09
 ---
 
 # Two-thread regression test for seq order under concurrent mutations
