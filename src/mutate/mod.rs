@@ -1582,14 +1582,21 @@ where
             // input order — duplicates are NOT pre-deduplicated by the
             // parser, so we see both and can reject. Switching to
             // BTreeMap here would silently keep the last value.
+            //
+            // Pull `next_key` and `next_value` separately so the
+            // duplicate-key check fires BEFORE value deserialization;
+            // otherwise a payload like `{"team":"a","team":1}` would
+            // surface a type error from the bad second value rather
+            // than the duplicate-key diagnostic the test pins.
             let mut out: Vec<(String, String)> = Vec::new();
             let mut seen = std::collections::BTreeSet::new();
-            while let Some((k, v)) = map.next_entry::<String, String>()? {
+            while let Some(k) = map.next_key::<String>()? {
                 if !seen.insert(k.clone()) {
                     return Err(serde::de::Error::custom(format!(
                         "custom field {k:?} given more than once"
                     )));
                 }
+                let v = map.next_value::<String>()?;
                 out.push((k, v));
             }
             Ok(out)
@@ -2753,6 +2760,67 @@ mod tests {
         let outcome = new_issue(tmp.path(), req, None).unwrap();
         let on_disk = fs::read_to_string(outcome.issue_dir.join("item.md")).unwrap();
         assert!(on_disk.contains("team: payments"), "got {on_disk}");
+    }
+
+    #[test]
+    fn new_issue_request_defaults_missing_custom_fields_to_empty() {
+        let req: NewIssueRequest =
+            serde_json::from_str(r#"{"type":"bug","title":"x"}"#).unwrap();
+        assert!(req.custom_fields.is_empty());
+    }
+
+    #[test]
+    fn new_issue_request_accepts_empty_custom_fields_object() {
+        let req: NewIssueRequest = serde_json::from_str(
+            r#"{"type":"bug","title":"x","custom_fields":{}}"#,
+        )
+        .unwrap();
+        assert!(req.custom_fields.is_empty());
+    }
+
+    #[test]
+    fn new_issue_request_rejects_non_object_custom_fields() {
+        // `custom_fields: []` (or any non-object shape) must be rejected
+        // with the visitor's `expecting` text so calling agents get a
+        // shape-error message rather than silent acceptance.
+        let err = serde_json::from_str::<NewIssueRequest>(
+            r#"{"type":"bug","title":"x","custom_fields":[]}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("expected"),
+            "expected shape error, got {err}"
+        );
+    }
+
+    #[test]
+    fn new_issue_request_rejects_non_string_custom_field_value() {
+        let err = serde_json::from_str::<NewIssueRequest>(
+            r#"{"type":"bug","title":"x","custom_fields":{"team":1}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("expected a string"),
+            "expected string-type error, got {err}"
+        );
+    }
+
+    #[test]
+    fn new_issue_request_duplicate_key_error_precedes_bad_duplicate_value() {
+        // Pinning the next_key/next_value ordering: a duplicate key
+        // with a type-invalid second value must report duplicate, not
+        // the type error. Otherwise the duplicate-rejection invariant
+        // would be silently bypassed by anyone whose duplicate
+        // happens to also be malformed.
+        let err = serde_json::from_str::<NewIssueRequest>(
+            r#"{"type":"bug","title":"x","custom_fields":{"team":"a","team":1}}"#,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("team") && msg.contains("more than once"),
+            "expected duplicate-key error, got {msg:?}"
+        );
     }
 
     #[test]
