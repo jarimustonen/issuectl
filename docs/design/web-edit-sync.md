@@ -174,49 +174,125 @@ construction; `doctor --fix` adds it to `.gitignore` if missing.
 #### 3.1.1 `locate_and_migrate(slug)` semantics
 
 The slug resolver runs inside the lock, before any read or write.
-Outcomes:
+"Path exists" and "valid issue" are kept separate: a slug-shaped
+directory is a *candidate* whether or not it contains a parseable
+`item.md`. Outcomes:
 
-- `Ok(folder)` — exactly one canonical or legacy location resolves to a
+- `Ok(folder)` — exactly one candidate location resolves to a
   directory (verified non-symlink via `symlink_metadata` +
-  canonical-path-prefix check) containing `item.md`. If the hit was at
-  a legacy `issues/{open,closed}/<slug>/` path, the directory is moved
-  to the canonical `issues/<slug>/` path under the same `flock` before
-  any subsequent read or write. After the rename the parent `issues/`
-  directory is `fsync`ed so the new location is durable on crash.
-- `Err(NotFound)` — neither canonical nor legacy paths exist. Mutation
-  handlers map to 404.
-- `Err(AmbiguousSlug)` — multiple locations exist (canonical + legacy,
-  or both legacy folders simultaneously). Mutation handlers map to 409
-  with `code: "ambiguous_slug"` and a `detail` pointing the user at
-  `issuectl doctor migrate-layout`. Silently picking one side would
-  hide divergence introduced by a partially-completed migration.
-- `Err(Symlink | Invalid)` — symlink escape attempt or non-directory at
-  the slug path. 403 / 400, same as today's `repo::locate_issue`.
+  canonical-path-prefix check) containing a parseable `item.md`. If
+  the hit was at a legacy `issues/{open,closed}/<slug>/` path, the
+  directory is moved to the canonical `issues/<slug>/` path under
+  the same `flock` (see "Migration mechanics" below).
+- `Err(NotFound)` — no candidate paths exist (canonical or legacy).
+  Mutation handlers map to 404.
+- `Err(AmbiguousSlug)` — more than one candidate path exists
+  (canonical + legacy, or both legacy folders simultaneously,
+  *whether or not their item.md files are valid*). Mutation handlers
+  map to 409 with `code: "ambiguous_slug"` and a `detail` pointing
+  the user at `issuectl doctor migrate-layout`. Silently picking one
+  side would hide divergence introduced by a partially-completed
+  migration.
+- `Err(Corrupt)` — exactly one candidate exists but its `item.md` is
+  missing or malformed. Mutation handlers map to 409 with `code:
+  "corrupt"`; the client surfaces "fix on disk first" rather than
+  letting a write blindly overwrite. (Distinguished from
+  `NotFound`: the slug exists, just not as a valid issue.)
+- `Err(Symlink | Invalid)` — symlink escape attempt or non-directory
+  at the slug path. 403 / 400, same as today's `repo::locate_issue`.
 
 **Side-effect ordering.** `locate_and_migrate` runs at step 2 of the
 mutation sequence (§3.1), *before* the `expected_version` check at
 step 4. A stale-version PATCH that ends in 409 still leaves the
 directory permanently migrated. This is intentional — migration is a
 strict layout cleanup, independent of mutation success — but it
-means a 409 client cannot assume the on-disk path was unchanged.
+means a 409 client cannot assume the on-disk path was unchanged. The
+409 response carries the post-migration `version`, which equals the
+pre-migration `version` (rename does not touch content); a client
+retrying with that `version` succeeds even though it never knew the
+migration ran. Migration alone does not bump `updated:` — that is
+reserved for mutations that actually change content.
 
-**Watcher event suppression during migration.** The directory rename
-in step 2 produces filesystem events the watcher would otherwise
-translate into `IssueRemoved(slug)` (legacy path) +
-`IssueUpserted(slug)` (canonical path), arriving alongside the
-mutator's synthetic `IssueUpserted(slug, V_new)`. To avoid a
-disappear/reappear flicker on connected clients, `mutate.rs` records
-`(slug, V_new)` in a short-lived (≥ debounce window + slack) ignore
-set; the watcher drops events whose `(slug, computed_version)` matches
-*and* drops the paired `IssueRemoved` for the same slug within the
-same debounce batch.
+**Migration mechanics.** When the resolver hits a legacy path:
+
+1. **Pre-rename: install slug-marker** in the in-process
+   `MigrationSuppress` set (an `Arc<RwLock<HashMap<Slug, MigrationEntry>>>`
+   shared via `AppState` between mutator and watcher; the CLI gets a
+   no-op handle since it has no watcher). The entry stamps the
+   legacy path, the canonical path, and a wall-clock install time.
+2. **No-overwrite rename.** Use `renameat2(RENAME_NOREPLACE)` on
+   Linux; cross-platform fallback: stat the canonical path under the
+   flock first and reject with `Err(AmbiguousSlug)` if it appeared
+   between resolution and rename (an external `git pull` lands a
+   canonical `issues/<slug>/` while we hold flock — `flock` doesn't
+   exclude `git`). If the rename itself returns `EEXIST` /
+   `DirectoryNotEmpty` / `AlreadyExists`, map to `Err(AmbiguousSlug)`
+   → 409.
+3. **fsync both parents.** `rename(2)` modifies two directories: the
+   source (entry removed) and the destination (entry added). Both
+   need `fsync` for crash-durable rename — without the source-side
+   fsync, on crash the slug can briefly appear at *both* paths. If
+   source and destination parents are the same dir (the
+   already-canonical case), one fsync suffices. Like §3.3, the
+   fsyncs are `cfg(unix)`-only; on Windows the rename is best-effort
+   durable.
+4. **Post-write: stamp `(slug, V_new)`** into the same suppression
+   entry once the mutation produces a final hash (step 7 of §3.1).
+   This is the secondary echo filter, not the primary suppression.
+
+**Watcher event suppression for migration.** Watcher events
+generated by the directory move would otherwise produce a
+disappear/reappear flicker on connected clients (legacy
+`IssueRemoved` + canonical `IssueUpserted`), arriving alongside the
+mutator's synthetic `IssueUpserted` (when one exists). The watcher
+honours two complementary rules:
+
+- **Debounce-batch coalescing (primary).** When a debounce batch
+  contains a removal at a legacy path AND a create/modify at the
+  canonical path for the same slug AND a `MigrationSuppress` entry
+  exists for that slug, the watcher drops the legacy `IssueRemoved`
+  and emits a single canonical `IssueUpserted` (with the
+  watcher-computed version, which may equal `V_old` if the mutation
+  hasn't completed its write yet, or `V_new` after). This rule is
+  what every migration relies on, including CLI-mediated migrations
+  where the watcher coalesces the rename pair on its own evidence
+  without needing a server-side marker (in CLI-only repos
+  `MigrationSuppress` is empty; coalescing then keys purely on the
+  rename-pair-in-batch signal).
+- **Version echo dedup (secondary).** When a watcher event's
+  `(slug, computed_version)` matches a recorded post-write entry,
+  drop it. This is the echo filter for the "watcher re-parses the
+  file the mutator just wrote" race; the §5.6 `(slug, version)`
+  dedup on the client side is the same idea, one layer up.
+
+**Suppression entry lifetime.** Entries TTL out at
+`max(5 s, 10 × debounce_window)` from install time, capped at 30 s.
+Expiry is best-effort: stale entries are removed on the next
+suppression-set access. If a watcher event for a migrated slug
+arrives after TTL, the version-echo dedup in §5.6 catches it on the
+client side at the cost of one extra render.
+
+**Migration-only failed mutations.** When migration runs but the
+mutation aborts (409, validation, etc.), no synthetic event is
+published. The pre-rename slug-marker is still installed, so the
+watcher's coalescing rule fires: clients learn the new layout via a
+single canonical `IssueUpserted` whose version is the pre-edit hash
+(unchanged by rename). The originating PATCH client receives 409 on
+its own response stream; SSE for other tabs carries the
+post-migration upsert.
 
 **`POST /api/issues` (create) collision behavior.** The create path
-also runs `locate_and_migrate` first. If it returns `Ok(_)` —
-canonical or legacy — the create is rejected with 409
-`slug_conflict`. If it returns `Err(NotFound)`, the create proceeds
-under the same flock. This makes "new" deterministic in the presence
-of legacy paths.
+uses `locate_issue_any_layout(slug)` — a *non-mutating* locator that
+returns `Some(folder)` for any canonical or legacy hit and `None`
+for `NotFound`, without renaming. If `Some`, the create is rejected
+with 409 `slug_conflict` and no on-disk side effect. If `None`, the
+create proceeds under the same flock to write at the canonical path.
+This avoids the surprise of a failed create having migrated a
+legacy slug; the migration belongs in the update path where the
+caller is opting in to layout cleanup. (External `git pull` between
+resolution and write can still land a canonical directory ahead of
+the create; this falls under the §3 precondition that excludes
+non-`flock` writers.)
 
 ### 3.2 Canonical hash
 
@@ -818,17 +894,33 @@ Notable points:
 **Client dedup contract** (single rule, applies regardless of event
 origin):
 
-- `IssueUpserted { slug, version }` is idempotent on `(slug, version)`.
-  A tab that already shows version `V` for slug `S` skips re-render
-  on any subsequent `IssueUpserted { slug: S, version: V }` — including
-  the synthetic event from a self-originated PATCH and the watcher's
-  follow-up event for the same write.
+- `IssueUpserted { slug, version }` is idempotent on `(slug, version)`
+  *for content rendering*. A tab that already shows version `V` for
+  slug `S` skips the body / metadata re-render on any subsequent
+  `IssueUpserted { slug: S, version: V }` — including the synthetic
+  event from a self-originated PATCH and the watcher's follow-up
+  event for the same write.
+- **Non-content reconciliation always runs.** Even on a same-version
+  upsert, the client clears any `IssueInvalid` badge for the slug,
+  applies updated `summary.warnings` (e.g. `legacy_layout` cleared
+  after migration), and refreshes save-indicator / "Saved" UI state.
+  The version dedup is a render-skip, not a drop: side-channel state
+  that lives outside the canonical hash must still reconcile. (The
+  canonical hash deliberately excludes `updated:` — see §3.2 — so
+  same-version upserts are normal after migration-only writes and
+  after vim swap-restore cycles; both must clear stale warnings.)
 - `IssueRemoved { slug }` is idempotent on `slug`. A tab that already
-  shows slug `S` as removed (or never had it) skips re-render. The
-  mutator never publishes `IssueRemoved` (it always writes via
-  `locate_and_migrate` + `write_item_atomic`); only the watcher does.
-  Migration-driven `IssueRemoved` events are suppressed by the rule
-  in §3.1.1, so the contract stays slug-only.
+  shows slug `S` as removed (or never had it) skips re-render. On
+  receiving `IssueRemoved`, the client also **deletes
+  `cardVersion[slug]`** and any `IssueInvalid` state for the slug;
+  a subsequent `IssueUpserted` for `S` is then treated as fresh, even
+  if its version equals the pre-removal version (which can happen
+  when an external process recreates an issue with identical
+  content).
+- The mutator never publishes `IssueRemoved` (it always writes via
+  `locate_and_migrate` + `write_item_atomic`); only the watcher
+  does. Migration-driven `IssueRemoved` events are suppressed by the
+  rule in §3.1.1, so the contract stays slug-only.
 
 ### 5.7 Bulk-change coalescing
 
@@ -839,7 +931,8 @@ events. Threshold tunable via `--watch-bulk-threshold`.
 
 The `Resync` event carries a `seq` like any other event (allocated
 inside the EventHub mutex). On receipt, clients **discard all
-per-issue local_version state**, refetch `/api/issues`, capture the new
+per-issue `cardVersion` / `bodyDraftBaseVersion` state**, refetch
+`/api/issues`, capture the new
 `snapshot_seq` from that response, and continue consuming the SSE stream
 with `seq > snapshot_seq`. The `Resync` itself is the only event a
 client treats as "drop everything"; per-issue events between two
@@ -902,44 +995,119 @@ For **metadata** PATCHes (status, priority, etc.), the simpler
 
 Server-side write-token / request-id machinery is deliberately not
 used; the dedup contract in §5.6 is symmetric across tabs and origins.
-Concretely:
+The client-side state shape requires **two separate per-slug
+versions**, because the version the card *currently shows* and the
+version the user is *editing against* are not always the same:
 
-1. Every tab tracks `local_version[slug]` — the version it currently
+```ts
+type SlugState = {
+  cardVersion: string;           // for echo dedup + metadata rendering
+  bodyDraftBaseVersion?: string; // for `expected_version` on PUT /body
+  bodyDraft?: string;            // textarea contents
+  bodyDraftDirty?: boolean;
+};
+```
+
+`cardVersion[slug]` is what §5.6's dedup compares against:
+
+1. Every tab tracks `cardVersion[slug]` — the version it currently
    shows for each slug, regardless of how that version arrived (REST
    GET, SSE, own PATCH 200).
 2. When an `IssueUpserted { slug, version }` arrives, if
-   `version == local_version[slug]` the tab silently reconciles
-   (updates "Saved" indicator if appropriate, no re-render flash).
-   If different, full re-render and `local_version[slug] = version`.
+   `version == cardVersion[slug]` the tab silently reconciles
+   (updates "Saved" indicator, clears `IssueInvalid` badge per §5.6,
+   no re-render flash). If different, full re-render and
+   `cardVersion[slug] = version`.
 3. The PATCH 200 response carries the new `version`, which the
-   originating tab also writes into `local_version[slug]`.
+   originating tab also writes into `cardVersion[slug]`.
 
-**SSE-vs-PATCH-200 race.** The SSE event and PATCH 200 travel over
-independent TCP connections; either can arrive first at the
-originating tab. If SSE wins, the naive tab would see
-`version != local_version[slug]` (still pre-PATCH) and full-rerender,
+**Body editor uses its own base version (data-integrity critical).**
+`bodyDraftBaseVersion[slug]` is captured exactly once when the user
+opens a body textarea (or when the user explicitly accepts a server
+version via the §6.3 conflict UX). It is **never** updated by
+incoming SSE events, even when the same SSE event updates
+`cardVersion[slug]`. `PUT /body` sends `bodyDraftBaseVersion[slug]`
+as `expected_version`, NOT `cardVersion[slug]`. The base only
+changes on save success or explicit accept-theirs.
+
+Without this separation, a passive metadata SSE event (e.g. another
+user changes a label while Bob is mid-textarea) would silently
+advance Bob's `cardVersion`; a subsequent body save would then send
+the *new* version as `expected_version` and the server would accept
+the write — silently overwriting any concurrent body edit, no 409,
+no §6.3 conflict UX. This is the single most important rule in §6.
+
+**SSE-vs-mutation-200 race.** The SSE event and the mutation HTTP
+response travel over independent TCP connections; either can arrive
+first at the originating tab. If SSE wins, the naive tab would see
+`version != cardVersion[slug]` (still pre-mutation) and full-rerender,
 potentially flashing the user's just-clicked card. The originating
-tab MUST therefore **buffer SSE events for slug `S` while a PATCH
-request for `S` is in flight from this tab**, draining the buffer
-when the PATCH completes (success or failure). Combined with the
-dedup rule in step 2 and the active-textarea-preservation rule
-below, this closes the data-loss path: the SSE event cannot replace
-the textarea or full-rerender behind a click while the user's own
-write is mid-flight.
+tab MUST therefore **buffer SSE events for slug `S` while one or
+more mutation requests for `S` are in flight from this tab**.
+"Mutation request" covers `PATCH /api/issues/{S}`,
+`PUT /api/issues/{S}/body`, and `POST /api/issues` once the new
+slug is known — every state-changing route, not just PATCH.
+
+Buffer state machine:
+
+- **One mutation per slug at a time.** The client MUST serialize
+  mutations to the same slug from the same tab — a second edit
+  while the first is in flight is queued locally, not sent.
+  Concurrent same-slug mutations would race the buffer drain and
+  produce confusing version-mismatch UX, and `flock` serializes
+  them server-side anyway. Different slugs are independent.
+- **Buffer scope.** Per-slug, per-tab. The buffer holds
+  `BoardEvent`s for slug `S` (and only slug `S`); other slugs flow
+  through normally. No shared-worker / cross-tab sharing.
+- **Drain on completion.** When the in-flight mutation resolves
+  (200 / 4xx / 5xx / network error), drain the buffer in seq order,
+  applying the §5.6 dedup rule against `cardVersion[slug]` after
+  the response payload has been processed. If the response carries
+  an authoritative `version` (200 OK or 409 with `issue` body per
+  §4.3), apply that *first*, then drop any buffered event whose
+  `version` matches. Buffered events with versions that differ from
+  the post-response `cardVersion` are applied as ordinary external
+  edits.
+- **Hard timeout / max buffer.** Mutation requests have a client-side
+  timeout (default 10 s); on timeout, abort the request, drain the
+  buffer, and refetch `GET /api/issues/{S}` to re-establish
+  `cardVersion`. The buffer also has a hard size cap (e.g. 100
+  events); on overflow, the tab triggers a `Resync`-equivalent
+  refetch and discards the buffer. Either way the slug recovers.
+- **`Resync` invalidates the buffer.** A `Resync` event arriving
+  during a buffered window is processed immediately; the per-slug
+  buffer is discarded (any buffered events with `seq <= snapshot_seq`
+  from the post-`Resync` refetch are stale by definition). The
+  in-flight mutation is allowed to complete normally; on completion,
+  the buffer is empty and the post-`Resync` refetch state is
+  authoritative.
+- **Page unload / crash with mutation in flight.** The buffer is
+  in-memory only. On reload, `GET /api/issues` provides authoritative
+  state; `localStorage` recovers any body draft per §6.5. Buffered
+  events are intentionally discarded.
 
 **Active-textarea preservation.** A re-render driven by an
-`IssueUpserted` (regardless of origin) MUST NOT overwrite the
-contents of an open `<textarea>` for the same slug. Metadata
-re-renders (status drag, label chips, etc.) update freely; the body
-textarea has its own state machine — its content is only replaced
-when the user explicitly accepts a server version in the conflict UX
-(§6.3). Combined with `localStorage` per-keystroke (§6.5), there is
-no path that loses an in-progress draft.
+`IssueUpserted` or `IssueRemoved` (regardless of origin) MUST NOT
+overwrite or unmount an open `<textarea>` for the same slug:
+
+- `IssueUpserted`: metadata re-renders (status drag, label chips,
+  etc.) update freely; the body textarea keeps its draft. Its
+  content is only replaced when the user explicitly accepts a
+  server version in the conflict UX (§6.3).
+- `IssueRemoved`: if the slug has a dirty textarea, the UI
+  transitions the card into a "deleted on server" tombstone state
+  (banner offering "copy draft", "discard", "re-create as new
+  issue") rather than unmounting the editor. The draft survives in
+  `localStorage` regardless.
+
+Combined with `localStorage` per-keystroke (§6.5) and the
+`bodyDraftBaseVersion` separation above, there is no path that
+loses an in-progress draft.
 
 Other tabs (same user, different tab) treat the event as external
-(`version != local_version[slug]`) — correct, because from their
+(`version != cardVersion[slug]`) — correct, because from their
 perspective it *is* external — and re-render under the same
-textarea-preservation rule. No server state required.
+preservation rules. No server state required.
 
 ### 6.5 Body autosave (M2)
 
@@ -1018,11 +1186,20 @@ rename, no half-state.
 
 The one rename in the mutation path is the legacy→canonical directory
 move performed by `locate_and_migrate` (§3.1.1). `rename(2)` is
-atomic, so the on-disk slug is unambiguously at one path or the other
-at any instant. A crash *between* the rename and the subsequent
+atomic on a single filesystem, so on Unix the on-disk slug is
+unambiguously at one path or the other at any instant — provided the
+parent-directory `fsync`s on both source and destination have
+landed. A crash *between* the rename and the subsequent
 `write_item_atomic` leaves the slug at the canonical path with its
 pre-write content — a perfectly valid state, indistinguishable from
 "a migration ran but no edit followed." No reconciliation is required.
+
+On Windows the parent-directory `fsync`s are gated `cfg(unix)`, so a
+sudden power loss between rename and the OS flushing directory
+metadata can leave the slug visible at *both* paths, or at neither,
+on next boot. This is the same Windows-durability caveat that
+applies to `write_item_atomic` (§3.3); next startup's reconciler
+sweep handles whichever inconsistency surfaces.
 
 Orphan tempfiles (`.issuectl-tmp-*`) left behind when `Drop` was
 skipped (e.g. SIGKILL) are swept on next startup (`doctor` extension).
@@ -1270,7 +1447,7 @@ client                              server
   |                                  |  release flock
   |  200 { version: V_new, issue }   |
   |  <--------------------------     |
-  |  client stores local_version = V_new
+  |  client stores cardVersion[foo] = V_new
   |                                  |
   |  (notify fires; watcher debounces)
   |                                  |  re-parse, recompute hash → V_new
@@ -1279,7 +1456,7 @@ client                              server
   |                                  |   above by version equality)
   |  SSE event { version: V_new }    |
   |  <--------------------------     |
-  |  V === local_version → silent reconcile,
+  |  V === cardVersion[foo] → silent reconcile,
   |  show "saved" indicator instead of re-render.
 ```
 
