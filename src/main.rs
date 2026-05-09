@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::builder::PossibleValuesParser;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 pub(crate) const ISSUE_TYPES: &[&str] = &["bug", "task", "feature", "improvement", "chore", "epic"];
 pub(crate) const PRIORITIES: &[&str] = &["normal", "high"];
@@ -477,15 +477,20 @@ enum Command {
         expected_version: Option<String>,
     },
 
-    /// Add or remove a label. Idempotent.
+    /// Add or remove a label. Re-running the same call is safe: a
+    /// duplicate add is a no-op on labels (the list is deduped) and
+    /// removing an absent label is a no-op too. Note that the
+    /// `updated:` frontmatter date is still bumped on every call —
+    /// idempotency here means "won't error / won't double the
+    /// label," not "byte-identical file."
     Label {
         /// Issue slug
         #[arg(value_parser = parse_slug_arg)]
         slug: String,
 
         /// Operation
-        #[arg(value_parser = PossibleValuesParser::new(["add", "remove"]))]
-        op: String,
+        #[arg(value_enum)]
+        op: LabelOp,
 
         /// Label
         #[arg(value_parser = parse_non_empty)]
@@ -666,6 +671,12 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum LabelOp {
+    Add,
+    Remove,
 }
 
 #[derive(Subcommand)]
@@ -875,7 +886,7 @@ fn main() -> Result<()> {
             label,
             dry_run,
             expected_version,
-        } => cmd_label(json_output, &slug, &op, &label, dry_run, expected_version),
+        } => cmd_label(json_output, &slug, op, &label, dry_run, expected_version),
         Command::Apply { patch, dry_run } => cmd_apply(json_output, &patch, dry_run),
         Command::Body { action } => match action {
             BodyAction::Set {
@@ -1850,29 +1861,25 @@ fn cmd_set(
         dry_run,
         ..Default::default()
     };
-    let patch_for_clear = || {
-        if clear {
-            Patch::Clear
-        } else {
-            Patch::Set(value.clone().expect("required by clap unless --clear"))
-        }
+    let patch = if clear {
+        Patch::Clear
+    } else {
+        Patch::Set(value.expect("required by clap unless --clear"))
     };
+    // Status is the one field whose `Patch::Clear` is rejected by the
+    // mutate layer; for everything else we let the shared
+    // validate()/under-lock path produce the canonical error message
+    // so CLI and API agree byte-for-byte. Custom fields land in the
+    // schema-validated `custom_fields` slot — reserved keys like
+    // `labels` / `related` produce a hint pointing at the right verb.
     match field {
-        "status" => {
-            if clear {
-                bail!("status cannot be cleared (issues always have a status)");
-            }
-            req.status = Patch::Set(value.clone().unwrap());
-        }
-        "priority" => req.priority = patch_for_clear(),
-        "assignee" => req.assignee = patch_for_clear(),
-        "owner" => req.owner = patch_for_clear(),
-        "epic" => req.epic = patch_for_clear(),
+        "status" => req.status = patch,
+        "priority" => req.priority = patch,
+        "assignee" => req.assignee = patch,
+        "owner" => req.owner = patch,
+        "epic" => req.epic = patch,
         other => {
-            // Custom-field path. The mutate layer rejects reserved
-            // keys with a hint pointing at the right slot, so the user
-            // gets a clear error if they try `set <slug> labels foo`.
-            req.custom_fields.insert(other.to_string(), patch_for_clear());
+            req.custom_fields.insert(other.to_string(), patch);
         }
     }
     let root = find_root();
@@ -1902,7 +1909,7 @@ fn cmd_check(
 fn cmd_label(
     json: bool,
     slug: &str,
-    op: &str,
+    op: LabelOp,
     label: &str,
     dry_run: bool,
     expected_version: Option<String>,
@@ -1918,9 +1925,8 @@ fn cmd_label(
         ..Default::default()
     };
     match op {
-        "add" => req.add_labels.push(label.to_string()),
-        "remove" => req.remove_labels.push(label.to_string()),
-        _ => bail!("op must be `add` or `remove`"),
+        LabelOp::Add => req.add_labels.push(label.to_string()),
+        LabelOp::Remove => req.remove_labels.push(label.to_string()),
     }
     let root = find_root();
     let outcome =
@@ -1945,13 +1951,29 @@ fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
     if !slug::is_valid(&slug) {
         bail!("invalid slug shape: {slug:?}");
     }
-    if json && !map.contains_key(serde_yaml::Value::String("expected_version".into())) {
-        bail!(
-            "patch must include `expected_version:` when invoked with --json (per design D4=B)"
-        );
+    // `dry_run` is `#[serde(skip)]` on UpdateIssueRequest, so a
+    // user-supplied `dry_run: true` would otherwise fail with a generic
+    // "unknown field" error from `deny_unknown_fields`. Catch it here
+    // with a precise message — dry-run is a CLI execution mode, not a
+    // patch field.
+    if map.contains_key(serde_yaml::Value::String("dry_run".into())) {
+        bail!("`dry_run` is a CLI flag; use `issuectl apply --dry-run`, not a patch field");
     }
     let mut req: mutate::UpdateIssueRequest = serde_yaml::from_value(yaml)
         .with_context(|| format!("cannot parse patch fields in {}", patch_path.display()))?;
+    // Validate `--json` D4=B contract AFTER deserialization so we
+    // catch `expected_version: null` and empty/whitespace strings —
+    // a presence-only `map.contains_key` check passed `null` through,
+    // which then deserialized to `None` and bypassed concurrency.
+    if json {
+        match req.expected_version.as_deref() {
+            Some(v) if !v.trim().is_empty() && v.trim() == v => {}
+            _ => bail!(
+                "patch must include a non-empty `expected_version:` when invoked with --json \
+                 (per design D4=B); fetch with `issuectl show <slug> --json`"
+            ),
+        }
+    }
     req.dry_run = dry_run;
     let root = find_root();
     let outcome =
@@ -1960,9 +1982,11 @@ fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
 }
 
 /// Shared CLI epilogue for the new mutation verbs. On `--dry-run`
-/// prints a unified diff against the on-disk `item.md`; otherwise
-/// prints (or emits the JSON envelope for) the standard mutation
-/// response. `--json` always emits the same envelope as `update`.
+/// prints a unified diff between the bytes mutate.rs captured under
+/// the flock; otherwise prints (or emits the JSON envelope for) the
+/// standard mutation response. `--json` emits the same envelope as
+/// `update` (slug, final_dir, moved_to_closed, moved_to_open,
+/// version), with `dry_run: true` and `diff` added when planning.
 fn finish_mutation(
     json: bool,
     slug: &str,
@@ -1971,16 +1995,16 @@ fn finish_mutation(
     human_verb: &str,
 ) -> Result<()> {
     if dry_run {
-        let item_path = outcome.issue_dir.join("item.md");
-        let before = fs::read_to_string(&item_path).unwrap_or_default();
-        let after = outcome
-            .pending_serialized
-            .clone()
-            .unwrap_or_else(|| before.clone());
-        let diff = render_unified_diff(&before, &after, &item_path);
+        // Both halves were captured under the held flock in mutate.rs.
+        // No disk reads here — reading "before" outside the lock would
+        // race a concurrent writer and produce a misleading diff.
+        let before = outcome.before_serialized.as_deref().unwrap_or("");
+        let after = outcome.pending_serialized.as_deref().unwrap_or(before);
+        let diff = render_unified_diff(before, after, &outcome.issue_dir);
         if json {
             let report = serde_json::json!({
                 "slug": slug,
+                "final_dir": outcome.issue_dir.to_string_lossy(),
                 "version": outcome.version,
                 "moved_to_closed": outcome.moved_to_closed,
                 "moved_to_open": outcome.moved_to_open,
@@ -1996,6 +2020,7 @@ fn finish_mutation(
     if json {
         let report = serde_json::json!({
             "slug": slug,
+            "final_dir": outcome.issue_dir.to_string_lossy(),
             "version": outcome.version,
             "moved_to_closed": outcome.moved_to_closed,
             "moved_to_open": outcome.moved_to_open,
@@ -2007,14 +2032,22 @@ fn finish_mutation(
     Ok(())
 }
 
-fn render_unified_diff(before: &str, after: &str, path: &Path) -> String {
+/// Render a git-style unified diff between `before` and `after`. The
+/// header path is rendered as `issues/<slug>/item.md` rather than the
+/// absolute path so the output looks like a normal `git diff` rather
+/// than `--- a//abs/path/...` (the leading double-slash from joining
+/// `a/` with an absolute path).
+fn render_unified_diff(before: &str, after: &str, issue_dir: &Path) -> String {
     if before == after {
         return String::new();
     }
-    let label = path.display().to_string();
+    let rel = issue_dir
+        .file_name()
+        .map(|n| format!("issues/{}/item.md", n.to_string_lossy()))
+        .unwrap_or_else(|| issue_dir.join("item.md").display().to_string());
     let diff = similar::TextDiff::from_lines(before, after);
-    let header_old = format!("--- a/{label}\n");
-    let header_new = format!("+++ b/{label}\n");
+    let header_old = format!("--- a/{rel}\n");
+    let header_new = format!("+++ b/{rel}\n");
     let body = diff
         .unified_diff()
         .context_radius(3)

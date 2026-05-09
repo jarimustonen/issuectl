@@ -15,9 +15,9 @@ use chrono::{SecondsFormat, Utc};
 
 /// Canonical section name for free-form human/agent comments.
 pub const COMMENTS: &str = "Comments";
-#[allow(dead_code)]
+/// Canonical section for `note --decision` blocks.
 pub const DECISIONS: &str = "Decisions";
-#[allow(dead_code)]
+/// Canonical section for `note --agent-run` blocks.
 pub const AGENT_RUNS: &str = "Agent Runs";
 
 /// Format the timestamp half of a block heading. UTC, second-precision.
@@ -171,6 +171,21 @@ fn is_any_h2(line: &str) -> bool {
 
 fn is_h3(line: &str) -> bool {
     line.starts_with("### ") && !line.starts_with("#### ")
+}
+
+/// Iterate body lines, yielding `(line_index, line)` for every line
+/// that lies outside a fenced code block. Used by `mutate.rs` to make
+/// the new `check` checkbox-toggle verb fence-aware so it doesn't
+/// silently mutate documentation snippets like `- [ ] example`
+/// inside a markdown code fence.
+pub(crate) fn lines_outside_fences(body: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = body.split('\n').collect();
+    let mut out = Vec::new();
+    scan_outside_fences(&lines, |i, l| {
+        out.push((i, l.to_string()));
+        false
+    });
+    out
 }
 
 /// Walk `lines` and call `f(i, line)` for every line that lies

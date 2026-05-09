@@ -208,6 +208,13 @@ impl UpdateIssueRequest {
                 )));
             }
         }
+        if let Patch::Set(e) = &self.epic {
+            if !crate::slug::is_valid(e) {
+                return Err(MutateError::Validation(format!(
+                    "epic {e:?} is not a valid slug (lowercase ASCII, kebab-case, ≥2 segments)"
+                )));
+            }
+        }
 
         for (name, list) in [
             ("add_labels", &self.add_labels),
@@ -319,6 +326,14 @@ pub struct UpdateOutcome {
     /// been written so the CLI can render a unified diff. `None` for
     /// real writes — the file on disk is the authoritative version.
     pub pending_serialized: Option<String>,
+    /// Pre-mutation serialized bytes captured under the same flock as
+    /// `pending_serialized`. Lets the CLI render a dry-run diff
+    /// without re-reading the file outside the lock — without this,
+    /// a concurrent writer between flock release and the diff render
+    /// could yield a "before" that doesn't match what the mutation
+    /// planned against. `None` for real writes (the diff is the
+    /// final on-disk state, not a plan).
+    pub before_serialized: Option<String>,
 }
 
 /// Errors that the mutate layer surfaces to its callers. The CLI maps
@@ -512,15 +527,27 @@ pub fn update_issue(
             moved_to_closed: false,
             moved_to_open: false,
             pending_serialized: None,
+            before_serialized: None,
         });
     }
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
+    // Dry-run is no-write: skip both the default-schema bootstrap and
+    // the legacy → flat directory migration. `schema::load` still
+    // reads (or returns the implicit empty schema) so post-mutation
+    // validation runs against the same rules a real write would use.
+    if !req.dry_run {
+        crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
+    }
 
-    // 1) locate, then in-line migrate any legacy path under the flock
-    //    so writes always land at the canonical flat path.
-    let item_path = locate_and_migrate(root, slug)?;
+    // 1) locate. Real writes migrate legacy → flat under the flock so
+    //    the canonical flat path is the only mutation target. Dry-run
+    //    locates without migrating to honour the "no write" contract.
+    let item_path = if req.dry_run {
+        locate_for_dry_run(root, slug)?
+    } else {
+        locate_and_migrate(root, slug)?
+    };
     let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     update_issue_under_lock(slug, item_path, req, hub, &schema)
 }
@@ -564,6 +591,15 @@ fn update_issue_under_lock(
 
     // 4) load the YAML mapping for in-place edits
     let mut item = write::read_item(&item_path).map_err(MutateError::Io)?;
+    // Capture the canonicalised pre-mutation bytes before any in-memory
+    // edit. Done under the held flock so the dry-run diff is against
+    // the same state the mutation planned against — a concurrent
+    // writer can't slip a different "before" into the diff.
+    let before_serialized = if req.dry_run {
+        Some(write::serialize_item(&item).map_err(MutateError::Io)?)
+    } else {
+        None
+    };
     let mut moved_to_closed = false;
     let mut moved_to_open = false;
 
@@ -680,7 +716,7 @@ fn update_issue_under_lock(
     //    `item_path` is the canonical location regardless of status.
     if req.dry_run {
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
-        let new_issue = parse_in_memory(&item, slug);
+        let new_issue = parse_serialized(&pending, slug);
         let new_version = canonical_hash(&new_issue);
         return Ok(UpdateOutcome {
             issue: new_issue,
@@ -692,6 +728,7 @@ fn update_issue_under_lock(
             moved_to_closed,
             moved_to_open,
             pending_serialized: Some(pending),
+            before_serialized,
         });
     }
     write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
@@ -723,17 +760,17 @@ fn update_issue_under_lock(
         moved_to_closed,
         moved_to_open,
         pending_serialized: None,
+        before_serialized: None,
     })
 }
 
-/// Parse an in-memory `ItemFile` into a domain `Issue` by serializing
-/// to a string and re-running the parser. Used by dry-run paths so we
-/// don't have to rebuild the parser logic for in-memory mutations.
-fn parse_in_memory(item: &ItemFile, slug: &str) -> Issue {
-    let serialized =
-        write::serialize_item(item).expect("serialize succeeds for valid in-memory item");
+/// Re-parse already-serialized `item.md` bytes into a domain `Issue`.
+/// Dry-run paths serialize the post-mutation `ItemFile` to compute
+/// `pending_serialized` for the diff; passing those same bytes back
+/// here avoids serializing a second time.
+fn parse_serialized(serialized: &str, slug: &str) -> Issue {
     let parsed = crate::parser::parse_item_md_text_with_warnings(
-        &serialized,
+        serialized,
         slug,
         "open",
         Path::new("<dry-run>"),
@@ -837,9 +874,15 @@ pub fn update_body(
     }
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
+    if !dry_run {
+        crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
+    }
 
-    let item_path = locate_and_migrate(root, slug)?;
+    let item_path = if dry_run {
+        locate_for_dry_run(root, slug)?
+    } else {
+        locate_and_migrate(root, slug)?
+    };
 
     let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
     if !parsed.warnings.is_empty() {
@@ -861,6 +904,11 @@ pub fn update_body(
     }
 
     let mut item = write::read_item(&item_path).map_err(MutateError::Io)?;
+    let before_serialized = if dry_run {
+        Some(write::serialize_item(&item).map_err(MutateError::Io)?)
+    } else {
+        None
+    };
     // Clients send a plain markdown body. Preserve the read_item
     // convention of one leading newline so the on-disk layout stays
     // `---\n<fm>\n---\n\n<body>` rather than `---<body>` — without
@@ -890,7 +938,7 @@ pub fn update_body(
 
     if dry_run {
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
-        let new_issue = parse_in_memory(&item, slug);
+        let new_issue = parse_serialized(&pending, slug);
         let new_version = canonical_hash(&new_issue);
         return Ok(UpdateOutcome {
             issue: new_issue,
@@ -902,6 +950,7 @@ pub fn update_body(
             moved_to_closed: false,
             moved_to_open: false,
             pending_serialized: Some(pending),
+            before_serialized,
         });
     }
 
@@ -930,6 +979,7 @@ pub fn update_body(
         moved_to_closed: false,
         moved_to_open: false,
         pending_serialized: None,
+        before_serialized: None,
     })
 }
 
@@ -959,7 +1009,11 @@ pub fn note_issue(
         .map_err(|e| MutateError::Validation(e.to_string()))?;
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    let item_path = locate_and_migrate(root, slug)?;
+    let item_path = if dry_run {
+        locate_for_dry_run(root, slug)?
+    } else {
+        locate_and_migrate(root, slug)?
+    };
 
     let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
     if !parsed.warnings.is_empty() {
@@ -980,6 +1034,11 @@ pub fn note_issue(
     }
 
     let mut item = write::read_item(&item_path).map_err(MutateError::Io)?;
+    let before_serialized = if dry_run {
+        Some(write::serialize_item(&item).map_err(MutateError::Io)?)
+    } else {
+        None
+    };
     let block = crate::body_sections::render_note_block(
         &crate::body_sections::now_iso(),
         author,
@@ -994,9 +1053,15 @@ pub fn note_issue(
     item.body = crate::body_sections::canonicalise_body_leading(&appended);
     write::set_string(&mut item.frontmatter, "updated", &write::today());
 
+    // Schema validation runs on every write surface for parity with
+    // `update_body` / `update_issue` — without this, a tightened
+    // schema could block `body set` while letting `note` keep
+    // mutating the same invalid issue (review finding #6).
+    validate_against_schema(root, &item.frontmatter)?;
+
     if dry_run {
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
-        let new_issue = parse_in_memory(&item, slug);
+        let new_issue = parse_serialized(&pending, slug);
         let new_version = canonical_hash(&new_issue);
         return Ok(UpdateOutcome {
             issue: new_issue,
@@ -1008,6 +1073,7 @@ pub fn note_issue(
             moved_to_closed: false,
             moved_to_open: false,
             pending_serialized: Some(pending),
+            before_serialized,
         });
     }
 
@@ -1036,6 +1102,7 @@ pub fn note_issue(
         moved_to_closed: false,
         moved_to_open: false,
         pending_serialized: None,
+        before_serialized: None,
     })
 }
 
@@ -1064,9 +1131,15 @@ pub fn toggle_checkbox(
     }
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
+    if !dry_run {
+        crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
+    }
 
-    let item_path = locate_and_migrate(root, slug)?;
+    let item_path = if dry_run {
+        locate_for_dry_run(root, slug)?
+    } else {
+        locate_and_migrate(root, slug)?
+    };
     let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
     if !parsed.warnings.is_empty() {
         return Err(MutateError::Corrupt {
@@ -1086,13 +1159,20 @@ pub fn toggle_checkbox(
     }
 
     let mut item = write::read_item(&item_path).map_err(MutateError::Io)?;
+    let before_serialized = if dry_run {
+        Some(write::serialize_item(&item).map_err(MutateError::Io)?)
+    } else {
+        None
+    };
     let new_body = toggle_checkbox_in_body(&item.body, substring)?;
     item.body = new_body;
     write::set_string(&mut item.frontmatter, "updated", &write::today());
 
+    validate_against_schema(root, &item.frontmatter)?;
+
     if dry_run {
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
-        let new_issue = parse_in_memory(&item, slug);
+        let new_issue = parse_serialized(&pending, slug);
         let new_version = canonical_hash(&new_issue);
         return Ok(UpdateOutcome {
             issue: new_issue,
@@ -1104,6 +1184,7 @@ pub fn toggle_checkbox(
             moved_to_closed: false,
             moved_to_open: false,
             pending_serialized: Some(pending),
+            before_serialized,
         });
     }
 
@@ -1131,18 +1212,25 @@ pub fn toggle_checkbox(
         moved_to_closed: false,
         moved_to_open: false,
         pending_serialized: None,
+        before_serialized: None,
     })
 }
 
 /// Find a unique checkbox line containing `substring` and return the
-/// body with that one line's `[ ]` / `[x]` toggled. The checkbox shape
-/// matched is `^\s*[-*+]\s+\[[ xX]\]\s` so common GFM variants work,
-/// while still rejecting `- [n]` or other non-checkbox brackets.
+/// body with that one line's `[ ]` / `[x]` toggled. Fence-aware:
+/// checkbox lines inside fenced code blocks are skipped so example
+/// task lists in documentation snippets don't get silently mutated.
+/// The checkbox shape matched is `^\s*[-*+]\s+\[[ xX]\]\s` so common
+/// GFM variants work, while non-checkbox brackets like `- [n]` are
+/// rejected.
 fn toggle_checkbox_in_body(body: &str, substring: &str) -> Result<String, MutateError> {
-    let mut matches: Vec<usize> = Vec::new();
     let lines: Vec<&str> = body.split('\n').collect();
-    for (i, line) in lines.iter().enumerate() {
-        if checkbox_state(line).is_some() && line.contains(substring) {
+    let mut matches: Vec<usize> = Vec::new();
+    // Fence-aware enumeration so `- [ ]` examples inside ```fenced```
+    // code blocks aren't toggled. Shares the scanner with
+    // body_sections so a future fence-rule change updates both verbs.
+    for (i, line) in crate::body_sections::lines_outside_fences(body) {
+        if checkbox_state(&line).is_some() && line.contains(substring) {
             matches.push(i);
         }
     }
@@ -1152,7 +1240,12 @@ fn toggle_checkbox_in_body(body: &str, substring: &str) -> Result<String, Mutate
         ))),
         1 => {
             let idx = matches[0];
-            let toggled = toggle_line_checkbox(lines[idx]);
+            let toggled = toggle_line_checkbox(lines[idx]).ok_or_else(|| {
+                MutateError::Validation(format!(
+                    "internal: matched line {:?} is not a checkbox after match",
+                    lines[idx]
+                ))
+            })?;
             let mut out = Vec::with_capacity(lines.len());
             for (i, l) in lines.iter().enumerate() {
                 if i == idx {
@@ -1169,24 +1262,37 @@ fn toggle_checkbox_in_body(body: &str, substring: &str) -> Result<String, Mutate
     }
 }
 
-/// `Some(true)` for `- [x]`, `Some(false)` for `- [ ]`, `None` otherwise.
+/// `Some(true)` for `- [x]`, `Some(false)` for `- [ ]`, `None`
+/// otherwise. Byte-based parsing so multibyte mark chars (e.g.
+/// `[✓]`, `[é]`) return `None` rather than panicking on a
+/// non-char-boundary slice.
 fn checkbox_state(line: &str) -> Option<bool> {
-    let trimmed = line.trim_start();
-    let bullet = trimmed.chars().next()?;
-    if !matches!(bullet, '-' | '*' | '+') {
+    let bytes = line.as_bytes();
+    // Skip leading ASCII whitespace. A non-ASCII leading char means
+    // this can't be a GFM checkbox line — return None.
+    let mut i = 0;
+    while matches!(bytes.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+    let bullet = *bytes.get(i)?;
+    if !matches!(bullet, b'-' | b'*' | b'+') {
         return None;
     }
-    let rest = &trimmed[bullet.len_utf8()..];
-    if !rest.starts_with(' ') && !rest.starts_with('\t') {
+    i += 1;
+    if !matches!(bytes.get(i), Some(b' ' | b'\t')) {
         return None;
     }
-    let rest = rest.trim_start();
-    if !rest.starts_with('[') || rest.len() < 4 || &rest[2..3] != "]" {
+    while matches!(bytes.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+    if bytes.get(i) != Some(&b'[') {
         return None;
     }
-    let mark = rest.as_bytes()[1];
-    let after = rest.as_bytes().get(3).copied();
-    if !matches!(after, Some(b' ') | Some(b'\t')) {
+    let mark = *bytes.get(i + 1)?;
+    if bytes.get(i + 2) != Some(&b']') {
+        return None;
+    }
+    if !matches!(bytes.get(i + 3), Some(b' ' | b'\t')) {
         return None;
     }
     match mark {
@@ -1196,21 +1302,65 @@ fn checkbox_state(line: &str) -> Option<bool> {
     }
 }
 
-fn toggle_line_checkbox(line: &str) -> String {
-    let lead_len = line.len() - line.trim_start().len();
-    let (lead, rest) = line.split_at(lead_len);
-    // rest looks like `- [ ] foo` (or `* [x] foo` / `+ [X] foo`).
-    let bullet = &rest[..1];
-    let after_bullet = &rest[1..];
-    let bullet_pad_len = after_bullet.len() - after_bullet.trim_start().len();
-    let (bullet_pad, body) = after_bullet.split_at(bullet_pad_len);
-    // body == `[X] ...`
-    let mark = body.as_bytes()[1];
-    let new_mark = if mark == b' ' { 'x' } else { ' ' };
-    format!(
-        "{lead}{bullet}{bullet_pad}[{new_mark}]{}",
-        &body[3..]
-    )
+/// Toggle the `[ ]` / `[x]` mark on a known-checkbox line. Returns
+/// `None` if the line doesn't match the byte-safe checkbox shape —
+/// callers should have validated via `checkbox_state` first. Builds
+/// the result from raw bytes to avoid the implicit "ASCII-only first
+/// 4 chars" invariant the previous string-slice version assumed.
+fn toggle_line_checkbox(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while matches!(bytes.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+    if !matches!(bytes.get(i), Some(b'-' | b'*' | b'+')) {
+        return None;
+    }
+    i += 1;
+    while matches!(bytes.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+    if bytes.get(i) != Some(&b'[') {
+        return None;
+    }
+    let mark_idx = i + 1;
+    let mark = *bytes.get(mark_idx)?;
+    if bytes.get(i + 2) != Some(&b']') {
+        return None;
+    }
+    let new_mark = if mark == b' ' { b'x' } else { b' ' };
+    let mut out = Vec::with_capacity(bytes.len());
+    out.extend_from_slice(&bytes[..mark_idx]);
+    out.push(new_mark);
+    out.extend_from_slice(&bytes[mark_idx + 1..]);
+    // Safe: we replaced one ASCII byte with another at a position
+    // already proven to be ASCII by the byte checks above; the rest
+    // of the line (including any non-ASCII content after `]`) is
+    // copied byte-for-byte and therefore preserves UTF-8 validity.
+    String::from_utf8(out).ok()
+}
+
+/// Run schema validation against a post-mutation frontmatter mapping.
+/// Centralised so every body- and frontmatter-mutation entry point
+/// (`update_issue_under_lock`, `update_body`, `note_issue`,
+/// `toggle_checkbox`) enforces the same contract — schema runs once
+/// per write, immediately before atomic write or dry-run return.
+fn validate_against_schema(
+    root: &Path,
+    frontmatter: &serde_yaml::Mapping,
+) -> Result<(), MutateError> {
+    let schema =
+        crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let violations = crate::schema::validate(&schema, frontmatter);
+    if !violations.is_empty() {
+        let msg = violations
+            .iter()
+            .map(|v| v.message())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(MutateError::SchemaViolation(msg));
+    }
+    Ok(())
 }
 
 /// Apply a `Patch<String>` onto a frontmatter mapping. `Unspecified`
@@ -1220,6 +1370,22 @@ fn apply_string_patch(item: &mut ItemFile, key: &str, p: &Patch<String>) {
         Patch::Unspecified => {}
         Patch::Clear => write::remove_key(&mut item.frontmatter, key),
         Patch::Set(v) => write::set_string(&mut item.frontmatter, key, v),
+    }
+}
+
+/// Locate the issue without migrating. Used by dry-run paths so that
+/// `--dry-run` is genuinely no-write — the previous version called
+/// `locate_and_migrate` unconditionally, which silently moved
+/// `issues/{open,closed}/<slug>/` → `issues/<slug>/` even when the
+/// caller asked for a preview. Real writes still go through
+/// `locate_and_migrate` so the on-disk layout converges to flat.
+fn locate_for_dry_run(root: &Path, slug: &str) -> Result<PathBuf, MutateError> {
+    use repo::LayoutState;
+    match repo::resolve_layout(root, slug) {
+        LayoutState::Flat { item_path } | LayoutState::Legacy { item_path, .. } => Ok(item_path),
+        LayoutState::Ambiguous { paths } => Err(MutateError::AmbiguousSlug { paths }),
+        LayoutState::Absent => Err(MutateError::NotFound),
+        LayoutState::Invalid { reason, .. } => Err(MutateError::Io(anyhow!("{reason}"))),
     }
 }
 
@@ -3079,6 +3245,231 @@ mod tests {
             before, after,
             "schema violation must leave the file unchanged"
         );
+    }
+
+    #[test]
+    fn dry_run_does_not_create_default_schema() {
+        // Regression for review finding #1: `--dry-run` must not
+        // bootstrap `.schema.yaml` (the previous version called
+        // `ensure_default_written` before the dry-run branch).
+        let tmp = fresh_repo();
+        let _v0 = seed_issue(tmp.path(), "open", "dryrun-no-schema-x", "open");
+        let schema_path = tmp.path().join("issues/.schema.yaml");
+        assert!(!schema_path.exists(), "precondition: no schema yet");
+        let req = UpdateIssueRequest {
+            priority: Patch::Set("high".into()),
+            dry_run: true,
+            ..Default::default()
+        };
+        let _ = update_issue(tmp.path(), "dryrun-no-schema-x", req, None).unwrap();
+        assert!(
+            !schema_path.exists(),
+            "dry-run must not create issues/.schema.yaml"
+        );
+    }
+
+    #[test]
+    fn dry_run_does_not_migrate_legacy_layout() {
+        // Regression for review finding #1: `--dry-run` must not
+        // perform the legacy → flat directory rename that
+        // `locate_and_migrate` does on real writes.
+        let tmp = fresh_repo();
+        let legacy_dir = tmp.path().join("issues/open/dryrun-no-migrate-y");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\n\
+             priority: normal\n---\n\n# T\n",
+        )
+        .unwrap();
+        let flat_dir = tmp.path().join("issues/dryrun-no-migrate-y");
+        let req = UpdateIssueRequest {
+            priority: Patch::Set("high".into()),
+            dry_run: true,
+            ..Default::default()
+        };
+        let _ = update_issue(tmp.path(), "dryrun-no-migrate-y", req, None).unwrap();
+        assert!(legacy_dir.exists(), "dry-run must not move the legacy dir");
+        assert!(
+            !flat_dir.exists(),
+            "dry-run must not create the flat-layout dir"
+        );
+    }
+
+    #[test]
+    fn dry_run_returns_before_serialized_for_diff() {
+        // Regression for review finding #5: `before_serialized` must
+        // be filled under the flock so the CLI epilogue can render
+        // a diff without re-reading disk outside the lock.
+        let tmp = fresh_repo();
+        let _ = seed_issue(tmp.path(), "open", "dryrun-before-w", "open");
+        let req = UpdateIssueRequest {
+            priority: Patch::Set("high".into()),
+            dry_run: true,
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "dryrun-before-w", req, None).unwrap();
+        let before = out.before_serialized.expect("dry-run must capture before");
+        let after = out.pending_serialized.expect("dry-run must capture after");
+        assert!(before.contains("priority: normal"));
+        assert!(after.contains("priority: high"));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn checkbox_state_does_not_panic_on_unicode_marker() {
+        // Regression for review finding #4: `checkbox_state` used to
+        // panic on `&rest[2..3]` when the bracket content was
+        // multibyte (e.g. `[✓]`).
+        assert_eq!(checkbox_state("- [✓] task"), None);
+        assert_eq!(checkbox_state("- [é] task"), None);
+        assert_eq!(checkbox_state("- [ ] task"), Some(false));
+        assert_eq!(checkbox_state("- [x] task"), Some(true));
+        assert_eq!(checkbox_state("- [X] task"), Some(true));
+        // Don't panic with non-ASCII content after the box either.
+        assert_eq!(checkbox_state("- [ ] café"), Some(false));
+    }
+
+    #[test]
+    fn toggle_checkbox_ignores_lines_inside_fenced_code() {
+        // Regression for review finding #3: fenced code blocks must
+        // NOT be considered when matching checkbox lines.
+        let tmp = fresh_repo();
+        let body = "# T\n\nIn docs:\n\n```markdown\n- [ ] only example here\n```\n\n\
+                    Real:\n\n- [ ] real task\n";
+        let _ = seed_with_body(tmp.path(), "fence-target-z", body);
+        // The "example" substring is only inside the code fence —
+        // the fence-aware scanner should report no match.
+        let err = toggle_checkbox(
+            tmp.path(),
+            "fence-target-z",
+            "example",
+            None,
+            None,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, MutateError::Validation(s) if s.contains("no checkbox")));
+        // The real task should still toggle cleanly.
+        toggle_checkbox(tmp.path(), "fence-target-z", "real", None, None, false).unwrap();
+        let after =
+            fs::read_to_string(tmp.path().join("issues/fence-target-z/item.md")).unwrap();
+        assert!(after.contains("- [x] real task"));
+        assert!(after.contains("- [ ] only example here"));
+    }
+
+    #[test]
+    fn note_validates_against_schema() {
+        // Regression for review finding #6: `note_issue` previously
+        // skipped schema validation, which `update_body` enforced —
+        // making `body set` reject and `note` write through.
+        let tmp = fresh_repo();
+        let _ = seed_issue(tmp.path(), "open", "note-schema-target-q", "open");
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: true\n",
+        )
+        .unwrap();
+        let err = note_issue(
+            tmp.path(),
+            "note-schema-target-q",
+            "alice",
+            "hello",
+            crate::body_sections::COMMENTS,
+            None,
+            None,
+            false,
+        )
+        .unwrap_err();
+        match err {
+            MutateError::SchemaViolation(msg) => assert!(msg.contains("team"), "got {msg:?}"),
+            other => panic!("expected SchemaViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_validates_against_schema() {
+        // Regression for review finding #6.
+        let tmp = fresh_repo();
+        let body = "# T\n\n- [ ] only one\n";
+        let _ = seed_with_body(tmp.path(), "check-schema-target-r", body);
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: true\n",
+        )
+        .unwrap();
+        let err = toggle_checkbox(
+            tmp.path(),
+            "check-schema-target-r",
+            "only one",
+            None,
+            None,
+            false,
+        )
+        .unwrap_err();
+        match err {
+            MutateError::SchemaViolation(msg) => assert!(msg.contains("team"), "got {msg:?}"),
+            other => panic!("expected SchemaViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn epic_slug_shape_validated_in_request() {
+        // Regression for review finding #7: `Patch::Set` for epic
+        // must reject non-slug-shaped values in `validate()` so the
+        // YAML / `set` paths can't bypass the CLI flag's slug check.
+        let req = UpdateIssueRequest {
+            epic: Patch::Set("Not a slug".into()),
+            ..Default::default()
+        };
+        let err = req.validate().unwrap_err();
+        assert!(matches!(err, MutateError::Validation(s) if s.contains("epic")));
+    }
+
+    #[test]
+    fn apply_yaml_rejects_duplicate_keys() {
+        // Regression for review finding #12: `serde_yaml 0.9` rejects
+        // duplicate map keys at every depth. The reviewers feared a
+        // last-wins silent collapse for `priority: high\npriority: low`;
+        // verify the parser rejects it instead.
+        let yaml = "slug: a-b\npriority: high\npriority: low\n";
+        let err = serde_yaml::from_str::<serde_yaml::Value>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate"),
+            "expected duplicate-key error, got {err}"
+        );
+        let nested = "slug: a-b\ncustom_fields:\n  k: v\n  k: v2\n";
+        let err = serde_yaml::from_str::<serde_yaml::Value>(nested).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate"),
+            "expected nested duplicate-key error, got {err}"
+        );
+    }
+
+    #[test]
+    fn apply_multi_field_patch_lands_atomically() {
+        // Positive test for the apply transaction: priority + add_label
+        // + custom_field all advance the canonical hash exactly once.
+        let tmp = fresh_repo();
+        let v0 = seed_issue(tmp.path(), "open", "apply-happy-path", "open");
+        let req = UpdateIssueRequest {
+            expected_version: Some(v0.clone()),
+            priority: Patch::Set("high".into()),
+            add_labels: vec!["backend".into()],
+            custom_fields: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("triage".into(), Patch::Set("P1".into()));
+                m
+            },
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "apply-happy-path", req, None).unwrap();
+        assert_ne!(out.version, v0);
+        let after = fs::read_to_string(tmp.path().join("issues/apply-happy-path/item.md"))
+            .unwrap();
+        assert!(after.contains("priority: high"));
+        assert!(after.contains("backend"));
+        assert!(after.contains("triage: P1"));
     }
 
     #[test]
