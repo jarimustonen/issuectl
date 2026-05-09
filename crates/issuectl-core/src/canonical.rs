@@ -42,6 +42,14 @@ pub fn canonical_hash(issue: &Issue) -> String {
 /// `updated:` is excluded — it is bumped on every save and would
 /// re-introduce false-409s. Status comes straight from frontmatter:
 /// the post-flat-layout repo has no parallel folder axis to reconcile.
+///
+/// `title` is included unconditionally even though `Issue.title` is a
+/// non-optional `String` — the parser materialises an absent H1 as
+/// `""`, so "no title", `title: ""`, and `title: ~` all collapse to
+/// the same projection entry. This is intentional: the body bytes
+/// already carry the H1 text, so the empty-vs-absent distinction is
+/// preserved at the body level. Treating title as a presence-bearing
+/// optional here would only add asymmetry without information gain.
 fn canonical_frontmatter_value(issue: &Issue) -> Value {
     let mut m = Map::new();
     m.insert("type".into(), Value::String(issue.issue_type.clone()));
@@ -189,6 +197,49 @@ mod tests {
         a.title = "old title".into();
         b.title = "new title".into();
         assert_ne!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
+    fn title_change_not_masked_by_updated_exclusion() {
+        // `updated:` is excluded from the hash; pin that excluding
+        // `updated` doesn't accidentally mask a coincident title change.
+        let mut a = issue("foo", "open", "open", "body");
+        let mut b = issue("foo", "open", "open", "body");
+        a.title = "old".into();
+        a.updated = Some("2026-05-06".into());
+        b.title = "new".into();
+        b.updated = Some("2099-01-01".into());
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
+    fn parsed_frontmatter_title_change_changes_hash() {
+        // Guard against parser regressions: future refactors that stop
+        // populating `Issue.title` from the H1 would still pass the
+        // direct-mutation test above. This one goes through the parser.
+        use crate::parser::parse_item_md_text_with_warnings;
+        use std::path::Path;
+        let item_a = "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2026-05-06\n---\n\n# Old title\n\nbody\n";
+        let item_b = "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2026-05-06\n---\n\n# New title\n\nbody\n";
+        let a = parse_item_md_text_with_warnings(item_a, "foo", "open", Path::new("a.md"));
+        let b = parse_item_md_text_with_warnings(item_b, "foo", "open", Path::new("b.md"));
+        assert_eq!(a.issue.title, "Old title");
+        assert_eq!(b.issue.title, "New title");
+        assert_ne!(canonical_hash(&a.issue), canonical_hash(&b.issue));
+    }
+
+    #[test]
+    fn golden_hash_with_title() {
+        // Frozen vector: any future drift in the canonical projection,
+        // serialisation, or hash framing flips this. Update the
+        // expected value with intent (and document the version-token
+        // break in the commit message).
+        let mut i = issue("foo", "open", "open", "body");
+        i.title = "Example title".into();
+        assert_eq!(
+            canonical_hash(&i),
+            "sha256:342ad2308c37e7e3c443bef5d2243800e723955d5d28d75fb6a69de05143d5c4"
+        );
     }
 
     #[test]
