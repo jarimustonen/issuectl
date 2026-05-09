@@ -1,9 +1,9 @@
 ---
 created: 2026-05-08
-updated: 2026-05-08
+updated: 2026-05-09
 type: task
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
 commits:
@@ -11,6 +11,7 @@ commits:
   summary: custom_fields support on UpdateIssueRequest + CLI --field/--clear-field
 - hash: 149393c
   summary: centralize reserved-key list, tighten whitespace, address /llm-review fixes
+closed: 2026-05-09
 ---
 
 # Add custom_fields to UpdateIssueRequest

@@ -70,8 +70,9 @@ to keep the epic in sync with the worktree:
   (subsumed by @slightly-finicky-heart; close when M2 lands).
 
 ### M2 — agent-safe foundation
-- [ ] @slightly-finicky-heart — `issuectl doctor`: full validation suite +
-  installable git hooks. Subsumes @amazingly-scattered-month.
+- [x] @slightly-finicky-heart — `issuectl doctor`: full validation suite +
+  installable git hooks. Subsumes @amazingly-scattered-month. Landed
+  `8afb683` + review fixes (`8568585`, `f572e8a`).
 - [ ] @peculiarly-political-interest — Agent-safe mutation CLI
   (`set` / `note` / `check` / `label` / `apply` + `--dry-run`).
 - [x] @outright-homely-calendar — `issuectl fmt` + optional YAML merge
@@ -107,19 +108,21 @@ to keep the epic in sync with the worktree:
 ### Bugs / polish (small, dropped into v0.5.0 because they hurt daily use)
 - [x] @peculiarly-truncated-title — `issuectl ls` drops the first
   character of the H1 title in CLI display. Fixed in `6549ce6`.
-- [ ] @astoundingly-harsh-nest — `do_new_locked` returns `anyhow::Error`
-  and `mutate::new_issue` reverse-engineers the typed `MutateError`
-  variant by string-matching the formatted message. Brittle; fix by
-  returning a typed enum. Spin-off from @especially-stingy-powder
-  /llm-review.
-- [ ] @strikingly-abandoned-stranger — Add a two-thread regression test
-  that exercises the actual seq-inversion failure mode the C3 fix
-  prevents (the existing `new_issue_publishes_before_releasing_flock`
-  test only covers the proxy invariant in a single-threaded setup).
-  Spin-off from @especially-stingy-powder /llm-review.
-- [ ] @tolerably-beautiful-war — Add `custom_fields` to
-  `UpdateIssueRequest` so PATCH can set/clear custom keys (currently
-  only POST supports them). Spin-off from @painfully-endurable-steel
+- [x] @astoundingly-harsh-nest — Typed `DoNewError` enum at
+  `do_new_locked` boundary. Landed `c272404` + review fixes `bcdb9e9`.
+  Spin-offs: @partially-ahead-button (extract domain code from main.rs),
+  @relatively-entertaining-ticket (CLI golden-test harness).
+- [x] @strikingly-abandoned-stranger — Two-thread seq-order regression
+  tests landed and reverted (`47be957`, `5e6baef`) — kept the existing
+  proxy-invariant test; harness deemed flaky. See issue body for
+  rationale.
+- [x] @tolerably-beautiful-war — `custom_fields` on `UpdateIssueRequest`.
+  Landed `4f62aef` + review fixes `149393c`.
+- [ ] @partially-ahead-button — Extract `do_new_locked` + `NewArgs`
+  out of `src/main.rs` into a domain module. Spin-off from
+  @astoundingly-harsh-nest /llm-review.
+- [ ] @relatively-entertaining-ticket — CLI golden-test harness for
+  `cmd_new` error output. Spin-off from @astoundingly-harsh-nest
   /llm-review.
 
 ## Phases
