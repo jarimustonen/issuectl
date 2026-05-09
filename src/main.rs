@@ -1796,10 +1796,12 @@ fn finish_mutation(
                 "moved_to_open": outcome.moved_to_open,
                 "dry_run": true,
                 "diff": diff,
+                "warnings": outcome.warnings,
             });
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
             print!("{diff}");
+            emit_warnings_to_stderr(&outcome.warnings);
         }
         return Ok(());
     }
@@ -1810,12 +1812,24 @@ fn finish_mutation(
             "version": outcome.version,
             "moved_to_closed": outcome.moved_to_closed,
             "moved_to_open": outcome.moved_to_open,
+            "warnings": outcome.warnings,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!("{human_verb} {slug}");
+        emit_warnings_to_stderr(&outcome.warnings);
     }
     Ok(())
+}
+
+/// Print non-fatal advisories from `UpdateOutcome::warnings` to stderr
+/// so the human-readable CLI surface mirrors the JSON `warnings` key.
+/// Body-only verbs (`note`, `check`) emit transition-rule mismatches
+/// here without blocking the write — see `mutate::transition_warnings`.
+fn emit_warnings_to_stderr(warnings: &[String]) {
+    for w in warnings {
+        eprintln!("warning: {w}");
+    }
 }
 
 /// Render a git-style unified diff between `before` and `after`. The

@@ -181,6 +181,10 @@ as `update`; body-only mutation.
 - `--dry-run` prints a unified diff and exits 0 without writing.
 - `--expected-version <token>` is required with `--json` (fetch via
   `show --json`).
+- Transition-rule mismatches detected by `note` and `check` are
+  emitted as warnings (stderr; `warnings` array in `--json`) — the
+  write goes through. The unified `apply` path keeps rule violations
+  as hard errors so they can be fixed in the same transaction.
 
 Block shape (auto-generated):
 
@@ -222,14 +226,21 @@ diff, no write).
 
   ```yaml
   body_ops:
-    - toggle_checkbox: "tests passing"
+    - set_checkbox:
+        match: "tests passing"
+        checked: true            # idempotent: safe to retry
     - append_note:
         author: ci-bot
         message: "all checks green"
-        section: agent_runs   # or comments (default) / decisions
+        section: agent_runs      # or comments (default) / decisions
   ```
 
-  Rolls back cleanly on schema violation or any failed body op.
+  `set_checkbox` is idempotent — replaying the same op against an
+  already-target body is a no-op (the box doesn't flip back). Rolls
+  back cleanly on schema violation or any failed body op; the
+  legacy → flat directory migration and default `.schema.yaml`
+  bootstrap also defer until after validation passes, so a failing
+  patch leaves no repo side effects.
 
 JSON output shape (same envelope as `update`):
 

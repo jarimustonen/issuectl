@@ -130,11 +130,13 @@ pub struct UpdateIssueRequest {
     pub custom_fields: std::collections::BTreeMap<String, Patch<String>>,
     /// In-order body mutations applied under the same flock as the
     /// frontmatter PATCHes above. Each op is one of `append_note` or
-    /// `toggle_checkbox`; ops apply in vector order so a patch can
+    /// `set_checkbox`; ops apply in vector order so a patch can
     /// (e.g.) append a note that documents a checkbox flip happening
     /// right after it. Schema + transition validation runs once on
     /// the post-body state, matching the all-or-nothing contract of
-    /// the rest of `UpdateIssueRequest`.
+    /// the rest of `UpdateIssueRequest`. Capped at `MAX_BODY_OPS` so
+    /// a runaway agent or hostile PATCH can't pin the repo-wide flock
+    /// scanning the body 50k times in one request.
     #[serde(default)]
     pub body_ops: Vec<BodyOp>,
     /// CLI-only: compute the post-mutation bytes and return them via
@@ -244,53 +246,105 @@ pub struct CommitSpec {
     pub summary: String,
 }
 
+/// Hard cap on the number of body operations one mutation request can
+/// carry. Each `set_checkbox` rescans the entire body (`O(body_lines)`),
+/// so an unbounded vector lets a single PATCH pin the repo-wide flock
+/// long enough to starve every other writer. The cap is enforced in
+/// `UpdateIssueRequest::validate` so it fires before any disk I/O.
+pub const MAX_BODY_OPS: usize = 64;
+
 /// Body-mutation operation carried inside an `UpdateIssueRequest`.
 /// Externally tagged so `apply` patch.yaml entries read like
-/// `- toggle_checkbox: "needle"` and `- append_note: { ... }`. JSON
-/// clients send the same shape (`{"toggle_checkbox": "needle"}`).
+/// `- set_checkbox: { match: "needle", checked: true }` and
+/// `- append_note: { ... }`. JSON clients send the same shape
+/// (`{"set_checkbox": {...}}`). The wire shape is enforced by a
+/// hand-rolled `MapAccess` visitor (see `Deserialize` impl) so unknown
+/// keys, multi-key entries, and null-sibling-key bypasses are all
+/// rejected explicitly.
 #[derive(Debug, Clone)]
 pub enum BodyOp {
-    /// Toggle the unique `- [ ]` / `- [x]` line whose text contains
-    /// the needle (substring match, fence-aware). Errors when zero or
-    /// multiple lines match — same contract as `cmd_check`.
-    ToggleCheckbox(String),
+    /// Drive the unique `- [ ]` / `- [x]` line whose text contains the
+    /// needle to a target state. Idempotent — if the line is already
+    /// in the requested state the op is a no-op for that body, which
+    /// lets agents retry timed-out requests safely. Errors when zero
+    /// or multiple lines match.
+    SetCheckbox(SetCheckboxOp),
     /// Append a timestamped block to the named section, creating the
     /// section if missing. Same shape as `cmd_note`.
     AppendNote(AppendNoteOp),
 }
 
-// Manual external-tag deserialize so the wire shape is the same one-
-// key-mapping form under both `serde_json` and `serde_yaml`. The
-// derive-based `Deserialize` works for serde_json's external-tag
-// representation but serde_yaml requires `!Tag` directives, which
-// don't read well in a hand-edited patch.yaml. Going through a
-// helper map gives us identical wire format on both ends.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct SetCheckboxOp {
+    /// Substring matched against checkbox lines (fence-aware). Must
+    /// uniquely identify one `- [ ]` / `- [x]` line.
+    #[serde(rename = "match")]
+    pub match_substring: String,
+    /// Target state. `true` ticks the box (or leaves it ticked);
+    /// `false` clears it (or leaves it cleared).
+    pub checked: bool,
+}
+
+// Manual external-tag deserialize: serde_yaml does not accept the
+// derive-based external-tag shape without `!Tag` directives, and the
+// previous helper-struct version (`#[derive(Deserialize)] struct Wire
+// { toggle_checkbox: Option<_>, append_note: Option<_> }`) silently
+// dropped unknown keys and accepted null-sibling-key bypasses. The
+// `MapAccess` visitor enforces:
+//   - exactly one variant key per entry;
+//   - unknown keys rejected with the canonical `unknown_field` shape;
+//   - null-valued sibling keys rejected explicitly (the previous
+//     `Option<T>` collapsed `null` to `None` and let through
+//     `{"set_checkbox": {...}, "append_note": null}`).
+// `serde_json` and `serde_yaml` both read the same single-key-mapping
+// shape through this visitor.
 impl<'de> Deserialize<'de> for BodyOp {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        use serde::de::Error as DeError;
-        #[derive(Deserialize)]
-        struct Wire {
-            #[serde(default)]
-            toggle_checkbox: Option<serde_yaml::Value>,
-            #[serde(default)]
-            append_note: Option<AppendNoteOp>,
-        }
-        let w = Wire::deserialize(d)?;
-        match (w.toggle_checkbox, w.append_note) {
-            (Some(v), None) => {
-                let needle = v.as_str().ok_or_else(|| {
-                    D::Error::custom("toggle_checkbox value must be a string")
-                })?;
-                Ok(BodyOp::ToggleCheckbox(needle.to_string()))
+        use serde::de::{Error as DeError, IgnoredAny, MapAccess, Visitor};
+        use std::fmt;
+
+        const VARIANTS: &[&str] = &["set_checkbox", "append_note"];
+
+        struct BodyOpVisitor;
+        impl<'de> Visitor<'de> for BodyOpVisitor {
+            type Value = BodyOp;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(
+                    "a single-key mapping: \
+                     {set_checkbox: {match, checked}} or \
+                     {append_note: {author, message, section?}}",
+                )
             }
-            (None, Some(note)) => Ok(BodyOp::AppendNote(note)),
-            (None, None) => Err(D::Error::custom(
-                "body_ops entry must be `toggle_checkbox: <needle>` or `append_note: { ... }`",
-            )),
-            (Some(_), Some(_)) => Err(D::Error::custom(
-                "body_ops entry must declare exactly one of `toggle_checkbox` / `append_note`",
-            )),
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<BodyOp, M::Error> {
+                let Some(key) = map.next_key::<String>()? else {
+                    return Err(M::Error::custom(
+                        "body_ops entry must declare exactly one operation",
+                    ));
+                };
+                let op = match key.as_str() {
+                    "set_checkbox" => BodyOp::SetCheckbox(map.next_value::<SetCheckboxOp>()?),
+                    "append_note" => BodyOp::AppendNote(map.next_value::<AppendNoteOp>()?),
+                    other => return Err(M::Error::unknown_field(other, VARIANTS)),
+                };
+                if let Some(extra) = map.next_key::<String>()? {
+                    // Consume the value before erroring so the
+                    // deserializer state stays valid for callers
+                    // walking multiple entries; reject regardless of
+                    // whether the value is null (the previous
+                    // `Option<T>` helper accepted `null` siblings,
+                    // which let multi-key entries slip through).
+                    let _: IgnoredAny = map.next_value()?;
+                    return Err(M::Error::custom(format!(
+                        "body_ops entry must be a single-key mapping; \
+                         unexpected extra key {extra:?} (valid keys: {VARIANTS:?})"
+                    )));
+                }
+                Ok(op)
+            }
         }
+
+        d.deserialize_map(BodyOpVisitor)
     }
 }
 
@@ -440,12 +494,19 @@ impl UpdateIssueRequest {
             }
         }
 
+        if self.body_ops.len() > MAX_BODY_OPS {
+            return Err(MutateError::Validation(format!(
+                "body_ops length {} exceeds maximum {MAX_BODY_OPS}; \
+                 split into multiple `apply` calls",
+                self.body_ops.len()
+            )));
+        }
         for (i, op) in self.body_ops.iter().enumerate() {
             match op {
-                BodyOp::ToggleCheckbox(needle) => {
-                    if needle.trim().is_empty() {
+                BodyOp::SetCheckbox(set) => {
+                    if set.match_substring.trim().is_empty() {
                         return Err(MutateError::Validation(format!(
-                            "body_ops[{i}]: toggle_checkbox needle cannot be empty"
+                            "body_ops[{i}].match: set_checkbox match cannot be empty"
                         )));
                     }
                 }
@@ -519,6 +580,13 @@ pub struct UpdateOutcome {
     /// `None` for real writes (the diff is the final on-disk state,
     /// not a plan).
     pub before_serialized: Option<String>,
+    /// Non-fatal advisories surfaced to the caller. The standalone
+    /// body-mutation verbs (`cmd_note`, `cmd_check`) detect transition-
+    /// rule violations and emit them here rather than refusing the
+    /// write — the CLI prints them to stderr, the JSON envelope adds
+    /// a `warnings` key. The frontmatter PATCH path never warns; rule
+    /// violations there are hard errors via `MutateError::TransitionViolation`.
+    pub warnings: Vec<String>,
 }
 
 /// Errors that the mutate layer surfaces to its callers. The CLI maps
@@ -724,26 +792,22 @@ pub fn update_issue(
             moved_to_open: false,
             pending_serialized: None,
             before_serialized: None,
+            warnings: Vec::new(),
         });
     }
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    // Dry-run is no-write: skip both the default-schema bootstrap and
-    // the legacy → flat directory migration. `schema::load` still
-    // reads (or returns the implicit empty schema) so post-mutation
-    // validation runs against the same rules a real write would use.
-    if !req.dry_run {
-        crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
-    }
-
-    // 1) locate. Real writes migrate legacy → flat under the flock so
-    //    the canonical flat path is the only mutation target. Dry-run
-    //    locates without migrating to honour the "no write" contract.
-    let item_path = if req.dry_run {
-        locate_for_dry_run(root, slug)?
-    } else {
-        locate_and_migrate(root, slug)?
-    };
+    // Locate without migrating, regardless of dry_run. The legacy →
+    // flat directory rename and the default-schema bootstrap used to
+    // run *before* `update_issue_under_lock`, which meant a body op
+    // (or any other validation failure) could roll the issue's content
+    // back while leaving `.schema.yaml` newly created and the legacy
+    // directory permanently moved — directly contradicting the
+    // documented "all-or-nothing under one flock" contract. We now
+    // defer both side effects until validation has passed
+    // (`update_issue_under_lock` runs them just before the atomic
+    // write).
+    let item_path = locate_for_dry_run(root, slug)?;
     let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let rules = load_validated_rules(root, &schema)?;
     update_issue_under_lock(root, slug, item_path, req, hub, &schema, &rules)
@@ -1061,10 +1125,19 @@ fn update_issue_under_lock(
             moved_to_open,
             pending_serialized: Some(pending),
             before_serialized,
+            warnings: Vec::new(),
         });
     }
-    write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
-    let final_path = item_path.clone();
+    // 5b) Side effects deferred from `update_issue` so they only fire
+    //     after every validation step above has passed. Schema
+    //     bootstrap and the legacy → flat directory migration would
+    //     otherwise leak past a rolled-back transaction (failed body
+    //     op, schema violation, transition rejection): the on-disk
+    //     `item.md` would be unchanged but `.schema.yaml` would be
+    //     newly created and the legacy directory permanently moved.
+    crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
+    let final_path = migrate_to_flat_if_legacy(root, slug, &item_path)?;
+    write_item_atomic(&final_path, &item).map_err(MutateError::Io)?;
 
     // 6) recompute canonical hash from final on-disk content
     let after = crate::parser::parse_item_md_with_warnings(&final_path, slug, "open");
@@ -1093,6 +1166,7 @@ fn update_issue_under_lock(
         moved_to_open,
         pending_serialized: None,
         before_serialized: None,
+        warnings: Vec::new(),
     })
 }
 
@@ -1302,6 +1376,7 @@ pub fn update_body(
             moved_to_open: false,
             pending_serialized: Some(pending),
             before_serialized,
+            warnings: Vec::new(),
         });
     }
 
@@ -1331,6 +1406,7 @@ pub fn update_body(
         moved_to_open: false,
         pending_serialized: None,
         before_serialized: None,
+        warnings: Vec::new(),
     })
 }
 
@@ -1417,6 +1493,20 @@ pub fn note_issue(
     // mutating the same invalid issue (review finding #6).
     validate_against_schema(root, &item.frontmatter)?;
 
+    // Transition rules also evaluated for parity with `update_body`,
+    // BUT — by design — violations are surfaced as warnings rather
+    // than hard errors. `cmd_note` is a body-only verb agents reach
+    // for to record intent (decisions, agent runs, comments); blocking
+    // the write would force them to back out and replay through the
+    // unified `apply` envelope just to log "I noticed AC#2 is
+    // unticked." We let the write through, leave the issue in a
+    // (potentially) rule-violating state, and tell the caller. The
+    // unified PATCH path (`update_issue_under_lock`) keeps the strict
+    // rejection — body_ops there compose with frontmatter mutations,
+    // so the caller has the tools to fix the violation in the same
+    // transaction.
+    let warnings = transition_warnings(root, slug, &item, &item_path, &prev_issue.status);
+
     if dry_run {
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
         let new_issue = parse_serialized(&pending, slug);
@@ -1429,6 +1519,7 @@ pub fn note_issue(
             moved_to_open: false,
             pending_serialized: Some(pending),
             before_serialized,
+            warnings,
         });
     }
 
@@ -1458,6 +1549,7 @@ pub fn note_issue(
         moved_to_open: false,
         pending_serialized: None,
         before_serialized: None,
+        warnings,
     })
 }
 
@@ -1532,6 +1624,16 @@ pub fn toggle_checkbox(
 
     validate_against_schema(root, &item.frontmatter)?;
 
+    // Transition rules: surface as warnings on this body-only verb,
+    // matching `note_issue`. Toggling a checkbox cannot legitimately
+    // be blocked by a transition rule (the verb doesn't change
+    // status), but a `requires_*` rule that pins acceptance criteria
+    // for an already-closing issue WILL fire here — and the user
+    // probably wants to know without being blocked from making the
+    // edit. The unified `body_ops` PATCH path keeps the strict
+    // rejection.
+    let warnings = transition_warnings(root, slug, &item, &item_path, &prev_issue.status);
+
     if dry_run {
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
         let new_issue = parse_serialized(&pending, slug);
@@ -1544,6 +1646,7 @@ pub fn toggle_checkbox(
             moved_to_open: false,
             pending_serialized: Some(pending),
             before_serialized,
+            warnings,
         });
     }
 
@@ -1572,7 +1675,39 @@ pub fn toggle_checkbox(
         moved_to_open: false,
         pending_serialized: None,
         before_serialized: None,
+        warnings,
     })
+}
+
+/// Evaluate transition rules against the post-mutation projection and
+/// return any violations as warning strings. Used by body-only verbs
+/// (`note_issue`, `toggle_checkbox`) that surface rule mismatches as
+/// warnings rather than hard errors. `prev_status` is the on-disk
+/// status before the mutation; for body-only verbs that's the same as
+/// the post-mutation status, so only `requires_*` rules can fire.
+///
+/// On schema/transitions config load failure we silently return no
+/// warnings — the body verbs predate the rules engine and shouldn't
+/// start failing because the *config* is malformed; the unified PATCH
+/// path catches that with `MutateError::TransitionConfig`.
+fn transition_warnings(
+    root: &Path,
+    slug: &str,
+    item: &write::ItemFile,
+    item_path: &Path,
+    prev_status: &str,
+) -> Vec<String> {
+    let Ok(schema) = crate::schema::load(root) else { return Vec::new() };
+    let Ok(rules) = crate::transitions::load(root) else { return Vec::new() };
+    let universe = crate::schema::status_universe(&schema);
+    if crate::transitions::validate_status_refs(&rules, &universe).is_err() {
+        return Vec::new();
+    }
+    let projected = match projected_issue_for_rules(slug, item, item_path) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    crate::transitions::evaluate_transition(&rules, &projected, prev_status)
 }
 
 /// Apply a single `BodyOp` against the in-flight `ItemFile`. Shared by
@@ -1582,16 +1717,24 @@ pub fn toggle_checkbox(
 /// identical across surfaces.
 fn apply_body_op(item: &mut ItemFile, index: usize, op: &BodyOp) -> Result<(), MutateError> {
     match op {
-        BodyOp::ToggleCheckbox(needle) => {
-            let new_body = toggle_checkbox_in_body(&item.body, needle).map_err(|e| match e {
-                MutateError::Validation(s) => {
-                    MutateError::Validation(format!("body_ops[{index}]: {s}"))
-                }
-                other => other,
-            })?;
+        BodyOp::SetCheckbox(set) => {
+            let new_body =
+                set_checkbox_in_body(&item.body, &set.match_substring, set.checked)
+                    .map_err(|e| prefix_body_op_error(index, e))?;
             item.body = new_body;
         }
         BodyOp::AppendNote(note) => {
+            // `validate()` already checked author/message, but
+            // `render_note_block` re-validates defensively. Mirror the
+            // same `body_ops[i].<field>:` shape here so the under-lock
+            // error path matches the pre-lock validation path
+            // byte-for-byte (LLM review consensus #5).
+            crate::body_sections::validate_author(&note.author).map_err(|e| {
+                MutateError::Validation(format!("body_ops[{index}].author: {e}"))
+            })?;
+            crate::body_sections::validate_message(&note.message).map_err(|e| {
+                MutateError::Validation(format!("body_ops[{index}].message: {e}"))
+            })?;
             let block = crate::body_sections::render_note_block(
                 &crate::body_sections::now_iso(),
                 &note.author,
@@ -1604,6 +1747,86 @@ fn apply_body_op(item: &mut ItemFile, index: usize, op: &BodyOp) -> Result<(), M
         }
     }
     Ok(())
+}
+
+/// Attach `body_ops[{index}]:` context to *every* error variant a body
+/// op might surface. The previous `match` only wrapped `Validation`
+/// and let other variants pass through unprefixed — dead today (the
+/// body primitives only return `Validation`), but a footgun the
+/// moment one of them grows an Io / SchemaViolation path.
+fn prefix_body_op_error(index: usize, err: MutateError) -> MutateError {
+    match err {
+        MutateError::Validation(s) => {
+            MutateError::Validation(format!("body_ops[{index}]: {s}"))
+        }
+        MutateError::SchemaViolation(s) => {
+            MutateError::SchemaViolation(format!("body_ops[{index}]: {s}"))
+        }
+        MutateError::TransitionViolation(s) => {
+            MutateError::TransitionViolation(format!("body_ops[{index}]: {s}"))
+        }
+        MutateError::ConflictingIntent(s) => {
+            MutateError::ConflictingIntent(format!("body_ops[{index}]: {s}"))
+        }
+        MutateError::Io(e) => {
+            MutateError::Io(anyhow!("body_ops[{index}]: {e:#}"))
+        }
+        // Variants that don't carry a free-form message (NotFound,
+        // VersionMismatch, AmbiguousSlug, Corrupt, SchemaConfig,
+        // TransitionConfig) round-trip unchanged — there is no
+        // sensible place to splice the index in.
+        other => other,
+    }
+}
+
+/// Drive the unique checkbox line containing `substring` to the target
+/// `checked` state. Idempotent: if the matched line is already in the
+/// target state, returns the body unchanged so retried agent requests
+/// don't flip the box back and forth. Errors when zero or multiple
+/// lines match — same shape as `toggle_checkbox_in_body`.
+fn set_checkbox_in_body(
+    body: &str,
+    substring: &str,
+    checked: bool,
+) -> Result<String, MutateError> {
+    let lines: Vec<&str> = body.split('\n').collect();
+    let mut matches: Vec<(usize, bool)> = Vec::new();
+    crate::body_sections::for_each_line_outside_fences(body, |i, line| {
+        if let Some(state) = checkbox_state(line) {
+            if line.contains(substring) {
+                matches.push((i, state));
+            }
+        }
+    });
+    match matches.as_slice() {
+        [] => Err(MutateError::Validation(format!(
+            "no checkbox line matched {substring:?}"
+        ))),
+        [(idx, current_state)] => {
+            if *current_state == checked {
+                return Ok(body.to_string());
+            }
+            let new_line = set_line_checkbox(lines[*idx], checked).ok_or_else(|| {
+                MutateError::Validation(format!(
+                    "internal: matched line {:?} is not a checkbox after match",
+                    lines[*idx]
+                ))
+            })?;
+            let mut out = Vec::with_capacity(lines.len());
+            for (i, l) in lines.iter().enumerate() {
+                if i == *idx {
+                    out.push(new_line.clone());
+                } else {
+                    out.push((*l).to_string());
+                }
+            }
+            Ok(out.join("\n"))
+        }
+        many => Err(MutateError::Validation(format!(
+            "{} checkbox lines matched {substring:?}; refine to a unique substring",
+            many.len()
+        ))),
+    }
 }
 
 /// Find a unique checkbox line containing `substring` and return the
@@ -1731,6 +1954,39 @@ fn toggle_line_checkbox(line: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// Drive a checkbox line to the target `checked` state regardless of
+/// its current state. Returns `None` when the line doesn't match the
+/// byte-safe checkbox shape — callers should have validated via
+/// `checkbox_state` first. Mirror of `toggle_line_checkbox` but with
+/// an explicit target so `set_checkbox_in_body` can be idempotent.
+fn set_line_checkbox(line: &str, checked: bool) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while matches!(bytes.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+    if !matches!(bytes.get(i), Some(b'-' | b'*' | b'+')) {
+        return None;
+    }
+    i += 1;
+    while matches!(bytes.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+    if bytes.get(i) != Some(&b'[') {
+        return None;
+    }
+    let mark_idx = i + 1;
+    if bytes.get(mark_idx).is_none() || bytes.get(i + 2) != Some(&b']') {
+        return None;
+    }
+    let new_mark = if checked { b'x' } else { b' ' };
+    let mut out = Vec::with_capacity(bytes.len());
+    out.extend_from_slice(&bytes[..mark_idx]);
+    out.push(new_mark);
+    out.extend_from_slice(&bytes[mark_idx + 1..]);
+    String::from_utf8(out).ok()
+}
+
 /// Run schema validation against a post-mutation frontmatter mapping.
 /// Centralised so every body- and frontmatter-mutation entry point
 /// (`update_issue_under_lock`, `update_body`, `note_issue`,
@@ -1825,6 +2081,36 @@ fn locate_for_dry_run(root: &Path, slug: &str) -> Result<PathBuf, MutateError> {
     }
 }
 
+/// If the located item path is at a legacy `issues/{open,closed}/<slug>/`
+/// directory, run the legacy → flat migration in-place and return the
+/// new flat path. Otherwise return the path unchanged. Called after
+/// validation has passed so the rename is part of the same atomic
+/// success — never on a rolled-back transaction.
+fn migrate_to_flat_if_legacy(
+    root: &Path,
+    slug: &str,
+    item_path: &Path,
+) -> Result<PathBuf, MutateError> {
+    use repo::LayoutState;
+    let needs_migration = matches!(
+        repo::resolve_layout(root, slug),
+        LayoutState::Legacy { .. }
+    );
+    if !needs_migration {
+        return Ok(item_path.to_path_buf());
+    }
+    repo::migrate_to_flat_inplace(root, slug).map_err(MutateError::Io)?;
+    match repo::resolve_layout(root, slug) {
+        LayoutState::Flat { item_path } => Ok(item_path),
+        LayoutState::Absent => Err(MutateError::NotFound),
+        LayoutState::Ambiguous { paths } => Err(MutateError::AmbiguousSlug { paths }),
+        LayoutState::Invalid { reason, .. } => Err(MutateError::Io(anyhow!("{reason}"))),
+        LayoutState::Legacy { .. } => Err(MutateError::Io(anyhow!(
+            "post-migration state still classifies as legacy"
+        ))),
+    }
+}
+
 /// Locate the issue and, if it lives at a legacy path, move it to the
 /// canonical flat path under the held flock. Returns the final flat
 /// `item.md` path.
@@ -1834,6 +2120,7 @@ fn locate_for_dry_run(root: &Path, slug: &str) -> Result<PathBuf, MutateError> {
 /// commands — no per-call-site classification logic. After a legacy →
 /// flat migration, re-resolves to validate the new flat path picked up
 /// by the resolver's symlink/escape hardening (M4 fix).
+#[allow(dead_code)] // retained for `close_issue` / future call-sites that still want eager migration
 fn locate_and_migrate(root: &Path, slug: &str) -> Result<PathBuf, MutateError> {
     use repo::LayoutState;
     match repo::resolve_layout(root, slug) {
@@ -4263,7 +4550,10 @@ mod tests {
             status: Patch::Set("testing".into()),
             add_labels: vec!["agent-friendly".into()],
             body_ops: vec![
-                BodyOp::ToggleCheckbox("tests passing".into()),
+                BodyOp::SetCheckbox(SetCheckboxOp {
+                    match_substring: "tests passing".into(),
+                    checked: true,
+                }),
                 BodyOp::AppendNote(AppendNoteOp {
                     author: "ci-bot".into(),
                     message: "all checks green".into(),
@@ -4290,7 +4580,10 @@ mod tests {
         let _ = seed_with_body(tmp.path(), "body-ops-dry", body);
         let before = fs::read_to_string(tmp.path().join("issues/body-ops-dry/item.md")).unwrap();
         let req = UpdateIssueRequest {
-            body_ops: vec![BodyOp::ToggleCheckbox("only one".into())],
+            body_ops: vec![BodyOp::SetCheckbox(SetCheckboxOp {
+                match_substring: "only one".into(),
+                checked: true,
+            })],
             dry_run: true,
             ..Default::default()
         };
@@ -4315,7 +4608,10 @@ mod tests {
             fs::read_to_string(tmp.path().join("issues/body-ops-rollback/item.md")).unwrap();
         let req = UpdateIssueRequest {
             status: Patch::Set("testing".into()),
-            body_ops: vec![BodyOp::ToggleCheckbox("nope".into())],
+            body_ops: vec![BodyOp::SetCheckbox(SetCheckboxOp {
+                match_substring: "nope".into(),
+                checked: true,
+            })],
             ..Default::default()
         };
         let err = update_issue(tmp.path(), "body-ops-rollback", req, None).unwrap_err();
@@ -4335,7 +4631,9 @@ mod tests {
         // refactor can't silently change the agent contract.
         let yaml = r#"
 body_ops:
-  - toggle_checkbox: "tests passing"
+  - set_checkbox:
+      match: "tests passing"
+      checked: true
   - append_note:
       section: agent_runs
       author: ci-bot
@@ -4344,8 +4642,11 @@ body_ops:
         let req: UpdateIssueRequest = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(req.body_ops.len(), 2);
         match &req.body_ops[0] {
-            BodyOp::ToggleCheckbox(s) => assert_eq!(s, "tests passing"),
-            other => panic!("expected ToggleCheckbox, got {other:?}"),
+            BodyOp::SetCheckbox(s) => {
+                assert_eq!(s.match_substring, "tests passing");
+                assert!(s.checked);
+            }
+            other => panic!("expected SetCheckbox, got {other:?}"),
         }
         match &req.body_ops[1] {
             BodyOp::AppendNote(n) => {
@@ -4363,20 +4664,206 @@ body_ops:
         // round-trips with the YAML one above.
         let json = r#"{
             "body_ops": [
-                {"toggle_checkbox": "ship it"},
+                {"set_checkbox": {"match": "ship it", "checked": false}},
                 {"append_note": {"author": "alice", "message": "done"}}
             ]
         }"#;
         let req: UpdateIssueRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.body_ops.len(), 2);
+        match &req.body_ops[0] {
+            BodyOp::SetCheckbox(s) => {
+                assert_eq!(s.match_substring, "ship it");
+                assert!(!s.checked);
+            }
+            other => panic!("expected SetCheckbox, got {other:?}"),
+        }
         match &req.body_ops[1] {
             BodyOp::AppendNote(n) => {
                 assert_eq!(n.author, "alice");
-                // Default section is Comments when omitted on the wire.
                 assert_eq!(n.section, NoteSection::Comments);
             }
             other => panic!("expected AppendNote, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn body_ops_deserialize_rejects_unknown_top_key() {
+        // Unknown variant key — visitor must reject with the canonical
+        // unknown-field shape.
+        let json = r#"{"body_ops": [{"toggl_checkbox": "x"}]}"#;
+        let err = serde_json::from_str::<UpdateIssueRequest>(json).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("toggl_checkbox") || msg.contains("unknown"), "got {msg}");
+    }
+
+    #[test]
+    fn body_ops_deserialize_rejects_extra_sibling_key() {
+        // Unknown sibling key beside a valid op.
+        let json = r#"{"body_ops": [
+            {"set_checkbox": {"match": "x", "checked": true}, "junk": 1}
+        ]}"#;
+        let err = serde_json::from_str::<UpdateIssueRequest>(json).unwrap_err();
+        assert!(err.to_string().contains("single-key mapping"), "got {err}");
+    }
+
+    #[test]
+    fn body_ops_deserialize_rejects_null_sibling_key_bypass() {
+        // Previous Option<T> helper struct accepted this — the null
+        // collapsed to None and "exactly one variant" passed.
+        let json = r#"{"body_ops": [
+            {"set_checkbox": {"match": "x", "checked": true}, "append_note": null}
+        ]}"#;
+        let err = serde_json::from_str::<UpdateIssueRequest>(json).unwrap_err();
+        assert!(err.to_string().contains("single-key mapping"), "got {err}");
+    }
+
+    #[test]
+    fn append_note_op_rejects_unknown_field() {
+        // Pin the pre-existing `deny_unknown_fields` on AppendNoteOp so a
+        // future refactor doesn't silently drop the directive.
+        let json = r#"{"body_ops": [
+            {"append_note": {"author": "a", "message": "m", "junk": 1}}
+        ]}"#;
+        let err = serde_json::from_str::<UpdateIssueRequest>(json).unwrap_err();
+        assert!(err.to_string().contains("junk") || err.to_string().contains("unknown"), "got {err}");
+    }
+
+    #[test]
+    fn body_ops_length_cap_rejected_by_validate() {
+        let tmp = fresh_repo();
+        let _ = seed_issue(tmp.path(), "open", "body-ops-too-many", "open");
+        let huge: Vec<BodyOp> = (0..(MAX_BODY_OPS + 1))
+            .map(|_| BodyOp::SetCheckbox(SetCheckboxOp {
+                match_substring: "x".into(),
+                checked: true,
+            }))
+            .collect();
+        let req = UpdateIssueRequest {
+            body_ops: huge,
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "body-ops-too-many", req, None).unwrap_err();
+        assert!(
+            matches!(&err, MutateError::Validation(s) if s.contains("body_ops length") && s.contains("exceeds")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn failed_body_op_does_not_create_default_schema() {
+        // Regression: until the locate-then-validate-then-side-effects
+        // refactor, `ensure_default_written` ran before body ops, so a
+        // failing op left `.schema.yaml` newly created on a fresh repo.
+        let tmp = fresh_repo();
+        let body = "# T\n\n- [ ] alpha\n";
+        let _ = seed_with_body(tmp.path(), "body-ops-no-schema-bootstrap", body);
+        let schema_path = tmp.path().join("issues/.schema.yaml");
+        assert!(!schema_path.exists(), "precondition: no schema yet");
+        let req = UpdateIssueRequest {
+            body_ops: vec![BodyOp::SetCheckbox(SetCheckboxOp {
+                match_substring: "no-such-needle".into(),
+                checked: true,
+            })],
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "body-ops-no-schema-bootstrap", req, None).unwrap_err();
+        assert!(matches!(err, MutateError::Validation(_)));
+        assert!(
+            !schema_path.exists(),
+            "failed body op must not bootstrap .schema.yaml"
+        );
+    }
+
+    #[test]
+    fn failed_body_op_does_not_migrate_legacy_layout() {
+        // Same regression class for the legacy → flat directory move.
+        let tmp = fresh_repo();
+        let legacy_dir = tmp.path().join("issues/open/body-ops-no-migrate");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\npriority: normal\n---\n\n# T\n\n- [ ] only\n",
+        )
+        .unwrap();
+        let req = UpdateIssueRequest {
+            body_ops: vec![BodyOp::SetCheckbox(SetCheckboxOp {
+                match_substring: "no-such-needle".into(),
+                checked: true,
+            })],
+            ..Default::default()
+        };
+        let _ = update_issue(tmp.path(), "body-ops-no-migrate", req, None).unwrap_err();
+        assert!(
+            legacy_dir.join("item.md").exists(),
+            "failed body op must leave legacy directory in place"
+        );
+        assert!(
+            !tmp.path().join("issues/body-ops-no-migrate/item.md").exists(),
+            "failed body op must NOT migrate to flat layout"
+        );
+    }
+
+    #[test]
+    fn standalone_toggle_checkbox_surfaces_transition_warning_without_failing() {
+        // #11: standalone body verbs (`toggle_checkbox`, `note_issue`)
+        // detect transition-rule violations but emit them as warnings
+        // rather than refusing the write — the user wanted the change
+        // through; the rule mismatch goes to the caller for them to
+        // resolve. The unified `body_ops` PATCH path keeps the strict
+        // rejection.
+        let tmp = fresh_repo();
+        // Set up a rule: `done` requires assignee. Seed a `done` issue
+        // without an assignee so the rule is already violated; the
+        // checkbox toggle won't change frontmatter so it just inherits.
+        fs::create_dir_all(tmp.path().join(".issuectl")).unwrap();
+        fs::write(
+            tmp.path().join(".issuectl/transitions.yaml"),
+            "version: 1\nstatus_rules:\n  done:\n    requires_assignee: true\n",
+        )
+        .unwrap();
+        let dir = tmp.path().join("issues/warn-cbx");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: task\ncreated: 2026-05-06\nstatus: done\npriority: normal\n---\n\n# T\n\n- [ ] flip me\n",
+        )
+        .unwrap();
+        let out = toggle_checkbox(tmp.path(), "warn-cbx", "flip me", None, None, false).unwrap();
+        assert!(
+            !out.warnings.is_empty(),
+            "expected at least one warning for the rule violation"
+        );
+        assert!(
+            out.warnings.iter().any(|w| w.contains("assignee")),
+            "warnings should mention the missing assignee, got {:?}",
+            out.warnings
+        );
+        // Write went through despite the violation.
+        let after = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert!(after.contains("- [x] flip me"));
+    }
+
+    #[test]
+    fn set_checkbox_is_idempotent_on_target_state() {
+        // A retry of the same set_checkbox op (already at target state)
+        // must NOT toggle the box back. This is the central reason
+        // body_ops uses set_checkbox rather than the toggle primitive.
+        let tmp = fresh_repo();
+        let body = "# T\n\n- [x] already checked\n";
+        let _ = seed_with_body(tmp.path(), "set-cbx-idem", body);
+        let req = UpdateIssueRequest {
+            body_ops: vec![BodyOp::SetCheckbox(SetCheckboxOp {
+                match_substring: "already checked".into(),
+                checked: true,
+            })],
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "set-cbx-idem", req, None).unwrap();
+        let after = fs::read_to_string(tmp.path().join("issues/set-cbx-idem/item.md")).unwrap();
+        assert!(
+            after.contains("- [x] already checked"),
+            "idempotent set must leave box checked, got:\n{after}"
+        );
     }
 
     #[test]
