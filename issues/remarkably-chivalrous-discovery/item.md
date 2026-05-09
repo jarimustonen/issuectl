@@ -2,12 +2,18 @@
 created: 2026-05-07
 updated: 2026-05-09
 type: chore
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
 commits:
 - hash: 55c19cb
   summary: 'docs(web-edit-sync): rewrite as coherent flat-layout contract'
+- hash: 8f0fda0
+  summary: 'docs(web-edit-sync): apply review findings from multi-LLM panel'
+- hash: d72154c
+  summary: 'docs(web-edit-sync): apply round-2 review findings'
+related: ['@especially-unruly-crate']
+closed: 2026-05-09
 ---
 
 # Coherent rewrite of web-edit-sync.md after flat-layout
