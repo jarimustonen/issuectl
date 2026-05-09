@@ -47,6 +47,7 @@ fn canonical_frontmatter_value(issue: &Issue) -> Value {
     m.insert("type".into(), Value::String(issue.issue_type.clone()));
     m.insert("status".into(), Value::String(issue.status.clone()));
     m.insert("priority".into(), Value::String(issue.priority.clone()));
+    m.insert("title".into(), Value::String(issue.title.clone()));
     if let Some(v) = &issue.created {
         m.insert("created".into(), Value::String(v.clone()));
     }
@@ -177,6 +178,17 @@ mod tests {
         let c = issue("foo", "open", "open", "body\r\n");
         assert_eq!(canonical_hash(&a), canonical_hash(&b));
         assert_eq!(canonical_hash(&a), canonical_hash(&c));
+    }
+
+    #[test]
+    fn canonical_hash_changes_when_title_changes() {
+        // Title is frontmatter-derived and a hand-edit must invalidate
+        // any in-flight `expected_version` token.
+        let mut a = issue("foo", "open", "open", "body");
+        let mut b = issue("foo", "open", "open", "body");
+        a.title = "old title".into();
+        b.title = "new title".into();
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
     }
 
     #[test]
