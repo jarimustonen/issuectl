@@ -1,13 +1,13 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-09
 type: task
 status: open
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
-related: ['@fiercely-juicy-kettle']
+related: ['@fiercely-juicy-kettle', '@entirely-cowardly-aftermath']
 labels: [kanban, research, web-ui]
 ---
 
@@ -34,3 +34,12 @@ the schema-defined-actions architecture with a built-in `worktree`
 action kind (§9 of the design note). When the implementation issue
 for the `worktree` action kind is filed, it should reference and
 close this ticket with a `Source:` line.
+
+### 2026-05-09T04:37:57Z · @jari
+
+Spike work is now tracked under @entirely-cowardly-aftermath in
+the v0.6.0 epic (@hugely-exciting-spiders). The design note has
+been through two multi-LLM review rounds and an empirical
+`/assess-findings` pass. Implementation ticket comes next per
+§12 of the design note; that ticket will be the one that finally
+closes this issue with a `Source:` line.

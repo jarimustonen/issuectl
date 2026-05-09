@@ -1,6 +1,6 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-09
 type: epic
 status: open
 priority: normal
@@ -24,7 +24,7 @@ When v0.6.0 planning starts:
 3. Rank the rest by value-to-cost.
 4. Decide a cut line; move the tail to v0.7.0 or close as `wontfix`.
 
-## Issues (28 candidates, grouped by theme)
+## Issues (29 candidates, grouped by theme)
 
 ### Workflow / planning
 - [ ] @uncommonly-cooing-badge — Dependency tracking: canonical `blocked_by` + cycle detection + dependency-aware queries
@@ -45,7 +45,8 @@ When v0.6.0 planning starts:
 - [ ] @remarkably-juvenile-memory — `issuectl open <slug>` editor integration
 - [ ] @wildly-common-bushes — QoL bundle: triage inbox + fuzzy picker + slug prefix matching + shell completions + scan-todos
 - [ ] @fiercely-mature-cattle — Schema-driven agent instructions in context bundle
-- [ ] @excessively-beneficial-owner — Investigate Claude Code launch button (research task)
+- [ ] @excessively-beneficial-owner — Investigate Claude Code launch button (research task; superseded in scope by @entirely-cowardly-aftermath)
+- [x] @entirely-cowardly-aftermath — Design web control surface for triggering issue work from kanban (design spike → `docs/design/web-control-surface.md`; spawns implementation tickets per §12)
 
 ### Git-native / reporting
 - [ ] @strikingly-absorbing-cows — Git-native commit linking (trailers + `sync-commits` + branch-name detection)
