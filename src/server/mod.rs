@@ -26,6 +26,8 @@ pub(crate) mod watcher;
 use events::EventHub;
 use ratelimit::TokenBucketLimiter;
 
+use crate::repo_config::RepoConfigCache;
+
 /// Options governing the optional filesystem watcher. `serve()` builds a
 /// `WatcherConfig` from these and spawns `watcher::spawn(...)`. Set
 /// `enabled=false` to drop the watcher entirely (read-only board, manual
@@ -95,6 +97,12 @@ pub struct AppState {
     /// session handler. parking_lot::Mutex for cheap uncontended
     /// access from the request thread.
     pub watch_degraded: Arc<parking_lot::Mutex<Option<String>>>,
+    /// Per-process parsed `issues/.schema.yaml` +
+    /// `.issuectl/transitions.yaml`. Each PATCH/POST stats both files
+    /// and only re-parses when mtime advances; CLI behaviour is
+    /// untouched because the cache is plumbed in via a thread-local
+    /// guard activated only inside server mutate handlers.
+    pub config: Arc<RepoConfigCache>,
 }
 
 impl AppState {
@@ -112,6 +120,7 @@ impl AppState {
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: true,
             watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
+            config: Arc::new(RepoConfigCache::new()),
         }
     }
 }
@@ -402,6 +411,7 @@ async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) ->
         body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
         watch_enabled: actual_watch_enabled,
         watch_degraded,
+        config: Arc::new(RepoConfigCache::new()),
     };
 
     eprintln!("issuectl serving on http://{bound}");
@@ -489,6 +499,7 @@ mod tests {
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: true,
             watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
+            config: Arc::new(RepoConfigCache::new()),
         })
     }
 
@@ -1003,6 +1014,7 @@ mod tests {
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: false,
             watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
+            config: Arc::new(RepoConfigCache::new()),
         });
         let resp = r
             .oneshot(Request::get("/api/session").body(Body::empty()).unwrap())
@@ -1055,6 +1067,7 @@ mod tests {
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: false,
             watch_degraded,
+            config: Arc::new(RepoConfigCache::new()),
         });
         let resp = r
             .oneshot(Request::get("/api/session").body(Body::empty()).unwrap())
@@ -1363,6 +1376,7 @@ mod tests {
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: true,
             watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
+            config: Arc::new(RepoConfigCache::new()),
         });
         let payload = serde_json::json!({ "status": "fixed" });
         let resp = r
@@ -1423,6 +1437,7 @@ mod tests {
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: true,
             watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
+            config: Arc::new(RepoConfigCache::new()),
         });
         let resp = r
             .oneshot(

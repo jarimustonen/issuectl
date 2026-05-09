@@ -159,7 +159,23 @@ pub fn default_schema() -> Schema {
 /// property-level merge), so a user can relax `type.required` or
 /// constrain `labels.enum` without losing the rest of the defaults.
 /// Returns the default schema unchanged when the file is missing.
+///
+/// When a `repo_config::RepoConfigCache` is active on the current
+/// thread (server mode), the cached parse is returned instead of
+/// re-reading the file. The CLI never installs a cache, so this is
+/// a no-op there. See `repo_config` for the mtime-invalidation rules.
 pub fn load(root: &Path) -> Result<Schema> {
+    if let Some(cache) = crate::repo_config::current() {
+        return Ok((*cache.schema(root)?).clone());
+    }
+    load_uncached(root)
+}
+
+/// Direct, unconditional parse of `issues/.schema.yaml`. Used by
+/// `repo_config::RepoConfigCache` to populate cache entries — going
+/// through `load` would recurse via the thread-local. Also the
+/// implementation `load` falls back to when no cache is active.
+pub(crate) fn load_uncached(root: &Path) -> Result<Schema> {
     let path = schema_path(root);
     if !path.is_file() {
         return Ok(default_schema());

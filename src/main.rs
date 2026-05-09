@@ -14,6 +14,7 @@ mod parser;
 mod query;
 mod refs;
 mod repo;
+mod repo_config;
 mod schema;
 mod server;
 mod skill;
