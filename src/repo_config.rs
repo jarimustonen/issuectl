@@ -1,24 +1,27 @@
 //! Server-mode cache for `issues/.schema.yaml` and
 //! `.issuectl/transitions.yaml`.
 //!
-//! Server mode parses both YAMLs on every PATCH/POST today. The CLI
-//! parses them once per command, so the cost is only visible when the
-//! same process serves many requests. This cache is therefore opt-in:
-//! activated via a thread-local guard around the mutate call site.
-//! When active, `schema::load` and `transitions::load` consult the
-//! cache, comparing the file's freshness key (mtime + length) against
-//! the cached value. If the file looks unchanged, the cached `Arc` is
-//! reused; otherwise the cache re-parses, swaps, and returns the
-//! fresh value.
+//! In server mode the same process serves many PATCH/POST requests,
+//! and re-parsing both YAMLs on every request is pure overhead. The
+//! CLI parses them once per command, so the cost is only visible on
+//! the server. This cache is therefore opt-in: callers activate it
+//! via a thread-local guard around the request handler. When active,
+//! `schema::load` and `transitions::load` consult the cache, comparing
+//! the file's freshness key against the cached value. If the file
+//! looks unchanged, the cached `Arc` is reused; otherwise the cache
+//! re-parses, swaps, and returns the fresh value.
 //!
-//! Invalidation is best-effort, not strict coherency. We compare
-//! `(mtime, len)` per request — that catches ordinary edits but cannot
-//! see same-mtime same-length replacements (e.g. `cp -p`, atomic
-//! restore tools that preserve timestamps). For v1 that trade-off is
-//! intentional: config files are human-edited, replacements are rare,
-//! and the cost of being wrong is one stale parse until the next real
-//! edit. If correctness matters more than throughput, callers should
-//! restart the server after such replacements.
+//! Invalidation is best-effort, not strict coherency. The freshness
+//! key is `(mtime, len)`: cheap to compute, catches any edit that
+//! changes either value. It does not catch byte-for-byte replacements
+//! that preserve both — `cp -p`, mtime-pinning restore tools, or
+//! same-second in-place edits on filesystems with coarse timestamp
+//! resolution. Config files are human-edited and these patterns are
+//! rare; if a deployment hits one, restarting the server clears the
+//! cache. Stat errors that aren't `NotFound` (permission denied, I/O
+//! error) propagate up to the caller — silently caching them as
+//! "missing" would let a transient error pin the server to the
+//! built-in defaults.
 
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -26,7 +29,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use parking_lot::RwLock;
 
 use crate::schema::{self, Schema};
@@ -44,16 +47,27 @@ enum FileStamp {
     Present { modified: SystemTime, len: u64 },
 }
 
-fn file_stamp(path: &Path) -> FileStamp {
+/// Read the freshness stamp for `path`. `NotFound` collapses to
+/// `Missing` — the cache memoizes absence on purpose. Any other I/O
+/// error (permission denied, stale NFS handle, mtime unsupported)
+/// propagates so the caller fails loudly rather than serving a
+/// fabricated default. Round-1 review identified silent error-to-
+/// `Missing` collapse as a real correctness hole.
+fn file_stamp(path: &Path) -> Result<FileStamp> {
     match std::fs::metadata(path) {
-        Ok(meta) => match meta.modified() {
-            Ok(modified) => FileStamp::Present {
+        Ok(meta) => {
+            let modified = meta
+                .modified()
+                .with_context(|| format!("cannot read mtime of {}", path.display()))?;
+            Ok(FileStamp::Present {
                 modified,
                 len: meta.len(),
-            },
-            Err(_) => FileStamp::Missing,
-        },
-        Err(_) => FileStamp::Missing,
+            })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FileStamp::Missing),
+        Err(e) => {
+            Err(anyhow::Error::new(e).context(format!("cannot stat {}", path.display())))
+        }
     }
 }
 
@@ -92,6 +106,13 @@ impl RepoConfigCache {
         }
     }
 
+    /// The repository root this cache is bound to. Exposed so
+    /// `schema::load` / `transitions::load` can debug-assert their
+    /// caller-supplied root agrees with the cache.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Test-only: number of individual cache refreshes (schema or
     /// rules) since construction. Each schema or rules miss adds one;
     /// successive hits add zero.
@@ -106,15 +127,24 @@ impl RepoConfigCache {
     /// later callers without disturbing this one.
     pub fn schema(&self) -> Result<Arc<Schema>> {
         let path = schema::schema_path(&self.root);
-        let stamp = file_stamp(&path);
+        // Fast-path read using a stamp captured outside the lock. If
+        // it agrees with the cached entry, return the cached `Arc`
+        // without taking the writer.
+        let stamp = file_stamp(&path)?;
         if let Some(hit) = self.inner.read().schema.as_ref() {
             if hit.stamp == stamp {
                 return Ok(hit.value.clone());
             }
         }
+        // Slow path: re-stat under the write lock so the cached
+        // entry's stamp reflects the parsed bytes, not whatever the
+        // file looked like before we queued. Round-1 review caught
+        // that reusing the pre-lock stamp could record a stale
+        // fingerprint when a concurrent writer raced ahead of us.
         let mut w = self.inner.write();
+        let stamp_under_lock = file_stamp(&path)?;
         if let Some(hit) = w.schema.as_ref() {
-            if hit.stamp == stamp {
+            if hit.stamp == stamp_under_lock {
                 return Ok(hit.value.clone());
             }
         }
@@ -123,7 +153,7 @@ impl RepoConfigCache {
         self.refresh_count.fetch_add(1, Ordering::Relaxed);
         w.schema = Some(Cached {
             value: parsed.clone(),
-            stamp,
+            stamp: stamp_under_lock,
         });
         Ok(parsed)
     }
@@ -131,15 +161,16 @@ impl RepoConfigCache {
     /// Same shape as `schema`, for `.issuectl/transitions.yaml`.
     pub fn rules(&self) -> Result<Arc<TransitionRules>> {
         let path = transitions::rules_path(&self.root);
-        let stamp = file_stamp(&path);
+        let stamp = file_stamp(&path)?;
         if let Some(hit) = self.inner.read().rules.as_ref() {
             if hit.stamp == stamp {
                 return Ok(hit.value.clone());
             }
         }
         let mut w = self.inner.write();
+        let stamp_under_lock = file_stamp(&path)?;
         if let Some(hit) = w.rules.as_ref() {
-            if hit.stamp == stamp {
+            if hit.stamp == stamp_under_lock {
                 return Ok(hit.value.clone());
             }
         }
@@ -148,7 +179,7 @@ impl RepoConfigCache {
         self.refresh_count.fetch_add(1, Ordering::Relaxed);
         w.rules = Some(Cached {
             value: parsed.clone(),
-            stamp,
+            stamp: stamp_under_lock,
         });
         Ok(parsed)
     }
@@ -160,14 +191,20 @@ thread_local! {
 }
 
 /// RAII guard for the thread-local `ACTIVE` cache slot. The guard is
-/// `!Send` and `!Sync` by construction (via the `PhantomData<*const ()>`
-/// field): holding it across `.await` would cause a compile error.
-/// That's deliberate — `tokio::task::spawn_blocking` reuses worker
-/// threads, so a guard that survived an async boundary on one thread
-/// could leak the cache to another task scheduled on the same worker.
+/// `!Send` and `!Sync` by construction so it cannot cross an `.await`
+/// in an `async fn`: the future containing it would be `!Send` and
+/// fail to compile with `tokio::spawn`. That's deliberate — the
+/// thread-local belongs to the worker thread that installed it, and
+/// migrating across threads would either lose the cache or leak it
+/// onto a different worker.
+///
+/// **Do not remove the `_not_send_sync` field.** `Rc<()>` is the
+/// idiomatic Rust marker for "stays on its thread"; replacing it with
+/// `()` would silently make the guard `Send` and reintroduce the leak
+/// described above.
 pub struct ActiveGuard {
     prev: Option<Arc<RepoConfigCache>>,
-    _not_send_sync: std::marker::PhantomData<*const ()>,
+    _not_send_sync: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl Drop for ActiveGuard {
@@ -202,6 +239,7 @@ mod tests {
     use filetime::{set_file_mtime, FileTime};
     use std::fs;
     use std::path::Path;
+    use std::sync::atomic::AtomicBool;
     use std::thread;
 
     /// Two PATCHes in a row trigger one parse pair, not two; touching
@@ -266,8 +304,11 @@ mod tests {
     }
 
     /// Length-only invalidation works even when an external rewrite
-    /// happens to land at the same mtime tick. Belt-and-suspenders for
-    /// the `(mtime, len)` key.
+    /// happens to land at the same mtime tick. The post-pin assertion
+    /// guards against this test silently passing on a filesystem where
+    /// `set_file_mtime` is a no-op (in which case the rewrite's own
+    /// mtime change would invalidate the cache, masking the bug this
+    /// test is meant to catch).
     #[test]
     fn same_mtime_different_length_invalidates() {
         let tmp = tempfile::tempdir().unwrap();
@@ -281,10 +322,16 @@ mod tests {
         let stamp_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
         assert_eq!(cache.refresh_count(), 1);
 
-        // Rewrite content with different length but pin the original
-        // mtime back. The cache must still see the change via `len`.
+        // Rewrite content with a different length, then pin the mtime
+        // back to the pre-rewrite value.
         fs::write(&path, "version: 1\nfields:\n  type:\n    required: true\n").unwrap();
         set_file_mtime(&path, FileTime::from_system_time(stamp_mtime)).unwrap();
+
+        let pinned = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(
+            pinned, stamp_mtime,
+            "set_file_mtime did not pin the mtime; this test would otherwise pass for the wrong reason",
+        );
 
         let _ = cache.schema().unwrap();
         assert_eq!(
@@ -339,9 +386,12 @@ mod tests {
 
     /// The real risk for the thread-local design is `tokio::task::
     /// spawn_blocking` worker reuse: the same OS thread serves multiple
-    /// blocking tasks in succession. Verify that even when the first
-    /// task panics mid-handler, the guard's `Drop` clears the slot
-    /// before the next task on the reused worker observes it.
+    /// blocking tasks in succession. This test pins both halves of the
+    /// claim:
+    /// - the second task runs on the same OS thread as the first
+    ///   (otherwise the test would pass for the wrong reason);
+    /// - the slot is empty when that thread is reused, even though
+    ///   the first task panicked before its scope ended.
     #[test]
     fn guard_clears_after_panic_on_reused_blocking_worker() {
         let tmp = tempfile::tempdir().unwrap();
@@ -355,8 +405,11 @@ mod tests {
             .unwrap();
 
         rt.block_on(async {
+            let first_tid = Arc::new(parking_lot::Mutex::new(None::<thread::ThreadId>));
+            let first_tid_w = first_tid.clone();
             let c = cache.clone();
             let first = tokio::task::spawn_blocking(move || {
+                *first_tid_w.lock() = Some(thread::current().id());
                 let _g = enter(c);
                 assert!(current().is_some());
                 panic!("force unwind to exercise Drop on panic");
@@ -364,14 +417,157 @@ mod tests {
             .await;
             assert!(first.is_err(), "first task must surface the panic");
 
-            let saw_leaked = tokio::task::spawn_blocking(|| current().is_some())
-                .await
-                .unwrap();
+            let (saw_leaked, second_tid) =
+                tokio::task::spawn_blocking(|| (current().is_some(), thread::current().id()))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                Some(second_tid),
+                *first_tid.lock(),
+                "second blocking task must run on the same OS thread as the first; otherwise this test \
+                 proves nothing about Drop on a reused worker",
+            );
             assert!(
                 !saw_leaked,
                 "a reused blocking worker must not see a leaked active cache",
             );
         });
+    }
+
+    /// `schema::load` falls back to the built-in default when the file
+    /// is absent. The cache must memoize that absence — repeated calls
+    /// against a still-missing file should not re-parse the embedded
+    /// default.
+    #[test]
+    fn missing_file_is_memoized_and_invalidates_when_file_appears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("issues")).unwrap();
+
+        let cache = RepoConfigCache::new(root.to_path_buf());
+        let _ = cache.schema().unwrap();
+        assert_eq!(cache.refresh_count(), 1, "absent file is one parse (default)");
+        let _ = cache.schema().unwrap();
+        let _ = cache.schema().unwrap();
+        assert_eq!(
+            cache.refresh_count(),
+            1,
+            "subsequent requests with the file still missing must hit the cache",
+        );
+
+        // File appears: stamp transitions Missing → Present, refresh.
+        fs::write(
+            root.join("issues/.schema.yaml"),
+            "version: 1\nfields: {}\n",
+        )
+        .unwrap();
+        let _ = cache.schema().unwrap();
+        assert_eq!(
+            cache.refresh_count(),
+            2,
+            "file appearing must invalidate the memoized Missing entry",
+        );
+    }
+
+    /// Inverse of the above: a file that disappears between requests
+    /// must invalidate the Present entry, not silently keep serving
+    /// the last-parsed copy.
+    #[test]
+    fn deleted_file_invalidates_present_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("issues")).unwrap();
+        let path = root.join("issues/.schema.yaml");
+        fs::write(&path, "version: 1\nfields: {}\n").unwrap();
+
+        let cache = RepoConfigCache::new(root.to_path_buf());
+        let _ = cache.schema().unwrap();
+        assert_eq!(cache.refresh_count(), 1);
+
+        fs::remove_file(&path).unwrap();
+        let _ = cache.schema().unwrap();
+        assert_eq!(
+            cache.refresh_count(),
+            2,
+            "Present → Missing transition must trigger a refresh",
+        );
+    }
+
+    /// A failed parse must not poison the cache. The next call after
+    /// the YAML is fixed should succeed; it would not if the cache
+    /// stored the stamp of the broken file alongside no value, or
+    /// stamped the broken read as a successful one.
+    #[test]
+    fn parse_error_does_not_poison_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("issues")).unwrap();
+        let path = root.join("issues/.schema.yaml");
+        fs::write(&path, "this: is: not: valid: yaml\n").unwrap();
+
+        let cache = RepoConfigCache::new(root.to_path_buf());
+        assert!(
+            cache.schema().is_err(),
+            "broken YAML must surface as an error, not a cached default",
+        );
+        // refresh_count is incremented after a successful parse only,
+        // so a failing call leaves it at zero.
+        assert_eq!(cache.refresh_count(), 0);
+
+        // Repair the file; the cache should now succeed.
+        fs::write(&path, "version: 1\nfields: {}\n").unwrap();
+        let _ = cache.schema().unwrap();
+        assert_eq!(
+            cache.refresh_count(),
+            1,
+            "after the YAML is fixed, the next call must parse cleanly",
+        );
+    }
+
+    /// Concurrent readers racing on a cold cache must not all parse.
+    /// The double-checked locking pattern guarantees exactly one
+    /// successful parse no matter how many threads queue on the write
+    /// lock, because the second check inside the lock sees the
+    /// freshly-cached entry.
+    #[test]
+    fn concurrent_readers_share_one_parse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("issues")).unwrap();
+        fs::write(
+            root.join("issues/.schema.yaml"),
+            "version: 1\nfields: {}\n",
+        )
+        .unwrap();
+
+        let cache = Arc::new(RepoConfigCache::new(root.to_path_buf()));
+        // Barrier synchronises N threads to all call `schema()` as
+        // close together as possible.
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let c = cache.clone();
+                let b = barrier.clone();
+                let s = stop.clone();
+                thread::spawn(move || {
+                    b.wait();
+                    if !s.load(std::sync::atomic::Ordering::Relaxed) {
+                        let _ = c.schema().unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(
+            cache.refresh_count(),
+            1,
+            "8 concurrent first-callers must share one parse via DCL",
+        );
     }
 
     fn bump_mtime(path: &Path) {

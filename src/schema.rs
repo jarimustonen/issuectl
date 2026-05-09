@@ -169,9 +169,15 @@ pub fn default_schema() -> Schema {
 pub fn load(root: &Path) -> Result<Arc<Schema>> {
     if let Some(cache) = crate::repo_config::current() {
         // The cache is bound to the `AppState` root in server mode.
-        // `mutate::*` callers pass that same root, so the lookup is
-        // consistent without re-checking it here.
-        let _ = root;
+        // `mutate::*` callers pass that same root, so the cache's
+        // bound root governs which file is read. `debug_assert`
+        // surfaces a future bug where a caller passes a different
+        // root while a cache is active.
+        debug_assert_eq!(
+            root,
+            cache.root(),
+            "schema::load called with root that disagrees with the active RepoConfigCache",
+        );
         return cache.schema();
     }
     Ok(Arc::new(load_uncached(root)?))

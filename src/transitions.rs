@@ -132,9 +132,11 @@ pub fn rules_path(root: &Path) -> PathBuf {
 /// each loaded rule is validated for empty/duplicated values.
 pub fn load(root: &Path) -> Result<Arc<TransitionRules>> {
     if let Some(cache) = crate::repo_config::current() {
-        // Cache is bound to the AppState root; see `schema::load` for
-        // the rationale.
-        let _ = root;
+        debug_assert_eq!(
+            root,
+            cache.root(),
+            "transitions::load called with root that disagrees with the active RepoConfigCache",
+        );
         return cache.rules();
     }
     Ok(Arc::new(load_uncached(root)?))
