@@ -3,11 +3,17 @@ created: 2026-05-09
 updated: 2026-05-09
 type: chore
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
 related: ['@partially-ahead-button']
 labels: [release-v0.5.0]
+commits:
+- hash: 8c0254d
+  summary: 'feat(mutate): centralize custom-field-key validation across all paths'
+- hash: 91e7024
+  summary: 'feat(mutate): centralize custom-field-value trim/blank check'
+closed: 2026-05-09
 ---
 
 # Centralize custom-field-key validation across CLI and API create/update
