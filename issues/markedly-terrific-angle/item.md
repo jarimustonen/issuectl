@@ -8,6 +8,13 @@ reporter: jari
 assignee: jari
 epic: exorbitantly-ill-apples
 labels: [agent-friendly, v0.6.0-candidate]
+commits:
+- hash: 465a9c4
+  summary: initial AGENTS.md policy + agents init + doctor drift check
+- hash: ba060c2
+  summary: harden against malformed sentinels, schema parse errors, atomic write+lock+symlink, format-version marker
+- hash: a40a156
+  summary: tighten parser (inner_span, fence-aware, Result-returning regenerate)
 ---
 
 # .issuectl/AGENTS.md — committed agent policy file
