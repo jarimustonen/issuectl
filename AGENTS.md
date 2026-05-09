@@ -54,8 +54,17 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
 
 - **Always `--json`** when scripting `issuectl` from another tool or
   agent. The human-readable mode is for terminal users.
-- **Tests live next to the code** in `#[cfg(test)] mod` blocks. New
-  features add tests; bug fixes add regression tests.
+- **Tests live next to the code** in `#[cfg(test)] mod` blocks by
+  default. New features add tests; bug fixes add regression tests.
+  - **Exception — `tests/` integration tests:** use only when the
+    assertion is genuinely cross-cutting and *must* exercise the
+    built binary end-to-end (e.g. locking the exact stderr/stdout
+    bytes that users see, including how `main()` renders an
+    `anyhow::Error`). Inline tests cannot observe that surface.
+    Everything reachable from a `pub(crate)` entry point belongs in
+    an inline `#[cfg(test)]` module.
+  - Current `tests/`: `cli_new.rs` (golden output of `issuectl
+    new`).
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, repo layout,
   PR process, and commit-message conventions.
 - See [issues/AGENTS.md](issues/AGENTS.md) for how this project's own
