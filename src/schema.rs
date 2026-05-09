@@ -123,6 +123,9 @@ fields:
   related:
     required: false
     list: true
+  blocked_by:
+    required: false
+    list: true
   labels:
     required: false
     list: true

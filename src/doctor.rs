@@ -148,6 +148,17 @@ struct DoctorReport {
     status_reconciled: Vec<String>,
 }
 
+/// Project an absolute path under the repo root to a repo-relative
+/// `String` (UTF-8 lossy fallback). JSON consumers (and the text
+/// renderer) shouldn't see absolute filesystem paths leaking into
+/// CI logs.
+fn rel(repo_root: &Path, p: &Path) -> String {
+    p.strip_prefix(repo_root)
+        .unwrap_or(p)
+        .to_string_lossy()
+        .to_string()
+}
+
 pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
     let mut report = scan(repo_root)?;
 
@@ -158,12 +169,28 @@ pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
         let _lock = crate::mutate::WriteLock::acquire(repo_root)?;
         report = scan(repo_root)?;
         apply(repo_root, &mut report)?;
+        // After mutation, the in-memory report mixes "what we planned"
+        // with "what's still true". Stale findings (e.g. broken refs we
+        // just fixed via legacy-migration rewrites) would mis-report
+        // the post-fix state and mis-compute the exit code. Take one
+        // clean snapshot and merge the just-applied actions back in
+        // for the user-facing summary.
+        let mut fresh = scan(repo_root)?;
+        fresh.fix_applied = true;
+        fresh.legacy_dirs = std::mem::take(&mut report.legacy_dirs);
+        fresh.flat_layout_migrated = std::mem::take(&mut report.flat_layout_migrated);
+        fresh.notes_renamed = std::mem::take(&mut report.notes_renamed);
+        fresh.orphan_tempfiles_removed =
+            std::mem::take(&mut report.orphan_tempfiles_removed);
+        fresh.status_reconciled = std::mem::take(&mut report.status_reconciled);
+        fresh.files_rewritten = report.files_rewritten;
+        report = fresh;
     }
 
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&render_json(&report, fix))?
+            serde_json::to_string_pretty(&render_json(&report, fix, repo_root))?
         );
     } else {
         render_text(&report, fix);
@@ -370,10 +397,11 @@ fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()
             }
             let ftype = entry.file_type()?;
             if ftype.is_symlink() {
-                let meta = std::fs::metadata(&path);
-                if meta.map(|m| m.is_dir()).unwrap_or(false) {
-                    symlinked.push(format!("{folder}/{name}"));
-                }
+                // Surface every symlink under issues/ regardless of
+                // target validity. A broken or non-directory symlink
+                // is still a foreign filesystem entry doctor cannot
+                // process safely.
+                symlinked.push(format!("{folder}/{name}"));
                 continue;
             }
             if !ftype.is_dir() {
@@ -560,14 +588,21 @@ fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()
 
         // Reference integrity.
         let check_ref = |raw: &str| -> Option<String> {
-            let bare = raw.trim().strip_prefix('@').unwrap_or(raw.trim());
+            let trimmed = raw.trim();
+            let bare = trimmed
+                .strip_prefix('@')
+                .or_else(|| trimmed.strip_prefix('#'))
+                .unwrap_or(trimmed);
             if bare.is_empty() {
                 return None;
             }
-            // Numeric legacy refs are surfaced by the legacy migration
-            // path; skip here.
+            // Numeric refs survive only as legacy artefacts. The
+            // legacy-migration path rewrites them during --fix, but
+            // flat-layout repos and post-migration leftovers will
+            // never see another rewrite. Surface them as broken so the
+            // user knows they exist.
             if bare.chars().all(|c| c.is_ascii_digit()) {
-                return None;
+                return Some(format!("{bare} (legacy numeric ref)"));
             }
             if !crate::slug::is_valid(bare) {
                 return Some(bare.to_string());
@@ -578,14 +613,21 @@ fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()
             None
         };
 
-        if let Some(epic) = fm
-            .get(serde_yaml::Value::String("epic".into()))
-            .and_then(|v| v.as_str())
-        {
-            if let Some(missing) = check_ref(epic) {
-                report
-                    .broken_refs
-                    .push((slug.clone(), "epic".into(), missing));
+        if let Some(epic_v) = fm.get(serde_yaml::Value::String("epic".into())) {
+            // Accept string and numeric (legacy) values; coerce numeric
+            // to its decimal string form so check_ref can flag it as a
+            // legacy ref.
+            let epic_str = match epic_v {
+                serde_yaml::Value::String(s) => Some(s.clone()),
+                serde_yaml::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            };
+            if let Some(epic) = epic_str {
+                if let Some(missing) = check_ref(&epic) {
+                    report
+                        .broken_refs
+                        .push((slug.clone(), "epic".into(), missing));
+                }
             }
         }
         for key in ["related", "blocked_by"] {
@@ -616,18 +658,53 @@ fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()
             }
         }
 
-        // Status/folder reconciliation (legacy folders only).
+        // Status/folder reconciliation (legacy folders only). Re-read
+        // each hit's own frontmatter — the `status` parsed above is
+        // from `primary` and applies only to that file, not to other
+        // hits at different paths (a slug present in flat AND legacy
+        // can have divergent status fields).
+        //
+        // Skip slugs that are present in both legacy folders: they are
+        // human-attention only and the preflight in `apply()` refuses
+        // to --fix them.
+        let in_both_legacy_folders = hits.iter().any(|(f, _)| f == "open")
+            && hits.iter().any(|(f, _)| f == "closed");
+        if in_both_legacy_folders {
+            continue;
+        }
         for (f, ipath) in hits {
-            match (f.as_str(), status.as_deref()) {
-                ("closed", Some(s)) if crate::ACTIVE_STATUSES.contains(&s) => {
-                    report
-                        .closed_with_active_status
-                        .push((slug.clone(), s.to_string(), ipath.clone()));
+            if f != "open" && f != "closed" {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(ipath) else {
+                continue;
+            };
+            let Some(fm_text) = parser::split_frontmatter(&text).0 else {
+                continue;
+            };
+            let Ok(fm) = serde_yaml::from_str::<serde_yaml::Mapping>(fm_text) else {
+                continue;
+            };
+            let Some(hit_status) = fm
+                .get(serde_yaml::Value::String("status".into()))
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            match f.as_str() {
+                "closed" if crate::ACTIVE_STATUSES.contains(&hit_status) => {
+                    report.closed_with_active_status.push((
+                        slug.clone(),
+                        hit_status.to_string(),
+                        ipath.clone(),
+                    ));
                 }
-                ("open", Some(s)) if crate::is_closing_status(s) => {
-                    report
-                        .open_with_closing_status
-                        .push((slug.clone(), s.to_string(), ipath.clone()));
+                "open" if crate::is_closing_status(hit_status) => {
+                    report.open_with_closing_status.push((
+                        slug.clone(),
+                        hit_status.to_string(),
+                        ipath.clone(),
+                    ));
                 }
                 _ => {}
             }
@@ -640,26 +717,56 @@ fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()
 }
 
 fn has_conflict_markers(text: &str) -> bool {
+    use crate::body_sections::{closes_fence, opening_fence, Fence};
+    let mut fence: Option<Fence> = None;
     for line in text.lines() {
-        if line.starts_with("<<<<<<<") || line.starts_with(">>>>>>>") || line == "=======" {
+        match fence {
+            Some(open) if closes_fence(line, open) => {
+                fence = None;
+                continue;
+            }
+            Some(_) => continue,
+            None => {
+                if let Some(o) = opening_fence(line) {
+                    fence = Some(o);
+                    continue;
+                }
+            }
+        }
+        let trimmed = line.trim_end();
+        if trimmed.starts_with("<<<<<<< ")
+            || trimmed.starts_with(">>>>>>> ")
+            || trimmed.starts_with("||||||| ")
+            || trimmed == "======="
+        {
             return true;
         }
     }
     false
 }
 
-/// Tarjan-style DFS: returns each unique elementary cycle once,
-/// rotated so the lexicographically-smallest slug appears first.
+/// 3-color DFS: each cycle reported once, rotated so the
+/// lexicographically-smallest slug appears first. Adding a `visited`
+/// set (the "black" color) caps the work at O(V + E) for cycle
+/// detection — without it, a dense DAG re-explores subtrees from
+/// every starting node and degrades exponentially.
+///
+/// This is *not* full Johnson's enumeration: we report at least one
+/// cycle per strongly-connected component, not every elementary
+/// cycle inside it. Doctor only needs to flag that cycles exist;
+/// listing every elementary cycle adds nothing actionable.
 fn detect_cycles(graph: &BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
     let mut found: BTreeSet<Vec<String>> = BTreeSet::new();
     let mut stack: Vec<String> = Vec::new();
     let mut on_stack: BTreeSet<String> = BTreeSet::new();
+    let mut visited: BTreeSet<String> = BTreeSet::new();
 
     fn dfs(
         node: &str,
         graph: &BTreeMap<String, Vec<String>>,
         stack: &mut Vec<String>,
         on_stack: &mut BTreeSet<String>,
+        visited: &mut BTreeSet<String>,
         found: &mut BTreeSet<Vec<String>>,
     ) {
         stack.push(node.to_string());
@@ -672,23 +779,26 @@ fn detect_cycles(graph: &BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
                     let min_idx = cycle
                         .iter()
                         .enumerate()
-                        .min_by_key(|(_, s)| (*s).clone())
+                        .min_by(|a, b| a.1.cmp(b.1))
                         .map(|(i, _)| i)
                         .unwrap_or(0);
                     let mut rotated: Vec<String> = cycle[min_idx..].to_vec();
                     rotated.extend_from_slice(&cycle[..min_idx]);
                     found.insert(rotated);
-                } else if graph.contains_key(n) {
-                    dfs(n, graph, stack, on_stack, found);
+                } else if graph.contains_key(n) && !visited.contains(n) {
+                    dfs(n, graph, stack, on_stack, visited, found);
                 }
             }
         }
         stack.pop();
         on_stack.remove(node);
+        visited.insert(node.to_string());
     }
 
     for node in graph.keys() {
-        dfs(node, graph, &mut stack, &mut on_stack, &mut found);
+        if !visited.contains(node) {
+            dfs(node, graph, &mut stack, &mut on_stack, &mut visited, &mut found);
+        }
     }
     found.into_iter().collect()
 }
@@ -858,7 +968,60 @@ fn detect_orphan_epic_refs(repo_root: &Path, report: &mut DoctorReport) -> Resul
     Ok(())
 }
 
+/// Bail before any filesystem mutation if the repo is in a state that
+/// `--fix` cannot safely heal. A mid-fix bail leaves the repo in a
+/// half-migrated state with no rollback path; surface every blocker
+/// up-front so the user can resolve them before we touch anything.
+fn preflight_apply(report: &DoctorReport) -> Result<()> {
+    if !report.flat_layout_conflicts.is_empty() {
+        bail!(
+            "doctor: flat-layout migration has conflicts; resolve before --fix:\n  {}",
+            report
+                .flat_layout_conflicts
+                .iter()
+                .map(|c| format!("{}: {}", c.slug, c.detail))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
+    }
+    if !report.duplicate_slugs.is_empty() {
+        bail!(
+            "doctor: duplicate slugs ({:?}); resolve before --fix",
+            report.duplicate_slugs
+        );
+    }
+    if !report.both_open_and_closed.is_empty() {
+        bail!(
+            "doctor: slugs present in both open/ and closed/ ({:?}); human attention required",
+            report.both_open_and_closed
+        );
+    }
+    if !report.conflict_markers.is_empty() {
+        bail!(
+            "doctor: git merge-conflict markers in {:?}; resolve manually",
+            report.conflict_markers
+        );
+    }
+    if !report.parse_errors.is_empty() {
+        bail!(
+            "doctor: parse errors in {} issue(s); resolve before --fix",
+            report.parse_errors.len()
+        );
+    }
+    Ok(())
+}
+
 fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
+    // Preflight: refuse to mutate before checking every condition that
+    // would force us to bail mid-way. A mid-fix bail leaves the repo in
+    // a half-migrated state with no rollback path, so all "manual
+    // attention required" findings must block at the top.
+    preflight_apply(report)?;
+
+    // Orphan tempfile cleanup runs FIRST so paths recorded by scan()
+    // are still valid: directory migration would invalidate them.
+    apply_orphan_tempfiles(report)?;
+
     // Status/folder reconciliation runs BEFORE the flat-layout
     // migration so the rewrites land at the legacy path that scan()
     // recorded; the subsequent migration moves the corrected file.
@@ -885,21 +1048,10 @@ fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
         report.schema_parse_error = None;
     }
 
-    // Flat-layout migration runs next: any issue still under
+    // Flat-layout migration: any issue still under
     // `issues/{open,closed}/<slug>/` moves up to `issues/<slug>/`. The
     // pre-acquired write lock in `run` covers this — `execute_migrate_layout_plan`
     // is the lock-free body and must not re-acquire.
-    if !report.flat_layout_conflicts.is_empty() {
-        bail!(
-            "doctor: flat-layout migration has conflicts; resolve before --fix:\n  {}",
-            report
-                .flat_layout_conflicts
-                .iter()
-                .map(|c| format!("{}: {}", c.slug, c.detail))
-                .collect::<Vec<_>>()
-                .join("\n  ")
-        );
-    }
     if !report.flat_layout_moves.is_empty() {
         let moves = std::mem::take(&mut report.flat_layout_moves);
         report.flat_layout_migrated = execute_migrate_layout_plan(repo_root, moves)?;
@@ -912,24 +1064,9 @@ fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
         report.duplicate_slugs = fresh.duplicate_slugs;
     }
 
-    // Orphan tempfile cleanup. Delete `.issuectl-tmp-*` survivors —
-    // these are atomic-write tempfiles a SIGKILL'd process left behind.
-    apply_orphan_tempfiles(report)?;
-
     if report.legacy_dirs.is_empty() {
         report.fix_applied = true;
         return Ok(());
-    }
-
-    // Pre-flight: bail if scan generated overlapping slugs. With ~105M
-    // combinations and tens of legacy dirs the chance is negligible, but
-    // proceeding into a partial rename and discovering it halfway leaves
-    // the repo in a much worse state than refusing up-front.
-    if !report.duplicate_slugs.is_empty() {
-        bail!(
-            "doctor: scan produced colliding new slugs ({:?}); rerun to regenerate",
-            report.duplicate_slugs
-        );
     }
 
     // Build maps for reference rewriting.
@@ -1647,7 +1784,7 @@ fn render_text(report: &DoctorReport, fix: bool) {
     }
 }
 
-fn render_json(report: &DoctorReport, fix: bool) -> serde_json::Value {
+fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json::Value {
     let migrations: Vec<serde_json::Value> = report
         .legacy_dirs
         .iter()
@@ -1732,12 +1869,12 @@ fn render_json(report: &DoctorReport, fix: bool) -> serde_json::Value {
     let orphan_tempfiles: Vec<String> = report
         .orphan_tempfiles
         .iter()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| rel(repo_root, p))
         .collect();
     let orphan_tempfiles_removed: Vec<String> = report
         .orphan_tempfiles_removed
         .iter()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| rel(repo_root, p))
         .collect();
     let closed_with_active: Vec<serde_json::Value> = report
         .closed_with_active_status
@@ -2225,6 +2362,50 @@ mod tests {
     }
 
     #[test]
+    fn flags_numeric_legacy_ref_in_flat_repo() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\nepic: 5\n---\n# T\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.broken_refs
+                .iter()
+                .any(|(_, k, t)| k == "epic" && t.contains("legacy")),
+            "expected legacy-numeric flag, got {:?}",
+            r.broken_refs
+        );
+    }
+
+    #[test]
+    fn conflict_marker_check_skips_fenced_blocks() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n\n```\n<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> branch\n```\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(r.conflict_markers.is_empty(), "got {:?}", r.conflict_markers);
+    }
+
+    #[test]
+    fn detect_cycles_visits_each_node_once() {
+        // Acyclic diamond: A→B, A→C, B→D, C→D. Without the visited
+        // set, D was traversed from both B and C; with it, the
+        // traversal stops after the first complete walk.
+        let mut g: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        g.insert("a".into(), vec!["b".into(), "c".into()]);
+        g.insert("b".into(), vec!["d".into()]);
+        g.insert("c".into(), vec!["d".into()]);
+        g.insert("d".into(), vec![]);
+        let cycles = detect_cycles(&g);
+        assert!(cycles.is_empty(), "no cycles in DAG, got {cycles:?}");
+    }
+
+    #[test]
     fn does_not_flag_existing_epic_ref() {
         let tmp = fresh_repo();
         put_flat(
@@ -2411,7 +2592,7 @@ mod tests {
     }
 
     #[test]
-    fn flags_conflict_markers_and_does_not_auto_fix() {
+    fn flags_conflict_markers_and_apply_refuses() {
         let tmp = fresh_repo();
         put_flat(
             &tmp,
@@ -2424,7 +2605,12 @@ mod tests {
             tmp.path().join("issues/quiet-brave-otter/item.md"),
         )
         .unwrap();
-        apply(tmp.path(), &mut r).unwrap();
+        // Preflight bails before any mutation runs.
+        let err = apply(tmp.path(), &mut r).unwrap_err();
+        assert!(
+            err.to_string().contains("merge-conflict markers"),
+            "got: {err}"
+        );
         let after = fs::read_to_string(
             tmp.path().join("issues/quiet-brave-otter/item.md"),
         )
@@ -2523,6 +2709,7 @@ mod tests {
         assert!(!after.contains("closed:"), "closed should be dropped: {after}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn detects_symlinked_issue_dir() {
         // Symlink target need not exist meaningfully; we just check
@@ -2532,10 +2719,20 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
         fs::write(target.join("item.md"), "---\n---\n# x\n").unwrap();
         let link = tmp.path().join("issues/quiet-brave-otter");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        #[cfg(not(unix))]
-        return;
+        let r = scan(tmp.path()).unwrap();
+        assert!(r
+            .symlinked_dirs
+            .iter()
+            .any(|s| s.contains("quiet-brave-otter")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detects_broken_symlinked_issue_dir() {
+        let tmp = fresh_repo();
+        let link = tmp.path().join("issues/quiet-brave-otter");
+        std::os::unix::fs::symlink("/nonexistent/target/path", &link).unwrap();
         let r = scan(tmp.path()).unwrap();
         assert!(r
             .symlinked_dirs

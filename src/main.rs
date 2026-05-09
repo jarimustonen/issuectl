@@ -597,6 +597,12 @@ enum HooksAction {
         /// installing
         #[arg(long)]
         uninstall: bool,
+
+        /// Overwrite an existing non-`.githooks` `core.hooksPath`
+        /// (e.g. `.husky`). The prior value is stashed and restored
+        /// on uninstall.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -743,7 +749,9 @@ fn main() -> Result<()> {
         },
         Command::Doctor { fix } => doctor::run(&find_root(), fix, json_output),
         Command::Hooks { action } => match action {
-            HooksAction::Install { uninstall } => hooks::run(&find_root(), uninstall),
+            HooksAction::Install { uninstall, force } => {
+                hooks::run(&find_root(), uninstall, force)
+            }
         },
         Command::Skill { action } => match action {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
