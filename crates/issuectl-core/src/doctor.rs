@@ -372,11 +372,6 @@ struct DoctorActions {
     /// True when scan flagged AGENTS.md drift AND the file is present
     /// AND drift is regeneratable (not malformed / not check-skipped).
     regenerate_agents_md: bool,
-    /// Always true on `--fix` — `schema::ensure_default_written` is
-    /// idempotent, so re-running is cheap even on a repo that already
-    /// has the file. Kept as an explicit field so `ApplyOutcome` can
-    /// faithfully report whether the bootstrap actually wrote.
-    bootstrap_schema: bool,
     /// Critical findings that block `--fix`. Computed via
     /// `critical_blockers` from the same predicate that drives the
     /// run-time exit code, guaranteeing the two are aligned (no class
@@ -405,7 +400,6 @@ impl DoctorActions {
             regenerate_agents_md: findings.agents_md_drift
                 && findings.agents_md_malformed.is_none()
                 && findings.agents_md_check_skipped.is_none(),
-            bootstrap_schema: true,
             preflight_blockers,
         }
     }
@@ -430,6 +424,14 @@ struct ApplyOutcome {
     files_rewritten: usize,
     agents_md_regenerated: bool,
     schema_bootstrapped: bool,
+    /// Slugs whose `## Notes` rename was planned by scan but skipped
+    /// at apply time because a concurrent edit introduced a
+    /// `## Comments` heading between scan and apply (TOCTOU; rare
+    /// since the WriteLock is held). Recorded explicitly because the
+    /// post-apply rescan only re-classifies if the conflict is still
+    /// visible — and because users running `--json --fix` need a
+    /// signal that some planned work didn't run.
+    notes_conflicts_at_apply: Vec<String>,
 }
 
 impl ApplyOutcome {
@@ -470,14 +472,16 @@ pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
         findings = scan(repo_root)?;
         let actions = DoctorActions::from_findings(&mut findings);
         let outcome = apply(repo_root, actions, &lock)?;
-        // After mutation re-scan once: the outcome stands alone (it
-        // carries what was written) and the fresh scan supplies what
-        // is now true on disk. No field-by-field splice list — adding
-        // a new applied-action variant means extending `ApplyOutcome`
-        // and `DoctorActions`, not editing this function.
-        if outcome.fix_applied() {
-            findings = scan(repo_root)?;
-        }
+        // ALWAYS re-scan after apply, regardless of fix_applied. The
+        // call to `DoctorActions::from_findings` drained findings via
+        // `mem::take` (legacy_dirs / flat_layout_plan / notes_to_rename
+        // / orphan_tempfiles / status reconciliation lists) — without
+        // this rescan, render_text and render_json would receive a
+        // gutted `findings` on preflight-blocked or no-write runs, and
+        // the user would see "doctor: cannot apply --fix" with NONE of
+        // the actual to-do lists below. Caches are hot post-apply, so
+        // the I/O is negligible.
+        findings = scan(repo_root)?;
         Some(outcome)
     } else {
         None
@@ -579,10 +583,23 @@ fn critical_blockers(findings: &DoctorFindings) -> Vec<String> {
             findings.missing_item_md
         ));
     }
-    if !findings.broken_refs.is_empty() {
+    // Exclude legacy numeric refs from the critical set: they are
+    // exactly what `--fix`'s legacy migration translates (number →
+    // slug via `rewrite_item_frontmatter`). Treating them as critical
+    // would refuse the very migration designed to heal them, so a
+    // partially-flat-layout repo with a few stale `epic: 7` refs
+    // could not progress. The `(legacy numeric ref)` suffix is set
+    // by `populate_extended_validation::check_ref` and is the typed
+    // signal — not a substring matcher on user content.
+    let non_legacy_broken: Vec<&(String, String, String)> = findings
+        .broken_refs
+        .iter()
+        .filter(|(_, _, target)| !target.ends_with("(legacy numeric ref)"))
+        .collect();
+    if !non_legacy_broken.is_empty() {
         blockers.push(format!(
             "broken cross-references: {} entry/entries",
-            findings.broken_refs.len()
+            non_legacy_broken.len()
         ));
     }
     if !findings.blocked_by_cycles.is_empty() {
@@ -768,23 +785,29 @@ fn populate_slug_and_legacy(scan: &ScanResult, repo_root: &Path, report: &mut Do
         }
 
         // Surface parse warnings without printing them to stderr.
-        // Skip for legacy dirs: the migration pass rewrites their
-        // frontmatter anyway, and a missing slug/number combo would
-        // otherwise be flagged for every legacy issue.
-        if s.legacy_number.is_none() {
-            if let Some(parsed) = &s.parsed {
-                let severity = if parsed.has_hard_frontmatter_error() {
-                    ParseSeverity::Hard
-                } else {
-                    ParseSeverity::Soft
-                };
-                for w in &parsed.warnings {
-                    report.parse_errors.push(ParseError {
-                        location: location.clone(),
-                        message: w.clone(),
-                        severity,
-                    });
-                }
+        // For LEGACY directories, only HARD errors are surfaced —
+        // SOFT warnings (legacy numeric refs etc.) are noise on
+        // dirs the migration pass rewrites wholesale. HARD errors
+        // (frontmatter unparseable, file unreadable) MUST surface
+        // even for legacy issues: `--fix`'s `rewrite_item_frontmatter`
+        // calls `write::read_item`, which would panic mid-apply on
+        // an unparseable file. Letting them flow through into
+        // `critical_blockers` makes preflight refuse cleanly.
+        if let Some(parsed) = &s.parsed {
+            let severity = if parsed.has_hard_frontmatter_error() {
+                ParseSeverity::Hard
+            } else {
+                ParseSeverity::Soft
+            };
+            if s.legacy_number.is_some() && severity == ParseSeverity::Soft {
+                continue;
+            }
+            for w in &parsed.warnings {
+                report.parse_errors.push(ParseError {
+                    location: location.clone(),
+                    message: w.clone(),
+                    severity,
+                });
             }
         }
     }
@@ -1412,18 +1435,16 @@ fn apply(
     // bootstrap call also ensures the issues/ directory exists so a
     // brand-new repo with `issuectl doctor --fix` ends in a usable
     // state.
-    if actions.bootstrap_schema {
-        let issues_dir = repo_root.join("issues");
-        fs::create_dir_all(&issues_dir)
-            .with_context(|| format!("cannot create {}", issues_dir.display()))?;
-        // Report `schema_bootstrapped = true` only when we actually
-        // wrote bytes — `ensure_default_written` is idempotent and
-        // returns `false` when the file already existed. Previously
-        // `fix_applied` ignored schema bootstrap entirely; this lifts
-        // the value into the outcome so `--fix` runs that ONLY write
-        // `.schema.yaml` correctly report `fix_applied: true`.
-        outcome.schema_bootstrapped = schema::ensure_default_written(repo_root)?;
-    }
+    let issues_dir = repo_root.join("issues");
+    fs::create_dir_all(&issues_dir)
+        .with_context(|| format!("cannot create {}", issues_dir.display()))?;
+    // Report `schema_bootstrapped = true` only when we actually wrote
+    // bytes — `ensure_default_written` is idempotent and returns
+    // `false` when the file already existed. Previously `fix_applied`
+    // ignored schema bootstrap entirely; lifting the value into the
+    // outcome makes `--fix` runs that ONLY write `.schema.yaml`
+    // correctly report `fix_applied: true`.
+    outcome.schema_bootstrapped = schema::ensure_default_written(repo_root)?;
 
     // Flat-layout migration: any issue still under
     // `issues/{open,closed}/<slug>/` moves up to `issues/<slug>/`. The
@@ -1561,8 +1582,12 @@ fn rename_notes_to_comments(
         let (rewritten, has_conflict) = migrate_notes_heading(&original);
         if has_conflict {
             // Conflict surfaced during apply (file changed between
-            // scan and apply — manual edit). The post-apply re-scan
-            // in `run` will pick this up and emit it via findings.
+            // scan and apply — manual edit). Record it explicitly:
+            // the post-apply re-scan will pick up the conflict only
+            // if both headings are still present, but we need a
+            // reliable signal even on the no-write path so JSON
+            // consumers see that planned work was skipped.
+            outcome.notes_conflicts_at_apply.push(slug);
             continue;
         }
         if rewritten != original {
@@ -3820,6 +3845,181 @@ mod tests {
         assert_eq!(
             blockers, actions.preflight_blockers,
             "preflight_blockers must be equal to critical_blockers output"
+        );
+    }
+
+    /// Round-2 regression #1 (state destruction on preflight-blocked
+    /// path): `DoctorActions::from_findings` drains the to-do data via
+    /// `mem::take`. Before the fix, `run` only re-scanned when
+    /// `outcome.fix_applied()` was true — so a preflight-blocked run
+    /// rendered an empty findings object and the user saw the blocker
+    /// message but none of the pending lists. The fix unconditionally
+    /// re-scans after apply.
+    #[test]
+    fn preflight_blocked_render_path_does_not_lose_pending_work() {
+        let tmp = fresh_repo();
+        // One legitimate legacy migration that scan should surface,
+        // plus a slug present in BOTH legacy folders → preflight
+        // blocker. After apply returns Ok(outcome) with blockers
+        // populated, the rescanned `findings` MUST still contain the
+        // legacy migration entry.
+        put_legacy(
+            &tmp,
+            "open",
+            7,
+            "alpha",
+            "---\nnumber: 7\nstatus: open\n---\n# A\n",
+        );
+        for f in ["open", "closed"] {
+            let dir = tmp.path().join("issues").join(f).join("quiet-brave-otter");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("item.md"),
+                "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n",
+            )
+            .unwrap();
+        }
+
+        let mut findings = scan(tmp.path()).unwrap();
+        let actions = DoctorActions::from_findings(&mut findings);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        assert!(!outcome.blockers.is_empty(), "expected preflight blocker");
+        // Simulate `run`'s post-apply rescan.
+        let final_findings = scan(tmp.path()).unwrap();
+        assert!(
+            !final_findings.legacy_dirs.is_empty(),
+            "rescan must surface the legacy migration even when preflight blocked"
+        );
+        // The JSON envelope on this path must carry both the blockers
+        // AND the to-do lists.
+        let json = render_json(&final_findings, Some(&outcome), true, tmp.path());
+        let migrations = json["migrations"].as_array().unwrap();
+        assert!(
+            !migrations.is_empty(),
+            "migrations field must not be empty on preflight-blocked path"
+        );
+        let blockers = json["apply_outcome"]["blockers"].as_array().unwrap();
+        assert!(!blockers.is_empty());
+    }
+
+    /// Round-2 regression #2 (legacy numeric refs in flat-layout
+    /// blocking `--fix`): a flat-layout issue with `epic: 7` produces
+    /// a `broken_refs` entry of kind "(legacy numeric ref)". Before
+    /// the fix, `critical_blockers` treated this as a refusal. The
+    /// migration is supposed to heal it via `rewrite_item_frontmatter`.
+    #[test]
+    fn legacy_numeric_refs_in_flat_layout_do_not_block_fix() {
+        let tmp = fresh_repo();
+        // Flat-layout issue with a stale numeric epic ref — this is
+        // exactly the state a partially-migrated repo will have.
+        put_flat(
+            &tmp,
+            "alpha-bright-cat",
+            "---\ntype: bug\nstatus: open\npriority: normal\nepic: 7\n---\n# A\n",
+        );
+        let findings = scan(tmp.path()).unwrap();
+        // Sanity: scan flagged it.
+        assert!(
+            findings
+                .broken_refs
+                .iter()
+                .any(|(_, k, t)| k == "epic" && t.contains("(legacy numeric ref)")),
+            "expected legacy-numeric ref to be flagged: {:?}",
+            findings.broken_refs
+        );
+        // critical_blockers must NOT contain a "broken cross-references"
+        // entry that would refuse `--fix`.
+        let blockers = critical_blockers(&findings);
+        assert!(
+            !blockers.iter().any(|b| b.contains("broken cross-references")),
+            "legacy numeric refs must not block --fix: {:?}",
+            blockers
+        );
+    }
+
+    /// Round-2 regression #3 (notes apply-time conflict silently
+    /// dropped): when scan classified a file as `SafeRename` but a
+    /// concurrent edit between scan and apply added a `## Comments`
+    /// heading, the fix is skipped. The skip MUST be recorded in
+    /// `outcome.notes_conflicts_at_apply` so JSON consumers see that
+    /// planned work was deferred.
+    #[test]
+    fn notes_conflict_at_apply_is_recorded_in_outcome() {
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/legacy-notes-here");
+        fs::create_dir_all(&dir).unwrap();
+        let item = dir.join("item.md");
+        // Initially: SafeRename (one ## Notes, no ## Comments).
+        fs::write(
+            &item,
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n## Notes\n\nold\n",
+        )
+        .unwrap();
+        let mut findings = scan(tmp.path()).unwrap();
+        assert!(findings
+            .notes_to_rename
+            .iter()
+            .any(|s| s == "legacy-notes-here"));
+
+        // Concurrent edit: a user appends a `## Comments` section
+        // before apply runs. `migrate_notes_heading` will now
+        // classify this as Conflict at apply time.
+        fs::write(
+            &item,
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n## Notes\n\nold\n\n## Comments\n\nnew\n",
+        )
+        .unwrap();
+
+        let actions = DoctorActions::from_findings(&mut findings);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            outcome
+                .notes_conflicts_at_apply
+                .iter()
+                .any(|s| s == "legacy-notes-here"),
+            "TOCTOU conflict must surface in outcome: {:?}",
+            outcome
+        );
+        assert!(outcome.notes_renamed.is_empty(), "no rename when conflict");
+    }
+
+    /// Round-2 regression #4 (hard parse errors on legacy dirs): a
+    /// legacy issue with unparseable frontmatter MUST surface as a
+    /// Hard parse_error so `critical_blockers` refuses `--fix`. The
+    /// alternative is mid-apply panic when `write::read_item` hits
+    /// the same broken YAML.
+    #[test]
+    fn hard_parse_errors_on_legacy_dirs_block_fix() {
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/open/7-broken-legacy");
+        fs::create_dir_all(&dir).unwrap();
+        // Legacy frontmatter that parses-as-mapping fails.
+        fs::write(dir.join("item.md"), "---\nfoo: : :\n---\n# T\n").unwrap();
+        let r = scan(tmp.path()).unwrap();
+        // Soft warnings on legacy issues are still suppressed (the
+        // intentional skip), but Hard errors must surface.
+        assert!(
+            r.parse_errors
+                .iter()
+                .any(|e| e.severity == ParseSeverity::Hard),
+            "Hard parse error on legacy must be surfaced: {:?}",
+            r.parse_errors
+        );
+        let blockers = critical_blockers(&r);
+        assert!(
+            blockers.iter().any(|b| b.contains("unparseable issue file")),
+            "Hard parse error must block --fix: {:?}",
+            blockers
         );
     }
 
