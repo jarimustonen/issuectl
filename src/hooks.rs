@@ -21,14 +21,18 @@ const HOOK_BODY: &str = r#"set -eu
 # otherwise smuggle broken content past the hook. Skip with
 # `--no-verify` or `ISSUECTL_SKIP_DOCTOR=1`.
 
-[ "${ISSUECTL_SKIP_DOCTOR:-}" = "1" ] && exit 0
+if [ "${ISSUECTL_SKIP_DOCTOR:-}" = "1" ]; then
+    exit 0
+fi
 
 # Fail closed if `git diff` cannot inspect the index.
 if ! changed=$(git diff --cached --name-only --diff-filter=ACMRD -- issues/ 2>/dev/null); then
     echo "issuectl: failed to inspect staged changes" >&2
     exit 1
 fi
-[ -n "$changed" ] || exit 0
+if [ -z "$changed" ]; then
+    exit 0
+fi
 
 if ! command -v issuectl >/dev/null 2>&1; then
     echo "issuectl pre-commit hook installed but \`issuectl\` is not on PATH." >&2
@@ -39,10 +43,17 @@ fi
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/issuectl-hook.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
-# Materialise the staged snapshot of the entire index. issuectl doctor
-# walks `issues/` from the cwd; it doesn't need a real .git dir.
-if ! git checkout-index --all --prefix="$tmp/" >/dev/null 2>&1; then
-    echo "issuectl: failed to materialize staged snapshot" >&2
+# Anchor `issuectl doctor`'s repo-root walk inside the temp dir so a
+# commit that deletes the last issues/ entry doesn't make doctor walk
+# up out of /tmp searching for `issues/` or `.git`.
+mkdir -p "$tmp/issues"
+
+# Materialise only the staged `issues/` tree — not the entire index —
+# so a monorepo with GBs of unrelated tracked files doesn't pay
+# checkout cost on every commit.
+if ! git ls-files -z --cached -- issues/ \
+    | git checkout-index -z --stdin --prefix="$tmp/" >/dev/null 2>&1; then
+    echo "issuectl: failed to materialize staged issues/ snapshot" >&2
     exit 1
 fi
 

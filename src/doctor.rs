@@ -176,7 +176,6 @@ pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
         // clean snapshot and merge the just-applied actions back in
         // for the user-facing summary.
         let mut fresh = scan(repo_root)?;
-        fresh.fix_applied = true;
         fresh.legacy_dirs = std::mem::take(&mut report.legacy_dirs);
         fresh.flat_layout_migrated = std::mem::take(&mut report.flat_layout_migrated);
         fresh.notes_renamed = std::mem::take(&mut report.notes_renamed);
@@ -184,6 +183,15 @@ pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
             std::mem::take(&mut report.orphan_tempfiles_removed);
         fresh.status_reconciled = std::mem::take(&mut report.status_reconciled);
         fresh.files_rewritten = report.files_rewritten;
+        // `fix_applied` means "a mutation actually happened", not "fix
+        // mode ran". A clean repo + `--fix` is a no-op; consumers
+        // (JSON, text rendering) should be able to distinguish.
+        fresh.fix_applied = !fresh.legacy_dirs.is_empty()
+            || !fresh.flat_layout_migrated.is_empty()
+            || !fresh.notes_renamed.is_empty()
+            || !fresh.orphan_tempfiles_removed.is_empty()
+            || !fresh.status_reconciled.is_empty()
+            || fresh.files_rewritten > 0;
         report = fresh;
     }
 
@@ -970,45 +978,73 @@ fn detect_orphan_epic_refs(repo_root: &Path, report: &mut DoctorReport) -> Resul
 
 /// Bail before any filesystem mutation if the repo is in a state that
 /// `--fix` cannot safely heal. A mid-fix bail leaves the repo in a
-/// half-migrated state with no rollback path; surface every blocker
-/// up-front so the user can resolve them before we touch anything.
+/// half-migrated state with no rollback path; surface *every* blocker
+/// up-front so the user can resolve them in one pass instead of
+/// iterating one preflight failure at a time.
 fn preflight_apply(report: &DoctorReport) -> Result<()> {
+    let mut blockers: Vec<String> = Vec::new();
+
     if !report.flat_layout_conflicts.is_empty() {
-        bail!(
-            "doctor: flat-layout migration has conflicts; resolve before --fix:\n  {}",
-            report
-                .flat_layout_conflicts
-                .iter()
-                .map(|c| format!("{}: {}", c.slug, c.detail))
-                .collect::<Vec<_>>()
-                .join("\n  ")
-        );
+        let detail = report
+            .flat_layout_conflicts
+            .iter()
+            .map(|c| format!("    {}: {}", c.slug, c.detail))
+            .collect::<Vec<_>>()
+            .join("\n");
+        blockers.push(format!("flat-layout migration conflicts:\n{detail}"));
     }
     if !report.duplicate_slugs.is_empty() {
-        bail!(
-            "doctor: duplicate slugs ({:?}); resolve before --fix",
-            report.duplicate_slugs
-        );
+        blockers.push(format!("duplicate slugs: {:?}", report.duplicate_slugs));
     }
     if !report.both_open_and_closed.is_empty() {
-        bail!(
-            "doctor: slugs present in both open/ and closed/ ({:?}); human attention required",
+        blockers.push(format!(
+            "slugs present in BOTH issues/open/ and issues/closed/: {:?}",
             report.both_open_and_closed
-        );
+        ));
     }
     if !report.conflict_markers.is_empty() {
-        bail!(
-            "doctor: git merge-conflict markers in {:?}; resolve manually",
+        blockers.push(format!(
+            "git merge-conflict markers in: {:?}",
             report.conflict_markers
-        );
+        ));
     }
-    if !report.parse_errors.is_empty() {
+    // Only HARD parse errors block — recoverable warnings (e.g.
+    // "legacy numeric epic ref" hints) would otherwise refuse `--fix`
+    // on the very repos the legacy migration was designed to heal.
+    let hard_parse_errors: Vec<&(String, String)> = report
+        .parse_errors
+        .iter()
+        .filter(|(_, msg)| is_hard_parse_error(msg))
+        .collect();
+    if !hard_parse_errors.is_empty() {
+        let detail = hard_parse_errors
+            .iter()
+            .map(|(loc, msg)| format!("    {loc}: {msg}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        blockers.push(format!(
+            "unparseable issue file(s) ({}):\n{detail}",
+            hard_parse_errors.len()
+        ));
+    }
+
+    if !blockers.is_empty() {
         bail!(
-            "doctor: parse errors in {} issue(s); resolve before --fix",
-            report.parse_errors.len()
+            "doctor: cannot safely apply --fix until these issues are resolved:\n\n  - {}",
+            blockers.join("\n\n  - ")
         );
     }
     Ok(())
+}
+
+/// Distinguish hard parse failures (file unreadable, frontmatter
+/// completely unparseable) from soft warnings the legacy migration
+/// path is supposed to heal. Only hard failures block `--fix`.
+fn is_hard_parse_error(msg: &str) -> bool {
+    msg.contains("invalid frontmatter YAML")
+        || msg.contains("missing or unterminated frontmatter")
+        || msg.contains("invalid YAML frontmatter")
+        || msg.starts_with("cannot read")
 }
 
 fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
@@ -2589,6 +2625,56 @@ mod tests {
             "team is schema-known: {:?}",
             r.unknown_keys
         );
+    }
+
+    #[test]
+    fn preflight_aggregates_blockers_in_one_message() {
+        // Repo with TWO independent blockers: a slug present in both
+        // legacy folders + a file with conflict markers. The user
+        // should see both in a single bail, not have to iterate.
+        let tmp = fresh_repo();
+        for f in ["open", "closed"] {
+            let dir = tmp.path().join("issues").join(f).join("quiet-brave-otter");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("item.md"),
+                "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n",
+            )
+            .unwrap();
+        }
+        let conflicted = tmp.path().join("issues/alpha-bright-cat");
+        fs::create_dir_all(&conflicted).unwrap();
+        fs::write(
+            conflicted.join("item.md"),
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> b\n",
+        )
+        .unwrap();
+        let mut r = scan(tmp.path()).unwrap();
+        let err = apply(tmp.path(), &mut r).unwrap_err().to_string();
+        assert!(err.contains("BOTH"), "missing both-folders blocker: {err}");
+        assert!(
+            err.contains("merge-conflict markers"),
+            "missing conflict-marker blocker: {err}"
+        );
+    }
+
+    #[test]
+    fn preflight_does_not_block_on_soft_parse_warnings() {
+        // A legacy-numeric epic ref produces a parser warning (now
+        // categorised as "soft") but should NOT prevent --fix from
+        // running its migration pass.
+        let tmp = fresh_repo();
+        put_legacy(
+            &tmp,
+            "open",
+            7,
+            "alpha",
+            "---\nnumber: 7\nstatus: open\nepic: 12\n---\n# A\n",
+        );
+        let mut r = scan(tmp.path()).unwrap();
+        // Pre-fix: there are likely parser warnings in `parse_errors`.
+        // None of them should trip the hard-error preflight check.
+        apply(tmp.path(), &mut r).expect("--fix should not refuse on soft parse warnings");
     }
 
     #[test]
