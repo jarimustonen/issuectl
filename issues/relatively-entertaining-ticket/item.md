@@ -3,10 +3,11 @@ created: 2026-05-08
 updated: 2026-05-09
 type: chore
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
 labels: [release-v0.5.0]
+closed: 2026-05-09
 ---
 
 # CLI golden-test harness for cmd_new error output

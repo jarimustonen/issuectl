@@ -73,12 +73,17 @@ to keep the epic in sync with the worktree:
 - [x] @slightly-finicky-heart — `issuectl doctor`: full validation suite +
   installable git hooks. Subsumes @amazingly-scattered-month. Landed
   `8afb683` + review fixes (`8568585`, `f572e8a`).
-- [ ] @peculiarly-political-interest — Agent-safe mutation CLI
+- [x] @peculiarly-political-interest — Agent-safe mutation CLI
   (`set` / `note` / `check` / `label` / `apply` + `--dry-run`).
+  Landed `d5943fb` + review fixes (`e67503be`, `505c185`).
+  Spin-off: @massively-regular-market (body ops in `apply`).
 - [x] @outright-homely-calendar — `issuectl fmt` + optional YAML merge
   driver. Landed `230974d` + review fixes `49e7c0f`. Closed.
-- [ ] @vastly-lyrical-police — Declarative status transition rules +
-  per-type body section linting. Small extension of doctor.
+- [x] @vastly-lyrical-police — Declarative status transition rules +
+  per-type body section linting. Landed `3f9afba`. Spin-offs:
+  @deeply-wistful-beam (cache schema/transitions),
+  @fully-economic-grade (update --type body scaffolding),
+  @incredibly-mellow-owner (doctor single-pass scanner).
 - [x] @overly-dreary-yak — Standardized markdown body sections (comments,
   decisions, agent runs, reopen notes). Landed `39cabc5` + review fixes
   (`6f4485f`, `122bec7`, `010bc3c`, `73c1a66`). Spin-offs:
@@ -118,12 +123,24 @@ to keep the epic in sync with the worktree:
   rationale.
 - [x] @tolerably-beautiful-war — `custom_fields` on `UpdateIssueRequest`.
   Landed `4f62aef` + review fixes `149393c`.
-- [ ] @partially-ahead-button — Extract `do_new_locked` + `NewArgs`
-  out of `src/main.rs` into a domain module. Spin-off from
-  @astoundingly-harsh-nest /llm-review.
-- [ ] @relatively-entertaining-ticket — CLI golden-test harness for
-  `cmd_new` error output. Spin-off from @astoundingly-harsh-nest
-  /llm-review.
+- [x] @partially-ahead-button — Extract `do_new_locked` + `NewArgs`
+  out of `src/main.rs` into a domain module. Landed `6b99007` + `7ba0977`
+  + review fixes (`ef1af2f`, `16cba25`). Spin-offs:
+  @ridiculously-outgoing-brass (constants relocation + lib.rs split),
+  @genuinely-magical-canvas (centralize custom-field validation).
+- [x] @relatively-entertaining-ticket — CLI golden-test harness for
+  `cmd_new` error output. Landed `41df83d` + review fixes `96483be`.
+- [ ] @ridiculously-outgoing-brass — Move issue-domain constants/helpers
+  out of `main.rs`; consider `lib.rs` split.
+- [ ] @genuinely-magical-canvas — Centralize custom-field-key validation
+  across CLI and API create/update.
+- [ ] @incredibly-mellow-owner — `doctor` single-pass issue scanner.
+- [ ] @deeply-wistful-beam — Server: cache schema + transitions config
+  with mtime invalidation.
+- [ ] @fully-economic-grade — `issuectl update --type`: scaffold or
+  reject when required body sections are missing.
+- [ ] @massively-regular-market — `apply` transactional body ops
+  (`note` / `check`) in single flock.
 
 ## Phases
 

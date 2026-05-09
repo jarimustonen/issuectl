@@ -2,12 +2,13 @@
 created: 2026-05-06
 updated: 2026-05-09
 type: feature
-status: in-progress
+status: done
 priority: normal
 reporter: jari
 assignee: jari
 epic: exorbitantly-ill-apples
 labels: [v0.6.0-candidate, validation]
+closed: 2026-05-09
 ---
 
 # Declarative status transition rules + per-type body section linting

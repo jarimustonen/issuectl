@@ -3,7 +3,7 @@ created: 2026-05-08
 updated: 2026-05-09
 type: chore
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
 labels: [release-v0.5.0]
@@ -14,6 +14,7 @@ commits:
   summary: round-2 layering fixes (refs.rs; mutate/new_issue; API dup-key rejection)
 - hash: 534c388
   summary: fix dedup visitor error precedence + edge-case tests
+closed: 2026-05-09
 ---
 
 # Extract do_new_locked + NewArgs out of main.rs into domain module

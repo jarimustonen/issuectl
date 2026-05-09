@@ -2,12 +2,13 @@
 created: 2026-05-06
 updated: 2026-05-09
 type: feature
-status: in-progress
+status: done
 priority: high
 reporter: jari
 assignee: jari
 epic: exorbitantly-ill-apples
 labels: [agent-friendly, cli, foundation]
+closed: 2026-05-09
 ---
 
 # Agent-safe mutation CLI: set / note / check / label / apply (+ --dry-run)
