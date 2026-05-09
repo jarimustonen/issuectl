@@ -1016,17 +1016,30 @@ fn populate_extended_validation(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // Status/closed consistency.
+        // Status/closed consistency. Schema-aware: a project that
+        // declares `archived` (or similar) as a closing status via
+        // `status_classes:` in `.schema.yaml` flags `archived without
+        // closed:` here just like a built-in `done`. The "active"
+        // branch covers explicitly-active statuses only — an unknown
+        // status (typo, removed enum value) is left alone so doctor
+        // doesn't double-flag the schema-validation failure.
         if let Some(s) = &status {
-            let closing = crate::issue_fields::is_closing_status(s);
-            let active = crate::issue_fields::ACTIVE_STATUSES.contains(&s.as_str());
+            let class = schema::status_class(known_schema, s);
+            let known_active =
+                crate::issue_fields::ACTIVE_STATUSES.contains(&s.as_str())
+                    || known_schema
+                        .status_classes
+                        .get(s.as_str())
+                        .copied()
+                        == Some(schema::StatusClass::Active);
+            let closing = class == schema::StatusClass::Closing;
             if closing && closed.is_none() {
                 report.status_consistency.push((
                     slug.clone(),
                     format!("closing status {s:?} requires `closed:` date"),
                 ));
             }
-            if active && closed.is_some() {
+            if known_active && closed.is_some() {
                 report.status_consistency.push((
                     slug.clone(),
                     format!("active status {s:?} must not carry `closed:`"),
@@ -1149,14 +1162,20 @@ fn populate_extended_validation(
                 continue;
             };
             match hit.folder.as_str() {
-                "closed" if crate::issue_fields::ACTIVE_STATUSES.contains(&hit_status) => {
+                "closed" if crate::issue_fields::ACTIVE_STATUSES.contains(&hit_status)
+                    || known_schema
+                        .status_classes
+                        .get(hit_status)
+                        .copied()
+                        == Some(schema::StatusClass::Active) =>
+                {
                     report.closed_with_active_status.push((
                         slug.clone(),
                         hit_status.to_string(),
                         hit.item_path.clone(),
                     ));
                 }
-                "open" if crate::issue_fields::is_closing_status(hit_status) => {
+                "open" if schema::is_closing(known_schema, hit_status) => {
                     report.open_with_closing_status.push((
                         slug.clone(),
                         hit_status.to_string(),

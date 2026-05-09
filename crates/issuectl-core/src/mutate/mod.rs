@@ -432,11 +432,18 @@ impl UpdateIssueRequest {
         check_set_nonempty("owner", &self.owner)?;
         check_set_nonempty("epic", &self.epic)?;
 
+        // No built-in `all_statuses()` membership check here, mirroring
+        // the `type` policy above: the schema (`fields.status.enum`) is
+        // the source of truth, and a project may legitimately add
+        // `archived` (or similar) to its enum. Schema validation in
+        // step 4b runs under lock against the post-mutation
+        // frontmatter — wrong statuses fail there with a clearer
+        // message that lists the actual allowed set.
         if let Patch::Set(s) = &self.status {
-            if !crate::issue_fields::all_statuses().iter().any(|v| v == s) {
-                return Err(MutateError::Validation(format!(
-                    "status {s:?} is not one of the known statuses"
-                )));
+            if s.is_empty() {
+                return Err(MutateError::Validation(
+                    "status cannot be empty (use Patch::Clear to remove)".into(),
+                ));
             }
         }
         if let Patch::Set(p) = &self.priority {
@@ -786,7 +793,9 @@ pub fn update_issue(
             });
         }
         let mut issue = parsed.issue;
-        issue.folder = folder_for_status(&issue.status).to_string();
+        let schema = crate::schema::load(root)
+            .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+        issue.folder = folder_for_status(&schema, &issue.status).to_string();
         let version = canonical_hash(&issue);
         if let Some(ref expected) = req.expected_version {
             if expected != &version {
@@ -861,6 +870,7 @@ fn projected_issue_for_rules(
     slug: &str,
     item: &write::ItemFile,
     item_path: &Path,
+    schema: &crate::schema::Schema,
 ) -> Result<Issue, MutateError> {
     let text = write::serialize_item(item).map_err(MutateError::Io)?;
     let parsed =
@@ -871,7 +881,7 @@ fn projected_issue_for_rules(
         });
     }
     let mut issue = parsed.issue;
-    issue.folder = folder_for_status(&issue.status).to_string();
+    issue.folder = folder_for_status(schema, &issue.status).to_string();
     Ok(issue)
 }
 
@@ -906,7 +916,7 @@ fn update_issue_under_lock(
         });
     }
     let mut current_issue = parsed.issue;
-    current_issue.folder = folder_for_status(&current_issue.status).to_string();
+    current_issue.folder = folder_for_status(schema, &current_issue.status).to_string();
     let current_version = canonical_hash(&current_issue);
     let prev_status = current_issue.status.clone();
     let prev_type = current_issue.issue_type.clone();
@@ -947,8 +957,8 @@ fn update_issue_under_lock(
     // active↔closing transition for messaging parity with the old API.
     if let Patch::Set(s) = &req.status {
         write::set_string(&mut item.frontmatter, "status", s);
-        let prev_closing = crate::issue_fields::is_closing_status(&prev_status);
-        let new_closing = crate::issue_fields::is_closing_status(s);
+        let prev_closing = crate::schema::is_closing(schema, &prev_status);
+        let new_closing = crate::schema::is_closing(schema, s);
         if new_closing {
             // Only set `closed:` on the active→closing edge, OR backfill
             // if the field is missing on a closing→closing transition
@@ -1122,7 +1132,7 @@ fn update_issue_under_lock(
     //     surface — both write paths apply rules through the
     //     post-mutation `Issue` projection. Rules are loaded once by
     //     the caller (same pattern as `schema`).
-    let projected = projected_issue_for_rules(slug, &item, &item_path)?;
+    let projected = projected_issue_for_rules(slug, &item, &item_path, schema)?;
     let rule_violations =
         crate::transitions::evaluate_transition(rules, &projected, &prev_status);
     if !rule_violations.is_empty() {
@@ -1134,7 +1144,7 @@ fn update_issue_under_lock(
     //    `item_path` is the canonical location regardless of status.
     if req.dry_run {
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
-        let new_issue = parse_serialized(&pending, slug);
+        let new_issue = parse_serialized(&pending, slug, schema);
         let new_version = canonical_hash(&new_issue);
         return Ok(UpdateOutcome {
             issue: new_issue,
@@ -1161,7 +1171,7 @@ fn update_issue_under_lock(
     // 6) recompute canonical hash from final on-disk content
     let after = crate::parser::parse_item_md_with_warnings(&final_path, slug, "open");
     let mut new_issue = after.issue;
-    new_issue.folder = folder_for_status(&new_issue.status).to_string();
+    new_issue.folder = folder_for_status(schema, &new_issue.status).to_string();
     let new_version = canonical_hash(&new_issue);
 
     // 7) publish while still inside the lock so seq order matches
@@ -1193,7 +1203,7 @@ fn update_issue_under_lock(
 /// Dry-run paths serialize the post-mutation `ItemFile` to compute
 /// `pending_serialized` for the diff; passing those same bytes back
 /// here avoids serializing a second time.
-fn parse_serialized(serialized: &str, slug: &str) -> Issue {
+fn parse_serialized(serialized: &str, slug: &str, schema: &crate::schema::Schema) -> Issue {
     let parsed = crate::parser::parse_item_md_text_with_warnings(
         serialized,
         slug,
@@ -1201,7 +1211,7 @@ fn parse_serialized(serialized: &str, slug: &str) -> Issue {
         Path::new("<dry-run>"),
     );
     let mut issue = parsed.issue;
-    issue.folder = folder_for_status(&issue.status).to_string();
+    issue.folder = folder_for_status(schema, &issue.status).to_string();
     issue
 }
 
@@ -1233,13 +1243,14 @@ pub fn close_issue(
     // failure (already-closing issue) leaves no repo side effects.
     let item_path = locate_for_dry_run(root, slug)?;
     let item = write::read_item(&item_path).map_err(MutateError::Io)?;
+    let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let current_status = item
         .frontmatter
         .get(serde_yaml::Value::String("status".into()))
         .and_then(|v| v.as_str())
         .unwrap_or("open")
         .to_string();
-    if crate::issue_fields::is_closing_status(&current_status) {
+    if crate::schema::is_closing(&schema, &current_status) {
         return Err(MutateError::Validation(format!(
             "issue {slug} already has a closing status ({current_status}); use `update` to change status"
         )));
@@ -1250,6 +1261,11 @@ pub fn close_issue(
         .and_then(|v| v.as_str())
         .unwrap_or("bug")
         .to_string();
+    // Default-status selection consults the schema first: if the project
+    // has declared a custom closing status (e.g. `archived`), an explicit
+    // `--status` is still honoured, but absent that the bug/non-bug
+    // built-ins (`fixed` / `done`) remain the defaults — the brief
+    // explicitly keeps built-ins reigning over user-added classes.
     let resolved_status = status_override.unwrap_or_else(|| {
         if issue_type == "bug" {
             "fixed".to_string()
@@ -1277,7 +1293,6 @@ pub fn close_issue(
     req_normalized.add_related = normalized_add_related;
     req_normalized.remove_related = normalized_remove_related;
     req_normalized.validate()?;
-    let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let rules = load_validated_rules(root, &schema)?;
     update_issue_under_lock(root, slug, item_path, req_normalized, hub, &schema, &rules)
 }
@@ -1306,6 +1321,7 @@ pub fn update_body(
     // migration and `.schema.yaml` bootstrap fire only after every
     // validation step has passed (parity with `update_issue`).
     let item_path = locate_for_dry_run(root, slug)?;
+    let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
 
     let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
     if !parsed.warnings.is_empty() {
@@ -1314,7 +1330,7 @@ pub fn update_body(
         });
     }
     let mut prev_issue = parsed.issue;
-    prev_issue.folder = folder_for_status(&prev_issue.status).to_string();
+    prev_issue.folder = folder_for_status(&schema, &prev_issue.status).to_string();
     let current_version = canonical_hash(&prev_issue);
 
     if let Some(ref expected) = expected_version {
@@ -1355,7 +1371,6 @@ pub fn update_body(
     // Schema validation: body-set doesn't change frontmatter shape but
     // the schema may have tightened since the last write. Refusing here
     // matches the `update_issue` contract.
-    let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let violations = crate::schema::validate(&schema, &item.frontmatter);
     if !violations.is_empty() {
         let msg = violations
@@ -1373,7 +1388,7 @@ pub fn update_body(
     // Status doesn't change here, so only `requires_*` checks matter
     // (graph rules are skipped by the prev==new guard).
     let rules = load_validated_rules(root, &schema)?;
-    let projected = projected_issue_for_rules(slug, &item, &item_path)?;
+    let projected = projected_issue_for_rules(slug, &item, &item_path, &schema)?;
     let rule_violations =
         crate::transitions::evaluate_transition(&rules, &projected, &prev_issue.status);
     if !rule_violations.is_empty() {
@@ -1382,7 +1397,7 @@ pub fn update_body(
 
     if dry_run {
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
-        let new_issue = parse_serialized(&pending, slug);
+        let new_issue = parse_serialized(&pending, slug, &schema);
         let new_version = canonical_hash(&new_issue);
         return Ok(UpdateOutcome {
             issue: new_issue,
@@ -1405,7 +1420,7 @@ pub fn update_body(
 
     let after = crate::parser::parse_item_md_with_warnings(&final_path, slug, "open");
     let mut new_issue = after.issue;
-    new_issue.folder = folder_for_status(&new_issue.status).to_string();
+    new_issue.folder = folder_for_status(&schema, &new_issue.status).to_string();
     let new_version = canonical_hash(&new_issue);
 
     if let Some(hub) = hub {
@@ -1461,6 +1476,7 @@ pub fn note_issue(
     // bootstrap deferred to just before atomic write so that any
     // validation failure below leaves no repo side effects.
     let item_path = locate_for_dry_run(root, slug)?;
+    let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
 
     let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
     if !parsed.warnings.is_empty() {
@@ -1469,7 +1485,7 @@ pub fn note_issue(
         });
     }
     let mut prev_issue = parsed.issue;
-    prev_issue.folder = folder_for_status(&prev_issue.status).to_string();
+    prev_issue.folder = folder_for_status(&schema, &prev_issue.status).to_string();
     let current_version = canonical_hash(&prev_issue);
     if let Some(ref expected) = expected_version {
         if expected != &current_version {
@@ -1529,7 +1545,7 @@ pub fn note_issue(
 
     if dry_run {
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
-        let new_issue = parse_serialized(&pending, slug);
+        let new_issue = parse_serialized(&pending, slug, &schema);
         let new_version = canonical_hash(&new_issue);
         return Ok(UpdateOutcome {
             issue: new_issue,
@@ -1549,7 +1565,7 @@ pub fn note_issue(
 
     let after = crate::parser::parse_item_md_with_warnings(&final_path, slug, "open");
     let mut new_issue = after.issue;
-    new_issue.folder = folder_for_status(&new_issue.status).to_string();
+    new_issue.folder = folder_for_status(&schema, &new_issue.status).to_string();
     let new_version = canonical_hash(&new_issue);
 
     if let Some(hub) = hub {
@@ -1603,6 +1619,7 @@ pub fn toggle_checkbox(
     // Locate read-only regardless of `dry_run`. Migration / schema
     // bootstrap deferred to just before atomic write.
     let item_path = locate_for_dry_run(root, slug)?;
+    let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
     if !parsed.warnings.is_empty() {
         return Err(MutateError::Corrupt {
@@ -1610,7 +1627,7 @@ pub fn toggle_checkbox(
         });
     }
     let mut prev_issue = parsed.issue;
-    prev_issue.folder = folder_for_status(&prev_issue.status).to_string();
+    prev_issue.folder = folder_for_status(&schema, &prev_issue.status).to_string();
     let current_version = canonical_hash(&prev_issue);
     if let Some(ref expected) = expected_version {
         if expected != &current_version {
@@ -1652,7 +1669,7 @@ pub fn toggle_checkbox(
 
     if dry_run {
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
-        let new_issue = parse_serialized(&pending, slug);
+        let new_issue = parse_serialized(&pending, slug, &schema);
         let new_version = canonical_hash(&new_issue);
         return Ok(UpdateOutcome {
             issue: new_issue,
@@ -1671,7 +1688,7 @@ pub fn toggle_checkbox(
     write_item_atomic(&final_path, &item).map_err(MutateError::Io)?;
     let after = crate::parser::parse_item_md_with_warnings(&final_path, slug, "open");
     let mut new_issue = after.issue;
-    new_issue.folder = folder_for_status(&new_issue.status).to_string();
+    new_issue.folder = folder_for_status(&schema, &new_issue.status).to_string();
     let new_version = canonical_hash(&new_issue);
 
     if let Some(hub) = hub {
@@ -1741,7 +1758,7 @@ fn transition_warnings(
             "rules engine: transitions reference unknown statuses, transition checks skipped: {e:#}"
         )];
     }
-    let projected = match projected_issue_for_rules(slug, item, item_path) {
+    let projected = match projected_issue_for_rules(slug, item, item_path, &schema) {
         Ok(p) => p,
         Err(_) => return Vec::new(),
     };
@@ -2394,7 +2411,9 @@ pub fn new_issue(
     let parsed =
         crate::parser::parse_item_md_with_warnings(&outcome.item_path, &outcome.slug, "open");
     let mut issue = parsed.issue;
-    issue.folder = folder_for_status(&issue.status).to_string();
+    let schema = crate::schema::load(root)
+        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    issue.folder = folder_for_status(&schema, &issue.status).to_string();
     let version = canonical_hash(&issue);
 
     if let Some(hub) = hub {
@@ -2439,7 +2458,8 @@ mod tests {
         .unwrap();
         let parsed = crate::parser::parse_item_md_with_warnings(&dir.join("item.md"), slug, "open");
         let mut issue = parsed.issue;
-        issue.folder = crate::repo::folder_for_status(&issue.status).to_string();
+        let schema = crate::schema::default_schema();
+        issue.folder = crate::repo::folder_for_status(&schema, &issue.status).to_string();
         canonical_hash(&issue)
     }
 
@@ -2456,6 +2476,33 @@ mod tests {
         assert!(out.version.starts_with("sha256:"));
         let after = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
         assert!(after.contains("priority: high"));
+    }
+
+    #[test]
+    fn update_to_schema_declared_custom_closing_status_stamps_closed() {
+        // A project that adds `archived` to its schema's status enum
+        // and declares it as closing must get the full lifecycle
+        // treatment: `closed:` stamped, folder = "closed",
+        // `moved_to_closed` reported. Regression-anchors the
+        // schema-derived classifier replacing the static
+        // CLOSING_STATUSES list.
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  status:\n    required: true\n    enum: [open, in-progress, archived]\nstatus_classes:\n  archived: closing\n",
+        )
+        .unwrap();
+        let _v0 = seed_issue(tmp.path(), "open", "archive-target", "open");
+        let req = UpdateIssueRequest {
+            status: Patch::Set("archived".into()),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "archive-target", req, None).unwrap();
+        assert!(out.moved_to_closed, "active→archived must report moved_to_closed");
+        assert_eq!(out.issue.folder, "closed");
+        let after = fs::read_to_string(tmp.path().join("issues/archive-target/item.md")).unwrap();
+        assert!(after.contains("status: archived"));
+        assert!(after.contains("closed:"), "closed: must be stamped on schema-classified closing status; got:\n{after}");
     }
 
     #[test]
@@ -4442,7 +4489,8 @@ mod tests {
         let parsed =
             crate::parser::parse_item_md_with_warnings(&dir.join("item.md"), slug, "open");
         let mut issue = parsed.issue;
-        issue.folder = folder_for_status(&issue.status).to_string();
+        let schema = crate::schema::default_schema();
+        issue.folder = folder_for_status(&schema, &issue.status).to_string();
         canonical_hash(&issue)
     }
 

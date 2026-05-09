@@ -52,6 +52,28 @@ pub struct Schema {
     /// requirement for that type.
     #[serde(default)]
     pub body_sections: BTreeMap<String, Vec<String>>,
+    /// Lifecycle classification for status values. A schema-declared
+    /// status that maps to `Closing` here gets the same treatment as
+    /// a built-in closing status: directory bucketing, `closed:`
+    /// stamping, doctor consistency. Built-in statuses keep their
+    /// classification (this map only adds; it does not override). When
+    /// a status is in neither this map nor the built-in fallback,
+    /// `status_class` defaults to `Active`.
+    #[serde(default)]
+    pub status_classes: BTreeMap<String, StatusClass>,
+}
+
+/// Lifecycle classification for a status value.
+///
+/// Two kinds today: `Active` (issue is still open / in-progress) and
+/// `Closing` (issue is finished — `done`, `wontfix`, `archived`, etc.).
+/// All `Closing` variants share lifecycle behaviour; the task brief
+/// explicitly defers a multi-flavoured taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusClass {
+    Active,
+    Closing,
 }
 
 fn default_version() -> u32 {
@@ -148,6 +170,18 @@ fields:
   # entries (`{hash, summary}`), which the v1 schema's scalar/list-of-
   # string model cannot describe. Unknown fields are allowed, so it
   # passes validation either way.
+
+# Lifecycle classification for custom statuses. Built-in statuses
+# (`open`, `in-progress`, `testing` → active; `done`, `fixed`, `wontfix`,
+# `duplicate`, `cannot-reproduce`, `obsolete` → closing) are classified
+# automatically. Add a status's class here when you extend the
+# `status` enum above with a custom value — closing statuses get the
+# `closed:` stamp, end up in the closed bucket, and pass doctor's
+# open/closed consistency check the same way `done` does.
+#
+# status_classes:
+#   archived: closing
+#   verified: active
 "#;
 
 pub fn default_schema() -> Schema {
@@ -215,6 +249,9 @@ pub(crate) fn load_uncached(root: &Path) -> Result<Schema> {
     // user keep the default (today: empty).
     for (issue_type, sections) in user.body_sections {
         merged.body_sections.insert(issue_type, sections);
+    }
+    for (status, class) in user.status_classes {
+        merged.status_classes.insert(status, class);
     }
     validate_body_sections(&merged.body_sections).with_context(|| format!("{}", path.display()))?;
     validate_loadability(&merged).with_context(|| format!("{}", path.display()))?;
@@ -448,6 +485,30 @@ pub fn validate(schema: &Schema, fm: &Mapping) -> Vec<ViolationKind> {
         }
     }
     out
+}
+
+/// Lifecycle classification for a status value, with the schema's
+/// `status_classes:` map taking precedence over the built-in fallback
+/// in `issue_fields::is_closing_status`. Statuses unknown to both
+/// (typos, removed enum values) classify as `Active` — the lenient
+/// default chosen so a stray status doesn't get auto-stamped with
+/// `closed:` or banished to the closed bucket.
+pub fn status_class(schema: &Schema, status: &str) -> StatusClass {
+    if let Some(class) = schema.status_classes.get(status) {
+        return *class;
+    }
+    if crate::issue_fields::is_closing_status(status) {
+        StatusClass::Closing
+    } else {
+        StatusClass::Active
+    }
+}
+
+/// Convenience wrapper: `true` when `status` should receive the
+/// closing-side lifecycle treatment (directory bucket, `closed:`
+/// stamp, doctor consistency).
+pub fn is_closing(schema: &Schema, status: &str) -> bool {
+    status_class(schema, status) == StatusClass::Closing
 }
 
 /// Project the `status` field's allowed-value enum into a set. Used
@@ -794,6 +855,62 @@ mod tests {
             type_spec.allowed.is_none(),
             "redeclaring `type` without `enum:` must drop the built-in enum (whole-spec replace)"
         );
+    }
+
+    #[test]
+    fn status_class_built_in_closing_is_closing() {
+        // Regression: built-in `done` / `wontfix` keep classifying as
+        // closing even when the schema declares no `status_classes:`.
+        let s = default_schema();
+        assert_eq!(status_class(&s, "done"), StatusClass::Closing);
+        assert_eq!(status_class(&s, "wontfix"), StatusClass::Closing);
+        assert_eq!(status_class(&s, "open"), StatusClass::Active);
+        assert_eq!(status_class(&s, "in-progress"), StatusClass::Active);
+    }
+
+    #[test]
+    fn status_class_custom_closing_status_routes_through_schema() {
+        // A project that declares `archived` as closing in
+        // `status_classes:` gets the closing-side classification.
+        let yaml = "version: 1\nstatus_classes:\n  archived: closing\n  verified: active\n";
+        let schema: Schema = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(status_class(&schema, "archived"), StatusClass::Closing);
+        assert!(is_closing(&schema, "archived"));
+        assert_eq!(status_class(&schema, "verified"), StatusClass::Active);
+        assert!(!is_closing(&schema, "verified"));
+        // Built-ins still classify correctly through the same schema.
+        assert!(is_closing(&schema, "done"));
+        assert!(!is_closing(&schema, "open"));
+    }
+
+    #[test]
+    fn status_class_unknown_status_defaults_to_active() {
+        // Schema present but doesn't declare the status's class, AND
+        // it isn't in the built-in fallback. Lenient default: active —
+        // chosen so a stray status doesn't get auto-stamped with
+        // `closed:` or banished to the closed directory bucket.
+        let s = default_schema();
+        assert_eq!(status_class(&s, "ufo"), StatusClass::Active);
+    }
+
+    #[test]
+    fn load_merges_user_status_classes_with_defaults() {
+        // The user can extend the lifecycle taxonomy with custom
+        // statuses without restating the built-in `status` enum or
+        // re-declaring the built-in classifications.
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nstatus_classes:\n  archived: closing\n",
+        )
+        .unwrap();
+        let schema = load(tmp.path()).unwrap();
+        assert!(is_closing(&schema, "archived"));
+        // Built-in `done` still classifies through the fallback.
+        assert!(is_closing(&schema, "done"));
+        // Built-in `open` stays active.
+        assert!(!is_closing(&schema, "open"));
     }
 
     #[test]

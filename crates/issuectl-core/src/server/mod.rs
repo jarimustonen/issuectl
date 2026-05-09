@@ -993,7 +993,8 @@ mod tests {
         let p = root.join("issues").join(slug).join("item.md");
         let parsed = crate::parser::parse_item_md_with_warnings(&p, slug, "open");
         let mut issue = parsed.issue;
-        issue.folder = crate::repo::folder_for_status(&issue.status).to_string();
+        let schema = crate::schema::default_schema();
+        issue.folder = crate::repo::folder_for_status(&schema, &issue.status).to_string();
         crate::canonical::canonical_hash(&issue)
     }
 

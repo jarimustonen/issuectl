@@ -520,8 +520,10 @@ fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
     };
 
     let parsed = crate::parser::parse_item_md_text_with_warnings(&text, slug, "open", &item_path);
+    let schema = crate::schema::load(root)
+        .unwrap_or_else(|_| std::sync::Arc::new(crate::schema::default_schema()));
     if !parsed.warnings.is_empty() {
-        let derived_folder = crate::repo::folder_for_status(&parsed.issue.status).to_string();
+        let derived_folder = crate::repo::folder_for_status(&schema, &parsed.issue.status).to_string();
         let warnings = parsed
             .warnings
             .into_iter()
@@ -536,7 +538,7 @@ fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
     }
 
     let mut issue = parsed.issue;
-    issue.folder = crate::repo::folder_for_status(&issue.status).to_string();
+    issue.folder = crate::repo::folder_for_status(&schema, &issue.status).to_string();
     let version = crate::canonical::canonical_hash(&issue);
     ParseOutcome::Loaded {
         summary: Box::new(IssueSummary::from(issue)),

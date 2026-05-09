@@ -149,8 +149,13 @@ pub fn find_repo_root(start: Option<&Path>) -> PathBuf {
 /// Folder bucket derived from frontmatter status. The on-disk layout is
 /// flat (`issues/<slug>/item.md`); `folder` survives in payloads as a
 /// computed kanban-bucket label so existing CLI/web filters keep working.
-pub fn folder_for_status(status: &str) -> &'static str {
-    if crate::issue_fields::is_closing_status(status) {
+///
+/// Schema-aware: a project that declares a custom closing status (e.g.
+/// `archived`) via `status_classes:` in `issues/.schema.yaml` gets that
+/// status bucketed as `closed`. Built-in statuses fall back to
+/// `issue_fields::is_closing_status` when the schema is silent.
+pub fn folder_for_status(schema: &crate::schema::Schema, status: &str) -> &'static str {
+    if crate::schema::is_closing(schema, status) {
         "closed"
     } else {
         "open"
@@ -310,11 +315,13 @@ fn check_dir(dir: &Path, canon_root: Option<&Path>) -> Option<ItemCheck> {
 /// Load all issues from the flat layout (and legacy compat paths).
 pub fn load_issues(repo_root: &Path) -> Vec<Issue> {
     let mut result = Vec::new();
+    let schema = crate::schema::load(repo_root)
+        .unwrap_or_else(|_| std::sync::Arc::new(crate::schema::default_schema()));
     for slug in discover_slugs(repo_root) {
         match resolve_layout(repo_root, &slug) {
             LayoutState::Flat { item_path } => {
                 let mut issue = parser::parse_item_md(&item_path, &slug, "open");
-                issue.folder = folder_for_status(&issue.status).to_string();
+                issue.folder = folder_for_status(&schema, &issue.status).to_string();
                 result.push(issue);
             }
             LayoutState::Legacy { item_path, folder } => {
@@ -322,7 +329,7 @@ pub fn load_issues(repo_root: &Path) -> Vec<Issue> {
                     "Warning: {slug} found at legacy path issues/{folder}/{slug}/ — run `issuectl doctor --fix`"
                 );
                 let mut issue = parser::parse_item_md(&item_path, &slug, "open");
-                issue.folder = folder_for_status(&issue.status).to_string();
+                issue.folder = folder_for_status(&schema, &issue.status).to_string();
                 result.push(issue);
             }
             LayoutState::Ambiguous { paths } => {
@@ -348,14 +355,17 @@ pub fn load_issues(repo_root: &Path) -> Vec<Issue> {
 pub fn load_issues_with_warnings(repo_root: &Path) -> (Vec<Issue>, Vec<LoadWarning>) {
     let mut issues = Vec::new();
     let mut warnings = Vec::new();
+    let schema = crate::schema::load(repo_root)
+        .unwrap_or_else(|_| std::sync::Arc::new(crate::schema::default_schema()));
 
     for slug in discover_slugs(repo_root) {
         match resolve_layout(repo_root, &slug) {
             LayoutState::Flat { item_path } => {
-                push_issue_with_parse(&slug, &item_path, false, None, &mut issues, &mut warnings);
+                push_issue_with_parse(&schema, &slug, &item_path, false, None, &mut issues, &mut warnings);
             }
             LayoutState::Legacy { folder, item_path } => {
                 push_issue_with_parse(
+                    &schema,
                     &slug,
                     &item_path,
                     true,
@@ -396,6 +406,7 @@ pub fn load_issues_with_warnings(repo_root: &Path) -> (Vec<Issue>, Vec<LoadWarni
 }
 
 fn push_issue_with_parse(
+    schema: &crate::schema::Schema,
     slug: &str,
     item_path: &Path,
     legacy: bool,
@@ -404,7 +415,7 @@ fn push_issue_with_parse(
     warnings: &mut Vec<LoadWarning>,
 ) {
     let parsed = parser::parse_item_md_with_warnings(item_path, slug, "open");
-    let derived_folder = folder_for_status(&parsed.issue.status);
+    let derived_folder = folder_for_status(schema, &parsed.issue.status);
     for w in parsed.warnings {
         warnings.push(LoadWarning {
             slug: slug.to_string(),
@@ -490,7 +501,9 @@ pub fn locate_issue(repo_root: &Path, slug: &str) -> Result<(String, PathBuf)> {
     // on-disk folder name. A `status: fixed` issue at `issues/open/foo/`
     // surfaces as folder = "closed".
     let issue = parser::parse_item_md(&located.item_path, slug, "open");
-    let folder = folder_for_status(&issue.status).to_string();
+    let schema = crate::schema::load(repo_root)
+        .unwrap_or_else(|_| std::sync::Arc::new(crate::schema::default_schema()));
+    let folder = folder_for_status(&schema, &issue.status).to_string();
     Ok((folder, located.item_path))
 }
 
@@ -498,7 +511,9 @@ pub fn locate_issue(repo_root: &Path, slug: &str) -> Result<(String, PathBuf)> {
 pub fn load_issue(repo_root: &Path, slug: &str) -> Result<Issue> {
     let located = locate_issue_full(repo_root, slug)?;
     let mut issue = parser::parse_item_md(&located.item_path, slug, "open");
-    issue.folder = folder_for_status(&issue.status).to_string();
+    let schema = crate::schema::load(repo_root)
+        .unwrap_or_else(|_| std::sync::Arc::new(crate::schema::default_schema()));
+    issue.folder = folder_for_status(&schema, &issue.status).to_string();
     Ok(issue)
 }
 
