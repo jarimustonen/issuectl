@@ -1,9 +1,9 @@
 ---
 created: 2026-05-08
-updated: 2026-05-08
+updated: 2026-05-09
 type: chore
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 epic: exorbitantly-ill-apples
 labels: [release-v0.5.0]
