@@ -24,7 +24,7 @@ When v0.6.0 planning starts:
 3. Rank the rest by value-to-cost.
 4. Decide a cut line; move the tail to v0.7.0 or close as `wontfix`.
 
-## Issues (29 candidates, grouped by theme)
+## Issues (30 candidates, grouped by theme)
 
 ### Workflow / planning
 - [ ] @uncommonly-cooing-badge — Dependency tracking: canonical `blocked_by` + cycle detection + dependency-aware queries
@@ -67,6 +67,9 @@ When v0.6.0 planning starts:
 ### Content / interop
 - [ ] @terrifically-minor-quiver — Issue-local attachments + fixtures dirs
 - [ ] @amazingly-certain-competition — Import / export (GitHub, JSON, CSV, markdown)
+
+### Architecture / refactor
+- [ ] @hugely-madly-haircut — Replace thread-local schema/transitions cache activation with explicit injection (spin-off from @deeply-wistful-beam)
 
 ### Discuss / maybe-don't-build
 - [ ] @somewhat-heady-zephyr — Per-issue `events.jsonl` log (only if v0.5.0 git-derived activity proves insufficient)
