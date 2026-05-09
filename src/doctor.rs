@@ -17,41 +17,218 @@ use crate::slug;
 use crate::write;
 use crate::{execute_migrate_layout_plan, plan_migrate_layout, MigrateConflict, MigrateMove};
 
-/// Decide whether an issue directory is in the legacy numbered layout and,
-/// if so, return its numeric id.
+/// Single-pass scanner snapshot (D7). Doctor previously re-walked
+/// `issues/` once per check category (legacy detection, schema
+/// validation, transition warnings, body sections, orphan epic refs,
+/// status reconciliation, …). For repos with hundreds of issues the
+/// duplicate I/O dominated the runtime; collapsing it into one read
+/// and one parse pass is the point of this struct + `scan_issues`.
+struct ScannedIssue {
+    /// Directory basename (post-flat-layout slug, or legacy `<NN>-<slug>`).
+    dir_name: String,
+    /// Kanban-bucket axis — `"flat"`, `"open"`, or `"closed"`.
+    folder: String,
+    /// The issue directory itself (`issues/<...>/<dir_name>`).
+    dir_path: PathBuf,
+    item_path: PathBuf,
+    item_present: bool,
+    /// `Some(msg)` when `item_path.is_file()` but the read failed.
+    read_error: Option<String>,
+    /// Raw `item.md` text. `None` if absent or unreadable.
+    text: Option<String>,
+    /// Frontmatter as a free-form YAML mapping. `None` when absent or
+    /// unparseable as a mapping.
+    mapping: Option<serde_yaml::Mapping>,
+    /// Text exists but no `---...---` frontmatter block.
+    fm_missing: bool,
+    /// Frontmatter extracted but YAML parse failed; carries the message
+    /// in the same form `collect_schema_violations` used to emit.
+    fm_yaml_error: Option<String>,
+    /// `parser::parse_item_md_text_with_warnings` output. `None` only
+    /// when the file could not be read or wasn't present.
+    parsed: Option<parser::ParsedItem>,
+    /// `Some(n)` when this directory is a legacy `<NN>-<slug>`
+    /// migration candidate; see `legacy_number_from_mapping`.
+    legacy_number: Option<u32>,
+}
+
+struct ScanResult {
+    issues: Vec<ScannedIssue>,
+    /// Symlinked entries directly under `issues/`, `issues/open/`, or
+    /// `issues/closed/`.
+    symlinked_dirs: Vec<String>,
+    /// Orphan `.issuectl-tmp-*` files anywhere in the issues tree.
+    tempfiles: Vec<PathBuf>,
+}
+
+/// Decide whether an issue directory is in the legacy numbered layout
+/// and, if so, return its numeric id.
 ///
 /// Two legacy variants exist in the wild:
 ///
-/// 1. **Explicit:** frontmatter carries a numeric `number:` field. This is
-///    the form `issuectl new` produced before the slug migration.
+/// 1. **Explicit:** frontmatter carries a numeric `number:` field.
 /// 2. **Implicit:** the number lives only in the dirname (`<NN>-<slug>/`)
-///    and frontmatter has neither `number:` nor `slug:`. Repos that
-///    pre-date the `number:` field at all (early grooveserve issues) look
-///    like this.
+///    and frontmatter has neither `number:` nor `slug:`.
 ///
 /// A user-supplied slug like `--slug 100-things-to-fix` matches the
-/// dirname pattern but carries `slug:` in frontmatter — so requiring the
-/// absence of `slug:` keeps us from migrating those.
-fn legacy_number(item_path: &Path, dir_name: &str) -> Option<u32> {
-    // Try to parse frontmatter; treat missing/malformed frontmatter as
-    // "no fields" rather than bailing out — pre-`number:` repos sometimes
-    // have item.md without YAML at all.
-    let fm: parser::Frontmatter = std::fs::read_to_string(item_path)
-        .ok()
-        .and_then(|text| {
-            let trimmed = text.trim_start();
-            let rest = trimmed.strip_prefix("---")?;
-            let end = rest.find("\n---")?;
-            serde_yaml::from_str(&rest[..end]).ok()
-        })
-        .unwrap_or_default();
-    if let Some(n) = fm.number {
-        return Some(n);
-    }
-    if fm.slug.is_some() {
-        return None;
+/// dirname pattern but carries `slug:` in frontmatter — so the
+/// presence of a string-typed `slug:` keeps us from migrating those.
+fn legacy_number_from_mapping(
+    mapping: Option<&serde_yaml::Mapping>,
+    dir_name: &str,
+) -> Option<u32> {
+    if let Some(m) = mapping {
+        if let Some(v) = m.get(serde_yaml::Value::String("number".into())) {
+            if let Some(n) = v.as_u64().and_then(|u| u32::try_from(u).ok()) {
+                return Some(n);
+            }
+        }
+        if m.get(serde_yaml::Value::String("slug".into()))
+            .and_then(|v| v.as_str())
+            .is_some()
+        {
+            return None;
+        }
     }
     parser::parse_legacy_dir(dir_name).map(|(n, _)| n)
+}
+
+/// One canonical walk over `issues/`: read every `item.md` once, parse
+/// frontmatter once, run the typed parser once. Each downstream check
+/// consumes this slice instead of re-reading from disk.
+fn scan_issues(repo_root: &Path) -> Result<ScanResult> {
+    let mut issues = Vec::new();
+    let mut symlinked_dirs = Vec::new();
+    let mut tempfiles = Vec::new();
+    let issues_dir = repo_root.join("issues");
+    if !issues_dir.is_dir() {
+        return Ok(ScanResult {
+            issues,
+            symlinked_dirs,
+            tempfiles,
+        });
+    }
+    collect_issue_dir(
+        &issues_dir,
+        "flat",
+        &mut issues,
+        &mut symlinked_dirs,
+        &mut tempfiles,
+    )?;
+    collect_issue_dir(
+        &issues_dir.join("open"),
+        "open",
+        &mut issues,
+        &mut symlinked_dirs,
+        &mut tempfiles,
+    )?;
+    collect_issue_dir(
+        &issues_dir.join("closed"),
+        "closed",
+        &mut issues,
+        &mut symlinked_dirs,
+        &mut tempfiles,
+    )?;
+    Ok(ScanResult {
+        issues,
+        symlinked_dirs,
+        tempfiles,
+    })
+}
+
+fn collect_issue_dir(
+    dir: &Path,
+    folder: &str,
+    issues: &mut Vec<ScannedIssue>,
+    symlinked_dirs: &mut Vec<String>,
+    tempfiles: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)
+        .with_context(|| format!("cannot read {}", dir.display()))?
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        if name.starts_with(".issuectl-tmp-") {
+            tempfiles.push(path);
+            continue;
+        }
+        let Ok(ftype) = entry.file_type() else { continue };
+        if ftype.is_symlink() {
+            symlinked_dirs.push(format!("{folder}/{name}"));
+            continue;
+        }
+        if !ftype.is_dir() {
+            continue;
+        }
+        if folder == "flat" && (name == "open" || name == "closed" || name == "archive") {
+            continue;
+        }
+        // Tempfiles can also live next to item.md.
+        if let Ok(rd) = fs::read_dir(&path) {
+            for inner in rd.flatten() {
+                let iname = inner.file_name().to_string_lossy().to_string();
+                if iname.starts_with(".issuectl-tmp-") {
+                    tempfiles.push(inner.path());
+                }
+            }
+        }
+        let item_path = path.join("item.md");
+        let item_present = item_path.is_file();
+        let mut text: Option<String> = None;
+        let mut read_error: Option<String> = None;
+        let mut mapping: Option<serde_yaml::Mapping> = None;
+        let mut fm_missing = false;
+        let mut fm_yaml_error: Option<String> = None;
+        let mut parsed: Option<parser::ParsedItem> = None;
+        if item_present {
+            match fs::read_to_string(&item_path) {
+                Ok(t) => {
+                    let (fm, _body) = parser::split_frontmatter(&t);
+                    match fm {
+                        None => fm_missing = true,
+                        Some(yaml) => match serde_yaml::from_str::<serde_yaml::Mapping>(yaml) {
+                            Ok(m) => mapping = Some(m),
+                            Err(e) => {
+                                fm_yaml_error =
+                                    Some(format!("invalid frontmatter YAML: {e}"));
+                            }
+                        },
+                    }
+                    parsed = Some(parser::parse_item_md_text_with_warnings(
+                        &t, &name, folder, &item_path,
+                    ));
+                    text = Some(t);
+                }
+                Err(e) => {
+                    read_error = Some(format!("cannot read {}: {}", item_path.display(), e));
+                }
+            }
+        }
+        let legacy_number = if item_present {
+            legacy_number_from_mapping(mapping.as_ref(), &name)
+        } else {
+            None
+        };
+        issues.push(ScannedIssue {
+            dir_name: name,
+            folder: folder.to_string(),
+            dir_path: path,
+            item_path,
+            item_present,
+            read_error,
+            text,
+            mapping,
+            fm_missing,
+            fm_yaml_error,
+            parsed,
+            legacy_number,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -269,144 +446,31 @@ fn has_critical_findings(report: &DoctorReport) -> bool {
 
 fn scan(repo_root: &Path) -> Result<DoctorReport> {
     let mut report = DoctorReport::default();
-    let issues_dir = repo_root.join("issues");
+    let scan = scan_issues(repo_root)?;
 
-    let mut all_slugs: BTreeMap<String, usize> = BTreeMap::new();
+    populate_slug_and_legacy(&scan, repo_root, &mut report);
+    populate_orphan_epic_refs(&scan, &mut report);
 
-    // Post-flat-layout: walk the canonical `issues/<slug>/` paths plus
-    // the legacy `issues/{open,closed}/<slug>/` ones for backward-compat
-    // reads. The `folder` axis fed downstream is the kanban-bucket label
-    // (legacy-folder name when reading legacy paths; "flat" otherwise).
-    let mut entries: Vec<(String, std::path::PathBuf, String)> = Vec::new();
-    if let Ok(rd) = fs::read_dir(&issues_dir) {
-        for entry in rd.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name == "open" || name == "closed" || name == "archive" {
-                continue;
-            }
-            entries.push((name, entry.path(), "flat".to_string()));
-        }
-    }
-    for legacy in ["open", "closed"] {
-        let folder_path = issues_dir.join(legacy);
-        if !folder_path.is_dir() {
-            continue;
-        }
-        for entry in fs::read_dir(&folder_path)
-            .with_context(|| format!("cannot read {}", folder_path.display()))?
-            .flatten()
-        {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            entries.push((name, entry.path(), legacy.to_string()));
-        }
-    }
-
-    for (dir_name, path, folder_owned) in entries {
-        let folder = folder_owned.as_str();
-        {
-            let item_path = path.join("item.md");
-            let item_present = item_path.is_file();
-
-            // See `legacy_number` for the detection rules.
-            let legacy = if item_present {
-                legacy_number(&item_path, &dir_name)
-            } else {
-                None
-            };
-
-            if let Some(number) = legacy {
-                let new_slug = slug::generate_unique(repo_root);
-                // Always migrate to the canonical flat path — even if
-                // the legacy `<NN>-<slug>` dir lives under
-                // `issues/{open,closed}/`, doctor `--fix` should bring
-                // it forward to the post-flat-layout home in one pass.
-                let new_path = issues_dir.join(&new_slug);
-                report.legacy_dirs.push(LegacyMigration {
-                    folder: folder.to_string(),
-                    old_dir_name: dir_name.clone(),
-                    old_path: path.clone(),
-                    new_slug: new_slug.clone(),
-                    new_path,
-                    old_number: number,
-                });
-                *all_slugs.entry(new_slug).or_insert(0) += 1;
-            } else {
-                // Report invalid slug + duplicate even when item.md is missing —
-                // the directory is still a problem worth flagging in one pass.
-                if !slug::is_valid(&dir_name) {
-                    report.invalid_slugs.push(format!("{folder}/{dir_name}"));
-                }
-                *all_slugs.entry(dir_name.clone()).or_insert(0) += 1;
-            }
-
-            if !item_present {
-                report.missing_item_md.push(format!("{folder}/{dir_name}"));
-                continue;
-            }
-
-            // Surface parse warnings without printing them to stderr (the
-            // CLI report includes them at the end). Skip for legacy dirs:
-            // the migration pass rewrites their frontmatter anyway, and a
-            // missing slug/number combo would be flagged as a parse warning
-            // for every legacy issue otherwise.
-            if legacy.is_none() {
-                let parsed = parser::parse_item_md_with_warnings(&item_path, &dir_name, folder);
-                for w in parsed.warnings {
-                    report
-                        .parse_errors
-                        .push((format!("{folder}/{dir_name}"), w));
-                }
-            }
-        }
-    }
-
-    for (s, n) in &all_slugs {
-        if *n > 1 {
-            report.duplicate_slugs.push(s.clone());
-        }
-    }
-
-    detect_orphan_epic_refs(repo_root, &mut report)?;
-
-    // Schema validation. Walk the same set of dirs again — cheap; the
-    // alternative (interleaving with the legacy_dirs pass) muddles the
-    // flow and obscures that schema checks ignore legacy issues (their
-    // frontmatter is rewritten by --fix anyway).
     report.schema_missing = !schema::schema_path(repo_root).is_file();
-    let schema = match schema::load(repo_root) {
+    let schema_value = match schema::load(repo_root) {
         Ok(s) => Some(s),
         Err(e) => {
             report.schema_parse_error = Some(e.to_string());
             None
         }
     };
-    if let Some(schema) = schema {
-        collect_schema_violations(repo_root, &schema, &mut report)?;
+    if let Some(s) = schema_value.as_ref() {
+        populate_schema_violations(&scan, repo_root, s, &mut report);
     }
 
     // Transition rules + body-section linting. Both are warning-only
-    // (legacy data may pre-date the rules). Loader returns lenient
-    // defaults when the file is missing, so a repo that hasn't opted
-    // in sees no extra noise. Body-section requirements live in the
-    // schema (`issues/.schema.yaml`); transition rules in
-    // `.issuectl/transitions.yaml`.
-    // Pull the schema again here even though `collect_schema_violations`
-    // already loaded it — that helper consumed by-value, and re-loading
-    // is cheap (one file read).
-    let schema_for_sections = schema::load(repo_root).ok();
+    // (legacy data may pre-date the rules).
     let rules = match crate::transitions::load(repo_root) {
         Ok(r) => {
             // N2: cross-validate status references against the schema
-            // enum so a typo'd status surfaces here too, not just in
-            // mutate paths.
-            if let Some(schema) = schema_for_sections.as_ref() {
-                let universe = schema::status_universe(schema);
+            // enum so a typo'd status surfaces here too.
+            if let Some(s) = schema_value.as_ref() {
+                let universe = schema::status_universe(s);
                 if let Err(e) = crate::transitions::validate_status_refs(&r, &universe) {
                     report.parse_errors.push((
                         crate::transitions::RULES_RELATIVE_PATH.to_string(),
@@ -428,13 +492,13 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
             None
         }
     };
-    if rules.is_some() || schema_for_sections.is_some() {
-        collect_transition_warnings(
-            repo_root,
+    if rules.is_some() || schema_value.is_some() {
+        populate_transition_warnings(
+            &scan,
             rules.as_ref(),
-            schema_for_sections.as_ref(),
+            schema_value.as_ref(),
             &mut report,
-        )?;
+        );
         // M2: stable, deterministic ordering for CLI text + JSON +
         // tests. `read_dir` traversal order is platform-dependent.
         report.transition_warnings.sort();
@@ -474,94 +538,128 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
 
     // Round-2 finding O6: read-only `doctor` must surface pending
     // Notes migrations and conflicts so users see the work even
-    // before running `--fix`. Read-only — no filesystem mutation.
-    plan_notes_migration(repo_root, &mut report)?;
+    // before running `--fix`.
+    populate_notes_migration(&scan, &mut report);
 
-    extended_validation(repo_root, &mut report)?;
+    populate_extended_validation(&scan, repo_root, &mut report);
 
     Ok(report)
 }
 
-/// Run the v0.5.0 validation suite (reference integrity, status/closed
-/// consistency, timestamp sanity, unknown-key flagging, conflict
-/// markers, orphan tempfiles, symlinked dirs, status-folder
-/// mismatches) over flat-layout and legacy-folder issues. Read-only.
-fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
-    use chrono::NaiveDate;
-
+/// Slug uniqueness, legacy-migration plan, missing-item-md, parse
+/// warnings, invalid slug detection. Mirrors the original main scan
+/// loop but consumes `ScanResult` instead of re-reading from disk.
+fn populate_slug_and_legacy(scan: &ScanResult, repo_root: &Path, report: &mut DoctorReport) {
     let issues_dir = repo_root.join("issues");
-    if !issues_dir.is_dir() {
-        return Ok(());
-    }
+    let mut all_slugs: BTreeMap<String, usize> = BTreeMap::new();
 
-    // Discover { slug → (folder, item_path) } across flat + legacy. Slugs
-    // present at both `open/` and `closed/` are surfaced separately; other
-    // multi-presence cases continue to flow through `duplicate_slugs` and
-    // the existing flat-layout migration plan.
-    let mut by_slug: BTreeMap<String, Vec<(String, PathBuf)>> = BTreeMap::new();
-    let mut symlinked: Vec<String> = Vec::new();
-    let mut tempfiles: Vec<PathBuf> = Vec::new();
-
-    let mut visit = |dir: &Path, folder: &str| -> Result<()> {
-        if !dir.is_dir() {
-            return Ok(());
+    for s in &scan.issues {
+        let location = format!("{}/{}", s.folder, s.dir_name);
+        if let Some(number) = s.legacy_number {
+            let new_slug = slug::generate_unique(repo_root);
+            // Always migrate to the canonical flat path — even if the
+            // legacy `<NN>-<slug>` dir lives under
+            // `issues/{open,closed}/`, doctor `--fix` should bring it
+            // forward to the post-flat-layout home in one pass.
+            let new_path = issues_dir.join(&new_slug);
+            report.legacy_dirs.push(LegacyMigration {
+                folder: s.folder.clone(),
+                old_dir_name: s.dir_name.clone(),
+                old_path: s.dir_path.clone(),
+                new_slug: new_slug.clone(),
+                new_path,
+                old_number: number,
+            });
+            *all_slugs.entry(new_slug).or_insert(0) += 1;
+        } else {
+            // Report invalid slug + duplicate even when item.md is
+            // missing — the directory is still a problem worth flagging.
+            if !slug::is_valid(&s.dir_name) {
+                report.invalid_slugs.push(location.clone());
+            }
+            *all_slugs.entry(s.dir_name.clone()).or_insert(0) += 1;
         }
-        for entry in fs::read_dir(dir)?.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let path = entry.path();
-            // Orphan tempfiles can appear at any level. Filter early
-            // and recurse for tempfile collection too.
-            if name.starts_with(".issuectl-tmp-") {
-                tempfiles.push(path.clone());
-                continue;
-            }
-            let ftype = entry.file_type()?;
-            if ftype.is_symlink() {
-                // Surface every symlink under issues/ regardless of
-                // target validity. A broken or non-directory symlink
-                // is still a foreign filesystem entry doctor cannot
-                // process safely.
-                symlinked.push(format!("{folder}/{name}"));
-                continue;
-            }
-            if !ftype.is_dir() {
-                continue;
-            }
-            if folder == "flat" && (name == "open" || name == "closed" || name == "archive") {
-                continue;
-            }
-            // Recurse one level into the issue dir to collect tempfiles
-            // sitting next to item.md.
-            if let Ok(rd) = fs::read_dir(&path) {
-                for inner in rd.flatten() {
-                    let iname = inner.file_name().to_string_lossy().to_string();
-                    if iname.starts_with(".issuectl-tmp-") {
-                        tempfiles.push(inner.path());
-                    }
+
+        if !s.item_present {
+            report.missing_item_md.push(location);
+            continue;
+        }
+
+        // Surface parse warnings without printing them to stderr.
+        // Skip for legacy dirs: the migration pass rewrites their
+        // frontmatter anyway, and a missing slug/number combo would
+        // otherwise be flagged for every legacy issue.
+        if s.legacy_number.is_none() {
+            if let Some(parsed) = &s.parsed {
+                for w in &parsed.warnings {
+                    report.parse_errors.push((location.clone(), w.clone()));
                 }
             }
-            let item = path.join("item.md");
-            if !item.is_file() {
-                continue;
-            }
-            by_slug
-                .entry(name.clone())
-                .or_default()
-                .push((folder.to_string(), item));
         }
-        Ok(())
-    };
-    visit(&issues_dir, "flat")?;
-    visit(&issues_dir.join("open"), "open")?;
-    visit(&issues_dir.join("closed"), "closed")?;
+    }
 
-    report.symlinked_dirs = symlinked;
-    report.orphan_tempfiles = tempfiles;
+    for (slug_name, n) in &all_slugs {
+        if *n > 1 {
+            report.duplicate_slugs.push(slug_name.clone());
+        }
+    }
+}
+
+/// Orphan epic-reference detection. Uses the cached parser output for
+/// each issue rather than re-reading every `item.md`.
+fn populate_orphan_epic_refs(scan: &ScanResult, report: &mut DoctorReport) {
+    let mut existing_slugs: BTreeSet<String> = BTreeSet::new();
+    for s in &scan.issues {
+        existing_slugs.insert(s.dir_name.clone());
+        if let Some((_, rest)) = parser::parse_legacy_dir(&s.dir_name) {
+            existing_slugs.insert(rest);
+        }
+    }
+    for s in &scan.issues {
+        if !s.item_present {
+            continue;
+        }
+        let Some(parsed) = &s.parsed else { continue };
+        if let Some(epic) = parsed.issue.epic.as_deref() {
+            let stripped = epic.strip_prefix('@').unwrap_or(epic);
+            let exists = existing_slugs.contains(stripped) || stripped.parse::<u32>().is_ok();
+            if !exists {
+                report
+                    .orphan_epic_refs
+                    .push((s.dir_name.clone(), epic.to_string()));
+            }
+        }
+    }
+}
+
+/// v0.5.0 validation suite (reference integrity, status/closed
+/// consistency, timestamp sanity, unknown-key flagging, conflict
+/// markers, orphan tempfiles, symlinked dirs, status-folder
+/// mismatches). Reads no files — operates entirely on the cached
+/// `ScanResult`.
+fn populate_extended_validation(
+    scan: &ScanResult,
+    repo_root: &Path,
+    report: &mut DoctorReport,
+) {
+    use chrono::NaiveDate;
+
+    report.symlinked_dirs = scan.symlinked_dirs.clone();
+    report.orphan_tempfiles = scan.tempfiles.clone();
+
+    // Group present-issue records by slug across flat + legacy folders.
+    let mut by_slug: BTreeMap<String, Vec<&ScannedIssue>> = BTreeMap::new();
+    for s in &scan.issues {
+        if !s.item_present {
+            continue;
+        }
+        by_slug.entry(s.dir_name.clone()).or_default().push(s);
+    }
 
     // Both open/<slug> AND closed/<slug>: ambiguous; never auto-fix.
     for (slug, hits) in &by_slug {
-        let has_open = hits.iter().any(|(f, _)| f == "open");
-        let has_closed = hits.iter().any(|(f, _)| f == "closed");
+        let has_open = hits.iter().any(|h| h.folder == "open");
+        let has_closed = hits.iter().any(|h| h.folder == "closed");
         if has_open && has_closed {
             report.both_open_and_closed.push(slug.clone());
         }
@@ -598,36 +696,28 @@ fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()
     }
 
     let today = chrono::Local::now().date_naive();
-
-    // Per-issue inspection: parse YAML mapping once, check each rule.
-    let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let existing_slugs: BTreeSet<String> = by_slug.keys().cloned().collect();
+    let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for (slug, hits) in &by_slug {
-        // For status reconciliation we want to look at *every* legacy
-        // path occurrence; for the rest, the canonical (flat) hit if
-        // any, else the first legacy hit.
-        let primary = hits
+        // For status reconciliation we want every legacy path
+        // occurrence; for the rest, the canonical (flat) hit if any,
+        // else the first legacy hit.
+        let primary: &ScannedIssue = hits
             .iter()
-            .find(|(f, _)| f == "flat")
-            .or_else(|| hits.first())
-            .unwrap();
-        let item_path = &primary.1;
-        let text = match fs::read_to_string(item_path) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
+            .find(|h| h.folder == "flat")
+            .copied()
+            .unwrap_or(hits[0]);
 
-        if has_conflict_markers(&text) {
+        let Some(text) = primary.text.as_deref() else {
+            continue;
+        };
+        if has_conflict_markers(text) {
             report.conflict_markers.push(slug.clone());
         }
 
-        let Some(fm_text) = parser::split_frontmatter(&text).0 else {
+        let Some(fm) = primary.mapping.as_ref() else {
             continue;
-        };
-        let fm = match serde_yaml::from_str::<serde_yaml::Mapping>(fm_text) {
-            Ok(fm) => fm,
-            Err(_) => continue, // already surfaced as parse_errors elsewhere
         };
 
         // Unknown-key flagging.
@@ -716,11 +806,6 @@ fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()
             if bare.is_empty() {
                 return None;
             }
-            // Numeric refs survive only as legacy artefacts. The
-            // legacy-migration path rewrites them during --fix, but
-            // flat-layout repos and post-migration leftovers will
-            // never see another rewrite. Surface them as broken so the
-            // user knows they exist.
             if bare.chars().all(|c| c.is_ascii_digit()) {
                 return Some(format!("{bare} (legacy numeric ref)"));
             }
@@ -734,9 +819,6 @@ fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()
         };
 
         if let Some(epic_v) = fm.get(serde_yaml::Value::String("epic".into())) {
-            // Accept string and numeric (legacy) values; coerce numeric
-            // to its decimal string form so check_ref can flag it as a
-            // legacy ref.
             let epic_str = match epic_v {
                 serde_yaml::Value::String(s) => Some(s.clone()),
                 serde_yaml::Value::Number(n) => Some(n.to_string()),
@@ -758,11 +840,9 @@ fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()
                 for item in seq {
                     if let Some(s) = item.as_str() {
                         if let Some(missing) = check_ref(s) {
-                            report.broken_refs.push((
-                                slug.clone(),
-                                key.to_string(),
-                                missing,
-                            ));
+                            report
+                                .broken_refs
+                                .push((slug.clone(), key.to_string(), missing));
                         } else if key == "blocked_by" {
                             let bare =
                                 s.trim().strip_prefix('@').unwrap_or(s.trim()).to_string();
@@ -778,31 +858,19 @@ fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()
             }
         }
 
-        // Status/folder reconciliation (legacy folders only). Re-read
-        // each hit's own frontmatter — the `status` parsed above is
-        // from `primary` and applies only to that file, not to other
-        // hits at different paths (a slug present in flat AND legacy
-        // can have divergent status fields).
-        //
-        // Skip slugs that are present in both legacy folders: they are
-        // human-attention only and the preflight in `apply()` refuses
-        // to --fix them.
-        let in_both_legacy_folders = hits.iter().any(|(f, _)| f == "open")
-            && hits.iter().any(|(f, _)| f == "closed");
+        // Status/folder reconciliation (legacy folders only). Use each
+        // hit's own cached mapping — a slug present in flat AND legacy
+        // can have divergent status fields.
+        let in_both_legacy_folders = hits.iter().any(|h| h.folder == "open")
+            && hits.iter().any(|h| h.folder == "closed");
         if in_both_legacy_folders {
             continue;
         }
-        for (f, ipath) in hits {
-            if f != "open" && f != "closed" {
+        for hit in hits {
+            if hit.folder != "open" && hit.folder != "closed" {
                 continue;
             }
-            let Ok(text) = fs::read_to_string(ipath) else {
-                continue;
-            };
-            let Some(fm_text) = parser::split_frontmatter(&text).0 else {
-                continue;
-            };
-            let Ok(fm) = serde_yaml::from_str::<serde_yaml::Mapping>(fm_text) else {
+            let Some(fm) = hit.mapping.as_ref() else {
                 continue;
             };
             let Some(hit_status) = fm
@@ -811,19 +879,19 @@ fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()
             else {
                 continue;
             };
-            match f.as_str() {
+            match hit.folder.as_str() {
                 "closed" if crate::ACTIVE_STATUSES.contains(&hit_status) => {
                     report.closed_with_active_status.push((
                         slug.clone(),
                         hit_status.to_string(),
-                        ipath.clone(),
+                        hit.item_path.clone(),
                     ));
                 }
                 "open" if crate::is_closing_status(hit_status) => {
                     report.open_with_closing_status.push((
                         slug.clone(),
                         hit_status.to_string(),
-                        ipath.clone(),
+                        hit.item_path.clone(),
                     ));
                 }
                 _ => {}
@@ -832,8 +900,6 @@ fn extended_validation(repo_root: &Path, report: &mut DoctorReport) -> Result<()
     }
 
     report.blocked_by_cycles = detect_cycles(&graph);
-
-    Ok(())
 }
 
 fn has_conflict_markers(text: &str) -> bool {
@@ -923,260 +989,130 @@ fn detect_cycles(graph: &BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
     found.into_iter().collect()
 }
 
-fn plan_notes_migration(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
-    let issues = repo_root.join("issues");
-    let Ok(rd) = fs::read_dir(&issues) else {
-        return Ok(());
-    };
-    for entry in rd.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+fn populate_notes_migration(scan: &ScanResult, report: &mut DoctorReport) {
+    for s in &scan.issues {
+        if s.folder != "flat" || !s.item_present {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if matches!(name.as_str(), "open" | "closed" | "archive") {
+        let Some(text) = s.text.as_deref() else {
             continue;
-        }
-        let item_path = entry.path().join("item.md");
-        if !item_path.is_file() {
-            continue;
-        }
-        let text = fs::read_to_string(&item_path)
-            .with_context(|| format!("cannot read {}", item_path.display()))?;
-        match classify_notes(&text) {
+        };
+        match classify_notes(text) {
             NotesScan::NoOp => {}
-            NotesScan::SafeRename => report.notes_to_rename.push(name),
-            NotesScan::Conflict => report.notes_conflicts.push(name),
+            NotesScan::SafeRename => report.notes_to_rename.push(s.dir_name.clone()),
+            NotesScan::Conflict => report.notes_conflicts.push(s.dir_name.clone()),
         }
     }
-    Ok(())
 }
 
-fn collect_schema_violations(
+fn populate_schema_violations(
+    scan: &ScanResult,
     repo_root: &Path,
     schema: &schema::Schema,
     report: &mut DoctorReport,
-) -> Result<()> {
-    let issues_dir = repo_root.join("issues");
-    let mut walk = |dir: &Path, folder: &str| -> Result<()> {
-        if !dir.is_dir() {
-            return Ok(());
+) {
+    for s in &scan.issues {
+        if !s.item_present {
+            continue;
         }
-        for entry in fs::read_dir(dir)?.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name == "open" || name == "closed" || name == "archive" {
-                continue;
-            }
-            let item = entry.path().join("item.md");
-            if !item.is_file() {
-                continue;
-            }
-            // Skip legacy <NN>-<slug> directories under the legacy
-            // `open/`/`closed/` folders — `--fix` rewrites their
-            // frontmatter, so flagging them is just noise. Don't apply
-            // the skip to the flat root: a flat issue named `7-alpha`
-            // is not legacy by location even though its name matches
-            // the legacy shape.
-            let in_legacy_folder = folder == "open" || folder == "closed";
-            if in_legacy_folder && parser::parse_legacy_dir(&name).is_some() {
-                continue;
-            }
-            let location = format!(
-                "{}",
-                item.strip_prefix(repo_root)
-                    .unwrap_or(&item)
-                    .display()
-            );
-            let text = match fs::read_to_string(&item) {
-                Ok(t) => t,
-                Err(e) => {
-                    report
-                        .parse_errors
-                        .push((location.clone(), format!("cannot read {}: {e}", item.display())));
-                    continue;
-                }
-            };
-            let Some(fm_text) = parser::split_frontmatter(&text).0 else {
-                report
-                    .parse_errors
-                    .push((location.clone(), "missing or unterminated frontmatter".into()));
-                continue;
-            };
-            let fm = match serde_yaml::from_str::<serde_yaml::Mapping>(fm_text) {
-                Ok(fm) => fm,
-                Err(e) => {
-                    report
-                        .parse_errors
-                        .push((location.clone(), format!("invalid frontmatter YAML: {e}")));
-                    continue;
-                }
-            };
-            for v in schema::validate(schema, &fm) {
-                report.schema_violations.push((location.clone(), v.message()));
-            }
+        // Skip legacy <NN>-<slug> dirs under the legacy `open/`/`closed/`
+        // folders — `--fix` rewrites their frontmatter, so flagging them
+        // is just noise. Don't apply the skip to the flat root: a flat
+        // issue named `7-alpha` is not legacy by location even though
+        // its name matches the legacy shape.
+        let in_legacy_folder = s.folder == "open" || s.folder == "closed";
+        if in_legacy_folder && parser::parse_legacy_dir(&s.dir_name).is_some() {
+            continue;
         }
-        Ok(())
-    };
-    walk(&issues_dir, "flat")?;
-    walk(&issues_dir.join("open"), "open")?;
-    walk(&issues_dir.join("closed"), "closed")?;
-    Ok(())
+        let location = format!(
+            "{}",
+            s.item_path
+                .strip_prefix(repo_root)
+                .unwrap_or(&s.item_path)
+                .display()
+        );
+        if let Some(err) = &s.read_error {
+            report.parse_errors.push((location, err.clone()));
+            continue;
+        }
+        if s.fm_missing {
+            report
+                .parse_errors
+                .push((location, "missing or unterminated frontmatter".into()));
+            continue;
+        }
+        if let Some(err) = &s.fm_yaml_error {
+            report.parse_errors.push((location, err.clone()));
+            continue;
+        }
+        let Some(fm) = s.mapping.as_ref() else {
+            continue;
+        };
+        for v in schema::validate(schema, fm) {
+            report
+                .schema_violations
+                .push((location.clone(), v.message()));
+        }
+    }
 }
 
-fn collect_transition_warnings(
-    repo_root: &Path,
+fn populate_transition_warnings(
+    scan: &ScanResult,
     rules: Option<&crate::transitions::TransitionRules>,
     schema: Option<&schema::Schema>,
     report: &mut DoctorReport,
-) -> Result<()> {
+) {
     let rules_active = rules.map(|r| !r.status_rules.is_empty()).unwrap_or(false);
     let sections_active = schema
         .map(|s| !s.body_sections.is_empty())
         .unwrap_or(false);
     if !rules_active && !sections_active {
-        return Ok(());
+        return;
     }
-    let issues_dir = repo_root.join("issues");
-    let mut walk = |dir: &Path, folder: &str| -> Result<()> {
-        if !dir.is_dir() {
-            return Ok(());
+    for s in &scan.issues {
+        if !s.item_present {
+            continue;
         }
-        for entry in fs::read_dir(dir)?.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name == "open" || name == "closed" || name == "archive" {
-                continue;
-            }
-            let item = entry.path().join("item.md");
-            if !item.is_file() {
-                continue;
-            }
-            let in_legacy_folder = folder == "open" || folder == "closed";
-            if in_legacy_folder && parser::parse_legacy_dir(&name).is_some() {
-                continue;
-            }
-            let parsed = parser::parse_item_md_with_warnings(&item, &name, folder);
-            // S5: previously skipped the issue if *any* parse warning
-            // was emitted (e.g. a benign legacy-numeric epic ref). The
-            // parser still populates `status` / `issue_type` from
-            // defaults in that case, so the lint result would be
-            // wrong; only skip when essential frontmatter is absent.
-            if essential_frontmatter_absent(&item) {
-                continue;
-            }
-            let issue = parsed.issue;
-            if let Some(rules) = rules {
-                for msg in crate::transitions::evaluate_existing(rules, &issue) {
-                    report.transition_warnings.push((issue.slug.clone(), msg));
-                }
-            }
-            if let Some(schema) = schema {
-                for missing in
-                    schema::missing_body_sections(schema, &issue.issue_type, &issue.body)
-                {
-                    report
-                        .missing_body_sections
-                        .push((issue.slug.clone(), missing));
-                }
+        let in_legacy_folder = s.folder == "open" || s.folder == "closed";
+        if in_legacy_folder && parser::parse_legacy_dir(&s.dir_name).is_some() {
+            continue;
+        }
+        let Some(parsed) = s.parsed.as_ref() else {
+            continue;
+        };
+        // S5: only skip when essential frontmatter is absent. A legacy
+        // numeric-epic ref produces a warning but leaves `status` /
+        // `type` intact, so the lint can still run usefully.
+        if essential_frontmatter_absent_from_mapping(s.mapping.as_ref()) {
+            continue;
+        }
+        let issue = &parsed.issue;
+        if let Some(rules) = rules {
+            for msg in crate::transitions::evaluate_existing(rules, issue) {
+                report.transition_warnings.push((issue.slug.clone(), msg));
             }
         }
-        Ok(())
-    };
-    walk(&issues_dir, "flat")?;
-    walk(&issues_dir.join("open"), "open")?;
-    walk(&issues_dir.join("closed"), "closed")?;
-    Ok(())
+        if let Some(sch) = schema {
+            for missing in schema::missing_body_sections(sch, &issue.issue_type, &issue.body) {
+                report
+                    .missing_body_sections
+                    .push((issue.slug.clone(), missing));
+            }
+        }
+    }
 }
 
-/// Returns true when the frontmatter cannot supply enough information
-/// to lint against the rules — specifically when `type:` or `status:`
-/// is missing or unparseable. This is stricter than "any warning"
-/// (S5): a legacy numeric-epic ref produces a warning but leaves
-/// `status` / `type` intact, so the lint can still run usefully.
-fn essential_frontmatter_absent(item_path: &Path) -> bool {
-    let Ok(text) = fs::read_to_string(item_path) else {
-        return true;
-    };
-    let Some(fm_text) = parser::split_frontmatter(&text).0 else {
-        return true;
-    };
-    let Ok(fm) = serde_yaml::from_str::<serde_yaml::Mapping>(fm_text) else {
-        return true;
-    };
+fn essential_frontmatter_absent_from_mapping(
+    mapping: Option<&serde_yaml::Mapping>,
+) -> bool {
+    let Some(m) = mapping else { return true };
     let has = |k: &str| {
-        fm.get(serde_yaml::Value::String(k.into()))
+        m.get(serde_yaml::Value::String(k.into()))
             .and_then(|v| v.as_str())
             .map(|s| !s.is_empty())
             .unwrap_or(false)
     };
     !has("status") || !has("type")
-}
-
-fn detect_orphan_epic_refs(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
-    let issues_dir = repo_root.join("issues");
-    let mut existing_slugs: BTreeSet<String> = BTreeSet::new();
-
-    let mut walk = |dir: &Path| -> Result<()> {
-        if !dir.is_dir() {
-            return Ok(());
-        }
-        for entry in fs::read_dir(dir)?.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name == "open" || name == "closed" || name == "archive" {
-                continue;
-            }
-            existing_slugs.insert(name.clone());
-            if let Some((_, rest)) = parser::parse_legacy_dir(&name) {
-                existing_slugs.insert(rest);
-            }
-        }
-        Ok(())
-    };
-    walk(&issues_dir)?;
-    walk(&issues_dir.join("open"))?;
-    walk(&issues_dir.join("closed"))?;
-
-    let mut walk_for_refs = |dir: &Path| -> Result<()> {
-        if !dir.is_dir() {
-            return Ok(());
-        }
-        for entry in fs::read_dir(dir)?.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name == "open" || name == "closed" || name == "archive" {
-                continue;
-            }
-            let item = entry.path().join("item.md");
-            if !item.is_file() {
-                continue;
-            }
-            let issue = parser::parse_item_md_with_warnings(&item, &name, "open").issue;
-            if let Some(epic) = issue.epic.as_deref() {
-                let stripped = epic.strip_prefix('@').unwrap_or(epic);
-                let exists = existing_slugs.contains(stripped) || stripped.parse::<u32>().is_ok();
-                if !exists {
-                    report
-                        .orphan_epic_refs
-                        .push((name.clone(), epic.to_string()));
-                }
-            }
-        }
-        Ok(())
-    };
-    walk_for_refs(&issues_dir)?;
-    walk_for_refs(&issues_dir.join("open"))?;
-    walk_for_refs(&issues_dir.join("closed"))?;
-
-    Ok(())
 }
 
 /// Bail before any filesystem mutation if the repo is in a state that
@@ -3245,5 +3181,94 @@ mod tests {
         assert!(!after.contains("stale body"));
         assert!(after.contains(agents::MANAGED_START));
         assert!(after.contains(agents::MANAGED_END));
+    }
+
+    /// Single-pass `scan_issues` powers every check. This fixture wires
+    /// up many independent findings in one repo and asserts the merged
+    /// `DoctorReport` looks the same as the multi-walk produced — a
+    /// regression guard for the D7 refactor.
+    #[test]
+    fn single_pass_scan_surfaces_all_categories() {
+        let tmp = fresh_repo();
+        // Legacy <NN>-<slug> dir under issues/open/.
+        put_legacy(
+            &tmp,
+            "open",
+            7,
+            "old-style",
+            "---\nnumber: 7\nstatus: open\n---\n# E7. Old\n",
+        );
+        // Flat-layout issue with: broken epic ref + future timestamp +
+        // unknown frontmatter key + ## Notes that needs renaming.
+        let dir = tmp.path().join("issues/quiet-brave-otter");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: open\npriority: normal\n\
+             epic: nonexistent-ghost-fox\ncreated: 2999-01-01\n\
+             whimsy: 1\n---\n# T\n\n## Notes\n\nold note\n",
+        )
+        .unwrap();
+        // Symlink + orphan tempfile.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                tmp.path().join("issues/quiet-brave-otter"),
+                tmp.path().join("issues/symlinked-thing"),
+            )
+            .unwrap();
+        }
+        fs::write(
+            tmp.path().join("issues/quiet-brave-otter/.issuectl-tmp-XYZ"),
+            "leftover",
+        )
+        .unwrap();
+
+        let r = scan(tmp.path()).unwrap();
+
+        assert_eq!(r.legacy_dirs.len(), 1, "legacy dir detected");
+        assert!(
+            r.broken_refs
+                .iter()
+                .any(|(_, k, t)| k == "epic" && t == "nonexistent-ghost-fox"),
+            "broken_refs={:?}",
+            r.broken_refs
+        );
+        assert!(
+            r.timestamp_issues.iter().any(|(_, m)| m.contains("future")),
+            "timestamp_issues={:?}",
+            r.timestamp_issues
+        );
+        assert!(
+            r.unknown_keys.iter().any(|(_, k)| k == "whimsy"),
+            "unknown_keys={:?}",
+            r.unknown_keys
+        );
+        assert!(
+            r.notes_to_rename.iter().any(|s| s == "quiet-brave-otter"),
+            "notes_to_rename={:?}",
+            r.notes_to_rename
+        );
+        assert!(
+            r.orphan_tempfiles
+                .iter()
+                .any(|p| p.to_string_lossy().contains(".issuectl-tmp-XYZ")),
+            "orphan_tempfiles={:?}",
+            r.orphan_tempfiles
+        );
+        #[cfg(unix)]
+        assert!(
+            r.symlinked_dirs.iter().any(|s| s.contains("symlinked-thing")),
+            "symlinked_dirs={:?}",
+            r.symlinked_dirs
+        );
+        // Schema violations should ignore the legacy dir.
+        assert!(
+            !r.schema_violations
+                .iter()
+                .any(|(loc, _)| loc.contains("7-old-style")),
+            "schema_violations should skip legacy dirs: {:?}",
+            r.schema_violations
+        );
     }
 }
