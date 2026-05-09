@@ -13,13 +13,15 @@
 //!    the current schema + transition rules so it never drifts from
 //!    the live policy.
 //!
-//! Sentinel detection is **line-anchored**: a sentinel line counts only
-//! when it occupies its own line (whitespace allowed). This protects
-//! sentinels embedded in fenced code blocks (documentation examples)
-//! from being treated as the real block. Files containing zero or one
-//! well-formed pair of sentinels are auto-fixable; anything else
-//! (multiple pairs, end-before-start, dangling start) is reported as
-//! malformed and `--fix` refuses to touch it.
+//! Sentinel detection is **line-anchored** AND **fence-aware**: a
+//! sentinel line counts only when it occupies its own line
+//! (whitespace allowed) AND that line is not inside a fenced code
+//! block (` ``` ` or `~~~`). This protects sentinels embedded in
+//! documentation examples from being treated as the real block.
+//! Files containing zero or one well-formed pair of sentinels are
+//! auto-fixable; anything else (multiple pairs, end-before-start,
+//! dangling start) is reported as malformed and `--fix` refuses to
+//! touch it.
 //!
 //! Policy distinct from `.issuectl/prompts/*.md` (ephemeral prompt
 //! templates rendered against an issue context). AGENTS.md is durable
@@ -39,12 +41,14 @@ pub const AGENTS_RELATIVE_PATH: &str = ".issuectl/AGENTS.md";
 pub const MANAGED_START: &str = "<!-- issuectl-managed:start -->";
 pub const MANAGED_END: &str = "<!-- issuectl-managed:end -->";
 
-/// Format version embedded as the first line inside the managed body.
-/// Bump only when the renderer makes an intentionally breaking change;
-/// drift checks compare full body bytes, so this marker is a forward-
-/// compat anchor (`managed_in_sync` semantics could later branch on it
-/// to defer cosmetic-only renderer churn instead of flagging every
-/// repo's AGENTS.md as drifted across an `issuectl` upgrade).
+/// Format version embedded as a marker line at the top of the managed
+/// body. Currently symbolic — `managed_in_sync` does a full-bytes
+/// comparison, so any wording change in the renderer drifts every
+/// repo regardless of this constant. The marker exists to (a) pin a
+/// canonical schema for the rendered block in source control, and
+/// (b) leave a hook for a future `managed_in_sync` that could parse
+/// the version and defer cosmetic-only upgrades. Bump only with an
+/// intentional break.
 pub const MANAGED_FORMAT_VERSION: u32 = 1;
 
 pub fn agents_path(root: &Path) -> PathBuf {
@@ -217,43 +221,69 @@ pub fn render_full(schema: &Schema, rules: &TransitionRules) -> String {
 /// auto-fix).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockLocation {
-    /// No sentinel lines present at all.
+    /// No sentinel lines present at all (outside fenced code blocks).
     Unmanaged,
-    /// Exactly one well-formed pair. Span is `(start_byte_of_open_line,
-    /// end_byte_after_close_line)` so a slice replacement preserves
-    /// surrounding text byte-for-byte.
-    Found { span: (usize, usize) },
+    /// Exactly one well-formed pair. Both spans are `(start, end)`
+    /// byte offsets into the original text:
+    /// - `outer_span` covers the open sentinel line through the close
+    ///   sentinel line (including their trailing newlines), suitable
+    ///   for slice replacement that preserves surrounding text.
+    /// - `inner_span` covers just the body between the two sentinel
+    ///   lines (exclusive of both), suitable for direct comparison
+    ///   against `render_managed_body` output without further parsing.
+    Found {
+        outer_span: (usize, usize),
+        inner_span: (usize, usize),
+    },
     /// Multiple sentinel pairs, dangling open, end-before-start, etc.
     /// `--fix` refuses; surface as a separate doctor finding.
     Malformed { reason: String },
 }
 
-/// Find sentinel lines using line-anchored matching: a line counts as
-/// a sentinel only when its trimmed content is exactly the sentinel
-/// string. This protects sentinels embedded in fenced code blocks
-/// (e.g. `\`\`\`markdown` blocks demonstrating the syntax) from being
+/// Track whether the line-walker is inside a fenced code block. A
+/// fence opens on a line whose trimmed content starts with three or
+/// more backticks or tildes (and the same character used to open is
+/// what closes — but we don't enforce that strictly; toggling on any
+/// triple-fence is good enough to skip sentinels in user docs).
+fn fence_toggle(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+}
+
+/// Find sentinel lines using line-anchored, fence-aware matching: a
+/// line counts as a sentinel only when its trimmed content is exactly
+/// the sentinel string AND it is not inside a fenced code block. This
+/// protects sentinels embedded in documentation examples from being
 /// mistaken for the real block.
 pub fn locate_managed_block(text: &str) -> BlockLocation {
-    // Walk lines collecting byte-offsets of sentinel-only lines.
+    // Each entry: (line_start_byte, after_line_end_byte) so callers
+    // get both the line position (for outer span) and the offset of
+    // the next line's first byte (where the body begins / ends).
     let mut starts: Vec<(usize, usize)> = Vec::new();
     let mut ends: Vec<(usize, usize)> = Vec::new();
     let bytes = text.as_bytes();
     let mut line_start = 0usize;
+    let mut in_fence = false;
     while line_start <= bytes.len() {
         let line_end = match bytes[line_start..].iter().position(|&b| b == b'\n') {
             Some(rel) => line_start + rel,
             None => bytes.len(),
         };
         let line = &text[line_start..line_end];
+        // Bytes including the trailing newline if any.
+        let after = if line_end < bytes.len() { line_end + 1 } else { line_end };
         let trimmed = line.trim();
-        if trimmed == MANAGED_START {
-            // End of line including the newline byte if present.
-            let after = if line_end < bytes.len() { line_end + 1 } else { line_end };
-            starts.push((line_start, after));
-        } else if trimmed == MANAGED_END {
-            let after = if line_end < bytes.len() { line_end + 1 } else { line_end };
-            ends.push((line_start, after));
+
+        if fence_toggle(line) {
+            in_fence = !in_fence;
+        } else if !in_fence {
+            if trimmed == MANAGED_START {
+                starts.push((line_start, after));
+            } else if trimmed == MANAGED_END {
+                ends.push((line_start, after));
+            }
         }
+
         if line_end >= bytes.len() {
             break;
         }
@@ -269,7 +299,7 @@ pub fn locate_managed_block(text: &str) -> BlockLocation {
             reason: "managed-end sentinel without matching managed-start".into(),
         },
         (1, 1) => {
-            let (s_start, _s_after) = starts[0];
+            let (s_start, s_after) = starts[0];
             let (e_start, e_after) = ends[0];
             if e_start < s_start {
                 BlockLocation::Malformed {
@@ -277,7 +307,8 @@ pub fn locate_managed_block(text: &str) -> BlockLocation {
                 }
             } else {
                 BlockLocation::Found {
-                    span: (s_start, e_after),
+                    outer_span: (s_start, e_after),
+                    inner_span: (s_after, e_start),
                 }
             }
         }
@@ -289,57 +320,48 @@ pub fn locate_managed_block(text: &str) -> BlockLocation {
     }
 }
 
-/// Extract the inner managed body from a well-formed file: text
-/// between the open sentinel line and the close sentinel line. Strips
-/// the immediate leading newline and one optional blank line that
-/// `wrap_managed` writes, so equality compares cleanly against
-/// `render_managed_body`. Returns `None` for `Unmanaged` or
+/// Extract the inner managed body. Returns the bytes between the two
+/// sentinel lines (exclusive of both), with one optional leading
+/// blank line stripped — symmetric with the blank line that
+/// `wrap_managed` emits. Returns `None` for `Unmanaged` or
 /// `Malformed`.
 pub fn extract_managed_body(text: &str) -> Option<String> {
     let (start, end) = match locate_managed_block(text) {
-        BlockLocation::Found { span } => span,
+        BlockLocation::Found { inner_span, .. } => inner_span,
         _ => return None,
     };
-    let block = &text[start..end];
-    // Trim the surrounding sentinel lines: drop everything up through
-    // the first newline (open sentinel line) and everything from the
-    // last `MANAGED_END` line backwards.
-    let after_open_line = block.find('\n').map(|i| i + 1).unwrap_or(block.len());
-    let inner_with_close = &block[after_open_line..];
-    // Find the start of the close-sentinel line. We know the line is
-    // present because locate returned Found.
-    let close_line_start = inner_with_close.rfind(MANAGED_END).and_then(|i| {
-        inner_with_close[..i].rfind('\n').map(|j| j + 1).or(Some(0))
-    })?;
-    let inner = &inner_with_close[..close_line_start];
-    // Drop one leading blank line that `wrap_managed` emits ("\n").
+    let inner = &text[start..end];
+    // `wrap_managed` writes "{START}\n\n{body}{END}\n" — the inner
+    // span here begins at the first byte AFTER the START line's
+    // newline, so the leading blank line is exactly one '\n'.
     let inner = inner.strip_prefix('\n').unwrap_or(inner);
     Some(inner.to_string())
 }
 
-/// Replace the managed span in `text` with a freshly-rendered block.
-/// Preserves everything outside the sentinels byte-for-byte. If the
+/// Replace the managed block in `text` with a freshly-rendered block,
+/// preserving everything outside the sentinels byte-for-byte. If the
 /// file has no sentinels, appends a fresh managed block at the end
-/// (separated by a blank line). Caller is responsible for refusing
-/// `Malformed` files — passing one here will short-circuit to "append
-/// new block" which would compound the malformed state. Use
-/// [`locate_managed_block`] first.
-pub fn regenerate_managed(text: &str, schema: &Schema, rules: &TransitionRules) -> String {
+/// (separated by a blank line). Errors on `Malformed` — auto-fixing a
+/// malformed file (e.g. one with two existing block pairs) would
+/// silently compound the corruption, so doctor's `--fix` path checks
+/// `locate_managed_block` upstream and surfaces a malformed finding
+/// rather than calling here.
+pub fn regenerate_managed(
+    text: &str,
+    schema: &Schema,
+    rules: &TransitionRules,
+) -> Result<String> {
     let body = render_managed_body(schema, rules);
     let wrapped = wrap_managed(&body);
     match locate_managed_block(text) {
-        BlockLocation::Found { span: (start, end) } => {
+        BlockLocation::Found { outer_span: (start, end), .. } => {
             let mut out = String::with_capacity(text.len());
             out.push_str(&text[..start]);
             out.push_str(&wrapped);
             out.push_str(&text[end..]);
-            out
+            Ok(out)
         }
-        BlockLocation::Unmanaged | BlockLocation::Malformed { .. } => {
-            // The Malformed branch is reachable only if a caller
-            // ignored locate_managed_block. We still produce something
-            // safe (append) rather than panic, but doctor's --fix path
-            // refuses to call here for Malformed files.
+        BlockLocation::Unmanaged => {
             let mut out = String::from(text);
             if !out.ends_with('\n') {
                 out.push('\n');
@@ -348,8 +370,11 @@ pub fn regenerate_managed(text: &str, schema: &Schema, rules: &TransitionRules) 
                 out.push('\n');
             }
             out.push_str(&wrapped);
-            out
+            Ok(out)
         }
+        BlockLocation::Malformed { reason } => bail!(
+            "refusing to regenerate malformed managed block: {reason} (fix manually before re-running)"
+        ),
     }
 }
 
@@ -392,9 +417,13 @@ fn classify_target(path: &Path) -> Result<bool> {
 }
 
 /// Atomic write: stage bytes in a tempfile in the same directory, then
-/// `persist` (rename) into place. Survives SIGKILL / disk full mid-
-/// write without leaving a half-overwritten target. Mirrors
-/// `schema::ensure_default_written`.
+/// `persist` (rename) into place. Crash-safety: an interrupted write
+/// leaves either the old file intact or the new file in place — never
+/// a half-overwritten target. Power-loss durability after `persist`
+/// returns is filesystem-dependent (we don't fsync the parent dir);
+/// matches the rest of the codebase's atomicity story (see
+/// `schema::ensure_default_written`). Tempfile naming uses the
+/// project-wide `.issuectl-` prefix so doctor recognizes orphans.
 pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -583,7 +612,7 @@ mod tests {
             "# Hand-written\n\nKeep me.\n\n{}\n\nold managed body\n{}\n\nAfter.\n",
             MANAGED_START, MANAGED_END
         );
-        let regenerated = regenerate_managed(&original, &s, &r);
+        let regenerated = regenerate_managed(&original, &s, &r).unwrap();
         assert!(regenerated.starts_with("# Hand-written\n\nKeep me.\n\n"));
         assert!(regenerated.contains("After.\n"));
         assert!(!regenerated.contains("old managed body"));
@@ -605,7 +634,7 @@ mod tests {
         assert!(!managed_in_sync(&good, &s2, &r));
 
         // Regenerating clears the drift.
-        let fixed = regenerate_managed(&good, &s2, &r);
+        let fixed = regenerate_managed(&good, &s2, &r).unwrap();
         assert!(managed_in_sync(&fixed, &s2, &r));
     }
 
@@ -621,7 +650,7 @@ mod tests {
         let s = schema::default_schema();
         let r = TransitionRules::default();
         let original = "Plain prose, no managed block.\n";
-        let out = regenerate_managed(original, &s, &r);
+        let out = regenerate_managed(original, &s, &r).unwrap();
         assert!(out.starts_with(original));
         assert!(out.contains(MANAGED_START));
         assert!(managed_in_sync(&out, &s, &r));
@@ -633,25 +662,49 @@ mod tests {
     }
 
     #[test]
-    fn locate_ignores_sentinels_inside_fenced_code_block() {
-        // A documentation example containing the literal sentinel
-        // strings inside a code fence must NOT be picked up.
-        // Indented inside a fence, the lines aren't sentinel-only at
-        // their natural position, but even when verbatim the line-
-        // anchored matcher treats them as sentinels — we deliberately
-        // do NOT track fences here. The defense is that a real user
-        // demonstrating sentinels inside a code fence will end up
-        // matching them; doctor will treat it as a real block. To
-        // avoid that, users should escape (e.g. zero-width-space) or
-        // not paste the literals. Document this limitation.
-        //
-        // We DO test that an indented sentinel (whitespace-prefixed
-        // but matching after trim) IS matched — this is by design: it
-        // lets users align the file with their preferred indentation.
+    fn locate_tolerates_indented_sentinels() {
+        // Whitespace-prefixed sentinel lines still match after trim —
+        // by design, so users can align AGENTS.md to their preferred
+        // indentation.
         let t = "Doc:\n  <!-- issuectl-managed:start -->\n  body\n  <!-- issuectl-managed:end -->\nAfter.\n";
         match locate_managed_block(t) {
-            BlockLocation::Found { .. } => { /* expected — indentation tolerated */ }
+            BlockLocation::Found { .. } => {}
             other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn locate_skips_sentinels_inside_fenced_code_block() {
+        // A documentation example demonstrating the sentinel syntax
+        // inside a ``` block must NOT be treated as a real managed
+        // block.
+        let t = format!(
+            "Documenting the feature:\n\n```markdown\n{}\nexample body\n{}\n```\n\nReal prose.\n",
+            MANAGED_START, MANAGED_END
+        );
+        assert_eq!(locate_managed_block(&t), BlockLocation::Unmanaged);
+    }
+
+    #[test]
+    fn locate_skips_sentinels_inside_tilde_fenced_block() {
+        let t = format!(
+            "~~~\n{}\nexample\n{}\n~~~\nReal prose.\n",
+            MANAGED_START, MANAGED_END
+        );
+        assert_eq!(locate_managed_block(&t), BlockLocation::Unmanaged);
+    }
+
+    #[test]
+    fn locate_finds_real_block_after_fenced_example() {
+        // Documentation example FOLLOWED by a real managed block:
+        // only the real one outside the fence should be found.
+        let t = format!(
+            "```\n{}\nfake\n{}\n```\n\n{}\n\nreal body\n{}\n",
+            MANAGED_START, MANAGED_END, MANAGED_START, MANAGED_END
+        );
+        match locate_managed_block(&t) {
+            BlockLocation::Found { .. } => {}
+            other => panic!("expected Found (real block outside fence), got {other:?}"),
         }
     }
 
@@ -700,6 +753,18 @@ mod tests {
             MANAGED_START, MANAGED_END, MANAGED_START, MANAGED_END
         );
         assert!(!managed_in_sync(&t, &s, &r));
+    }
+
+    #[test]
+    fn regenerate_errors_on_malformed_input() {
+        let s = schema::default_schema();
+        let r = TransitionRules::default();
+        let bad = format!(
+            "{}\nA\n{}\n\n{}\nB\n{}\n",
+            MANAGED_START, MANAGED_END, MANAGED_START, MANAGED_END
+        );
+        let err = regenerate_managed(&bad, &s, &r).unwrap_err();
+        assert!(err.to_string().contains("malformed"), "got: {err}");
     }
 
     #[test]

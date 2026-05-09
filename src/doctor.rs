@@ -1386,7 +1386,7 @@ fn regenerate_agents_md(repo_root: &Path, report: &mut DoctorReport) -> Result<(
         .with_context(|| format!("cannot read {}", path.display()))?;
     let schema = schema::load(repo_root)?;
     let rules = crate::transitions::load(repo_root)?;
-    let new_text = agents::regenerate_managed(&original, &schema, &rules);
+    let new_text = agents::regenerate_managed(&original, &schema, &rules)?;
     if new_text != original {
         agents::atomic_write(&path, new_text.as_bytes())?;
         report.agents_md_regenerated = true;
