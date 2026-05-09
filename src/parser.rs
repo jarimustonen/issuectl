@@ -56,6 +56,16 @@ fn deser_epic<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Erro
 pub struct ParsedItem {
     pub issue: crate::models::Issue,
     pub warnings: Vec<String>,
+    /// Raw frontmatter mapping. `None` when the file has no
+    /// `---...---` block or the YAML is unparseable. Exposed so
+    /// callers (e.g. `doctor`) can do mapping-level checks without
+    /// re-parsing the YAML.
+    pub mapping: Option<serde_yaml::Mapping>,
+    /// True when text exists but no `---...---` block was present.
+    pub fm_missing: bool,
+    /// `Some(msg)` when the frontmatter block was found but YAML
+    /// parsing into a `Mapping` failed.
+    pub fm_yaml_error: Option<String>,
 }
 
 pub fn parse_item_md_with_warnings(path: &Path, slug: &str, folder: &str) -> ParsedItem {
@@ -65,6 +75,9 @@ pub fn parse_item_md_with_warnings(path: &Path, slug: &str, folder: &str) -> Par
             return ParsedItem {
                 issue: default_issue(slug, folder),
                 warnings: vec![format!("cannot read {}: {}", path.display(), e)],
+                mapping: None,
+                fm_missing: false,
+                fm_yaml_error: None,
             };
         }
     };
@@ -83,10 +96,36 @@ pub fn parse_item_md_text_with_warnings(
 ) -> ParsedItem {
     let mut warnings = Vec::new();
     let (frontmatter, body) = split_frontmatter(text);
+    // D7: parse YAML once into `Mapping`, then derive the typed
+    // `Frontmatter` from the parsed value rather than re-parsing the
+    // text. Both products are exposed via `ParsedItem` so callers like
+    // `doctor` don't have to parse the same string twice.
+    let mut mapping: Option<serde_yaml::Mapping> = None;
+    let mut fm_missing = false;
+    let mut fm_yaml_error: Option<String> = None;
     let fm = match frontmatter {
-        Some(yaml_text) => match serde_yaml::from_str::<Frontmatter>(yaml_text) {
-            Ok(fm) => fm,
+        None => {
+            fm_missing = true;
+            Frontmatter::default()
+        }
+        Some(yaml_text) => match serde_yaml::from_str::<serde_yaml::Mapping>(yaml_text) {
+            Ok(m) => {
+                let value = serde_yaml::Value::Mapping(m.clone());
+                mapping = Some(m);
+                match serde_yaml::from_value::<Frontmatter>(value) {
+                    Ok(fm) => fm,
+                    Err(e) => {
+                        warnings.push(format!(
+                            "invalid YAML frontmatter in {}: {}",
+                            source.display(),
+                            e
+                        ));
+                        Frontmatter::default()
+                    }
+                }
+            }
             Err(e) => {
+                fm_yaml_error = Some(format!("invalid frontmatter YAML: {e}"));
                 warnings.push(format!(
                     "invalid YAML frontmatter in {}: {}",
                     source.display(),
@@ -95,7 +134,6 @@ pub fn parse_item_md_text_with_warnings(
                 Frontmatter::default()
             }
         },
-        None => Frontmatter::default(),
     };
 
     // Surface legacy numeric epic refs as a warning instead of an
@@ -155,7 +193,13 @@ pub fn parse_item_md_text_with_warnings(
         title,
         body: body.unwrap_or_default().trim().to_string(),
     };
-    ParsedItem { issue, warnings }
+    ParsedItem {
+        issue,
+        warnings,
+        mapping,
+        fm_missing,
+        fm_yaml_error,
+    }
 }
 
 /// Convert a `serde_yaml::Value` into a JSON-shaped value with

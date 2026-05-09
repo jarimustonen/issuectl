@@ -36,16 +36,10 @@ struct ScannedIssue {
     read_error: Option<String>,
     /// Raw `item.md` text. `None` if absent or unreadable.
     text: Option<String>,
-    /// Frontmatter as a free-form YAML mapping. `None` when absent or
-    /// unparseable as a mapping.
-    mapping: Option<serde_yaml::Mapping>,
-    /// Text exists but no `---...---` frontmatter block.
-    fm_missing: bool,
-    /// Frontmatter extracted but YAML parse failed; carries the message
-    /// in the same form `collect_schema_violations` used to emit.
-    fm_yaml_error: Option<String>,
     /// `parser::parse_item_md_text_with_warnings` output. `None` only
-    /// when the file could not be read or wasn't present.
+    /// when the file could not be read or wasn't present. The parser
+    /// exposes the raw mapping plus `fm_missing` / `fm_yaml_error`
+    /// flags so this struct doesn't carry duplicate copies.
     parsed: Option<parser::ParsedItem>,
     /// `Some(n)` when this directory is a legacy `<NN>-<slug>`
     /// migration candidate; see `legacy_number_from_mapping`.
@@ -180,24 +174,10 @@ fn collect_issue_dir(
         let item_present = item_path.is_file();
         let mut text: Option<String> = None;
         let mut read_error: Option<String> = None;
-        let mut mapping: Option<serde_yaml::Mapping> = None;
-        let mut fm_missing = false;
-        let mut fm_yaml_error: Option<String> = None;
         let mut parsed: Option<parser::ParsedItem> = None;
         if item_present {
             match fs::read_to_string(&item_path) {
                 Ok(t) => {
-                    let (fm, _body) = parser::split_frontmatter(&t);
-                    match fm {
-                        None => fm_missing = true,
-                        Some(yaml) => match serde_yaml::from_str::<serde_yaml::Mapping>(yaml) {
-                            Ok(m) => mapping = Some(m),
-                            Err(e) => {
-                                fm_yaml_error =
-                                    Some(format!("invalid frontmatter YAML: {e}"));
-                            }
-                        },
-                    }
                     parsed = Some(parser::parse_item_md_text_with_warnings(
                         &t, &name, folder, &item_path,
                     ));
@@ -209,7 +189,7 @@ fn collect_issue_dir(
             }
         }
         let legacy_number = if item_present {
-            legacy_number_from_mapping(mapping.as_ref(), &name)
+            legacy_number_from_mapping(parsed.as_ref().and_then(|p| p.mapping.as_ref()), &name)
         } else {
             None
         };
@@ -221,9 +201,6 @@ fn collect_issue_dir(
             item_present,
             read_error,
             text,
-            mapping,
-            fm_missing,
-            fm_yaml_error,
             parsed,
             legacy_number,
         });
@@ -541,7 +518,7 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
     // before running `--fix`.
     populate_notes_migration(&scan, &mut report);
 
-    populate_extended_validation(&scan, repo_root, &mut report);
+    populate_extended_validation(&scan, schema_value.as_ref(), &mut report);
 
     Ok(report)
 }
@@ -639,7 +616,7 @@ fn populate_orphan_epic_refs(scan: &ScanResult, report: &mut DoctorReport) {
 /// `ScanResult`.
 fn populate_extended_validation(
     scan: &ScanResult,
-    repo_root: &Path,
+    schema: Option<&schema::Schema>,
     report: &mut DoctorReport,
 ) {
     use chrono::NaiveDate;
@@ -665,12 +642,18 @@ fn populate_extended_validation(
         }
     }
 
-    // Schema-known field names for unknown-key flagging.
-    let schema_fields: BTreeSet<String> = match schema::load(repo_root) {
-        Ok(s) => s.fields.keys().cloned().collect(),
-        Err(_) => schema::default_schema().fields.keys().cloned().collect(),
+    // Schema-known field names for unknown-key flagging. Use the
+    // pre-loaded schema if available, otherwise fall back to the
+    // built-in defaults so the universe of known keys is never empty.
+    let owned_default;
+    let known_schema = match schema {
+        Some(s) => s,
+        None => {
+            owned_default = schema::default_schema();
+            &owned_default
+        }
     };
-    let mut known: BTreeSet<String> = schema_fields;
+    let mut known: BTreeSet<String> = known_schema.fields.keys().cloned().collect();
     // Frontmatter keys the parser/canonical layer recognises but the
     // built-in schema may not declare (e.g. `commits`, `blocked_by`,
     // `number`).
@@ -716,7 +699,7 @@ fn populate_extended_validation(
             report.conflict_markers.push(slug.clone());
         }
 
-        let Some(fm) = primary.mapping.as_ref() else {
+        let Some(fm) = primary.parsed.as_ref().and_then(|p| p.mapping.as_ref()) else {
             continue;
         };
 
@@ -870,7 +853,7 @@ fn populate_extended_validation(
             if hit.folder != "open" && hit.folder != "closed" {
                 continue;
             }
-            let Some(fm) = hit.mapping.as_ref() else {
+            let Some(fm) = hit.parsed.as_ref().and_then(|p| p.mapping.as_ref()) else {
                 continue;
             };
             let Some(hit_status) = fm
@@ -1035,17 +1018,20 @@ fn populate_schema_violations(
             report.parse_errors.push((location, err.clone()));
             continue;
         }
-        if s.fm_missing {
+        let Some(parsed) = s.parsed.as_ref() else {
+            continue;
+        };
+        if parsed.fm_missing {
             report
                 .parse_errors
                 .push((location, "missing or unterminated frontmatter".into()));
             continue;
         }
-        if let Some(err) = &s.fm_yaml_error {
+        if let Some(err) = &parsed.fm_yaml_error {
             report.parse_errors.push((location, err.clone()));
             continue;
         }
-        let Some(fm) = s.mapping.as_ref() else {
+        let Some(fm) = parsed.mapping.as_ref() else {
             continue;
         };
         for v in schema::validate(schema, fm) {
@@ -1083,7 +1069,7 @@ fn populate_transition_warnings(
         // S5: only skip when essential frontmatter is absent. A legacy
         // numeric-epic ref produces a warning but leaves `status` /
         // `type` intact, so the lint can still run usefully.
-        if essential_frontmatter_absent_from_mapping(s.mapping.as_ref()) {
+        if essential_frontmatter_absent_from_mapping(parsed.mapping.as_ref()) {
             continue;
         }
         let issue = &parsed.issue;
@@ -3269,6 +3255,113 @@ mod tests {
                 .any(|(loc, _)| loc.contains("7-old-style")),
             "schema_violations should skip legacy dirs: {:?}",
             r.schema_violations
+        );
+    }
+
+    /// Golden-snapshot test for the `render_json` output. Intentionally
+    /// avoids any non-deterministic input (no legacy `<NN>-<slug>` dirs
+    /// — those go through `slug::generate_unique`, no symlinks — paths
+    /// differ across platforms). Verifies the byte shape downstream
+    /// JSON consumers depend on.
+    #[test]
+    fn render_json_matches_golden_snapshot() {
+        let tmp = fresh_repo();
+        // Issue with: broken epic ref + future timestamp + unknown key.
+        put_flat(
+            &tmp,
+            "alpha-bright-cat",
+            "---\ntype: bug\nstatus: open\npriority: normal\n\
+             epic: nonexistent-ghost-fox\ncreated: 2999-01-01\n\
+             whimsy: 1\n---\n# A\n",
+        );
+        // Issue with closing status but no `closed:` (status consistency).
+        put_flat(
+            &tmp,
+            "beta-quiet-otter",
+            "---\ntype: bug\nstatus: done\npriority: normal\n---\n# B\n",
+        );
+        // Empty dir → missing_item_md.
+        fs::create_dir_all(tmp.path().join("issues/charlie-empty-dir")).unwrap();
+
+        let report = scan(tmp.path()).unwrap();
+        let json = render_json(&report, false, tmp.path());
+        let actual = serde_json::to_string_pretty(&json).unwrap();
+        // Normalise the tempdir prefix so the snapshot is portable.
+        let actual = actual.replace(
+            tmp.path().to_str().unwrap(),
+            "<TMP>",
+        );
+
+        let expected = r#"{
+  "agents_md_check_skipped": null,
+  "agents_md_drift": false,
+  "agents_md_malformed": null,
+  "agents_md_regenerated": false,
+  "blocked_by_cycles": [],
+  "both_open_and_closed": [],
+  "broken_refs": [
+    {
+      "kind": "epic",
+      "slug": "alpha-bright-cat",
+      "target": "nonexistent-ghost-fox"
+    }
+  ],
+  "closed_with_active_status": [],
+  "conflict_markers": [],
+  "duplicate_slugs": [],
+  "files_rewritten": 0,
+  "fix_applied": false,
+  "flat_layout_conflicts": [],
+  "flat_layout_migrated": [],
+  "flat_layout_planned": [],
+  "invalid_slugs": [],
+  "migrations": [],
+  "missing_body_sections": [],
+  "missing_item_md": [
+    "flat/charlie-empty-dir"
+  ],
+  "notes_conflicts": [],
+  "notes_renamed": [],
+  "notes_to_rename": [],
+  "open_with_closing_status": [],
+  "orphan_epic_refs": [
+    {
+      "epic": "nonexistent-ghost-fox",
+      "slug": "alpha-bright-cat"
+    }
+  ],
+  "orphan_tempfiles": [],
+  "orphan_tempfiles_removed": [],
+  "parse_errors": [],
+  "schema_missing": true,
+  "schema_parse_error": null,
+  "schema_violations": [],
+  "status_consistency": [
+    {
+      "message": "closing status \"done\" requires `closed:` date",
+      "slug": "beta-quiet-otter"
+    }
+  ],
+  "status_reconciled": [],
+  "symlinked_dirs": [],
+  "timestamp_issues": [
+    {
+      "message": "created date 2999-01-01 is in the future",
+      "slug": "alpha-bright-cat"
+    }
+  ],
+  "transition_warnings": [],
+  "unknown_keys": [
+    {
+      "key": "whimsy",
+      "slug": "alpha-bright-cat"
+    }
+  ]
+}"#;
+        assert_eq!(
+            actual, expected,
+            "render_json output drifted from the golden snapshot.\n\
+             If the change is intentional, update the snapshot."
         );
     }
 }
