@@ -43,6 +43,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -129,17 +130,20 @@ pub fn rules_path(root: &Path) -> PathBuf {
 /// `version` is mandatory in the YAML (no `#[serde(default)]`) so a
 /// future v2 cannot silently rebind today's untagged files. Likewise,
 /// each loaded rule is validated for empty/duplicated values.
-pub fn load(root: &Path) -> Result<TransitionRules> {
+pub fn load(root: &Path) -> Result<Arc<TransitionRules>> {
     if let Some(cache) = crate::repo_config::current() {
-        return Ok((*cache.rules(root)?).clone());
+        // Cache is bound to the AppState root; see `schema::load` for
+        // the rationale.
+        let _ = root;
+        return cache.rules();
     }
-    load_uncached(root)
+    Ok(Arc::new(load_uncached(root)?))
 }
 
 /// Direct, unconditional parse. Used by `repo_config::RepoConfigCache`
-/// to populate cache entries; recursing through `load` via the
-/// thread-local would deadlock conceptually. Also the fallback when
-/// no cache is active.
+/// to populate cache entries — calling `load` from inside the cache
+/// would re-enter the thread-local and defeat the point. Also the
+/// fallback `load` uses when no cache is active.
 pub(crate) fn load_uncached(root: &Path) -> Result<TransitionRules> {
     let path = rules_path(root);
     if !path.is_file() {

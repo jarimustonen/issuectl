@@ -26,6 +26,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -160,21 +161,27 @@ pub fn default_schema() -> Schema {
 /// constrain `labels.enum` without losing the rest of the defaults.
 /// Returns the default schema unchanged when the file is missing.
 ///
-/// When a `repo_config::RepoConfigCache` is active on the current
-/// thread (server mode), the cached parse is returned instead of
-/// re-reading the file. The CLI never installs a cache, so this is
-/// a no-op there. See `repo_config` for the mtime-invalidation rules.
-pub fn load(root: &Path) -> Result<Schema> {
+/// Returns `Arc<Schema>` so server mode can share a single parsed
+/// snapshot across requests via `repo_config::RepoConfigCache`. CLI
+/// callers pay only an `Arc` allocation — the schema itself is parsed
+/// once per command. When a cache is active on the current thread, the
+/// cached `Arc` is returned without re-parsing.
+pub fn load(root: &Path) -> Result<Arc<Schema>> {
     if let Some(cache) = crate::repo_config::current() {
-        return Ok((*cache.schema(root)?).clone());
+        // The cache is bound to the `AppState` root in server mode.
+        // `mutate::*` callers pass that same root, so the lookup is
+        // consistent without re-checking it here.
+        let _ = root;
+        return cache.schema();
     }
-    load_uncached(root)
+    Ok(Arc::new(load_uncached(root)?))
 }
 
 /// Direct, unconditional parse of `issues/.schema.yaml`. Used by
-/// `repo_config::RepoConfigCache` to populate cache entries — going
-/// through `load` would recurse via the thread-local. Also the
-/// implementation `load` falls back to when no cache is active.
+/// `repo_config::RepoConfigCache` to populate cache entries — calling
+/// `load` from inside the cache would re-enter the thread-local and
+/// defeat the point. Also the fallback `load` uses when no cache is
+/// active.
 pub(crate) fn load_uncached(root: &Path) -> Result<Schema> {
     let path = schema_path(root);
     if !path.is_file() {

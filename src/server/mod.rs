@@ -111,6 +111,7 @@ impl AppState {
     /// the same struct with values derived from the bound socket.
     #[cfg(test)]
     pub fn for_test(root: PathBuf) -> Self {
+        let config = Arc::new(RepoConfigCache::new(root.clone()));
         AppState {
             root: Arc::new(root),
             event_hub: Arc::new(EventHub::new()),
@@ -120,7 +121,7 @@ impl AppState {
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: true,
             watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
-            config: Arc::new(RepoConfigCache::new()),
+            config,
         }
     }
 }
@@ -411,7 +412,7 @@ async fn serve(root: PathBuf, host: String, port: u16, options: ServeOptions) ->
         body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
         watch_enabled: actual_watch_enabled,
         watch_degraded,
-        config: Arc::new(RepoConfigCache::new()),
+        config: Arc::new(RepoConfigCache::new(root.clone())),
     };
 
     eprintln!("issuectl serving on http://{bound}");
@@ -499,7 +500,7 @@ mod tests {
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: true,
             watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
-            config: Arc::new(RepoConfigCache::new()),
+            config: Arc::new(RepoConfigCache::new(root.to_path_buf())),
         })
     }
 
@@ -1014,7 +1015,7 @@ mod tests {
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: false,
             watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
-            config: Arc::new(RepoConfigCache::new()),
+            config: Arc::new(RepoConfigCache::new(tmp.path().to_path_buf())),
         });
         let resp = r
             .oneshot(Request::get("/api/session").body(Body::empty()).unwrap())
@@ -1067,7 +1068,7 @@ mod tests {
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: false,
             watch_degraded,
-            config: Arc::new(RepoConfigCache::new()),
+            config: Arc::new(RepoConfigCache::new(tmp.path().to_path_buf())),
         });
         let resp = r
             .oneshot(Request::get("/api/session").body(Body::empty()).unwrap())
@@ -1185,6 +1186,91 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
         assert!(body["version"].as_str().unwrap().starts_with("sha256:"));
+    }
+
+    /// Two PATCHes against the same router share the schema +
+    /// transitions parses. This is the user-visible contract of the
+    /// `RepoConfigCache`: each request stats both config files but
+    /// only re-parses when one has changed. Catches regressions where
+    /// `api.rs` forgets to install the cache before delegating to
+    /// `mutate::*`.
+    #[tokio::test]
+    async fn two_patches_share_one_config_parse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        seed_open_issue(&root, "patch-cache-share");
+        // Pre-bootstrap the schema file so `ensure_default_written`
+        // does not advance its mtime between the two PATCHes (which
+        // would invalidate the cache mid-test).
+        crate::schema::ensure_default_written(&root).unwrap();
+
+        let cache = Arc::new(RepoConfigCache::new(root.clone()));
+        let state = AppState {
+            root: Arc::new(root.clone()),
+            event_hub: Arc::new(EventHub::new()),
+            csrf_token: Arc::from(""),
+            allowed_hosts: Arc::new(Vec::new()),
+            writes_enabled: true,
+            body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
+            watch_enabled: true,
+            watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
+            config: cache.clone(),
+        };
+        let r = router(state);
+
+        // First PATCH: schema + transitions both miss → 2 parses.
+        let v1 = version_on_disk(&root, "patch-cache-share");
+        let resp1 = r
+            .clone()
+            .oneshot(
+                Request::patch("/api/issues/patch-cache-share")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "expected_version": v1,
+                            "priority": "high",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let after_first = cache.refresh_count();
+        assert_eq!(
+            after_first, 2,
+            "first PATCH should parse schema + rules once each",
+        );
+
+        // Second PATCH: stamps unchanged → cache hit on both. The
+        // version token has rotated because the first PATCH wrote;
+        // re-read from disk so the optimistic-concurrency check
+        // passes and we exercise the full mutate path again.
+        let v2 = version_on_disk(&root, "patch-cache-share");
+        let resp2 = r
+            .oneshot(
+                Request::patch("/api/issues/patch-cache-share")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "expected_version": v2,
+                            "priority": "normal",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        assert_eq!(
+            cache.refresh_count(),
+            after_first,
+            "second PATCH must reuse cached schema + rules — got {} parses, expected {}",
+            cache.refresh_count(),
+            after_first,
+        );
     }
 
     #[tokio::test]
@@ -1376,7 +1462,7 @@ mod tests {
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: true,
             watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
-            config: Arc::new(RepoConfigCache::new()),
+            config: Arc::new(RepoConfigCache::new(tmp.path().to_path_buf())),
         });
         let payload = serde_json::json!({ "status": "fixed" });
         let resp = r
@@ -1437,7 +1523,7 @@ mod tests {
             body_limiter: Arc::new(TokenBucketLimiter::new(10.0, 4.0)),
             watch_enabled: true,
             watch_degraded: Arc::new(parking_lot::Mutex::new(None)),
-            config: Arc::new(RepoConfigCache::new()),
+            config: Arc::new(RepoConfigCache::new(tmp.path().to_path_buf())),
         });
         let resp = r
             .oneshot(

@@ -6,15 +6,22 @@
 //! same process serves many requests. This cache is therefore opt-in:
 //! activated via a thread-local guard around the mutate call site.
 //! When active, `schema::load` and `transitions::load` consult the
-//! cache, comparing the file's mtime against the cached value. If the
-//! file has not advanced, the cached parse is reused; otherwise the
-//! cache re-parses, swaps, and returns the fresh value.
+//! cache, comparing the file's freshness key (mtime + length) against
+//! the cached value. If the file looks unchanged, the cached `Arc` is
+//! reused; otherwise the cache re-parses, swaps, and returns the
+//! fresh value.
 //!
-//! Invalidation is mtime-on-request. We don't `notify`-watch the
-//! files — for v1 the stat-then-maybe-read flow is enough, and it
-//! keeps the cache trivially correct under external edits.
+//! Invalidation is best-effort, not strict coherency. We compare
+//! `(mtime, len)` per request — that catches ordinary edits but cannot
+//! see same-mtime same-length replacements (e.g. `cp -p`, atomic
+//! restore tools that preserve timestamps). For v1 that trade-off is
+//! intentional: config files are human-edited, replacements are rare,
+//! and the cost of being wrong is one stale parse until the next real
+//! edit. If correctness matters more than throughput, callers should
+//! restart the server after such replacements.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -25,14 +32,34 @@ use parking_lot::RwLock;
 use crate::schema::{self, Schema};
 use crate::transitions::{self, TransitionRules};
 
-/// Cached parse + the mtime it was parsed from. `mtime: None` means
-/// the file did not exist at last stat — so a "still missing" stat
-/// avoids re-reading the default. Stored as `Arc<T>` so cache hits
-/// hand out cheap clones rather than re-cloning the parsed struct.
-#[derive(Clone)]
+/// Freshness fingerprint for a config file. `(mtime, len)` is cheap to
+/// compute and catches any edit that changes either value — `mtime`
+/// alone misses same-second rewrites on coarse-resolution filesystems,
+/// `len` alone misses byte-for-byte content changes. `Missing` lets the
+/// cache memoize "file does not exist" so a still-missing file does
+/// not re-call `default_schema()` on every request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileStamp {
+    Missing,
+    Present { modified: SystemTime, len: u64 },
+}
+
+fn file_stamp(path: &Path) -> FileStamp {
+    match std::fs::metadata(path) {
+        Ok(meta) => match meta.modified() {
+            Ok(modified) => FileStamp::Present {
+                modified,
+                len: meta.len(),
+            },
+            Err(_) => FileStamp::Missing,
+        },
+        Err(_) => FileStamp::Missing,
+    }
+}
+
 struct Cached<T> {
     value: Arc<T>,
-    mtime: Option<SystemTime>,
+    stamp: FileStamp,
 }
 
 #[derive(Default)]
@@ -41,90 +68,90 @@ struct Inner {
     rules: Option<Cached<TransitionRules>>,
 }
 
-/// Per-server-process cache. Cheap to clone (Arc internally) but
-/// usually held inside `AppState` as `Arc<RepoConfigCache>`.
+/// Per-server-process cache, bound to a single repository root. A new
+/// cache is constructed alongside each `AppState`; the cache cannot be
+/// reused across roots because the bound `root` is what the cache
+/// stats and parses against.
 pub struct RepoConfigCache {
+    root: PathBuf,
     inner: RwLock<Inner>,
-    /// Counts each call that actually re-parsed (i.e. cache miss or
-    /// stale entry). Exposed for tests that assert "two PATCHes
-    /// share one parse".
-    parse_count: AtomicUsize,
-}
-
-impl Default for RepoConfigCache {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Counts each call that actually re-parsed (cache miss or stale
+    /// entry). Only compiled in test builds — production has no need
+    /// to expose internal cache instrumentation.
+    #[cfg(test)]
+    refresh_count: AtomicUsize,
 }
 
 impl RepoConfigCache {
-    pub fn new() -> Self {
+    pub fn new(root: PathBuf) -> Self {
         RepoConfigCache {
+            root,
             inner: RwLock::new(Inner::default()),
-            parse_count: AtomicUsize::new(0),
+            #[cfg(test)]
+            refresh_count: AtomicUsize::new(0),
         }
     }
 
-    /// How many full re-parses (schema + rules combined) the cache
-    /// has performed since construction. Test-facing.
-    pub fn parse_count(&self) -> usize {
-        self.parse_count.load(Ordering::Relaxed)
+    /// Test-only: number of individual cache refreshes (schema or
+    /// rules) since construction. Each schema or rules miss adds one;
+    /// successive hits add zero.
+    #[cfg(test)]
+    pub fn refresh_count(&self) -> usize {
+        self.refresh_count.load(Ordering::Relaxed)
     }
 
-    /// Return the cached `Schema` for `root`, re-parsing if the file's
-    /// mtime advanced since the last hit. The returned `Arc` is a
+    /// Return the cached `Schema`, re-parsing if the file's freshness
+    /// stamp changed since the last hit. The returned `Arc` is a
     /// snapshot — concurrent invalidations swap in a fresh `Arc` for
     /// later callers without disturbing this one.
-    pub fn schema(&self, root: &Path) -> Result<Arc<Schema>> {
-        let path = schema::schema_path(root);
-        let mtime = file_mtime(&path);
+    pub fn schema(&self) -> Result<Arc<Schema>> {
+        let path = schema::schema_path(&self.root);
+        let stamp = file_stamp(&path);
         if let Some(hit) = self.inner.read().schema.as_ref() {
-            if hit.mtime == mtime {
+            if hit.stamp == stamp {
                 return Ok(hit.value.clone());
             }
         }
         let mut w = self.inner.write();
         if let Some(hit) = w.schema.as_ref() {
-            if hit.mtime == mtime {
+            if hit.stamp == stamp {
                 return Ok(hit.value.clone());
             }
         }
-        let parsed = Arc::new(schema::load_uncached(root)?);
-        self.parse_count.fetch_add(1, Ordering::Relaxed);
+        let parsed = Arc::new(schema::load_uncached(&self.root)?);
+        #[cfg(test)]
+        self.refresh_count.fetch_add(1, Ordering::Relaxed);
         w.schema = Some(Cached {
             value: parsed.clone(),
-            mtime,
+            stamp,
         });
         Ok(parsed)
     }
 
     /// Same shape as `schema`, for `.issuectl/transitions.yaml`.
-    pub fn rules(&self, root: &Path) -> Result<Arc<TransitionRules>> {
-        let path = transitions::rules_path(root);
-        let mtime = file_mtime(&path);
+    pub fn rules(&self) -> Result<Arc<TransitionRules>> {
+        let path = transitions::rules_path(&self.root);
+        let stamp = file_stamp(&path);
         if let Some(hit) = self.inner.read().rules.as_ref() {
-            if hit.mtime == mtime {
+            if hit.stamp == stamp {
                 return Ok(hit.value.clone());
             }
         }
         let mut w = self.inner.write();
         if let Some(hit) = w.rules.as_ref() {
-            if hit.mtime == mtime {
+            if hit.stamp == stamp {
                 return Ok(hit.value.clone());
             }
         }
-        let parsed = Arc::new(transitions::load_uncached(root)?);
-        self.parse_count.fetch_add(1, Ordering::Relaxed);
+        let parsed = Arc::new(transitions::load_uncached(&self.root)?);
+        #[cfg(test)]
+        self.refresh_count.fetch_add(1, Ordering::Relaxed);
         w.rules = Some(Cached {
             value: parsed.clone(),
-            mtime,
+            stamp,
         });
         Ok(parsed)
     }
-}
-
-fn file_mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
 thread_local! {
@@ -132,12 +159,15 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// RAII guard for the thread-local `ACTIVE` cache slot. Activating
-/// the cache via `enter` returns a guard that clears the slot on
-/// drop, even on panic — important because `tokio::task::spawn_blocking`
-/// reuses worker threads.
+/// RAII guard for the thread-local `ACTIVE` cache slot. The guard is
+/// `!Send` and `!Sync` by construction (via the `PhantomData<*const ()>`
+/// field): holding it across `.await` would cause a compile error.
+/// That's deliberate — `tokio::task::spawn_blocking` reuses worker
+/// threads, so a guard that survived an async boundary on one thread
+/// could leak the cache to another task scheduled on the same worker.
 pub struct ActiveGuard {
     prev: Option<Arc<RepoConfigCache>>,
+    _not_send_sync: std::marker::PhantomData<*const ()>,
 }
 
 impl Drop for ActiveGuard {
@@ -147,16 +177,20 @@ impl Drop for ActiveGuard {
     }
 }
 
-/// Install `cache` as the active cache for the current thread. Drops
-/// to the previous value when the returned guard goes out of scope.
+/// Install `cache` as the active cache for the current thread. The
+/// returned guard restores the previous slot on drop — including
+/// across panics, since `Drop` runs during unwind.
 pub fn enter(cache: Arc<RepoConfigCache>) -> ActiveGuard {
     let prev = ACTIVE.with(|slot| slot.borrow_mut().replace(cache));
-    ActiveGuard { prev }
+    ActiveGuard {
+        prev,
+        _not_send_sync: std::marker::PhantomData,
+    }
 }
 
 /// Active cache for the current thread, if any. `schema::load` and
 /// `transitions::load` consult this so that callers (CLI vs. server)
-/// don't need different signatures — the server flips the slot on
+/// don't need different signatures — the server installs a guard
 /// before delegating to `mutate::*`, the CLI never does.
 pub fn current() -> Option<Arc<RepoConfigCache>> {
     ACTIVE.with(|slot| slot.borrow().clone())
@@ -165,6 +199,7 @@ pub fn current() -> Option<Arc<RepoConfigCache>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use filetime::{set_file_mtime, FileTime};
     use std::fs;
     use std::path::Path;
     use std::thread;
@@ -174,7 +209,7 @@ mod tests {
     /// re-parse. This is the documented success criterion for the
     /// server cache.
     #[test]
-    fn cache_reuses_until_mtime_advances() {
+    fn cache_reuses_until_freshness_stamp_changes() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         fs::create_dir_all(root.join("issues")).unwrap();
@@ -188,59 +223,87 @@ mod tests {
         )
         .unwrap();
 
-        let cache = Arc::new(RepoConfigCache::new());
+        let cache = RepoConfigCache::new(root.to_path_buf());
 
         // First request: cold miss for both files.
-        let _ = cache.schema(root).unwrap();
-        let _ = cache.rules(root).unwrap();
+        let _ = cache.schema().unwrap();
+        let _ = cache.rules().unwrap();
         assert_eq!(
-            cache.parse_count(),
+            cache.refresh_count(),
             2,
             "first request should parse schema + rules once each"
         );
 
-        // Second request: hit on both. mtime unchanged.
-        let _ = cache.schema(root).unwrap();
-        let _ = cache.rules(root).unwrap();
+        // Second request: hit on both. Stamps unchanged.
+        let _ = cache.schema().unwrap();
+        let _ = cache.rules().unwrap();
         assert_eq!(
-            cache.parse_count(),
+            cache.refresh_count(),
             2,
-            "consecutive requests with unchanged mtimes must reuse the cache",
+            "consecutive requests with unchanged files must reuse the cache",
         );
 
-        // Touch the schema file with a later mtime, then a request
-        // re-parses schema (rules stay cached). Sleep long enough to
-        // outrun the host fs's mtime resolution — APFS is sub-ms but
-        // tmpfs/CI-FS is sometimes 1 s.
+        // Bump the schema's mtime explicitly. `filetime` sidesteps the
+        // host filesystem's mtime resolution and avoids the 1s+ sleeps
+        // that would otherwise be needed for the test to be reliable.
         bump_mtime(&root.join("issues/.schema.yaml"));
-        let _ = cache.schema(root).unwrap();
-        let _ = cache.rules(root).unwrap();
+        let _ = cache.schema().unwrap();
+        let _ = cache.rules().unwrap();
         assert_eq!(
-            cache.parse_count(),
+            cache.refresh_count(),
             3,
             "touching schema must invalidate the schema entry only",
         );
 
         bump_mtime(&root.join(".issuectl/transitions.yaml"));
-        let _ = cache.schema(root).unwrap();
-        let _ = cache.rules(root).unwrap();
+        let _ = cache.schema().unwrap();
+        let _ = cache.rules().unwrap();
         assert_eq!(
-            cache.parse_count(),
+            cache.refresh_count(),
             4,
             "touching transitions must invalidate the rules entry only",
         );
     }
 
+    /// Length-only invalidation works even when an external rewrite
+    /// happens to land at the same mtime tick. Belt-and-suspenders for
+    /// the `(mtime, len)` key.
+    #[test]
+    fn same_mtime_different_length_invalidates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("issues")).unwrap();
+        let path = root.join("issues/.schema.yaml");
+        fs::write(&path, "version: 1\nfields: {}\n").unwrap();
+
+        let cache = RepoConfigCache::new(root.to_path_buf());
+        let _ = cache.schema().unwrap();
+        let stamp_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(cache.refresh_count(), 1);
+
+        // Rewrite content with different length but pin the original
+        // mtime back. The cache must still see the change via `len`.
+        fs::write(&path, "version: 1\nfields:\n  type:\n    required: true\n").unwrap();
+        set_file_mtime(&path, FileTime::from_system_time(stamp_mtime)).unwrap();
+
+        let _ = cache.schema().unwrap();
+        assert_eq!(
+            cache.refresh_count(),
+            2,
+            "length change must invalidate even when mtime is pinned",
+        );
+    }
+
     /// `enter` activates the thread-local cache so `schema::load` and
     /// `transitions::load` route through it, and the guard clears the
-    /// slot on drop — including across worker-thread reuse.
+    /// slot on drop.
     #[test]
     fn enter_guard_routes_load_through_cache_and_clears_on_drop() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         fs::create_dir_all(root.join("issues")).unwrap();
 
-        let cache = Arc::new(RepoConfigCache::new());
+        let cache = Arc::new(RepoConfigCache::new(root.clone()));
 
         {
             let _g = enter(cache.clone());
@@ -255,30 +318,65 @@ mod tests {
             "active cache must be cleared when the guard drops",
         );
         assert_eq!(
-            cache.parse_count(),
+            cache.refresh_count(),
             2,
             "two schema + two transitions loads should yield one parse each",
         );
     }
 
-    /// The thread-local must be per-thread: spawning a worker without
-    /// `enter` must see no active cache, even while the parent has one
-    /// installed. This protects the CLI assumption "no cache unless
-    /// the server installs one explicitly".
+    /// `std::thread::spawn` proves OS-level thread-local isolation,
+    /// which is guaranteed by the platform — keep it as a smoke test
+    /// against `static` accidentally being introduced in place of
+    /// `thread_local!`.
     #[test]
     fn active_slot_is_per_thread() {
-        let cache = Arc::new(RepoConfigCache::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = Arc::new(RepoConfigCache::new(tmp.path().to_path_buf()));
         let _g = enter(cache);
         let saw_active = thread::spawn(|| current().is_some()).join().unwrap();
         assert!(!saw_active);
     }
 
+    /// The real risk for the thread-local design is `tokio::task::
+    /// spawn_blocking` worker reuse: the same OS thread serves multiple
+    /// blocking tasks in succession. Verify that even when the first
+    /// task panics mid-handler, the guard's `Drop` clears the slot
+    /// before the next task on the reused worker observes it.
+    #[test]
+    fn guard_clears_after_panic_on_reused_blocking_worker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let cache = Arc::new(RepoConfigCache::new(root));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let c = cache.clone();
+            let first = tokio::task::spawn_blocking(move || {
+                let _g = enter(c);
+                assert!(current().is_some());
+                panic!("force unwind to exercise Drop on panic");
+            })
+            .await;
+            assert!(first.is_err(), "first task must surface the panic");
+
+            let saw_leaked = tokio::task::spawn_blocking(|| current().is_some())
+                .await
+                .unwrap();
+            assert!(
+                !saw_leaked,
+                "a reused blocking worker must not see a leaked active cache",
+            );
+        });
+    }
+
     fn bump_mtime(path: &Path) {
-        // `set_modified` would be cleaner but is unstable on stable
-        // Rust; rewriting the file with a small sleep advances mtime
-        // reliably across filesystems.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        let prev = fs::read_to_string(path).unwrap();
-        fs::write(path, prev).unwrap();
+        let prev = std::fs::metadata(path).unwrap().modified().unwrap();
+        let next = FileTime::from_system_time(prev + std::time::Duration::from_secs(10));
+        set_file_mtime(path, next).unwrap();
     }
 }
