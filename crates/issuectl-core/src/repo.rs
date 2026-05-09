@@ -150,7 +150,7 @@ pub fn find_repo_root(start: Option<&Path>) -> PathBuf {
 /// flat (`issues/<slug>/item.md`); `folder` survives in payloads as a
 /// computed kanban-bucket label so existing CLI/web filters keep working.
 pub fn folder_for_status(status: &str) -> &'static str {
-    if crate::is_closing_status(status) {
+    if crate::issue_fields::is_closing_status(status) {
         "closed"
     } else {
         "open"

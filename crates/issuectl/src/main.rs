@@ -1,27 +1,3 @@
-mod agents;
-mod body_sections;
-mod canonical;
-mod context;
-mod docs;
-mod doctor;
-mod fmt;
-mod hooks;
-mod item_text;
-mod merge_driver;
-mod models;
-mod mutate;
-mod parser;
-mod query;
-mod refs;
-mod repo;
-mod repo_config;
-mod schema;
-mod server;
-mod skill;
-mod slug;
-mod transitions;
-mod write;
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,29 +6,13 @@ use anyhow::{bail, Context, Result};
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 
-pub(crate) const ISSUE_TYPES: &[&str] = &["bug", "task", "feature", "improvement", "chore", "epic"];
-pub(crate) const PRIORITIES: &[&str] = &["normal", "high"];
-pub(crate) const ACTIVE_STATUSES: &[&str] = &["open", "in-progress", "testing"];
-pub(crate) const CLOSING_STATUSES: &[&str] = &[
-    "done",
-    "fixed",
-    "wontfix",
-    "duplicate",
-    "cannot-reproduce",
-    "obsolete",
-];
-
-pub(crate) fn all_statuses() -> Vec<&'static str> {
-    ACTIVE_STATUSES
-        .iter()
-        .chain(CLOSING_STATUSES.iter())
-        .copied()
-        .collect()
-}
-
-pub(crate) fn is_closing_status(status: &str) -> bool {
-    CLOSING_STATUSES.contains(&status)
-}
+use issuectl_core::issue_fields::{
+    all_statuses, CLOSING_STATUSES, ISSUE_TYPES, PRIORITIES,
+};
+use issuectl_core::{
+    agents, body_sections, canonical, context, docs, doctor, fmt, hooks, merge_driver, models,
+    mutate, query, repo, server, skill, slug,
+};
 
 const TOP_LEVEL_HELP: &str = "\
 Examples:
@@ -1898,155 +1858,6 @@ fn cmd_body_set(
     Ok(())
 }
 
-#[derive(Debug)]
-pub(crate) struct MigrateMove {
-    pub slug: String,
-    pub from: PathBuf,
-    pub to: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct MigrateConflict {
-    pub slug: String,
-    pub detail: String,
-}
-
-/// One-shot move of every legacy `issues/{open,closed}/<slug>/` to
-/// `issues/<slug>/`. Held under the repo write lock so a concurrent
-/// CLI/server mutation cannot race the migration.
-///
-/// Two-pass plan-then-execute: discover everything → classify into
-/// `moves` and `conflicts` → if any conflict exists, return without
-/// touching disk. Only when the plan is clean does the rename pass
-/// run. This honours the docstring's all-or-nothing intent and matches
-/// what reviewers and the JSON exit-code contract expect (C6, M7).
-///
-/// Skips legacy directory entries whose names don't pass `slug::is_valid`
-/// — `issues/open/scratchwork` (or any non-kebab name) is reported as a
-/// `MigrateConflict` rather than silently migrated to `issues/scratchwork`
-/// (M6).
-#[derive(Debug, Default)]
-pub(crate) struct MigrateLayoutPlan {
-    pub moves: Vec<(String, PathBuf, PathBuf)>,
-    pub conflicts: Vec<MigrateConflict>,
-}
-
-/// Read-only plan: discover what would move and what conflicts. No renames.
-/// Safe to call without the write lock — callers wanting consistency
-/// should re-run after acquiring the lock.
-pub(crate) fn plan_migrate_layout(root: &Path) -> Result<MigrateLayoutPlan> {
-    let issues = root.join("issues");
-
-    use std::collections::BTreeMap;
-    let mut by_slug: BTreeMap<String, Vec<(PathBuf, &'static str)>> = BTreeMap::new();
-    let mut conflicts = Vec::new();
-    for legacy in ["open", "closed"] {
-        let legacy_dir = issues.join(legacy);
-        let Ok(rd) = fs::read_dir(&legacy_dir) else {
-            continue;
-        };
-        for entry in rd.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !slug::is_valid(&name) {
-                // M6: don't silently migrate non-slug-shaped names.
-                conflicts.push(MigrateConflict {
-                    slug: name.clone(),
-                    detail: format!(
-                        "{} is not a valid slug shape — rename or move out of issues/{} before migrating",
-                        entry.path().display(),
-                        legacy
-                    ),
-                });
-                continue;
-            }
-            by_slug
-                .entry(name)
-                .or_default()
-                .push((entry.path(), legacy));
-        }
-    }
-
-    // Pass 2: classify. flat-exists OR multiple-legacy → conflict.
-    let mut moves: Vec<(String, PathBuf, PathBuf)> = Vec::new();
-    for (slug, locations) in by_slug {
-        let dest = issues.join(&slug);
-        if dest.exists() {
-            conflicts.push(MigrateConflict {
-                slug: slug.clone(),
-                detail: format!(
-                    "both flat ({}) and legacy ({}) exist",
-                    dest.display(),
-                    locations
-                        .iter()
-                        .map(|(p, _)| p.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            });
-            continue;
-        }
-        if locations.len() > 1 {
-            conflicts.push(MigrateConflict {
-                slug: slug.clone(),
-                detail: format!(
-                    "slug exists in both legacy folders ({})",
-                    locations
-                        .iter()
-                        .map(|(p, _)| p.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(" and ")
-                ),
-            });
-            continue;
-        }
-        let (src, _) = locations.into_iter().next().unwrap();
-        moves.push((slug, src, dest));
-    }
-
-    // C6: all-or-nothing. If any conflict exists, the plan carries no
-    // moves so callers don't accidentally execute a partial migration.
-    if !conflicts.is_empty() {
-        return Ok(MigrateLayoutPlan {
-            moves: Vec::new(),
-            conflicts,
-        });
-    }
-
-    Ok(MigrateLayoutPlan { moves, conflicts })
-}
-
-/// Execute a previously-planned migration. Caller must hold the repo
-/// write lock.
-pub(crate) fn execute_migrate_layout_plan(
-    root: &Path,
-    moves: Vec<(String, PathBuf, PathBuf)>,
-) -> Result<Vec<MigrateMove>> {
-    let issues = root.join("issues");
-    let mut migrated = Vec::new();
-    for (slug, src, dest) in moves {
-        fs::rename(&src, &dest)
-            .with_context(|| format!("cannot rename {} → {}", src.display(), dest.display()))?;
-        migrated.push(MigrateMove {
-            slug,
-            from: src,
-            to: dest,
-        });
-    }
-
-    // Best-effort: prune now-empty legacy parent dirs so the repo
-    // doesn't keep ghost directories.
-    for legacy in ["open", "closed"] {
-        let p = issues.join(legacy);
-        if p.is_dir() {
-            let _ = fs::remove_dir(&p);
-        }
-    }
-
-    Ok(migrated)
-}
 
 fn cmd_skill_install(agent: &str, force: bool) -> Result<()> {
     let agents = match agent {
@@ -2484,16 +2295,6 @@ mod tests {
         assert!(parse_custom_field_key("team ").is_err(), "padded key");
         assert!(parse_custom_field_key("bad key").is_err());
         assert!(parse_custom_field_key("team:name").is_err());
-    }
-
-    #[test]
-    fn is_closing_status_classifies_correctly() {
-        for s in CLOSING_STATUSES {
-            assert!(is_closing_status(s));
-        }
-        for s in ACTIVE_STATUSES {
-            assert!(!is_closing_status(s));
-        }
     }
 
     fn write_raw_issue(root: &Path, slug: &str, fm: &str, body: &str) {

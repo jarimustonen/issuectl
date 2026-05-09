@@ -62,27 +62,6 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
     by the built binary, and `main()`'s `anyhow::Error` rendering.
     Anything reachable through a `pub(crate)` entry point belongs in
     an inline `#[cfg(test)]` module.
-- **`update --type` rejects when the new type's required body sections are missing.**
-  When `--type` lands a value whose schema requires body sections that
-  aren't already present in the body, `update` returns
-  `MutateError::SchemaViolation` listing each missing `## <Section>`.
-  The user has to add the headings to the body first, then re-run
-  `--type`. The alternative considered was *appending empty stubs*
-  (mirroring `cmd_new`'s create-time scaffolding); rejecting was
-  chosen because empty stubs pass `doctor` while communicating
-  nothing — a silent doctor blind-spot in an AI-first CLI. The
-  rejection path makes the gap explicit and gives an AI agent a
-  well-defined retry loop ("edit body, resubmit") instead of a
-  technically-conformant-but-semantically-blank document. Three
-  related rules ride along on a real type change (i.e. when the new
-  value differs from the current type): (a) reject if combined with
-  a close→open reopen on the same call (split into two calls); (b)
-  reject if `epic` is paired with assignee/reporter or a non-epic
-  type is paired with owner — mirrors `cmd_new`'s invariants; (c)
-  same-value sets are a true no-op so idempotent JSON clients don't
-  trip the checks. Old-type stubs (e.g. `## Plan` left over from a
-  previous `feature → task` change) are not pruned; that drift is
-  documented and acceptable.
 - **New mutation verbs go in `mutate.rs`, CLI handlers stay thin.**
   Every write path (CLI subcommand or web endpoint) routes through a
   function in `src/mutate.rs` so a) every writer obtains the same
@@ -93,20 +72,30 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
   argument parsing + JSON / human formatting (≤30 lines is the
   target). Do **not** reach into `write::*` directly from `main.rs`
   for new write paths — that bypasses the lock and the schema check.
-- **Domain logic lives in domain modules, not in `main.rs`.**
-  Layering complement to the operational rule above. `main.rs` owns
-  CLI parsing (clap structs), the top-level `cmd_*` handlers, and
-  `find_root` — nothing else. State-changing logic (lock acquisition,
-  schema validation, slug claiming, atomic writes) lives in
-  `src/mutate/`. Pure on-disk render/serialize primitives live in
-  `src/write.rs`. Shared domain helpers (issue enums like
-  `ISSUE_TYPES`/`PRIORITIES`, ref normalization, status
-  classification) live in their own domain module (`src/refs.rs`,
-  etc.). **No module under `src/` other than `main.rs` may
-  reference items defined in the crate root** — if a `mutate::*` or
-  `write::*` site needs to call `crate::foo()`, `foo` belongs in a
-  domain module. The `_pub` re-export wrapper anti-pattern is the
-  warning sign that a private root helper is leaking.
+- **Domain code lives in `issuectl-core`; `issuectl` only owns CLI
+  dispatch.** The repo is a Cargo workspace with two crates:
+  `crates/issuectl-core` (library) owns every domain module —
+  `mutate`, `write`, `repo`, `parser`, `schema`, `body_sections`,
+  `query`, `canonical`, `transitions`, `doctor`, `issue_fields`,
+  `migrate_layout`, etc. — and `crates/issuectl` (binary) owns
+  clap structs, `find_root`, the top-level `cmd_*` handlers, and
+  `fn main`. State-changing logic (lock acquisition, schema
+  validation, slug claiming, atomic writes) lives in
+  `crates/issuectl-core/src/mutate/`. Pure on-disk render/serialize
+  primitives live in `crates/issuectl-core/src/write.rs`. Shared
+  domain helpers (issue enums like `ISSUE_TYPES`/`PRIORITIES`,
+  status classification, ref normalization) live in their own
+  domain module (`issue_fields.rs`, `refs.rs`, etc.). The bin and
+  lib are **separate crates**: domain modules cannot reach
+  `crate::foo` to call something defined in the binary, because
+  `crate::` inside the lib resolves to `issuectl-core`'s `lib.rs`.
+  If a `mutate::*` or `write::*` site needs a helper, that helper
+  belongs in a domain module. The `_pub` re-export wrapper
+  anti-pattern is the warning sign that a private root helper is
+  leaking. `issuectl-core` is **published but explicitly internal**
+  (see its `lib.rs` doc comment) — `pub` items there are *not* a
+  semver contract. The semver contract lives in the `issuectl`
+  binary's CLI surface.
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, repo layout,
   PR process, and commit-message conventions.
 - See [issues/AGENTS.md](issues/AGENTS.md) for how this project's own

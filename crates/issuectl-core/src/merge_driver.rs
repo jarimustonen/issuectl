@@ -51,7 +51,7 @@ use serde_yaml::{Mapping, Value};
 
 use crate::fmt::format_text;
 use crate::item_text;
-use crate::mutate::{write_item_atomic, WriteLock};
+use crate::mutate::WriteLock;
 use crate::write::{self, ItemFile};
 
 #[derive(Debug)]

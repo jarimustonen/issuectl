@@ -18,7 +18,7 @@ use anyhow::{bail, Context, Result};
 use super::{MutateError, WriteLock};
 use crate::{refs, repo, schema, slug, write};
 
-pub(crate) struct NewArgs {
+pub struct NewArgs {
     pub issue_type: String,
     pub title: String,
     pub slug: Option<String>,
@@ -34,7 +34,7 @@ pub(crate) struct NewArgs {
     pub custom_fields: Vec<(String, String)>,
 }
 
-pub(crate) struct WriteOutcome {
+pub struct WriteOutcome {
     pub slug: String,
     pub title: String,
     pub item_path: PathBuf,
@@ -44,7 +44,7 @@ pub(crate) struct WriteOutcome {
 /// the `From` impl below so the API picks the right HTTP status without
 /// string-matching the formatted `anyhow::Error`.
 #[derive(Debug)]
-pub(crate) enum DoNewError {
+pub enum DoNewError {
     Validation(String),
     Conflict(String),
     SchemaViolation(String),
@@ -89,7 +89,7 @@ impl From<DoNewError> for MutateError {
     }
 }
 
-pub(crate) fn do_new(root: &Path, args: NewArgs) -> Result<WriteOutcome> {
+pub fn do_new(root: &Path, args: NewArgs) -> Result<WriteOutcome> {
     // M1 contract: every issuectl-mediated writer holds the repo
     // `flock`. Without this acquire, concurrent `issuectl new` from
     // the terminal would race against server-side mutations and

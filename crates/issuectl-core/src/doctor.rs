@@ -15,7 +15,10 @@ use crate::parser;
 use crate::schema;
 use crate::slug;
 use crate::write;
-use crate::{execute_migrate_layout_plan, plan_migrate_layout, MigrateConflict, MigrateMove};
+use crate::migrate_layout::{
+    execute_migrate_layout_plan, plan_migrate_layout, MigrateConflict, MigrateLayoutPlan,
+    MigrateMove, PlannedMove,
+};
 
 /// Single-pass scanner snapshot (D7). Doctor previously re-walked
 /// `issues/` once per check category (legacy detection, schema
@@ -224,7 +227,10 @@ struct DoctorReport {
     legacy_dirs: Vec<LegacyMigration>,
     /// Slug-shaped issues still living under `issues/{open,closed}/<slug>/`
     /// (post-flat-layout legacy). Planned moves to `issues/<slug>/`.
-    flat_layout_moves: Vec<(String, PathBuf, PathBuf)>,
+    /// Pending migration plan from `plan_migrate_layout`. Held opaque
+    /// so `apply` can hand it back to `execute_migrate_layout_plan`
+    /// (which consumes it under `&WriteLock`).
+    flat_layout_plan: Option<MigrateLayoutPlan>,
     flat_layout_migrated: Vec<MigrateMove>,
     flat_layout_conflicts: Vec<MigrateConflict>,
     invalid_slugs: Vec<String>,
@@ -350,9 +356,9 @@ pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
         // D2: hold the repo write lock through the apply pass so doctor
         // doesn't race CLI/server mutations. Re-scan under the lock to
         // ensure the plan reflects the locked-state filesystem.
-        let _lock = crate::mutate::WriteLock::acquire(repo_root)?;
+        let lock = crate::mutate::WriteLock::acquire(repo_root)?;
         report = scan(repo_root)?;
-        apply(repo_root, &mut report)?;
+        apply(repo_root, &mut report, &lock)?;
         // After mutation, the in-memory report mixes "what we planned"
         // with "what's still true". Stale findings (e.g. broken refs we
         // just fixed via legacy-migration rewrites) would mis-report
@@ -510,8 +516,8 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
     }
 
     let plan = plan_migrate_layout(repo_root)?;
-    report.flat_layout_moves = plan.moves;
-    report.flat_layout_conflicts = plan.conflicts;
+    report.flat_layout_conflicts = plan.conflicts().to_vec();
+    report.flat_layout_plan = Some(plan);
 
     // Round-2 finding O6: read-only `doctor` must surface pending
     // Notes migrations and conflicts so users see the work even
@@ -732,8 +738,8 @@ fn populate_extended_validation(
 
         // Status/closed consistency.
         if let Some(s) = &status {
-            let closing = crate::is_closing_status(s);
-            let active = crate::ACTIVE_STATUSES.contains(&s.as_str());
+            let closing = crate::issue_fields::is_closing_status(s);
+            let active = crate::issue_fields::ACTIVE_STATUSES.contains(&s.as_str());
             if closing && closed.is_none() {
                 report.status_consistency.push((
                     slug.clone(),
@@ -863,14 +869,14 @@ fn populate_extended_validation(
                 continue;
             };
             match hit.folder.as_str() {
-                "closed" if crate::ACTIVE_STATUSES.contains(&hit_status) => {
+                "closed" if crate::issue_fields::ACTIVE_STATUSES.contains(&hit_status) => {
                     report.closed_with_active_status.push((
                         slug.clone(),
                         hit_status.to_string(),
                         hit.item_path.clone(),
                     ));
                 }
-                "open" if crate::is_closing_status(hit_status) => {
+                "open" if crate::issue_fields::is_closing_status(hit_status) => {
                     report.open_with_closing_status.push((
                         slug.clone(),
                         hit_status.to_string(),
@@ -1172,7 +1178,11 @@ fn is_hard_parse_error(msg: &str) -> bool {
         || msg.starts_with("cannot read")
 }
 
-fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
+fn apply(
+    repo_root: &Path,
+    report: &mut DoctorReport,
+    lock: &crate::mutate::WriteLock,
+) -> Result<()> {
     // Preflight: refuse to mutate before checking every condition that
     // would force us to bail mid-way. A mid-fix bail leaves the repo in
     // a half-migrated state with no rollback path, so all "manual
@@ -1215,16 +1225,23 @@ fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
     // `issues/{open,closed}/<slug>/` moves up to `issues/<slug>/`. The
     // pre-acquired write lock in `run` covers this — `execute_migrate_layout_plan`
     // is the lock-free body and must not re-acquire.
-    if !report.flat_layout_moves.is_empty() {
-        let moves = std::mem::take(&mut report.flat_layout_moves);
-        report.flat_layout_migrated = execute_migrate_layout_plan(repo_root, moves)?;
-        // Paths in `legacy_dirs` (collected by the initial scan) now point
-        // at the pre-migration location. Re-scan so the NN-rename pass
-        // operates on fresh `old_path`s and picks up any frontmatter-only
-        // legacy issues that just moved into the flat layout.
-        let fresh = scan(repo_root)?;
-        report.legacy_dirs = fresh.legacy_dirs;
-        report.duplicate_slugs = fresh.duplicate_slugs;
+    if let Some(plan) = report.flat_layout_plan.take() {
+        if !plan.moves().is_empty() {
+            // `ExecuteOutcome` carries partial progress on mid-loop
+            // failure so the user-facing summary can still render
+            // "moved A, B before failing on C".
+            let outcome = execute_migrate_layout_plan(plan, lock);
+            report.flat_layout_migrated = outcome.migrated;
+            if let Some(err) = outcome.error {
+                return Err(err);
+            }
+            // Re-scan so the NN-rename pass operates on fresh
+            // `old_path`s and picks up frontmatter-only legacy issues
+            // that just moved into the flat layout.
+            let fresh = scan(repo_root)?;
+            report.legacy_dirs = fresh.legacy_dirs;
+            report.duplicate_slugs = fresh.duplicate_slugs;
+        }
     }
 
     if report.legacy_dirs.is_empty() {
@@ -1277,6 +1294,12 @@ fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
     let files_rewritten =
         rewrite_markdown_in_scopes(&scopes, &number_to_slug, &dir_to_slug, &ambiguous_numbers)?;
     report.files_rewritten = files_rewritten;
+
+    // Prune now-empty `issues/{open,closed}` parent dirs after any
+    // kind of legacy migration. Lives here (not inside
+    // `execute_migrate_layout_plan`) so a numbered-legacy-only repo
+    // — which the flat-layout planner skips — still gets cleaned.
+    crate::migrate_layout::prune_empty_legacy_parents(&repo_root.join("issues"));
 
     report.fix_applied = true;
     Ok(())
@@ -1721,9 +1744,17 @@ fn rewrite_text(
 
 // ── Output rendering ────────────────────────────────────────────────────────
 
+fn planned_moves(report: &DoctorReport) -> &[PlannedMove] {
+    report
+        .flat_layout_plan
+        .as_ref()
+        .map(|p| p.moves())
+        .unwrap_or(&[])
+}
+
 fn render_text(report: &DoctorReport, fix: bool) {
     let has_problems = !report.legacy_dirs.is_empty()
-        || !report.flat_layout_moves.is_empty()
+        || !planned_moves(report).is_empty()
         || !report.flat_layout_migrated.is_empty()
         || !report.flat_layout_conflicts.is_empty()
         || !report.invalid_slugs.is_empty()
@@ -1773,10 +1804,15 @@ fn render_text(report: &DoctorReport, fix: bool) {
             println!("  {}  ({} → {})", m.slug, m.from.display(), m.to.display());
         }
         println!();
-    } else if !report.flat_layout_moves.is_empty() {
+    } else if !planned_moves(report).is_empty() {
         println!("Issues still in legacy `issues/{{open,closed}}/<slug>/` layout:");
-        for (slug, src, dest) in &report.flat_layout_moves {
-            println!("  {}  ({} → {})", slug, src.display(), dest.display());
+        for m in planned_moves(report) {
+            println!(
+                "  {}  ({} → {})",
+                m.slug(),
+                m.from().display(),
+                m.to().display()
+            );
         }
         println!();
     }
@@ -2054,14 +2090,13 @@ fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json
         .map(|(loc, msg)| serde_json::json!({"location": loc, "message": msg}))
         .collect();
 
-    let flat_layout_planned: Vec<serde_json::Value> = report
-        .flat_layout_moves
+    let flat_layout_planned: Vec<serde_json::Value> = planned_moves(report)
         .iter()
-        .map(|(slug, src, dest)| {
+        .map(|m| {
             serde_json::json!({
-                "slug": slug,
-                "from": src.to_string_lossy(),
-                "to": dest.to_string_lossy(),
+                "slug": m.slug(),
+                "from": rel(repo_root, m.from()),
+                "to": rel(repo_root, m.to()),
             })
         })
         .collect();
@@ -2071,8 +2106,8 @@ fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json
         .map(|m| {
             serde_json::json!({
                 "slug": m.slug,
-                "from": m.from.to_string_lossy(),
-                "to": m.to.to_string_lossy(),
+                "from": rel(repo_root, &m.from),
+                "to": rel(repo_root, &m.to),
             })
         })
         .collect();
@@ -2283,7 +2318,7 @@ mod tests {
             "---\nnumber: 3\nstatus: open\n---\n# Third\n",
         );
         let mut r = scan(tmp.path()).unwrap();
-        apply(tmp.path(), &mut r).unwrap();
+        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         assert!(r.fix_applied);
         // Find the migrated 1-first directory.
         let mig1 = r.legacy_dirs.iter().find(|m| m.old_number == 1).unwrap();
@@ -2421,7 +2456,7 @@ mod tests {
         )
         .unwrap();
         let mut r = scan(tmp.path()).unwrap();
-        apply(tmp.path(), &mut r).unwrap();
+        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         let after = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(after.contains("## Comments"));
         assert!(!after.contains("## Notes"));
@@ -2443,7 +2478,7 @@ mod tests {
         let changelog = tmp.path().join("CHANGELOG.md");
         fs::write(&changelog, "# CHANGELOG\n\n- Fixed #1 regression\n").unwrap();
         let mut r = scan(tmp.path()).unwrap();
-        apply(tmp.path(), &mut r).unwrap();
+        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         let after = fs::read_to_string(&changelog).unwrap();
         assert!(
             after.contains("Fixed #1 regression"),
@@ -2505,7 +2540,7 @@ mod tests {
         let tmp = fresh_repo();
         let mut r = scan(tmp.path()).unwrap();
         assert!(r.schema_missing);
-        apply(tmp.path(), &mut r).unwrap();
+        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         let path = tmp.path().join("issues/.schema.yaml");
         assert!(path.is_file(), "schema file should be auto-written");
         // Should contain the canonical built-in fields.
@@ -2872,7 +2907,7 @@ mod tests {
         )
         .unwrap();
         let mut r = scan(tmp.path()).unwrap();
-        let err = apply(tmp.path(), &mut r).unwrap_err().to_string();
+        let err = apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap_err().to_string();
         assert!(err.contains("BOTH"), "missing both-folders blocker: {err}");
         assert!(
             err.contains("merge-conflict markers"),
@@ -2896,7 +2931,7 @@ mod tests {
         let mut r = scan(tmp.path()).unwrap();
         // Pre-fix: there are likely parser warnings in `parse_errors`.
         // None of them should trip the hard-error preflight check.
-        apply(tmp.path(), &mut r).expect("--fix should not refuse on soft parse warnings");
+        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).expect("--fix should not refuse on soft parse warnings");
     }
 
     #[test]
@@ -2914,7 +2949,7 @@ mod tests {
         )
         .unwrap();
         // Preflight bails before any mutation runs.
-        let err = apply(tmp.path(), &mut r).unwrap_err();
+        let err = apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap_err();
         assert!(
             err.to_string().contains("merge-conflict markers"),
             "got: {err}"
@@ -2953,7 +2988,7 @@ mod tests {
         let r = scan(tmp.path()).unwrap();
         assert!(r.orphan_tempfiles.iter().any(|p| p == &orphan));
         let mut r = scan(tmp.path()).unwrap();
-        apply(tmp.path(), &mut r).unwrap();
+        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         assert!(!orphan.exists(), "tempfile should be removed by --fix");
         assert!(r.orphan_tempfiles_removed.iter().any(|p| p == &orphan));
     }
@@ -2990,7 +3025,7 @@ mod tests {
             .closed_with_active_status
             .iter()
             .any(|(s, _, _)| s == "quiet-brave-otter"));
-        apply(tmp.path(), &mut r).unwrap();
+        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         // Flat-layout migration runs in the same apply pass and moves
         // the file from `issues/closed/<slug>/` to `issues/<slug>/`.
         let migrated = tmp.path().join("issues/quiet-brave-otter/item.md");
@@ -3010,7 +3045,7 @@ mod tests {
         )
         .unwrap();
         let mut r = scan(tmp.path()).unwrap();
-        apply(tmp.path(), &mut r).unwrap();
+        apply(tmp.path(), &mut r, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         let migrated = tmp.path().join("issues/quiet-brave-otter/item.md");
         let after = fs::read_to_string(&migrated).unwrap();
         assert!(after.contains("status: open"), "got: {after}");
@@ -3158,7 +3193,7 @@ mod tests {
 
         let mut report = scan(tmp.path()).unwrap();
         assert!(report.agents_md_drift);
-        apply(tmp.path(), &mut report).unwrap();
+        apply(tmp.path(), &mut report, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
         assert!(report.agents_md_regenerated);
 
         let after = fs::read_to_string(&path).unwrap();

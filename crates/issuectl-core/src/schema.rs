@@ -453,7 +453,7 @@ pub fn validate(schema: &Schema, fm: &Mapping) -> Vec<ViolationKind> {
 /// Project the `status` field's allowed-value enum into a set. Used
 /// by `transitions::validate_status_refs` to catch typo'd status
 /// names in `.issuectl/transitions.yaml`. Falls back to
-/// `crate::all_statuses()` when the schema's `status` field has no
+/// `crate::issue_fields::all_statuses()` when the schema's `status` field has no
 /// `enum:` constraint — same lenient default as elsewhere.
 pub fn status_universe(schema: &Schema) -> std::collections::BTreeSet<String> {
     schema
@@ -461,7 +461,7 @@ pub fn status_universe(schema: &Schema) -> std::collections::BTreeSet<String> {
         .get("status")
         .and_then(|spec| spec.allowed.as_ref())
         .map(|allowed| allowed.iter().cloned().collect())
-        .unwrap_or_else(|| crate::all_statuses().iter().map(|s| s.to_string()).collect())
+        .unwrap_or_else(|| crate::issue_fields::all_statuses().iter().map(|s| s.to_string()).collect())
 }
 
 /// Required H2 section names for an issue type. Empty slice when

@@ -8,6 +8,15 @@ priority: normal
 epic: exorbitantly-ill-apples
 related: ['@partially-ahead-button']
 labels: [release-v0.5.0]
+commits:
+- hash: ceedc71
+  summary: split src/lib.rs and relocate issue-domain primitives
+- hash: e81daab
+  summary: 'workspace split + migrate_layout hardening + #9 #12 fixes'
+- hash: a581c62
+  summary: round-2 review fixes (R1-R7,R10,R11,R13) + spin-off @greatly-flat-sleet
+- hash: 1e3844e
+  summary: round-3 review fixes (R3.1-3.4,3.6); pre-existing legacy_number ambiguity deferred
 ---
 
 # Move issue-domain constants and helpers out of main.rs (and consider lib.rs split)

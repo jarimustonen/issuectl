@@ -422,7 +422,7 @@ impl UpdateIssueRequest {
         }
         check_set_nonempty("status", &self.status)?;
         check_set_nonempty("type", &self.issue_type)?;
-        // No `crate::ISSUE_TYPES` membership check here: the schema
+        // No `crate::issue_fields::ISSUE_TYPES` membership check here: the schema
         // (`fields.type.enum`) is the source of truth for allowed
         // values, and a custom schema may declare additional types
         // (e.g. `spike`). Validation runs in step 4b under lock against
@@ -433,14 +433,14 @@ impl UpdateIssueRequest {
         check_set_nonempty("epic", &self.epic)?;
 
         if let Patch::Set(s) = &self.status {
-            if !crate::all_statuses().iter().any(|v| v == s) {
+            if !crate::issue_fields::all_statuses().iter().any(|v| v == s) {
                 return Err(MutateError::Validation(format!(
                     "status {s:?} is not one of the known statuses"
                 )));
             }
         }
         if let Patch::Set(p) = &self.priority {
-            if !crate::PRIORITIES.iter().any(|v| v == p) {
+            if !crate::issue_fields::PRIORITIES.iter().any(|v| v == p) {
                 return Err(MutateError::Validation(format!(
                     "priority {p:?} is not one of the known priorities"
                 )));
@@ -681,9 +681,12 @@ impl From<anyhow::Error> for MutateError {
 }
 
 /// RAII guard for the repo-wide write lock. Created with
-/// `acquire(root)` and released on `Drop` (panic-safe).
+/// `acquire(root)` and released on `Drop` (panic-safe). Carries the
+/// canonical repo root so callers (e.g. `migrate_layout`) can verify
+/// that the lock protects the repo they are about to mutate.
 pub struct WriteLock {
     _file: File,
+    canonical_root: PathBuf,
 }
 
 impl WriteLock {
@@ -715,7 +718,20 @@ impl WriteLock {
         }
         FileExt::lock_exclusive(&f)
             .with_context(|| format!("cannot acquire flock on {}", path.display()))?;
-        Ok(WriteLock { _file: f })
+        let canonical_root = fs::canonicalize(root)
+            .with_context(|| format!("cannot canonicalize repo root {}", root.display()))?;
+        Ok(WriteLock {
+            _file: f,
+            canonical_root,
+        })
+    }
+
+    /// Canonical path of the repo root this lock was acquired against.
+    /// Used by mutation helpers to verify the lock protects the repo
+    /// they are about to write — see e.g.
+    /// `migrate_layout::execute_migrate_layout_plan`.
+    pub fn canonical_root(&self) -> &Path {
+        &self.canonical_root
     }
 }
 
@@ -931,8 +947,8 @@ fn update_issue_under_lock(
     // active↔closing transition for messaging parity with the old API.
     if let Patch::Set(s) = &req.status {
         write::set_string(&mut item.frontmatter, "status", s);
-        let prev_closing = crate::is_closing_status(&prev_status);
-        let new_closing = crate::is_closing_status(s);
+        let prev_closing = crate::issue_fields::is_closing_status(&prev_status);
+        let new_closing = crate::issue_fields::is_closing_status(s);
         if new_closing {
             // Only set `closed:` on the active→closing edge, OR backfill
             // if the field is missing on a closing→closing transition
@@ -1223,7 +1239,7 @@ pub fn close_issue(
         .and_then(|v| v.as_str())
         .unwrap_or("open")
         .to_string();
-    if crate::is_closing_status(&current_status) {
+    if crate::issue_fields::is_closing_status(&current_status) {
         return Err(MutateError::Validation(format!(
             "issue {slug} already has a closing status ({current_status}); use `update` to change status"
         )));
@@ -2334,13 +2350,13 @@ pub fn new_issue(
     if req.title.trim().is_empty() {
         return Err(MutateError::Validation("title cannot be empty".into()));
     }
-    if !crate::ISSUE_TYPES.iter().any(|t| t == &req.issue_type) {
+    if !crate::issue_fields::ISSUE_TYPES.iter().any(|t| t == &req.issue_type) {
         return Err(MutateError::Validation(format!(
             "type {:?} is not one of the known types",
             req.issue_type
         )));
     }
-    if !crate::PRIORITIES.iter().any(|p| p == &req.priority) {
+    if !crate::issue_fields::PRIORITIES.iter().any(|p| p == &req.priority) {
         return Err(MutateError::Validation(format!(
             "priority {:?} is not one of the known priorities",
             req.priority
