@@ -59,8 +59,36 @@ Then call it in both:
 
 The duplicate-key check stays where it is (in `do_new_locked` for new, in `validate_custom_field_pairs` for update).
 
+## Also in scope: duplicate-key rejection on update
+
+Surfaced by the round-2 /llm-review on @partially-ahead-button.
+
+`NewIssueRequest::custom_fields` now rejects duplicate JSON object
+keys at the wire boundary (commit a1debda + follow-up). The update
+path still has the silent-dedup behavior:
+
+```rust
+// mutate/mod.rs
+pub custom_fields: BTreeMap<String, Patch<String>>,
+```
+
+A `PATCH {"custom_fields": {"team":"a","team":null}}` keeps whichever
+value `serde_json` picks last — undefined which one. The same
+`deserialize_custom_fields_no_dups`-style visitor applies, but the
+value type is `Patch<String>` instead of `String`. Two implementation
+options:
+
+1. Make the visitor generic over `V: Deserialize<'de>` and use it for
+   both request shapes (collect into Vec, then convert to BTreeMap
+   downstream if map semantics are needed).
+2. Add a parallel `deserialize_patch_map_no_dups` for the update path.
+
+Option (1) is cleaner. Either way the test patches mirror the
+existing `new_issue_request_*` set on the new path.
+
 ## Definition of done
 
 - API `POST /api/issues` and `PATCH /api/issues/<slug>` reject invalid/reserved custom-field keys with the same error message the CLI uses.
-- Test pinning the API rejection added to `mutate::tests`.
+- API `PATCH /api/issues/<slug>` rejects duplicate `custom_fields` keys at deserialization, mirroring `POST /api/issues`.
+- Test pinning the API rejection added to `mutate::tests` (both create and update paths).
 - No test suite regressions.
