@@ -306,11 +306,14 @@ enum Command {
         #[arg(short = 's', long, value_parser = PossibleValuesParser::new(all_statuses()))]
         status: Option<String>,
 
-        /// Change the issue type. Stubs for any per-type required body
-        /// sections that aren't already present are appended (mirrors
-        /// `new`'s scaffolding so the issue doesn't drift into a
-        /// doctor-failing state).
-        #[arg(short = 't', long = "type", value_parser = PossibleValuesParser::new(ISSUE_TYPES))]
+        /// Change the issue type. Rejected with `MutateError::SchemaViolation`
+        /// when the new type's schema-required body sections aren't already
+        /// present (the user must add them first), and rejected when combined
+        /// with a close→open reopen on the same call. Allowed values follow
+        /// `issues/.schema.yaml` (`fields.type.enum`); CLI accepts any
+        /// non-empty string and lets schema validation do the rejecting so
+        /// repos that extend the type enum work end-to-end.
+        #[arg(short = 't', long = "type", value_parser = parse_non_empty)]
         issue_type: Option<String>,
 
         /// New assignee (issues)

@@ -62,19 +62,27 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
     by the built binary, and `main()`'s `anyhow::Error` rendering.
     Anything reachable through a `pub(crate)` entry point belongs in
     an inline `#[cfg(test)]` module.
-- **`update --type` scaffolds missing required body sections (append, don't reject).**
+- **`update --type` rejects when the new type's required body sections are missing.**
   When `--type` lands a value whose schema requires body sections that
-  aren't already present, `update` appends `## <Section>` stubs to the
-  body — mirroring `cmd_new`'s scaffolding so a type change can't
-  silently drift into a doctor-failing state. The alternative
-  considered was rejecting the change with `MutateError::SchemaViolation`;
-  appending was chosen because the user's intent is unambiguous (they
-  asked for the new type), the no-op-on-already-present case is safe
-  (`schema::missing_body_sections` is idempotent and fence-aware), and
-  it removes a dead-end where the user has to hand-edit the body
-  before the mutation will succeed. Looser-target type changes are a
-  body-noop. Reuses the same `schema::missing_body_sections` +
-  `schema::stub_for_sections` pair as `mutate::new_issue`.
+  aren't already present in the body, `update` returns
+  `MutateError::SchemaViolation` listing each missing `## <Section>`.
+  The user has to add the headings to the body first, then re-run
+  `--type`. The alternative considered was *appending empty stubs*
+  (mirroring `cmd_new`'s create-time scaffolding); rejecting was
+  chosen because empty stubs pass `doctor` while communicating
+  nothing — a silent doctor blind-spot in an AI-first CLI. The
+  rejection path makes the gap explicit and gives an AI agent a
+  well-defined retry loop ("edit body, resubmit") instead of a
+  technically-conformant-but-semantically-blank document. Three
+  related rules ride along on a real type change (i.e. when the new
+  value differs from the current type): (a) reject if combined with
+  a close→open reopen on the same call (split into two calls); (b)
+  reject if `epic` is paired with assignee/reporter or a non-epic
+  type is paired with owner — mirrors `cmd_new`'s invariants; (c)
+  same-value sets are a true no-op so idempotent JSON clients don't
+  trip the checks. Old-type stubs (e.g. `## Plan` left over from a
+  previous `feature → task` change) are not pruned; that drift is
+  documented and acceptable.
 - **New mutation verbs go in `mutate.rs`, CLI handlers stay thin.**
   Every write path (CLI subcommand or web endpoint) routes through a
   function in `src/mutate.rs` so a) every writer obtains the same

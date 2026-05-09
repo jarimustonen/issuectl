@@ -144,7 +144,7 @@ closing status, the issue is also moved to `closed/` (same as `close`).
 Common flags:
 
 - `--status STATUS` (active or closing)
-- `-t/--type TYPE` (bug, task, feature, improvement, chore, epic — appends stubs for any per-type required body sections that aren't already present, mirroring `new`'s scaffolding so the issue doesn't drift into a doctor-failing state)
+- `-t/--type TYPE` (bug, task, feature, improvement, chore, epic, or any value the repo's `.schema.yaml` adds to `fields.type.enum` — rejected with `SchemaViolation` if the new type's required body sections are missing, with a list of `## <Section>` headings to add first; rejected if combined with a close→open reopen on the same call; rejected if the resulting type+`assignee`/`owner`/`reporter` combination violates the epic↔non-epic invariants `new` enforces)
 - `--assignee USER` / `--owner USER` (epics)
 - `--priority normal|high`
 - `--epic <slug>` / `--no-epic`
