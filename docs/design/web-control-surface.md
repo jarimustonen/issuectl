@@ -287,30 +287,33 @@ actions:
     description: "Create a worktree and start an agent on this issue"
     kind: workmux
     prompt: ".issuectl/prompts/implement.md"
-    base: "main"                       # passed to `workmux add --base`
-    # branch name = slug; workmux derives window name from it
+    base: "main"                       # validated as a git ref (R14)
+    branch_template: "{{slug}}"        # default; passed as the BRANCH_NAME positional
     agent: "claude"                    # tells workmux which agent to launch in the pane
-    allow_extra_instructions: true
-    on_start_runner:                   # status mutation runs in the RUNNER, not enqueue (review F1)
+    accept_extra_instructions: true    # R12: UI textarea toggle; not a permission boundary
+    on_start_runner:                   # best-effort status flip in the RUNNER (review F1, R8)
       set_status: in-progress
-      require_expected_version: true
+      best_effort: true                # R8: if it fails after agent started, warn — don't fail the run
     concurrency:
-      per_issue: 1
+      per_issue: 1                     # R4: 1 is the default for every kind; opt out per action
 
   send-to-active:
     label: "Send to active worktree"
-    description: "Deliver an extra prompt to a currently-open agent for this issue"
+    description: "Deliver an extra prompt to an open agent for this issue"
     kind: workmux-send
-    target: "{{slug}}"                 # workmux worktree name; defaults to slug
+    # target is resolved at click time (see §4.2.2); no `target:` field
     prompt: ".issuectl/prompts/follow-up.md"
-    allow_extra_instructions: true
+    accept_extra_instructions: true
     concurrency:
-      per_issue: unbounded             # send is idempotent-ish; let the user spam
+      per_target: 1                    # R4: only one in-flight send per worktree
+      cooldown_ms: 1000                # R4: brief debounce window
 
   context-dump:
     label: "Print context"
     kind: exec
     command: ["issuectl", "context", "{{slug}}"]
+    concurrency:
+      per_issue: 1                     # R4: even harmless-looking exec defaults to 1
     # no terminal; logs captured to logs/<run_id>.{stdout,stderr}
 ```
 
@@ -319,57 +322,166 @@ Template variables resolve only against a closed allowlist:
 `{{context_file}}`, `{{instructions_file}}`. Whole-argument
 substitution only; no interpolation into shell strings. Browser-
 supplied "extra instructions" *never* enter argv — they land only
-in `instructions_file`, which the agent reads. (Review F31.)
+in `instructions_file`, which the agent reads.
+
+**Concurrency defaults (R4).** All three kinds default to one
+in-flight run per natural scope (`per_issue` for `workmux`/`exec`,
+`per_target` for `workmux-send`). Manifest authors who genuinely
+want parallelism opt in explicitly (`per_issue: unbounded`,
+`per_issue: 4`, etc.). The previous draft defaulted `workmux-send`
+and `exec` to unbounded; that was unsafe — double-clicks spawn
+duplicate `cargo test` runs or interleave prompts in the agent's
+input buffer.
+
+**Canonical workmux naming (R7).** When the runner calls
+`workmux add`, the workmux name is always `issuectl-<run_id>` —
+not the slug. The branch name comes from `branch_template`
+(default `{{slug}}`). The mapping `(slug → workmux name)` for any
+in-flight run is recorded in the run JSON, which is what
+`workmux-send` consults to find a target — see §4.2.2.
 
 ### 4.2 Action kinds: `workmux`, `workmux-send`, `exec`
 
 #### `kind: workmux`
 
-The runner's execution path is roughly:
+The runner's execution path:
 
 ```
-1. workmux add \
-     --name <run_id_or_slug> \
-     --prompt-file <artifacts/<run_id>/prompt.md> \
-     --base <action.base> \
-     <slug>                          # branch name
-2. (optional, when on_start_runner.set_status set)
+1. (optional, when on_start_runner.set_status set; R8)
    issuectl --json update <slug> --status in-progress \
                                   --expected-version <run.issue_version>
-3. workmux wait <run_id> --status done --timeout <action.timeout>
-   ↓ status callbacks update running/<id>.json with workmux status JSON
-4. on completion: workmux merge <run_id>      (or leave it; F21 punts the auto-cleanup question)
+   ↳ failure → record warning on the run, continue (best_effort)
+2. workmux add \
+     --name issuectl-<run_id> \
+     --prompt-file <abs path artifacts/<run_id>/prompt.md> \
+     --base <validated_base> \
+     -- <branch_name>
+   ↳ failure → run → failed (state_reason: workmux_add_failed)
+3. workmux wait issuectl-<run_id> \
+                --status done \
+                --timeout <action.timeout>
+   ↑ blocking child of the runner. Cancellation = SIGTERM this
+     child + the cancel escalation in §5.3. Do **not** poll
+     `workmux status --json` in a loop (R1).
+4. observe wait's exit:
+     0     → run → complete
+     timed out → run → failed (state_reason: agent_timeout)
+     non-0  → run → failed; record stderr for diagnostics
 ```
 
-This is the entire `worktree` story. `workmux add` does the
-worktree-create + tmux-window + prompt-injection + agent-launch in
-one call. `workmux wait` is what tells us when the agent is
-genuinely done (review F15: no more "tmux client exited so we
-marked it complete while Claude kept running"). Logs are read on
-demand via `workmux capture <run_id> -n <lines>`; we do not
-maintain our own stdout file for this kind.
+`workmux add` does the worktree-create + tmux-window +
+prompt-injection + agent-launch in one call. `workmux wait` is
+what tells us when the agent is genuinely done — no
+"tmux client exited so we marked it complete while Claude kept
+running."
 
-Pre-flight check at action-availability time: `workmux --version`
-succeeds and the configured `agent` exists in PATH. Both surface
-through `GET /api/actions` so the UI can disable unavailable
-actions with an explicit reason.
+Cleanup (`workmux merge`/`workmux remove`) is **not** part of the
+runner's path. The user merges or discards on their own schedule.
+A previous draft of this section had `workmux merge` as a
+post-completion step; that is a source-control mutation, not
+cleanup, and never belonged in an automatic path. (R9.)
+
+##### Pre-flight, version pinning, status translation (R5)
+
+Action availability is checked by:
+
+1. `workmux --version` succeeds and reports a version `≥ MIN_WORKMUX`
+   (current floor: workmux 0.1.x line that emits the
+   `status`/`branch`/`elapsed_secs`/`pane_id` JSON shape we depend
+   on). Bump the floor whenever workmux changes a field name or
+   enum value.
+2. The configured `agent` exists in `PATH`.
+
+Both results surface through `GET /api/actions` so the UI can
+disable unavailable actions with an explicit reason.
+
+The runner translates `workmux status --json` payloads through
+an explicit enum *before* surfacing to the UI or transitioning a
+run. The translation must be written against **actual workmux
+output**, not the names this design wishes were used. As of
+`workmux 0.1.202` the observed `status` values include `working`
+and `done`; the translation table is:
+
+```rust
+enum WorkmuxObservedState {
+    Working,        // agent active
+    Done,           // agent finished
+    Idle,           // agent waiting for input (if workmux ever emits this)
+    Missing,        // no record for this name
+    Unknown(String), // any other string
+    ParseError(String),
+}
+```
+
+UI pill mapping:
+
+| Observed | Pill | Run transition |
+|---|---|---|
+| `Working` | "running" | stay running |
+| `Done` (after observed `Working`) | "complete" | terminal: complete |
+| `Idle` | "waiting" | stay running |
+| `Missing` after previously observed | "lost" | terminal: lost |
+| `Unknown(s)` | "running (unknown: s)" | stay running, log warning |
+| `ParseError(s)` | "running (degraded)" | stay running, retry with backoff |
+
+Unknown enum values and parse errors **never** terminally
+transition a run. A `workmux` upgrade that adds a new state must
+not silently mark every active run failed.
+
+##### Argument hardening (R14)
+
+`workmux add` is invoked with `--` separating flags from the
+branch positional, and `<validated_base>` has been checked via
+`git check-ref-format --branch <base>` before the call. This
+catches manifest typos like `base: "main "` (trailing space) or
+`base: "--orphan"` (accidental flag), even though manifest
+authors are trusted to write correct YAML overall.
 
 #### `kind: workmux-send`
 
 ```
-1. workmux send <action.target> --file <artifacts/<run_id>/prompt.md>
-2. mark complete immediately (send is fire-and-forget; receiver decides what to do)
+1. resolve target: latest run for this slug whose workmux name is
+   alive (per `workmux status`). If none, the action is unavailable
+   for this slug — the UI offers to fall back to `kind: workmux`.
+2. workmux send <resolved_target> --file <artifacts/<run_id>/prompt.md>
+3. on success → run → DELIVERED (not complete, see below)
+   on failure → run → failed; record stderr
 ```
+
+**Terminal state is `delivered`, not `complete` (R3).** The action
+is "done" only in the sense that the prompt reached the agent's
+input buffer. The agent has not necessarily read it, acted on it,
+or finished anything. Calling this `complete` would be dishonest.
+The UI pill says **Delivered**, with a tooltip "agent outcome
+unknown — open the tmux window to see what happens."
+
+Internally, the run-state machine has `delivered` as a separate
+terminal state alongside `complete`/`failed`/`cancelled`/`lost`.
+Wire format treats `delivered` as a peer of `complete` for SSE
+purposes.
 
 The user clicks → the prompt lands in the worktree they already
 have open in their tmux. No new window appears. This is the
-v0.6.0 answer to "send to my already-running Claude." The action
-fails if the named worktree doesn't exist (`workmux send` returns
-non-zero); the UI surfaces the error and offers to fall back to
-`kind: workmux` (open a fresh worktree).
+v0.6.0 answer to "send to my already-running Claude."
 
-`per_issue: unbounded` is the right default for this kind:
-sending follow-up prompts is benign and frequently rapid-fire.
+**Concurrency: `per_target: 1` with a 1-second cooldown (R4).**
+Sends are not idempotent: two follow-ups can interleave in the
+agent's input. A user who genuinely wants to enqueue multiple
+follow-ups can override `per_target` in the manifest, but the
+default refuses a second send until the first is `delivered`,
+plus a debounce to absorb double-clicks.
+
+**Target resolution (R7).** The action does not take a `target:`
+template field. The runner resolves the target at click time by
+looking up the most recent live `kind: workmux` run for the same
+slug in `running/<id>.json`, reading its `workmux_name`
+(`issuectl-<run_id>`), and verifying it via `workmux status`. If
+no such target exists, `GET /api/actions` reports the action
+`available: false, unavailable_reason: "no active worktree for
+this issue"` and the UI offers `kind: workmux` instead. This
+removes the ambiguity of the previous draft, which used
+`target: "{{slug}}"` and quietly broke if the workmux name had
+diverged from the slug.
 
 #### `kind: exec`
 
@@ -388,17 +500,38 @@ operations.
 - Free-form prompts originating from the web that are inserted into
   argv. Browser text only ever reaches an agent via
   `instructions_file`.
-- "Auto-detect tmux session and launch there" — explicit
-  `workmux-send target` only.
+- Auto-detection of arbitrary tmux sessions. `workmux-send` only
+  resolves targets that are tracked as in-flight `kind: workmux`
+  runs.
+
+#### Footgun: `kind: exec` invoking `workmux add` directly (R16)
+
+A manifest author who writes
+
+```yaml
+custom-spawn:
+  kind: exec
+  command: ["workmux", "add", "--name", "...", "..."]
+```
+
+will get **broken lifecycle semantics**: the runner waits on the
+short-lived `workmux add` process and marks the run `complete`
+the moment it returns, while the spawned agent runs for hours in
+a tmux pane the runner is not tracking. Logs come from
+`workmux add`'s ~zero-byte stdout, not from the agent. Cancellation
+kills the long-since-exited `workmux add`, not the agent.
+
+Use `kind: workmux` if you want workmux lifecycle. We do not
+lint or refuse this configuration — it's the same broken-design
+shape as any opaque `exec` invoking a daemon-spawning tool.
 
 This list matters. The whole reason `kind: workmux` is a structured
 kind, not a `kind: exec` calling `workmux` from YAML, is that the
 runner needs to do specific things around it: pre-flight version
-check, status polling via `workmux wait`, log reads via
-`workmux capture`, and lifecycle integration with `workmux merge`/
-`remove --gone`. Pushing all of that into a YAML recipe trades a
-one-time Rust integration for ongoing manifest complexity in every
-repo.
+check, blocking on `workmux wait`, status translation via the enum
+above, log reads via `workmux capture`, and structured cancellation.
+Pushing all of that into a YAML recipe trades a one-time Rust
+integration for ongoing manifest complexity in every repo.
 
 ## 5. The contract: who holds which lock when
 
@@ -431,36 +564,47 @@ visible run record, never as torn issue state.
 client                              server
   |  POST /api/actions/implement/runs                |
   |  X-Issuectl-CSRF: <tok>                          |
-  |  Idempotency-Key: <uuid>                         |  (review F10)
-  |  { slug, expected_version, instructions }        |
+  |  Idempotency-Key: <uuid>                         |  (review F10, R15)
+  |  { slug, expected_version, manifest_digest,      |  (R6)
+  |    instructions }                                |
   |  ------------------------------------------>     |
   |                                                  |
   |                 1. validate CSRF + Host          |
   |                 2. validate action_id ∈ manifest |
-  |                 3. flock(queue.lock)             |
+  |                 3. compare manifest_digest       |  (R6: stale-preview)
+  |                    against current resolved      |
+  |                    digest                        |
+  |                    → 409 manifest_changed if     |
+  |                    different (UI must re-fetch   |
+  |                    /api/actions and re-render    |
+  |                    the modal)                    |
+  |                 4. flock(queue.lock)             |
   |                    a. check Idempotency-Key      |
+  |                       (TTL 1h, scoped per        |  (R15)
+  |                        action_id+slug)           |
   |                       → return existing run if   |
-  |                       already accepted           |
+  |                       already accepted; expired  |
+  |                       keys mint a fresh run      |
   |                    b. check per-issue concurrency|
   |                       (queued+preparing+running) |
   |                       → 409 already_running      |
   |                    c. write preparing/<id>.json  |
   |                       (slug, action, idem, etc.) |
-  |                 4. release(queue.lock)           |
+  |                 5. release(queue.lock)           |
   |                                                  |
-  |                 5. flock(write.lock)             |
+  |                 6. flock(write.lock)             |
   |                    a. locate_issue(slug)         |
   |                    b. read item.md, hash         |
   |                    c. compare expected_version   |
   |                       → 409 version_mismatch +   |
   |                       transition preparing→failed|
   |                    d. SNAPSHOT issue (in mem)    |
-  |                 6. release(write.lock)           |
+  |                 7. release(write.lock)           |
   |                                                  |
-  |                 7. RENDER context bundle from    |  (outside flock per F2)
+  |                 8. RENDER context bundle from    |  (outside flock per F2)
   |                    snapshot to artifacts/.tmp-<id>|
   |                                                  |
-  |                 8. flock(queue.lock)             |
+  |                 9. flock(queue.lock)             |
   |                    a. atomic rename              |
   |                       artifacts/.tmp-<id>        |
   |                       → artifacts/<id>           |
@@ -468,9 +612,9 @@ client                              server
   |                       preparing/<id>.json        |
   |                       → queued/<id>.json         |
   |                       (or → failed/ on error)    |
-  |                 9. release(queue.lock)           |
+  |                10. release(queue.lock)           |
   |                                                  |
-  |                10. publish RunUpserted on        |
+  |                11. publish RunUpserted on        |
   |                    multiplexed /events channel   |  (F12 resolution)
   |  202 Accepted { run_id, status: "queued" }      |
   |  <------------------------------------------     |
@@ -531,46 +675,64 @@ list), it shells out to `issuectl --json update
 #### 5.2.1 `kind: workmux`
 
 ```
-6.a. (optional, when on_start_runner.set_status set)
+6.a. (optional, when on_start_runner.set_status set; R8)
      issuectl --json update <slug> --status in-progress \
                                    --expected-version <run.issue_version>
-     ↳ failure → run → failed (state_reason: issue_changed)
-6.b. workmux add --name <run_id> \
-                 --prompt-file artifacts/<run_id>/prompt.md \
-                 --base <action.base> \
-                 <slug>
+     ↳ failure: do NOT fail the run. Record a warning on the
+       run JSON and continue. Status mutation is best-effort
+       because the agent has not started yet; failing the run
+       here would deny the user their click for a non-essential
+       side effect.
+6.b. workmux add --name issuectl-<run_id> \                  (R7)
+                 --prompt-file <abs path artifacts/<id>/prompt.md> \
+                 --base <validated_base> \                   (R14)
+                 -- <branch_name>                            (R14)
      ↳ failure → run → failed (state_reason: workmux_add_failed)
-6.c. heartbeat loop:
-       workmux status <run_id> --json → write to running/<id>.json
-       sleep N seconds
-     until status ∈ {done, failed, idle-too-long} OR
-           cancel_requested becomes true
-6.d. on cancel_requested: workmux send <run_id> "<C-c>" then poll
-     status until exit
-6.e. terminal disposition:
-       done       → complete/
-       failed     → failed/
-       cancelled  → cancelled/
+
+   At this point, if 6.a recorded an `in-progress` status flip
+   that the agent will not actually realise, the warning on
+   the run JSON is the user-visible signal. (The previous draft
+   had this as a "torn state" hazard — R8.)
+6.c. workmux wait issuectl-<run_id> \                        (R1: NO polling loop)
+                  --status done \
+                  --timeout <action.timeout>
+     ↑ runner blocks on this child process. Cancel = SIGTERM
+       this child (see §5.3 escalation).
+     ↳ exit 0  → run → complete
+       timed out → run → failed (state_reason: agent_timeout)
+       non-0  → run → failed; record stderr
 ```
 
 Logs are read on demand (`GET /api/runs/<id>/logs` →
-`workmux capture <run_id> -n <lines>`); we don't maintain a
-stdout file for this kind. Cleanup of the worktree itself is
-*not* automatic in v0.6.0 — the user runs `workmux merge` /
-`workmux remove --gone` from their own workflow. (See §11.)
+`workmux capture issuectl-<run_id> -n <lines>`, with HTTP-side
+timeout and bytes cap per R13); we don't maintain a stdout file
+for this kind.
+
+Cleanup is **not** part of the runner's path (R9). The user
+runs `workmux merge` or `workmux remove --gone` on their own
+schedule. A previous draft listed `workmux merge` as a
+post-completion step, which was both contradictory with §11 and
+unsound — auto-merging unreviewed agent work is a footgun.
 
 #### 5.2.2 `kind: workmux-send`
 
 ```
-6.a. workmux send <action.target> --file artifacts/<run_id>/prompt.md
-6.b. exit code 0 → complete; nonzero → failed
-     (target_not_found, workmux_unavailable, etc.)
+6.a. resolve target (R7): scan running/<id>.json for the most
+     recent live `kind: workmux` run with this slug; verify via
+     `workmux status <name>`. If none → run → failed
+     (state_reason: no_active_target).
+6.b. workmux send <resolved_target> \
+                  --file artifacts/<run_id>/prompt.md
+6.c. exit code 0 → run → DELIVERED (R3 — peer terminal state to
+     `complete`; UI pill says "Delivered")
+     nonzero      → run → failed (record stderr)
 ```
 
-This kind is fire-and-forget by definition: there is no agent
-process *we own* to wait on. The receiving worktree's agent
-decides what to do with the prompt. Cancel is a no-op once
-`workmux send` has returned.
+This kind delivers a prompt to an agent we don't control. The
+receiving agent decides what to do with it. The terminal state
+is `delivered`, not `complete`, because we have no honest way to
+know whether the agent acted on the prompt — see §4.2.2 for the
+rationale. Cancel is a no-op once `workmux send` has returned.
 
 #### 5.2.3 `kind: exec`
 
@@ -608,11 +770,45 @@ sentinel. (Review F14.)
 3. release(queue.lock)
 ```
 
-The runner picks up `cancel_requested` at the next heartbeat /
-poll boundary in §5.2. For `kind: workmux` this triggers
-`workmux send <run> "<C-c>"`; for `kind: exec` it kills the
-process group. PID validation against start-time happens before
-any signal is sent (review F29).
+The runner observes `cancel_requested` and dispatches by kind:
+
+**`kind: exec`** — kill the recorded process group:
+```
+kill(-pgid, SIGTERM)
+sleep grace_period (default 5s)
+if still alive: kill(-pgid, SIGKILL)
+```
+PID start-time is validated before signaling (review F29) so that
+PID reuse cannot kill an unrelated process.
+
+**`kind: workmux`** — explicit escalation ladder (R2). `workmux
+send` is **not** documented as a cancel primitive, and
+`workmux 0.1.x` does not interpret special escape strings.
+Sending the literal four characters `<C-c>` would land in the
+agent's input as text. Honest semantics:
+
+```
+1. SIGTERM the runner's `workmux wait` child process.
+   This unblocks the runner immediately.
+2. Best-effort interrupt of the agent: workmux send
+   <name> "/cancel" (or whatever convention the agent
+   accepts as "stop"). The exact string is configurable
+   per-action via `cancel_signal:` (default empty → no
+   interrupt sent, agent keeps running).
+3. After grace_period (default 30s), if `workmux status`
+   still reports the agent as working: workmux remove
+   --force <name>. This kills the tmux pane and is
+   destructive — the agent's in-flight work is lost.
+4. Run transitions → cancelled.
+```
+
+The user-visible promise is "we asked the agent to stop and tore
+down the pane after 30s". We do **not** promise to gracefully
+unwind in-flight tool calls or save state — `workmux remove
+--force` is the backstop.
+
+**`kind: workmux-send`** — cancel is a no-op once `workmux send`
+has returned (the action is already terminal at that point).
 
 ### 5.4 Stale-run reaper
 
@@ -622,12 +818,24 @@ On `serve` startup and every N minutes thereafter, iterate
 generated once per host into `$XDG_STATE_HOME/issuectl/host-id`,
 not derived from hostname — hostnames are unstable.) For
 `kind: workmux` runs, additionally reconcile against
-`workmux status --json`: if the runner died but the workmux
-worktree is alive and the agent is `done`, transition to
-`complete` rather than `lost`.
+`workmux status`: if the runner died but the workmux worktree
+is alive and the agent reports `done`, transition to `complete`
+rather than `lost`.
 
 Cross-host runs (`host_id != this_host_id`) are left alone — that's
 the future multi-machine story and we don't speculatively reap.
+
+**Known limitation (R18):** `host_id` is a generated UUID, not a
+durable machine identifier. If `$XDG_STATE_HOME/issuectl/` is
+wiped (cleanup script, fresh OS install, ephemeral home) while
+runs are in-flight, those runs are issued a new `host_id` on
+next `serve` start and the old records become permanently
+"cross-host" from the reaper's perspective — they will not be
+marked `lost`. The user can clear them with
+`issuectl runs gc --orphaned` (part of the spin-off F21 work).
+Replacing the generated id with `/etc/machine-id` /
+`IOPlatformUUID` would close this leak; we judged the
+platform-specific code not worth the rare failure mode.
 
 ## 6. Trust, security, blast radius
 
@@ -674,11 +882,37 @@ Stated plainly so nobody is surprised:
   Same as `make`, same as `npm install`, same as opening the
   repo in an IDE that auto-runs config files. The user is
   responsible for reading `actions.yaml` and any referenced
-  prompt files before enabling actions in a given repo. The
-  startup banner (§6.4) makes this concrete.
+  prompt files before enabling actions in a given repo.
+- **The `make`/npm analogy is not perfect (R19).** `make foo` is
+  invoked from a terminal, per-target, with the user consciously
+  typing the command. `serve --enable-actions` turns checked-in
+  YAML into a clickable web button labelled "Start
+  implementation". That label is **not** a security boundary: a
+  malicious repo can map any benign-looking action to any argv.
+  The web-button modality lowers the friction of running
+  repo-authored code compared with typing `make`, and labels can
+  hide the payload. Mitigations: the action modal previews the
+  resolved argv (§7), and `manifest_digest` binding (§5.1 step 3
+  / R6) prevents preview-vs-execution drift. Treat action
+  buttons as executable code, not as ordinary kanban affordances.
 - **`git pull` that swaps actions underneath a running `serve`.**
   The freshly-pulled manifest is in effect on the next click.
-  This is the F4 finding accepted.
+  This is the F4 finding accepted as out-of-scope. R6's
+  digest-binding catches the *stale-preview* sub-case (the user
+  reviewed argv X in the modal, the server runs argv Y) but not
+  the broader "user clicks a button whose semantics changed
+  since they last looked." A web-UI banner on manifest-content
+  change (§7) is the visibility primitive for that case.
+- **Trust boundary is transitive (R17).** "Manifest is authored
+  code" extends to **every file the manifest references** — the
+  prompt files in `.issuectl/prompts/`, anything those include
+  (today's templates have no include syntax; if v0.7 adds one,
+  trust extends along the include chain), and any submodule whose
+  HEAD provides those files. To prevent the manifest from
+  *reading* arbitrary files via `prompt:` declarations, manifest
+  file references must be repo-relative, must not contain `..`,
+  and must resolve under the repo root after `realpath` —
+  symlinks pointing outside the repo are rejected at parse time.
 - **Prompt-injection content** in `.issuectl/prompts/*.md`. A
   malicious prompt can instruct the agent to exfiltrate secrets
   or modify code outside the issue's scope. We document this as
@@ -691,25 +925,52 @@ not the *manifest → executor* boundary. The relevant security
 boundary is therefore explicit: **the user vouching for the
 repo by running `issuectl serve --enable-actions` inside it**.
 
-### 6.4 Startup banner (visibility, not gating)
+### 6.4 Visibility (R11)
 
-The first time `serve --enable-actions` runs in a given repo (or
-when the resolved manifest content has changed since last run),
-print a one-time banner before binding the listener:
+Visibility lives in **two places**, with the UI as the primary
+surface because that is where the user is when they decide to
+click.
+
+**Web UI (primary).** The action modal previews the resolved
+argv before submission (§7), and the kanban surfaces a yellow
+banner when `manifest_digest` from the live `/api/actions` differs
+from the digest the page initially loaded with. This is exactly
+the case `git pull` mid-serve produces: the page is stale, the
+user is one click away from running argv they haven't reviewed.
+The banner says "Actions changed since this page loaded —
+refresh to see the current set" and offers a refresh button.
+
+**Terminal banner (supplemental).** On `serve --enable-actions`
+startup, print a one-time banner before binding the listener:
 
 ```
 issuectl: action surface enabled for /Users/jari/Sources/foo
   3 actions defined in .issuectl/actions.yaml:
-    implement       kind: workmux       runs: workmux add …
-    send-to-active  kind: workmux-send  runs: workmux send …
-    context-dump    kind: exec          runs: issuectl context …
+    implement       kind: workmux       resolved: workmux add --base main … claude
+    send-to-active  kind: workmux-send  resolved: workmux send <target> --file …
+    context-dump    kind: exec          resolved: issuectl context <slug>
   Loopback only (127.0.0.1:7878).
 ```
 
-This is **not** a gate — `serve` proceeds regardless, no
-keystroke is required. It exists so the user can't be unaware of
-what `--enable-actions` activated. Suppress with
-`--quiet-actions-banner` after the first read.
+Banner shows the **fully resolved argv**, not a truncated
+"workmux add …", because a truncated preview can hide
+`--dangerously-skip-permissions`-shaped flags. This is **not** a
+gate — `serve` proceeds regardless. It exists for users who
+launched `serve` interactively from a terminal; for users who
+run it under launchd/systemd, the UI banner is the only
+visibility they will ever see, which is acceptable because the UI
+banner fires on every *change*, not just first-run. Suppress the
+terminal banner with `--quiet-actions-banner` once you've read
+it.
+
+**Note on state tracking.** Detecting "manifest content has
+changed" requires an in-memory hash maintained by `serve`, *not*
+persisted state on disk and *not* a per-repo trust file. This is
+not the trust gate readmitted: nothing is approved, no per-repo
+state is recorded, and the digest is meaningful only for the
+current `serve` process's lifetime. (This is the
+state-tracking-contradiction the reviewer flagged — resolved by
+making the hash purely in-process.)
 
 ### 6.5 Other hardening that drops out cleanly
 
@@ -734,15 +995,25 @@ what `--enable-actions` activated. Suppress with
   (paths, branch names), still use a `safe_slug()` helper and
   insert `--` separators in argv where the called program supports
   them. (Review F7.)
-- **Environment policy** (review F17): children inherit a *minimal*
-  environment by default. `PATH` is sanitised to remove repo-local
-  directories; `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
-  `GIT_CONFIG`, `GIT_CONFIG_GLOBAL` are unset before spawn.
-  Explicit allowlist per action for things like
-  `ANTHROPIC_API_KEY`, `SSH_AUTH_SOCK`. Resolved executable path
-  (from `which`) is recorded in the run JSON for audit.
-- **Bounded extra instructions.** `allow_extra_instructions: true`
-  caps at 8 KiB. This is a manifest-size sanity bound, *not* a
+- **Environment policy split by kind (R10).** Generic `kind: exec`
+  children inherit a *minimal* environment by default: `PATH`
+  sanitised to remove repo-local directories;
+  `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE`/`GIT_CONFIG`/
+  `GIT_CONFIG_GLOBAL` unset before spawn; explicit allowlist per
+  action for things like `ANTHROPIC_API_KEY`. Interactive
+  `kind: workmux` and `kind: workmux-send` children get an
+  *interactive-safe* allowlist that adds the variables an agent
+  in tmux needs to function: `HOME`, `USER`, `LOGNAME`, `SHELL`,
+  `TERM`, `LANG`, `LC_*`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK`,
+  plus the per-action allowlist. Without these, `claude` in tmux
+  silently fails. The set of inherited keys (not values) is
+  recorded in the run JSON for audit.
+- **Resolved executable path** (from `which` against the
+  sanitised `PATH`) is recorded in the run JSON.
+- **Bounded extra instructions.** `accept_extra_instructions:
+  true` (R12 — renamed from `allow_extra_instructions` because
+  it is a UI textarea toggle, not a permission boundary) caps at
+  8 KiB. This is a manifest-size sanity bound, *not* a
   blast-radius reduction (review F32): the agent has full repo
   capability regardless. Free-text never enters argv (review F31);
   it lands only in `instructions_file`.
@@ -769,32 +1040,53 @@ A single click on a card surfaces an action menu derived from
 `/api/actions`. Selecting an action opens a small modal with:
 
 - the action's label/description,
-- an editable "extra instructions" textarea (when allowed),
-- a preview of the resolved argv (so the user can see what will
-  run — for `kind: workmux` this is the resolved
-  `workmux add …` invocation),
+- an editable "extra instructions" textarea (when
+  `accept_extra_instructions: true`),
+- a preview of the **fully resolved argv** (R19 — this is a
+  load-bearing security affordance, not just UX nicety; the user
+  reviews argv before clicking),
+- for `kind: workmux`, also the rendered prompt template's first
+  N lines with a "view full" expander so the user can review what
+  the agent will receive,
 - a "Run" button.
 
 After submit:
 
 - transient toast "queued #abc123" with the run id,
 - a per-card "runs" inset showing the most recent N runs with
-  status pills. Pills are kind-aware: a `kind: workmux` run shows
-  the live workmux agent status (`thinking`, `running`, `idle`,
-  `done`) rather than a fake `running` for the duration. (Review
-  F15 — the lifecycle distinction is concrete because workmux
-  reports it.)
+  status pills. Pills are kind-aware:
+  - `kind: workmux` reflects the workmux state via the
+    translation table in §4.2.1: `working` → "running", `done` →
+    "complete", `idle` → "waiting", anything else → "running
+    (unknown)" (R5);
+  - `kind: workmux-send` shows **"delivered"** as the terminal
+    pill, with a tooltip "agent outcome unknown — open the tmux
+    window to see what happens" (R3);
+  - `kind: exec` shows `queued` / `running` / `complete` /
+    `failed` / `cancelled` / `lost`.
 - click into a run for full status + log tail. For `kind: exec`
   this is `GET /api/runs/<id>/logs` against our log files; for
-  `kind: workmux` this is the result of `workmux capture <run> -n 200`,
-  ANSI-stripped.
+  `kind: workmux` this is the result of `workmux capture
+  issuectl-<run_id> -n <lines>`, ANSI-stripped, with a hard 2 s
+  server-side timeout, a max-bytes cap on the response, and a
+  ceiling of 5000 on `?lines=` regardless of what the client
+  asks for (R13).
 - "Attach in tmux" link for `kind: workmux` runs renders a
-  copy-pasteable `tmux attach -t <session> \; select-window -t <run_id>`
-  derived from `workmux status --json`.
+  copy-pasteable `tmux attach -t <session> \; select-window -t
+  issuectl-<run_id>` derived from `workmux status`.
 - run lifecycle events flow on the **existing `/events`** SSE
   channel as a new `RunUpserted` payload variant, not on a
   separate `/events/runs` stream. (Review F12 / DISCUSS resolution
   in `history/review-web-control-surface.md`.)
+- **Manifest-changed banner (R11):** the kanban polls
+  `manifest_digest` from `/api/actions` (or receives it on
+  `RunUpserted` events). If the live digest differs from the
+  digest captured at page load, a yellow banner appears at the
+  top: "Actions changed since this page loaded — refresh to see
+  the current set." Clicking refresh re-fetches `/api/actions`
+  and re-renders the action menu. R6 (manifest_digest binding on
+  POST) is what *enforces* the user resolves this before
+  clicking; the banner is the visibility layer.
 
 For v0.6.0, "Attach in tmux" is a copy-pasteable hint, not a deep
 link. The OS-launcher problem is real but not on the critical
@@ -823,16 +1115,20 @@ that breaks at exactly the wrong time.
 1. `.issuectl/actions.yaml` parser with strict schema, schema
    `version: 1`. Future versions parse-or-refuse with a clear
    error (review F19).
-2. `kind: workmux` action. The runner shells out to `workmux add`,
-   polls `workmux status --json`, reads logs via
-   `workmux capture`. Pre-flight checks `workmux --version` and
-   resolves the configured agent in `PATH`.
-3. `kind: workmux-send` action. The runner shells out to
-   `workmux send <target> --file <prompt>`. Pre-flight checks
-   that the target worktree exists.
+2. `kind: workmux` action. Runner: `workmux add`,
+   `workmux wait` (no polling, R1), log-on-demand via
+   `workmux capture`. Pre-flight checks `workmux --version
+   ≥ MIN_WORKMUX` and that the configured `agent` exists in
+   the sanitised PATH. Status translation enum (R5) shields
+   the runner from workmux schema drift.
+3. `kind: workmux-send` action. Runner: target resolution from
+   live `running/` records (R7), `workmux send <target> --file`,
+   terminal state `delivered` (R3). `per_target: 1` with 1 s
+   cooldown by default (R4).
 4. `kind: exec` generic action with argv-only commands, closed
    template-variable allowlist, process-group spawn (`setsid`),
-   per-stream log size cap, environment policy.
+   per-stream log size cap (10 MiB default, configurable),
+   minimal environment policy (R10). `per_issue: 1` default (R4).
 5. Run queue under `git rev-parse --git-common-dir`/issuectl/runs/
    (with XDG fallback for non-git repos) and the lock + state-
    machine + `preparing/` reservation described in §4 / §5.
@@ -842,14 +1138,18 @@ that breaks at exactly the wrong time.
    yet.
 7. HTTP API (loopback-only by default):
    - `GET /api/actions` — manifest, availability flags, resolved
-     argv preview.
+     argv preview, `manifest_digest` (R6).
    - `POST /api/actions/<id>/runs` — enqueue. Requires
-     `Idempotency-Key` (review F10).
+     `Idempotency-Key` (TTL 1h, scoped per action+slug — R15)
+     and `manifest_digest` (R6: 409 `manifest_changed` on
+     mismatch).
    - `GET /api/runs?slug=<slug>` and `GET /api/runs/<id>` — status.
    - `GET /api/runs/<id>/logs/{stdout,stderr}` — log tails for
      `kind: exec`; for `kind: workmux` proxies to
-     `workmux capture`.
-   - `POST /api/runs/<id>/cancel` — cancel.
+     `workmux capture` with 2 s server timeout, max-bytes cap,
+     and `?lines=` ceiling of 5000 (R13).
+   - `POST /api/runs/<id>/cancel` — cancel; dispatches the
+     escalation ladder in §5.3 (R2).
    - `GET /events` — `RunUpserted` payload variants flow on the
      existing `EventHub`/SSE channel (review F12 resolution),
      with the same `subscribe_since`/`instance_id` race-free
@@ -858,10 +1158,11 @@ that breaks at exactly the wrong time.
    - `issuectl run <action> <slug> [--instructions ...]
      [--expected-version ...] [--json]`.
    - `issuectl runs list|show|cancel|logs`.
-9. **Startup banner** listing actions defined in
-   `.issuectl/actions.yaml` (and their resolved argv) when
-   `serve --enable-actions` is invoked. Visibility, not a gate.
-   See §6.4.
+9. **Visibility surface (§6.4):** terminal banner on
+   `serve --enable-actions` startup with fully resolved argv
+   per action; web-UI yellow banner on `manifest_digest` change
+   between page load and current; modal preview of resolved
+   argv before submission. None of this gates execution.
 10. Stale-run reaper using `host_id` + `started_at`-aware PID
     checks; for `kind: workmux`, reconciles against
     `workmux status --json` (review F29).
@@ -915,11 +1216,12 @@ that breaks at exactly the wrong time.
   that without taking on a remote-shell-shaped surface.
 - **`workmux` and `workmux-send` are structured kinds, not
   `kind: exec` recipes.** The runner needs to do specific things
-  (pre-flight, status polling, log proxying, lifecycle); pushing
-  these into YAML trades a one-time integration for ongoing
-  manifest complexity in every repo. Honest trade-off named in
-  the assessment as F28-DISCUSS, resolved here in favour of
-  structured kinds.
+  (pre-flight version pinning, blocking on `workmux wait`,
+  status-enum translation, log proxying via `workmux capture`,
+  structured cancellation escalation); pushing these into YAML
+  trades a one-time integration for ongoing manifest complexity
+  in every repo. Honest trade-off named in the round-1 assessment
+  as F28-DISCUSS, resolved here in favour of structured kinds.
 - **Status mutation is a runner concern, not an enqueue concern.**
   This was the original design's worst structural bug (F1/F2);
   the revised §5.1 makes the run record durable before any side
@@ -933,12 +1235,21 @@ that breaks at exactly the wrong time.
 - **No content-hash trust gate.** `actions.yaml` is treated as
   authored code (same as Makefile/npm scripts/git hooks). The
   user is responsible for reading it before running
-  `serve --enable-actions` in a freshly-cloned repo. The startup
-  banner (§6.4) is the visibility primitive; it does not gate
-  execution. Review findings F4/F5/F23/F33 are accepted as
+  `serve --enable-actions` in a freshly-cloned repo. The
+  visibility surface in §6.4 (modal argv preview + UI banner on
+  manifest change + terminal banner) makes drift visible without
+  gating it. Review findings F4/F5/F23/F33 are accepted as
   out-of-scope risks given this trade-off — the alternative
   (re-prompt on every legitimate manifest edit) trains users to
   click-through and was judged worse.
+- **`manifest_digest` binding on POST is not a trust gate.**
+  R6 from the round-2 review adds a `manifest_digest` field to
+  `GET /api/actions` and requires it on `POST .../runs`. This
+  prevents the user from clicking a button whose argv changed
+  between page load and submit; it does *not* approve anything,
+  store per-repo state, or prompt the user. Same shape as
+  `expected_version` for issues. Importantly small, importantly
+  not the trust gate readmitted.
 
 ## 11. Open questions for follow-up review
 
@@ -957,23 +1268,27 @@ that breaks at exactly the wrong time.
    it as text appended to the context bundle. If it ever needs
    to *gate* actions ("agents may not run `kind: shell`"),
    that's a structured-policy file, not markdown. Defer.
-4. **Per-issue concurrency defaults by `kind`** — `workmux` →
-   1, `workmux-send` → unbounded, `exec` → unbounded — or always
-   require explicit declaration in the manifest? Review F18
-   raised this; the design above picks per-kind defaults but the
-   alternative (always explicit) is reasonable.
+4. **Concurrency defaults are now uniformly 1** (R4 resolution):
+   `kind: workmux` → `per_issue: 1`, `kind: workmux-send` →
+   `per_target: 1` + 1 s cooldown, `kind: exec` → `per_issue: 1`.
+   Manifest authors opt in to parallelism explicitly. Open
+   sub-question: is `per_issue` even the right axis for `exec`?
+   Some `exec` actions are repo-global (`cargo test`), not
+   per-issue. Add `per_repo` and `per_action` axes if the v0.6.0
+   user feedback shows real use.
 5. **How to surface action availability when a dependency
    disappears.** `workmux --version` at startup is fine, but
    each kanban request also needs to detect "workmux uninstalled
    while serve was running". Probe at action-list read with TTL
    cache (e.g. 30 s) plus on-demand recheck on enqueue.
-6. **`workmux-send` target naming.** The current example uses
-   `target: "{{slug}}"`, assuming the worktree was named after
-   the slug. If `workmux add` was given an explicit `--name`
-   that diverges, the send target is ambiguous. Either record
-   the workmux name in the issue frontmatter on `kind: workmux`
-   completion, or query `workmux list --json` and let the user
-   pick from a dropdown. Defer to UX iteration.
+6. **`workmux-send` target resolution under multi-run history**
+   (R7 follow-on). The design resolves targets by scanning live
+   `running/<id>.json` for the most recent `kind: workmux` run
+   matching the slug. If the user has multiple worktrees open
+   for the same issue (rare but possible — long-running plus a
+   parallel investigation branch), "most recent" picks one
+   silently. Future UX iteration: surface a picker in the modal
+   when more than one live workmux run matches.
 
 ## 12. Spin-off issues to file (recommendations)
 
@@ -1015,13 +1330,15 @@ closing the precursor with a `Source: <issue>` cross-reference.
 - `docs/design/body-sections.md` — `## Comments` is the canonical
   body section for free-form notes; the cross-reference on
   @excessively-beneficial-owner uses it.
-- `history/review-web-control-surface.md` — full review +
-  assessment table that drove the revisions in this version of
-  the note. F1, F2, F3, F6, F8, F9, F10, F11, F12, F14, F17,
-  F18, F19, F22, F25, F29, F31, F32 are integrated above; F21
-  is the named SPIN-OFF; F26 and F28 are resolved by the
-  `workmux` assumption; **F4, F5, F23, F33 are accepted as
-  out-of-scope risks given the no-trust-gate decision in §6**.
+- `history/review-web-control-surface.md` — round-1 review +
+  assessment. F1–F3, F6, F8–F12, F14, F17–F19, F22, F25, F29,
+  F31–F32 integrated; F21 SPIN-OFF; F26, F28 resolved by
+  `workmux`; F4, F5, F23, F33 accepted as out-of-scope risks
+  given the no-trust-gate decision in §6.
+- `history/review-web-control-surface-r2.md` — round-2 review +
+  assessment (post-workmux + post-trust-removal). R1–R15, R17,
+  R19 integrated above; R16 and R18 documented in-place as
+  known footguns/limitations rather than mechanically fixed.
 - `workmux --help` — local agent multiplexer; assumed dependency.
   Subcommands the design relies on: `add`, `send`, `status`,
   `wait`, `capture`, `merge`, `remove`.
