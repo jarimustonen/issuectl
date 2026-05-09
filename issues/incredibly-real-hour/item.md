@@ -1,10 +1,11 @@
 ---
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-05-09
 type: chore
 status: open
 priority: normal
-epic: exorbitantly-ill-apples
+epic: hugely-exciting-spiders
+labels: [monitoring]
 ---
 
 # Investigate watcher race: stale snapshot after concurrent PATCH
