@@ -392,6 +392,7 @@ enum Command {
     },
 
     /// Append a timestamped block to an issue's `## Comments` section
+    /// (or `## Decisions` / `## Agent Runs` with `--decision` / `--agent-run`)
     Note {
         /// Issue slug
         #[arg(value_parser = parse_slug_arg)]
@@ -405,9 +406,112 @@ enum Command {
         #[arg(value_parser = parse_non_empty)]
         message: String,
 
+        /// Append to the `## Decisions` section instead of `## Comments`.
+        #[arg(long, conflicts_with = "agent_run")]
+        decision: bool,
+
+        /// Append to the `## Agent Runs` section instead of `## Comments`.
+        #[arg(long = "agent-run", conflicts_with = "decision")]
+        agent_run: bool,
+
+        /// Plan only: print a unified diff and exit 0 without writing.
+        #[arg(long)]
+        dry_run: bool,
+
         /// Optimistic-concurrency token; required with --json
         #[arg(long = "expected-version", value_parser = parse_non_empty)]
         expected_version: Option<String>,
+    },
+
+    /// Set a single frontmatter field. Built-in fields (`status`,
+    /// `priority`, `assignee`, `owner`, `epic`) use the typed update
+    /// path; any other key goes through the schema-validated
+    /// `custom_fields` slot. Use `--clear` to remove a (non-status)
+    /// field.
+    Set {
+        /// Issue slug
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+
+        /// Field name (e.g. `status`, `priority`, or a schema-declared
+        /// custom key like `team`)
+        #[arg(value_parser = parse_non_empty)]
+        field: String,
+
+        /// New value. Required unless `--clear` is given.
+        #[arg(value_parser = parse_non_empty, required_unless_present = "clear")]
+        value: Option<String>,
+
+        /// Remove the field instead of setting it. Conflicts with `value`.
+        #[arg(long, conflicts_with = "value")]
+        clear: bool,
+
+        /// Plan only: print a unified diff and exit 0 without writing.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Optimistic-concurrency token; required with --json
+        #[arg(long = "expected-version", value_parser = parse_non_empty)]
+        expected_version: Option<String>,
+    },
+
+    /// Toggle a markdown checklist item in the issue body. Matches a
+    /// unique line containing the substring whose stripped text starts
+    /// with `- [ ]` or `- [x]`.
+    Check {
+        /// Issue slug
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+
+        /// Substring of the task line to match (must be unique across
+        /// the body's checkbox lines).
+        #[arg(value_parser = parse_non_empty)]
+        task: String,
+
+        /// Plan only: print a unified diff and exit 0 without writing.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Optimistic-concurrency token; required with --json
+        #[arg(long = "expected-version", value_parser = parse_non_empty)]
+        expected_version: Option<String>,
+    },
+
+    /// Add or remove a label. Idempotent.
+    Label {
+        /// Issue slug
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+
+        /// Operation
+        #[arg(value_parser = PossibleValuesParser::new(["add", "remove"]))]
+        op: String,
+
+        /// Label
+        #[arg(value_parser = parse_non_empty)]
+        label: String,
+
+        /// Plan only: print a unified diff and exit 0 without writing.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Optimistic-concurrency token; required with --json
+        #[arg(long = "expected-version", value_parser = parse_non_empty)]
+        expected_version: Option<String>,
+    },
+
+    /// Apply a multi-field YAML patch in a single transaction.
+    /// The file declares `slug:` plus any combination of built-in
+    /// fields, `custom_fields:`, label/related list ops, and commits
+    /// — all applied under one flock with one schema-validation pass.
+    Apply {
+        /// Path to the YAML patch file
+        #[arg(value_name = "PATCH")]
+        patch: PathBuf,
+
+        /// Plan only: print a unified diff and exit 0 without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Edit issue body markdown
@@ -737,8 +841,42 @@ fn main() -> Result<()> {
             slug,
             author,
             message,
+            decision,
+            agent_run,
+            dry_run,
             expected_version,
-        } => cmd_note(json_output, &slug, &author, &message, expected_version),
+        } => cmd_note(
+            json_output,
+            &slug,
+            &author,
+            &message,
+            decision,
+            agent_run,
+            dry_run,
+            expected_version,
+        ),
+        Command::Set {
+            slug,
+            field,
+            value,
+            clear,
+            dry_run,
+            expected_version,
+        } => cmd_set(json_output, &slug, &field, value, clear, dry_run, expected_version),
+        Command::Check {
+            slug,
+            task,
+            dry_run,
+            expected_version,
+        } => cmd_check(json_output, &slug, &task, dry_run, expected_version),
+        Command::Label {
+            slug,
+            op,
+            label,
+            dry_run,
+            expected_version,
+        } => cmd_label(json_output, &slug, &op, &label, dry_run, expected_version),
+        Command::Apply { patch, dry_run } => cmd_apply(json_output, &patch, dry_run),
         Command::Body { action } => match action {
             BodyAction::Set {
                 slug,
@@ -1654,11 +1792,100 @@ fn normalize_related_refs(refs: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_note(
     json: bool,
     slug: &str,
     author: &str,
     message: &str,
+    decision: bool,
+    agent_run: bool,
+    dry_run: bool,
+    expected_version: Option<String>,
+) -> Result<()> {
+    if json && expected_version.is_none() {
+        bail!(
+            "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
+        );
+    }
+    let section = if decision {
+        body_sections::DECISIONS
+    } else if agent_run {
+        body_sections::AGENT_RUNS
+    } else {
+        body_sections::COMMENTS
+    };
+    let root = find_root();
+    let outcome = mutate::note_issue(
+        &root,
+        slug,
+        author,
+        message,
+        section,
+        expected_version,
+        None,
+        dry_run,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    finish_mutation(json, slug, &outcome, dry_run, "Appended note to")
+}
+
+fn cmd_set(
+    json: bool,
+    slug: &str,
+    field: &str,
+    value: Option<String>,
+    clear: bool,
+    dry_run: bool,
+    expected_version: Option<String>,
+) -> Result<()> {
+    if json && expected_version.is_none() {
+        bail!(
+            "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
+        );
+    }
+    use mutate::Patch;
+    let mut req = mutate::UpdateIssueRequest {
+        expected_version,
+        dry_run,
+        ..Default::default()
+    };
+    let patch_for_clear = || {
+        if clear {
+            Patch::Clear
+        } else {
+            Patch::Set(value.clone().expect("required by clap unless --clear"))
+        }
+    };
+    match field {
+        "status" => {
+            if clear {
+                bail!("status cannot be cleared (issues always have a status)");
+            }
+            req.status = Patch::Set(value.clone().unwrap());
+        }
+        "priority" => req.priority = patch_for_clear(),
+        "assignee" => req.assignee = patch_for_clear(),
+        "owner" => req.owner = patch_for_clear(),
+        "epic" => req.epic = patch_for_clear(),
+        other => {
+            // Custom-field path. The mutate layer rejects reserved
+            // keys with a hint pointing at the right slot, so the user
+            // gets a clear error if they try `set <slug> labels foo`.
+            req.custom_fields.insert(other.to_string(), patch_for_clear());
+        }
+    }
+    let root = find_root();
+    let outcome =
+        mutate::update_issue(&root, slug, req, None).map_err(|e| anyhow::anyhow!("{e}"))?;
+    finish_mutation(json, slug, &outcome, dry_run, "Updated")
+}
+
+fn cmd_check(
+    json: bool,
+    slug: &str,
+    task: &str,
+    dry_run: bool,
     expected_version: Option<String>,
 ) -> Result<()> {
     if json && expected_version.is_none() {
@@ -1667,19 +1894,132 @@ fn cmd_note(
         );
     }
     let root = find_root();
-    let outcome = mutate::note_issue(&root, slug, author, message, expected_version, None)
+    let outcome = mutate::toggle_checkbox(&root, slug, task, expected_version, None, dry_run)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    finish_mutation(json, slug, &outcome, dry_run, "Toggled checkbox in")
+}
+
+fn cmd_label(
+    json: bool,
+    slug: &str,
+    op: &str,
+    label: &str,
+    dry_run: bool,
+    expected_version: Option<String>,
+) -> Result<()> {
+    if json && expected_version.is_none() {
+        bail!(
+            "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
+        );
+    }
+    let mut req = mutate::UpdateIssueRequest {
+        expected_version,
+        dry_run,
+        ..Default::default()
+    };
+    match op {
+        "add" => req.add_labels.push(label.to_string()),
+        "remove" => req.remove_labels.push(label.to_string()),
+        _ => bail!("op must be `add` or `remove`"),
+    }
+    let root = find_root();
+    let outcome =
+        mutate::update_issue(&root, slug, req, None).map_err(|e| anyhow::anyhow!("{e}"))?;
+    finish_mutation(json, slug, &outcome, dry_run, "Updated labels for")
+}
+
+fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
+    let yaml_text = fs::read_to_string(patch_path)
+        .with_context(|| format!("cannot read patch file {}", patch_path.display()))?;
+    let mut yaml: serde_yaml::Value = serde_yaml::from_str(&yaml_text)
+        .with_context(|| format!("cannot parse {} as YAML", patch_path.display()))?;
+    let map = yaml
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("patch file must be a YAML mapping at the top level"))?;
+    let slug = map
+        .remove(serde_yaml::Value::String("slug".into()))
+        .ok_or_else(|| anyhow::anyhow!("patch file must declare `slug:`"))?
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("`slug:` must be a string"))?
+        .to_string();
+    if !slug::is_valid(&slug) {
+        bail!("invalid slug shape: {slug:?}");
+    }
+    if json && !map.contains_key(serde_yaml::Value::String("expected_version".into())) {
+        bail!(
+            "patch must include `expected_version:` when invoked with --json (per design D4=B)"
+        );
+    }
+    let mut req: mutate::UpdateIssueRequest = serde_yaml::from_value(yaml)
+        .with_context(|| format!("cannot parse patch fields in {}", patch_path.display()))?;
+    req.dry_run = dry_run;
+    let root = find_root();
+    let outcome =
+        mutate::update_issue(&root, &slug, req, None).map_err(|e| anyhow::anyhow!("{e}"))?;
+    finish_mutation(json, &slug, &outcome, dry_run, "Applied patch to")
+}
+
+/// Shared CLI epilogue for the new mutation verbs. On `--dry-run`
+/// prints a unified diff against the on-disk `item.md`; otherwise
+/// prints (or emits the JSON envelope for) the standard mutation
+/// response. `--json` always emits the same envelope as `update`.
+fn finish_mutation(
+    json: bool,
+    slug: &str,
+    outcome: &mutate::UpdateOutcome,
+    dry_run: bool,
+    human_verb: &str,
+) -> Result<()> {
+    if dry_run {
+        let item_path = outcome.issue_dir.join("item.md");
+        let before = fs::read_to_string(&item_path).unwrap_or_default();
+        let after = outcome
+            .pending_serialized
+            .clone()
+            .unwrap_or_else(|| before.clone());
+        let diff = render_unified_diff(&before, &after, &item_path);
+        if json {
+            let report = serde_json::json!({
+                "slug": slug,
+                "version": outcome.version,
+                "moved_to_closed": outcome.moved_to_closed,
+                "moved_to_open": outcome.moved_to_open,
+                "dry_run": true,
+                "diff": diff,
+            });
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print!("{diff}");
+        }
+        return Ok(());
+    }
     if json {
         let report = serde_json::json!({
             "slug": slug,
             "version": outcome.version,
-            "issue_dir": outcome.issue_dir.to_string_lossy(),
+            "moved_to_closed": outcome.moved_to_closed,
+            "moved_to_open": outcome.moved_to_open,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("Appended note to {slug}");
+        println!("{human_verb} {slug}");
     }
     Ok(())
+}
+
+fn render_unified_diff(before: &str, after: &str, path: &Path) -> String {
+    if before == after {
+        return String::new();
+    }
+    let label = path.display().to_string();
+    let diff = similar::TextDiff::from_lines(before, after);
+    let header_old = format!("--- a/{label}\n");
+    let header_new = format!("+++ b/{label}\n");
+    let body = diff
+        .unified_diff()
+        .context_radius(3)
+        .to_string();
+    format!("{header_old}{header_new}{body}")
 }
 
 fn cmd_body_set(
@@ -1709,7 +2049,7 @@ fn cmd_body_set(
         buf
     };
     let root = find_root();
-    let outcome = mutate::update_body(&root, slug, expected_version, body, None)
+    let outcome = mutate::update_body(&root, slug, expected_version, body, None, false)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     if json {
         let report = serde_json::json!({

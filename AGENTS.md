@@ -62,6 +62,16 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
     by the built binary, and `main()`'s `anyhow::Error` rendering.
     Anything reachable through a `pub(crate)` entry point belongs in
     an inline `#[cfg(test)]` module.
+- **New mutation verbs go in `mutate.rs`, CLI handlers stay thin.**
+  Every write path (CLI subcommand or web endpoint) routes through a
+  function in `src/mutate.rs` so a) every writer obtains the same
+  repo-wide `flock`, b) every writer emits the same canonical version
+  token, and c) schema validation runs in exactly one place. Add new
+  domain logic as a public function in `mutate.rs` (or a sibling
+  domain module) and keep the `cmd_*` handler in `main.rs` to
+  argument parsing + JSON / human formatting (≤30 lines is the
+  target). Do **not** reach into `write::*` directly from `main.rs`
+  for new write paths — that bypasses the lock and the schema check.
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, repo layout,
   PR process, and commit-message conventions.
 - See [issues/AGENTS.md](issues/AGENTS.md) for how this project's own

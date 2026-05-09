@@ -171,6 +171,9 @@ Append a timestamped block to an issue's `## Comments` section
 as `update`; body-only mutation.
 
 - `issuectl --json note <slug> --as <user> "<message>"`
+- `--decision` appends to `## Decisions` instead.
+- `--agent-run` appends to `## Agent Runs` instead.
+- `--dry-run` prints a unified diff and exits 0 without writing.
 - `--expected-version <token>` is required with `--json` (fetch via
   `show --json`).
 
@@ -185,6 +188,41 @@ Block shape (auto-generated):
 Reopen flow: `update --status <active>` on a closed issue
 auto-appends a `## Reopen Notes — <today>` section in the same
 write — no extra CLI step is needed.
+
+### Action: Set / Check / Label / Apply (focused mutation verbs)
+
+These wrap `update` for the common single-field and body-toggle
+cases agents reach for. They share `update`'s flock + optimistic
+concurrency contract — `--expected-version` is required with
+`--json`, and every verb supports `--dry-run` (prints a unified
+diff, no write).
+
+- **`issuectl set <slug> <field> <value>`** — set a single
+  frontmatter field. Built-in keys (`status`, `priority`,
+  `assignee`, `owner`, `epic`) take the typed path; other keys go
+  through the schema-validated `custom_fields` slot. Use
+  `--clear` to remove a (non-status) field. Reserved keys like
+  `labels` / `related` / `type` / `title` error with a hint
+  pointing at the right flag.
+- **`issuectl check <slug> "<task substring>"`** — toggle a
+  unique `- [ ]` / `- [x]` line in the issue body. Errors when
+  zero or multiple checkbox lines match the substring.
+- **`issuectl label <slug> add|remove <label>`** — idempotent
+  label add / remove.
+- **`issuectl apply <patch.yaml>`** — multi-field transactional
+  patch. The YAML file declares `slug:` plus any combination of
+  built-in fields, `custom_fields:`, label / related list ops,
+  and commits. Rolls back cleanly on schema violation.
+
+JSON output shape (same envelope as `update`):
+
+```json
+{ "slug": "...", "version": "sha256:...",
+  "moved_to_closed": false, "moved_to_open": false }
+```
+
+With `--dry-run`, the JSON envelope adds `"dry_run": true` and
+`"diff": "<unified diff>"` and the on-disk file is untouched.
 
 Output shape:
 
@@ -295,15 +333,21 @@ criteria, recorded commits, and schema rules — use `issuectl context`:
 
 The bundle is byte-deterministic for a given issue state, which makes it
 safe to cache. It is read-only — `issuectl context` never mutates files
-under `issues/`.
+under `issues/`. The JSON form includes a `version` token matching
+`show --json`, so an agent can pass it straight to `--expected-version`
+on a subsequent `update`/`close` without a separate `show` call.
 
 ### Action: Render a prompt template
 
 Repo-local prompt templates live at `.issuectl/prompts/<name>.md` and
 support `{{key}}` substitution against the context bundle (e.g.
-`{{slug}}`, `{{title}}`, `{{body}}`, `{{acceptance_criteria}}`,
-`{{epic_goal}}`, `{{related}}`, `{{commits}}`, `{{context}}` for the full
-markdown bundle). Unknown keys are left intact so typos surface.
+`{{slug}}`, `{{title}}`, `{{body}}`, `{{version}}`, `{{epic_goal}}`,
+`{{related}}`, `{{commits}}`, `{{context}}` for the full markdown
+bundle). Any `## H2` heading in the issue body is also reachable via
+its snake-cased name — `## Risks` → `{{risks}}`, `## Test Plan` →
+`{{test_plan}}` — so templates can pull arbitrary sections without a
+code change. Unknown keys are left intact so typos surface. Template
+names must be plain filenames (no `/`, `\`, `..`, leading `.`).
 
 - Print rendered prompt: `issuectl prompt <template> <slug>`
 - Cache to `.issuectl/cache/agent/<slug>/prompts/<template>.md`: add `--write`
