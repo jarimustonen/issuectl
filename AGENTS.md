@@ -62,6 +62,19 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
     by the built binary, and `main()`'s `anyhow::Error` rendering.
     Anything reachable through a `pub(crate)` entry point belongs in
     an inline `#[cfg(test)]` module.
+- **`update --type` scaffolds missing required body sections (append, don't reject).**
+  When `--type` lands a value whose schema requires body sections that
+  aren't already present, `update` appends `## <Section>` stubs to the
+  body — mirroring `cmd_new`'s scaffolding so a type change can't
+  silently drift into a doctor-failing state. The alternative
+  considered was rejecting the change with `MutateError::SchemaViolation`;
+  appending was chosen because the user's intent is unambiguous (they
+  asked for the new type), the no-op-on-already-present case is safe
+  (`schema::missing_body_sections` is idempotent and fence-aware), and
+  it removes a dead-end where the user has to hand-edit the body
+  before the mutation will succeed. Looser-target type changes are a
+  body-noop. Reuses the same `schema::missing_body_sections` +
+  `schema::stub_for_sections` pair as `mutate::new_issue`.
 - **New mutation verbs go in `mutate.rs`, CLI handlers stay thin.**
   Every write path (CLI subcommand or web endpoint) routes through a
   function in `src/mutate.rs` so a) every writer obtains the same

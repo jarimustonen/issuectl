@@ -140,6 +140,7 @@ closing status, the issue is also moved to `closed/` (same as `close`).
 Common flags:
 
 - `--status STATUS` (active or closing)
+- `-t/--type TYPE` (bug, task, feature, improvement, chore, epic — appends stubs for any per-type required body sections that aren't already present, mirroring `new`'s scaffolding so the issue doesn't drift into a doctor-failing state)
 - `--assignee USER` / `--owner USER` (epics)
 - `--priority normal|high`
 - `--epic <slug>` / `--no-epic`

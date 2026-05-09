@@ -306,6 +306,13 @@ enum Command {
         #[arg(short = 's', long, value_parser = PossibleValuesParser::new(all_statuses()))]
         status: Option<String>,
 
+        /// Change the issue type. Stubs for any per-type required body
+        /// sections that aren't already present are appended (mirrors
+        /// `new`'s scaffolding so the issue doesn't drift into a
+        /// doctor-failing state).
+        #[arg(short = 't', long = "type", value_parser = PossibleValuesParser::new(ISSUE_TYPES))]
+        issue_type: Option<String>,
+
         /// New assignee (issues)
         #[arg(short = 'a', long, value_parser = parse_non_empty)]
         assignee: Option<String>,
@@ -804,6 +811,7 @@ fn main() -> Result<()> {
         Command::Update {
             slug,
             status,
+            issue_type,
             assignee,
             owner,
             priority,
@@ -822,6 +830,7 @@ fn main() -> Result<()> {
             UpdateArgs {
                 slug,
                 status,
+                issue_type,
                 assignee,
                 owner,
                 priority,
@@ -1340,6 +1349,7 @@ fn cmd_new(json: bool, args: NewArgs) -> Result<()> {
 pub(crate) struct UpdateArgs {
     pub slug: String,
     pub status: Option<String>,
+    pub issue_type: Option<String>,
     pub assignee: Option<String>,
     pub owner: Option<String>,
     pub priority: Option<String>,
@@ -1401,6 +1411,9 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
     };
     if let Some(s) = args.status {
         req.status = Patch::Set(s);
+    }
+    if let Some(t) = args.issue_type {
+        req.issue_type = Patch::Set(t);
     }
     if let Some(a) = args.assignee {
         req.assignee = Patch::Set(a);

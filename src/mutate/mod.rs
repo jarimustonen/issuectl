@@ -84,6 +84,13 @@ pub struct UpdateIssueRequest {
     pub expected_version: Option<String>,
     #[serde(default)]
     pub status: Patch<String>,
+    /// Issue type (`bug`, `feature`, `task`, ...). `Set` only — clearing
+    /// is rejected (every issue must have a type). Setting a stricter
+    /// type appends stubs for any required body sections that aren't
+    /// already present, matching `cmd_new`'s scaffolding behaviour so
+    /// `doctor` doesn't have to flag the type change after the fact.
+    #[serde(default, rename = "type")]
+    pub issue_type: Patch<String>,
     #[serde(default)]
     pub priority: Patch<String>,
     #[serde(default)]
@@ -174,6 +181,7 @@ impl UpdateIssueRequest {
     /// version token is still a no-op (M13).
     pub fn is_noop(&self) -> bool {
         matches!(self.status, Patch::Unspecified)
+            && matches!(self.issue_type, Patch::Unspecified)
             && matches!(self.priority, Patch::Unspecified)
             && matches!(self.assignee, Patch::Unspecified)
             && matches!(self.owner, Patch::Unspecified)
@@ -204,7 +212,20 @@ impl UpdateIssueRequest {
                 "status cannot be cleared (issues always have a status)".into(),
             ));
         }
+        if matches!(self.issue_type, Patch::Clear) {
+            return Err(MutateError::Validation(
+                "type cannot be cleared (issues always have a type)".into(),
+            ));
+        }
         check_set_nonempty("status", &self.status)?;
+        check_set_nonempty("type", &self.issue_type)?;
+        if let Patch::Set(t) = &self.issue_type {
+            if !crate::ISSUE_TYPES.iter().any(|v| v == t) {
+                return Err(MutateError::Validation(format!(
+                    "type {t:?} is not one of the known types"
+                )));
+            }
+        }
         check_set_nonempty("priority", &self.priority)?;
         check_set_nonempty("assignee", &self.assignee)?;
         check_set_nonempty("owner", &self.owner)?;
@@ -727,6 +748,9 @@ fn update_issue_under_lock(
         ));
     }
 
+    if let Patch::Set(t) = &req.issue_type {
+        write::set_string(&mut item.frontmatter, "type", t);
+    }
     apply_string_patch(&mut item, "priority", &req.priority);
     apply_string_patch(&mut item, "assignee", &req.assignee);
     apply_string_patch(&mut item, "owner", &req.owner);
@@ -782,6 +806,29 @@ fn update_issue_under_lock(
         let with_section =
             crate::body_sections::append_reopen_notes(trimmed_body, &write::today());
         item.body = crate::body_sections::canonicalise_body_leading(&with_section);
+    }
+
+    // Type-change body scaffolding: when `--type` lands on a stricter
+    // type than the issue currently satisfies, append stubs for any
+    // required H2 sections that aren't already present. Mirrors
+    // `cmd_new`'s scaffolding so the issue doesn't silently start
+    // failing `doctor` after the type change. Looser-target type
+    // changes are a no-op here (no missing sections ⇒ no append).
+    if let Patch::Set(new_type) = &req.issue_type {
+        let trimmed_body = item.body.trim_start_matches('\n');
+        let missing = crate::schema::missing_body_sections(schema, new_type, trimmed_body);
+        if !missing.is_empty() {
+            let stubs = crate::schema::stub_for_sections(&missing);
+            let mut combined = trimmed_body.to_string();
+            if !combined.ends_with('\n') {
+                combined.push('\n');
+            }
+            if !combined.ends_with("\n\n") {
+                combined.push('\n');
+            }
+            combined.push_str(&stubs);
+            item.body = crate::body_sections::canonicalise_body_leading(&combined);
+        }
     }
 
     // 4b) schema validation against the post-mutation frontmatter. The
@@ -3309,6 +3356,109 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, MutateError::SchemaConfig(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn update_type_appends_stubs_for_missing_required_sections() {
+        // task→feature with the schema declaring a `Plan` body section
+        // for `feature` should append `## Plan` since the seeded body
+        // (`# Title`) doesn't have it.
+        let tmp = fresh_repo();
+        let _v0 = seed_issue(tmp.path(), "open", "type-scaffold-target", "open");
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  type:\n    required: true\n\
+             body_sections:\n  feature: [Plan, Risks]\n",
+        )
+        .unwrap();
+        let req = UpdateIssueRequest {
+            issue_type: Patch::Set("feature".into()),
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "type-scaffold-target", req, None).unwrap();
+        let content =
+            fs::read_to_string(tmp.path().join("issues/type-scaffold-target/item.md")).unwrap();
+        assert!(content.contains("type: feature"), "got {content}");
+        assert!(content.contains("## Plan"), "Plan stub missing: {content}");
+        assert!(content.contains("## Risks"), "Risks stub missing: {content}");
+    }
+
+    #[test]
+    fn update_type_with_all_sections_present_does_not_duplicate() {
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/type-noop-target");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: task\ncreated: 2026-05-06\nstatus: open\npriority: normal\n---\n\n\
+             # Title\n\n## Plan\n\nalready written\n\n## Risks\n\ntracked\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  type:\n    required: true\n\
+             body_sections:\n  feature: [Plan, Risks]\n",
+        )
+        .unwrap();
+        let req = UpdateIssueRequest {
+            issue_type: Patch::Set("feature".into()),
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "type-noop-target", req, None).unwrap();
+        let content = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert_eq!(content.matches("## Plan").count(), 1, "Plan duplicated: {content}");
+        assert_eq!(content.matches("## Risks").count(), 1, "Risks duplicated: {content}");
+        assert!(content.contains("type: feature"));
+    }
+
+    #[test]
+    fn update_type_to_looser_target_is_body_noop() {
+        // feature→task with `task` declaring no required sections must
+        // leave the body untouched (no spurious stubs, no canonical
+        // re-flow).
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/type-loose-target");
+        fs::create_dir_all(&dir).unwrap();
+        let body_with_extras =
+            "---\ntype: feature\ncreated: 2026-05-06\nstatus: open\npriority: normal\n---\n\n\
+             # Title\n\n## Plan\n\nplan content\n";
+        fs::write(dir.join("item.md"), body_with_extras).unwrap();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  type:\n    required: true\n\
+             body_sections:\n  feature: [Plan]\n",
+        )
+        .unwrap();
+        let req = UpdateIssueRequest {
+            issue_type: Patch::Set("task".into()),
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "type-loose-target", req, None).unwrap();
+        let content = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert!(content.contains("type: task"));
+        // Body sections preserved, not duplicated, not stripped.
+        assert_eq!(content.matches("## Plan").count(), 1, "got {content}");
+        assert!(content.contains("plan content"));
+    }
+
+    #[test]
+    fn update_type_clear_is_rejected() {
+        let req = UpdateIssueRequest {
+            issue_type: Patch::Clear,
+            ..Default::default()
+        };
+        let err = req.validate().unwrap_err();
+        assert!(matches!(err, MutateError::Validation(s) if s.contains("type cannot be cleared")));
+    }
+
+    #[test]
+    fn update_type_unknown_value_is_rejected() {
+        let req = UpdateIssueRequest {
+            issue_type: Patch::Set("nonsense".into()),
+            ..Default::default()
+        };
+        let err = req.validate().unwrap_err();
+        assert!(matches!(err, MutateError::Validation(s) if s.contains("not one of the known types")));
     }
 
     #[test]
