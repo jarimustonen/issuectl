@@ -136,6 +136,14 @@ pub(crate) fn do_new_locked(
         }
     }
 
+    // Shared key-shape + reserved-built-in gate. Belt-and-braces for
+    // the CLI (clap's `parse_custom_field` already rejects these) and
+    // primary defense for the API new path, which previously let bad
+    // keys reach frontmatter rendering.
+    for (key, _) in &args.custom_fields {
+        super::validate_custom_field_key(key).map_err(DoNewError::Validation)?;
+    }
+
     let related = refs::normalize_related_refs(&args.related)
         .map_err(|e| DoNewError::Validation(format!("{e:#}")))?;
 

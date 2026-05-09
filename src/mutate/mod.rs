@@ -119,7 +119,14 @@ pub struct UpdateIssueRequest {
     /// ternary: omitted (no entry) leaves the key alone; `null` removes
     /// the key; a string sets it. Built-in keys (`status`, `priority`,
     /// dates, etc.) are reserved here — use the dedicated request slots.
-    #[serde(default)]
+    ///
+    /// Duplicate keys in the wire payload are rejected during
+    /// deserialization, mirroring `NewIssueRequest::custom_fields` so
+    /// `PATCH /api/issues/<slug>` enforces the same invariant the CLI
+    /// `--field foo=a --field foo=b` rejection enforces — without this
+    /// gate `serde_json` silently keeps whichever value the parser
+    /// happens to see last.
+    #[serde(default, deserialize_with = "deserialize_patch_map_no_dups")]
     pub custom_fields: std::collections::BTreeMap<String, Patch<String>>,
     /// CLI-only: compute the post-mutation bytes and return them via
     /// `UpdateOutcome::pending_serialized` instead of writing or
@@ -171,6 +178,30 @@ pub fn is_valid_custom_field_key(key: &str) -> bool {
         && key
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Single per-key gate shared by all four create/update paths: rejects
+/// invalid key shape and reserved built-in names with a uniform error
+/// message. Returns the formatted message so each call site can wrap it
+/// in the typed error variant that matches its return type
+/// (`MutateError::Validation` / `DoNewError::Validation`).
+///
+/// Routed through:
+/// - `UpdateIssueRequest::validate` (CLI + API update)
+/// - `do_new_locked` (CLI + API new)
+///
+/// Keeping the message text identical across paths means agents / users
+/// see the same diagnostic regardless of how the request was submitted.
+pub fn validate_custom_field_key(key: &str) -> Result<(), String> {
+    if !is_valid_custom_field_key(key) {
+        return Err(format!(
+            "custom field key {key:?} must be alphanumeric / underscore / hyphen"
+        ));
+    }
+    if let Some(hint) = reserved_custom_field_hint(key) {
+        return Err(format!("custom field {key:?} is built-in: {hint}"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -291,16 +322,7 @@ impl UpdateIssueRequest {
         }
 
         for (key, patch) in &self.custom_fields {
-            if !is_valid_custom_field_key(key) {
-                return Err(MutateError::Validation(format!(
-                    "custom field key {key:?} must be alphanumeric / underscore / hyphen"
-                )));
-            }
-            if let Some(hint) = reserved_custom_field_hint(key) {
-                return Err(MutateError::Validation(format!(
-                    "custom field {key:?} is built-in: {hint}"
-                )));
-            }
+            validate_custom_field_key(key).map_err(MutateError::Validation)?;
             if let Patch::Set(v) = patch {
                 // Reject blank/whitespace-only Sets so the API and CLI
                 // agree (the CLI parser strips and rejects empty;
@@ -1807,6 +1829,48 @@ where
     de.deserialize_map(CustomFieldsVisitor)
 }
 
+/// Sister of `deserialize_custom_fields_no_dups` for the update path,
+/// where the wire shape is `{key: Patch<String>}` instead of
+/// `{key: String}`. Same duplicate-key rejection contract — without it
+/// a `PATCH {"custom_fields": {"team":"a","team":null}}` would silently
+/// keep whichever entry `serde_json` saw last.
+fn deserialize_patch_map_no_dups<'de, D>(
+    de: D,
+) -> Result<std::collections::BTreeMap<String, Patch<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::{MapAccess, Visitor};
+    use std::fmt;
+
+    struct PatchMapVisitor;
+    impl<'de> Visitor<'de> for PatchMapVisitor {
+        type Value = std::collections::BTreeMap<String, Patch<String>>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("an object of custom field key=value pairs with no duplicate keys")
+        }
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut out: std::collections::BTreeMap<String, Patch<String>> =
+                std::collections::BTreeMap::new();
+            while let Some(k) = map.next_key::<String>()? {
+                if out.contains_key(&k) {
+                    return Err(serde::de::Error::custom(format!(
+                        "custom field {k:?} given more than once"
+                    )));
+                }
+                let v = map.next_value::<Patch<String>>()?;
+                out.insert(k, v);
+            }
+            Ok(out)
+        }
+    }
+
+    de.deserialize_map(PatchMapVisitor)
+}
+
 fn default_priority() -> String {
     "normal".to_string()
 }
@@ -2720,6 +2784,97 @@ mod tests {
         .unwrap();
         assert!(matches!(r.custom_fields.get("a"), Some(Patch::Set(s)) if s == "x"));
         assert!(matches!(r.custom_fields.get("b"), Some(Patch::Clear)));
+    }
+
+    #[test]
+    fn update_request_rejects_duplicate_custom_field_keys_at_deserialization() {
+        // Sister of the create-path duplicate-key rejection. Without a
+        // custom visitor, BTreeMap silently keeps whichever value
+        // serde_json saw last — this test pins the wire-level rejection.
+        let payload = r#"{"custom_fields":{"team":"a","team":null}}"#;
+        let err = serde_json::from_str::<UpdateIssueRequest>(payload).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("team") && msg.contains("more than once"),
+            "expected duplicate-key rejection, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn validate_custom_field_key_rejects_invalid_shape_and_reserved() {
+        // Single source of truth for the four create/update paths.
+        // Each call site (CLI/API × new/update) wraps this in its own
+        // typed error variant, so the message must stay stable.
+        assert!(validate_custom_field_key("team").is_ok());
+        let err = validate_custom_field_key("bad key").unwrap_err();
+        assert!(
+            err.contains("alphanumeric"),
+            "shape rejection: {err:?}"
+        );
+        let err = validate_custom_field_key("status").unwrap_err();
+        assert!(
+            err.contains("built-in"),
+            "reserved rejection: {err:?}"
+        );
+    }
+
+    #[test]
+    fn update_request_validate_rejects_reserved_custom_field_key() {
+        // CLI-update + API-update share `UpdateIssueRequest::validate`.
+        // Routing through `validate_custom_field_key` keeps the error
+        // text identical to the new-path rejection.
+        let mut req = UpdateIssueRequest::default();
+        req.custom_fields
+            .insert("status".into(), Patch::Set("ignored".into()));
+        let err = req.validate().unwrap_err();
+        match err {
+            MutateError::Validation(msg) => assert!(
+                msg.contains("status") && msg.contains("built-in"),
+                "expected built-in rejection, got {msg:?}"
+            ),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_issue_api_rejects_reserved_custom_field_key() {
+        // API new path: previously accepted `{"custom_fields":
+        // {"status":"…"}}` and let frontmatter-render ordering mask the
+        // damage. Now `do_new_locked` runs the shared validator before
+        // building the in-memory frontmatter, so the API surfaces the
+        // same MutateError::Validation as the update path.
+        let tmp = fresh_repo();
+        let mut req = NewIssueRequest::default();
+        req.issue_type = "bug".into();
+        req.title = "Sneaky".into();
+        req.priority = "normal".into();
+        req.custom_fields = vec![("status".into(), "fake".into())];
+        let err = new_issue(tmp.path(), req, None).unwrap_err();
+        match err {
+            MutateError::Validation(msg) => assert!(
+                msg.contains("status") && msg.contains("built-in"),
+                "expected built-in rejection, got {msg:?}"
+            ),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_issue_api_rejects_invalid_custom_field_key_shape() {
+        let tmp = fresh_repo();
+        let mut req = NewIssueRequest::default();
+        req.issue_type = "bug".into();
+        req.title = "Bad shape".into();
+        req.priority = "normal".into();
+        req.custom_fields = vec![("bad key".into(), "x".into())];
+        let err = new_issue(tmp.path(), req, None).unwrap_err();
+        match err {
+            MutateError::Validation(msg) => assert!(
+                msg.contains("bad key") && msg.contains("alphanumeric"),
+                "expected shape rejection, got {msg:?}"
+            ),
+            other => panic!("expected Validation, got {other:?}"),
+        }
     }
 
     #[test]

@@ -123,14 +123,7 @@ fn parse_custom_field(s: &str) -> std::result::Result<(String, String), String> 
             "field {s:?} has leading or trailing whitespace; remove it"
         ));
     }
-    if !mutate::is_valid_custom_field_key(key) {
-        return Err(format!(
-            "field key {key:?} must be alphanumeric / underscore / hyphen"
-        ));
-    }
-    if let Some(hint) = mutate::reserved_custom_field_hint(key) {
-        return Err(format!("field {key:?} is built-in: {hint}"));
-    }
+    mutate::validate_custom_field_key(key)?;
     Ok((key.to_string(), value.to_string()))
 }
 
@@ -145,14 +138,7 @@ fn parse_custom_field_key(s: &str) -> std::result::Result<String, String> {
             "field key {s:?} has leading or trailing whitespace; remove it"
         ));
     }
-    if !mutate::is_valid_custom_field_key(s) {
-        return Err(format!(
-            "field key {s:?} must be alphanumeric / underscore / hyphen"
-        ));
-    }
-    if let Some(hint) = mutate::reserved_custom_field_hint(s) {
-        return Err(format!("field {s:?} is built-in: {hint}"));
-    }
+    mutate::validate_custom_field_key(s)?;
     Ok(s.to_string())
 }
 
