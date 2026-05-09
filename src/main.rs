@@ -17,6 +17,7 @@ mod schema;
 mod server;
 mod skill;
 mod slug;
+mod transitions;
 mod write;
 
 use std::collections::BTreeMap;

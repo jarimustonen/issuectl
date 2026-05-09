@@ -49,6 +49,9 @@ pub(crate) enum DoNewError {
     Conflict(String),
     SchemaViolation(String),
     SchemaConfig(String),
+    /// `.issuectl/transitions.yaml` failed to load — distinct from
+    /// `SchemaConfig` so the operator gets routed to the right file.
+    TransitionConfig(String),
     Io(anyhow::Error),
 }
 
@@ -65,6 +68,9 @@ impl From<DoNewError> for anyhow::Error {
             DoNewError::Validation(s)
             | DoNewError::Conflict(s)
             | DoNewError::SchemaConfig(s) => anyhow::Error::msg(s),
+            DoNewError::TransitionConfig(s) => {
+                anyhow::Error::msg(format!("transition config: {s}"))
+            }
             DoNewError::SchemaViolation(s) => anyhow::Error::msg(format!("schema: {s}")),
         }
     }
@@ -75,6 +81,7 @@ impl From<DoNewError> for MutateError {
         match e {
             DoNewError::SchemaViolation(s) => MutateError::SchemaViolation(s),
             DoNewError::SchemaConfig(s) => MutateError::SchemaConfig(s),
+            DoNewError::TransitionConfig(s) => MutateError::TransitionConfig(s),
             DoNewError::Conflict(s) => MutateError::ConflictingIntent(s),
             DoNewError::Validation(s) => MutateError::Validation(s),
             DoNewError::Io(e) => MutateError::Io(e),
@@ -151,9 +158,8 @@ pub(crate) fn do_new_locked(
     // string parsing that the previous version used (and that subtly
     // duplicated the fragile `find("\n---")` splitter logic).
     let frontmatter = write::build_new_frontmatter(&new_args);
+    let schema = schema::load(root).map_err(|e| DoNewError::SchemaConfig(format!("{e:#}")))?;
     {
-        let schema =
-            schema::load(root).map_err(|e| DoNewError::SchemaConfig(format!("{e:#}")))?;
         let violations = schema::validate(&schema, &frontmatter);
         if !violations.is_empty() {
             let msg = violations
@@ -164,7 +170,39 @@ pub(crate) fn do_new_locked(
             return Err(DoNewError::SchemaViolation(msg));
         }
     }
+    // Body-section stubs: per-type required H2 sections from
+    // `issues/.schema.yaml`'s `body_sections` map. Empty when the
+    // type isn't declared (today's lenient default — no behavioural
+    // break). Filtered through `all_h2_sections` of the rendered
+    // body so a `--description` that already includes a required
+    // heading doesn't get a duplicate appended.
     let render = write::render_new_item_from_fm(&new_args, &frontmatter);
+    let required_sections = schema::required_sections_for_type(&schema, &args.issue_type);
+    let render = if required_sections.is_empty() {
+        render
+    } else {
+        let body_only = render.split("---\n\n").nth(1).unwrap_or(&render);
+        let present = crate::body_sections::all_h2_sections(body_only);
+        let missing: Vec<String> = required_sections
+            .iter()
+            .filter(|name| !present.contains_key(name.as_str()))
+            .cloned()
+            .collect();
+        let extra_sections = schema::stub_for_sections(&missing);
+        if extra_sections.is_empty() {
+            render
+        } else {
+            let mut combined = render;
+            if !combined.ends_with('\n') {
+                combined.push('\n');
+            }
+            if !combined.ends_with("\n\n") {
+                combined.push('\n');
+            }
+            combined.push_str(&extra_sections);
+            combined
+        }
+    };
 
     let issues_parent = root.join("issues");
     fs::create_dir_all(&issues_parent)
@@ -498,6 +536,7 @@ mod tests {
                 DoNewError::Conflict(s) => DoNewError::Conflict(s.clone()),
                 DoNewError::SchemaViolation(s) => DoNewError::SchemaViolation(s.clone()),
                 DoNewError::SchemaConfig(s) => DoNewError::SchemaConfig(s.clone()),
+                DoNewError::TransitionConfig(s) => DoNewError::TransitionConfig(s.clone()),
                 DoNewError::Io(_) => unreachable!(),
             };
             let any: anyhow::Error = cloned.into();

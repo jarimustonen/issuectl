@@ -816,6 +816,29 @@ fn mutate_error_to_response(err: MutateError) -> Response {
                 &msg,
             )
         }
+        MutateError::TransitionConfig(msg) => {
+            // 500: `.issuectl/transitions.yaml` is malformed or
+            // otherwise rejected at load. Not client-actionable — an
+            // operator must fix the file. Distinct from
+            // `schema_config` so the client can route the user to the
+            // correct file.
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "transition_config",
+                &msg,
+            )
+        }
+        MutateError::TransitionViolation(msg) => {
+            // 422: post-mutation issue violates the declarative
+            // transition rules in `.issuectl/transitions.yaml`. The
+            // client can fix it (e.g. set --assignee, follow the
+            // declared sequence) and retry.
+            error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "transition_violation",
+                &msg,
+            )
+        }
         MutateError::Io(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",

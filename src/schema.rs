@@ -42,6 +42,15 @@ pub struct Schema {
     pub version: u32,
     #[serde(default)]
     pub fields: BTreeMap<String, FieldSpec>,
+    /// Required H2 body sections per issue type. Lives in
+    /// `issues/.schema.yaml` because body shape is a structural
+    /// declaration about what an issue *is*, sibling to the
+    /// frontmatter-shape declarations in `fields`. Heading names are
+    /// matched verbatim (case-sensitive) against `## <name>` lines
+    /// outside fenced code blocks. Empty / absent ⇒ no body-section
+    /// requirement for that type.
+    #[serde(default)]
+    pub body_sections: BTreeMap<String, Vec<String>>,
 }
 
 fn default_version() -> u32 {
@@ -171,8 +180,48 @@ pub fn load(root: &Path) -> Result<Schema> {
     for (name, spec) in user.fields {
         merged.fields.insert(name, spec);
     }
+    // Body-section declarations replace per-type — same merge semantics
+    // as `fields`. A user redeclaring `bug:` overrides the default
+    // section list for that type wholesale; types not mentioned by the
+    // user keep the default (today: empty).
+    for (issue_type, sections) in user.body_sections {
+        merged.body_sections.insert(issue_type, sections);
+    }
+    validate_body_sections(&merged.body_sections).with_context(|| format!("{}", path.display()))?;
     validate_loadability(&merged).with_context(|| format!("{}", path.display()))?;
     Ok(merged)
+}
+
+/// Reject body-section declarations that would render to malformed
+/// markdown (newlines/tabs/control chars in heading names) or that
+/// repeat a heading inside the same type. Empty section names are
+/// rejected too — `## ` with no text is not a usable section.
+fn validate_body_sections(sections: &BTreeMap<String, Vec<String>>) -> Result<()> {
+    for (issue_type, names) in sections {
+        if issue_type.trim().is_empty() {
+            anyhow::bail!("body_sections: type key cannot be empty");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for name in names {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!(
+                    "body_sections.{issue_type}: section name cannot be empty",
+                );
+            }
+            if name.chars().any(|c| c == '\n' || c == '\r' || c.is_control()) {
+                anyhow::bail!(
+                    "body_sections.{issue_type}: section name {name:?} contains a newline or control character",
+                );
+            }
+            if !seen.insert(name.clone()) {
+                anyhow::bail!(
+                    "body_sections.{issue_type}: section {name:?} declared twice",
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reject schema configurations that would make `issuectl new`
@@ -368,6 +417,62 @@ pub fn validate(schema: &Schema, fm: &Mapping) -> Vec<ViolationKind> {
                 }
             }
         }
+    }
+    out
+}
+
+/// Project the `status` field's allowed-value enum into a set. Used
+/// by `transitions::validate_status_refs` to catch typo'd status
+/// names in `.issuectl/transitions.yaml`. Falls back to
+/// `crate::all_statuses()` when the schema's `status` field has no
+/// `enum:` constraint — same lenient default as elsewhere.
+pub fn status_universe(schema: &Schema) -> std::collections::BTreeSet<String> {
+    schema
+        .fields
+        .get("status")
+        .and_then(|spec| spec.allowed.as_ref())
+        .map(|allowed| allowed.iter().cloned().collect())
+        .unwrap_or_else(|| crate::all_statuses().iter().map(|s| s.to_string()).collect())
+}
+
+/// Required H2 section names for an issue type. Empty slice when
+/// the type isn't declared. Returned as a slice so callers can iterate
+/// without cloning.
+pub fn required_sections_for_type<'a>(schema: &'a Schema, issue_type: &str) -> &'a [String] {
+    schema
+        .body_sections
+        .get(issue_type)
+        .map(|v| v.as_slice())
+        .unwrap_or(&[])
+}
+
+/// Names of required body sections (in declaration order) that are
+/// *missing* from `body`. Heading detection routes through
+/// `body_sections::all_h2_sections` so it is fence-aware (a `## …`
+/// line inside a fenced code block does not count). Comparison is
+/// case-sensitive — same as the writer.
+pub fn missing_body_sections(schema: &Schema, issue_type: &str, body: &str) -> Vec<String> {
+    let required = required_sections_for_type(schema, issue_type);
+    if required.is_empty() {
+        return Vec::new();
+    }
+    let present = crate::body_sections::all_h2_sections(body);
+    required
+        .iter()
+        .filter(|name| !present.contains_key(name.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Render `## <name>\n\n` stubs for each section in `names`. Empty
+/// input ⇒ empty string. Used by `cmd_new` to seed the required
+/// scaffolding into newly-created issues.
+pub fn stub_for_sections(names: &[String]) -> String {
+    let mut out = String::new();
+    for n in names {
+        out.push_str("## ");
+        out.push_str(n);
+        out.push_str("\n\n");
     }
     out
 }

@@ -146,6 +146,14 @@ struct DoctorReport {
     open_with_closing_status: Vec<(String, String, PathBuf)>,
     /// Status reconciliation rewrites that actually ran during `--fix`.
     status_reconciled: Vec<String>,
+    /// Issues whose current status would fail the declarative
+    /// transition rules in `.issuectl/transitions.yaml` (e.g. `done`
+    /// without an assignee). Surfaced as warnings — these may be
+    /// legacy data, so doctor never blocks the exit code on them.
+    transition_warnings: Vec<(String, String)>,
+    /// Issues missing required H2 body sections per
+    /// `.issuectl/transitions.yaml` body_sections rules. `(slug, missing_section)`.
+    missing_body_sections: Vec<(String, String)>,
 }
 
 /// Project an absolute path under the repo root to a repo-relative
@@ -354,6 +362,57 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
     };
     if let Some(schema) = schema {
         collect_schema_violations(repo_root, &schema, &mut report)?;
+    }
+
+    // Transition rules + body-section linting. Both are warning-only
+    // (legacy data may pre-date the rules). Loader returns lenient
+    // defaults when the file is missing, so a repo that hasn't opted
+    // in sees no extra noise. Body-section requirements live in the
+    // schema (`issues/.schema.yaml`); transition rules in
+    // `.issuectl/transitions.yaml`.
+    // Pull the schema again here even though `collect_schema_violations`
+    // already loaded it — that helper consumed by-value, and re-loading
+    // is cheap (one file read).
+    let schema_for_sections = schema::load(repo_root).ok();
+    let rules = match crate::transitions::load(repo_root) {
+        Ok(r) => {
+            // N2: cross-validate status references against the schema
+            // enum so a typo'd status surfaces here too, not just in
+            // mutate paths.
+            if let Some(schema) = schema_for_sections.as_ref() {
+                let universe = schema::status_universe(schema);
+                if let Err(e) = crate::transitions::validate_status_refs(&r, &universe) {
+                    report.parse_errors.push((
+                        crate::transitions::RULES_RELATIVE_PATH.to_string(),
+                        format!("{e:#}"),
+                    ));
+                    None
+                } else {
+                    Some(r)
+                }
+            } else {
+                Some(r)
+            }
+        }
+        Err(e) => {
+            report.parse_errors.push((
+                crate::transitions::RULES_RELATIVE_PATH.to_string(),
+                format!("{e:#}"),
+            ));
+            None
+        }
+    };
+    if rules.is_some() || schema_for_sections.is_some() {
+        collect_transition_warnings(
+            repo_root,
+            rules.as_ref(),
+            schema_for_sections.as_ref(),
+            &mut report,
+        )?;
+        // M2: stable, deterministic ordering for CLI text + JSON +
+        // tests. `read_dir` traversal order is platform-dependent.
+        report.transition_warnings.sort();
+        report.missing_body_sections.sort();
     }
 
     let plan = plan_migrate_layout(repo_root)?;
@@ -911,6 +970,97 @@ fn collect_schema_violations(
     walk(&issues_dir.join("open"), "open")?;
     walk(&issues_dir.join("closed"), "closed")?;
     Ok(())
+}
+
+fn collect_transition_warnings(
+    repo_root: &Path,
+    rules: Option<&crate::transitions::TransitionRules>,
+    schema: Option<&schema::Schema>,
+    report: &mut DoctorReport,
+) -> Result<()> {
+    let rules_active = rules.map(|r| !r.status_rules.is_empty()).unwrap_or(false);
+    let sections_active = schema
+        .map(|s| !s.body_sections.is_empty())
+        .unwrap_or(false);
+    if !rules_active && !sections_active {
+        return Ok(());
+    }
+    let issues_dir = repo_root.join("issues");
+    let mut walk = |dir: &Path, folder: &str| -> Result<()> {
+        if !dir.is_dir() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(dir)?.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "open" || name == "closed" || name == "archive" {
+                continue;
+            }
+            let item = entry.path().join("item.md");
+            if !item.is_file() {
+                continue;
+            }
+            let in_legacy_folder = folder == "open" || folder == "closed";
+            if in_legacy_folder && parser::parse_legacy_dir(&name).is_some() {
+                continue;
+            }
+            let parsed = parser::parse_item_md_with_warnings(&item, &name, folder);
+            // S5: previously skipped the issue if *any* parse warning
+            // was emitted (e.g. a benign legacy-numeric epic ref). The
+            // parser still populates `status` / `issue_type` from
+            // defaults in that case, so the lint result would be
+            // wrong; only skip when essential frontmatter is absent.
+            if essential_frontmatter_absent(&item) {
+                continue;
+            }
+            let issue = parsed.issue;
+            if let Some(rules) = rules {
+                for msg in crate::transitions::evaluate_existing(rules, &issue) {
+                    report.transition_warnings.push((issue.slug.clone(), msg));
+                }
+            }
+            if let Some(schema) = schema {
+                for missing in
+                    schema::missing_body_sections(schema, &issue.issue_type, &issue.body)
+                {
+                    report
+                        .missing_body_sections
+                        .push((issue.slug.clone(), missing));
+                }
+            }
+        }
+        Ok(())
+    };
+    walk(&issues_dir, "flat")?;
+    walk(&issues_dir.join("open"), "open")?;
+    walk(&issues_dir.join("closed"), "closed")?;
+    Ok(())
+}
+
+/// Returns true when the frontmatter cannot supply enough information
+/// to lint against the rules — specifically when `type:` or `status:`
+/// is missing or unparseable. This is stricter than "any warning"
+/// (S5): a legacy numeric-epic ref produces a warning but leaves
+/// `status` / `type` intact, so the lint can still run usefully.
+fn essential_frontmatter_absent(item_path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(item_path) else {
+        return true;
+    };
+    let Some(fm_text) = parser::split_frontmatter(&text).0 else {
+        return true;
+    };
+    let Ok(fm) = serde_yaml::from_str::<serde_yaml::Mapping>(fm_text) else {
+        return true;
+    };
+    let has = |k: &str| {
+        fm.get(serde_yaml::Value::String(k.into()))
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    };
+    !has("status") || !has("type")
 }
 
 fn detect_orphan_epic_refs(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
@@ -1590,7 +1740,9 @@ fn render_text(report: &DoctorReport, fix: bool) {
         || !report.both_open_and_closed.is_empty()
         || !report.closed_with_active_status.is_empty()
         || !report.open_with_closing_status.is_empty()
-        || !report.status_reconciled.is_empty();
+        || !report.status_reconciled.is_empty()
+        || !report.transition_warnings.is_empty()
+        || !report.missing_body_sections.is_empty();
     if !has_problems {
         if report.schema_missing {
             println!(
@@ -1808,6 +1960,20 @@ fn render_text(report: &DoctorReport, fix: bool) {
         }
         println!();
     }
+    if !report.transition_warnings.is_empty() {
+        println!("Transition-rule warnings (warning-only — legacy data may pre-date the rules):");
+        for (slug, msg) in &report.transition_warnings {
+            println!("  {slug}: {msg}");
+        }
+        println!();
+    }
+    if !report.missing_body_sections.is_empty() {
+        println!("Missing required body sections:");
+        for (slug, section) in &report.missing_body_sections {
+            println!("  {slug}: ## {section}");
+        }
+        println!();
+    }
     if fix {
         println!(
             "Applied. {} dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s).",
@@ -1954,6 +2120,16 @@ fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json
         "closed_with_active_status": closed_with_active,
         "open_with_closing_status": open_with_closing,
         "status_reconciled": report.status_reconciled,
+        "transition_warnings": report
+            .transition_warnings
+            .iter()
+            .map(|(s, m)| serde_json::json!({"slug": s, "message": m}))
+            .collect::<Vec<_>>(),
+        "missing_body_sections": report
+            .missing_body_sections
+            .iter()
+            .map(|(s, sec)| serde_json::json!({"slug": s, "section": sec}))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -2850,5 +3026,48 @@ mod tests {
             "expected `team` violation, got {:?}",
             r.schema_violations
         );
+    }
+
+    #[test]
+    fn scan_surfaces_transition_warnings_and_missing_sections() {
+        let tmp = fresh_repo();
+        fs::create_dir_all(tmp.path().join(".issuectl")).unwrap();
+        fs::write(
+            tmp.path().join(".issuectl/transitions.yaml"),
+            "version: 1\nstatus_rules:\n  done:\n    requires_assignee: true\n",
+        )
+        .unwrap();
+        // Body-section requirements moved to schema (C6).
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields: {}\nbody_sections:\n  bug: [Steps to Reproduce, Expected, Actual]\n",
+        )
+        .unwrap();
+        // Issue is `done` without an assignee → transition warning.
+        // Bug is missing the required body sections → body section warning.
+        let dir = tmp.path().join("issues/legacy-bug");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-01-01\nstatus: done\npriority: normal\n---\n\n# T\n\n## Description\n\nx\n",
+        )
+        .unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.transition_warnings
+                .iter()
+                .any(|(s, m)| s == "legacy-bug" && m.contains("assignee")),
+            "expected assignee warning, got {:?}",
+            r.transition_warnings
+        );
+        let missing: Vec<_> = r
+            .missing_body_sections
+            .iter()
+            .filter(|(s, _)| s == "legacy-bug")
+            .map(|(_, sec)| sec.clone())
+            .collect();
+        assert!(missing.contains(&"Steps to Reproduce".to_string()));
+        assert!(missing.contains(&"Expected".to_string()));
+        assert!(missing.contains(&"Actual".to_string()));
     }
 }

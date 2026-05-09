@@ -394,6 +394,15 @@ pub enum MutateError {
     /// Mapped to 5xx — the client cannot fix it from the request; an
     /// operator must edit the schema file.
     SchemaConfig(String),
+    /// `.issuectl/transitions.yaml` is malformed or rejected at load
+    /// time. Same 5xx reasoning as `SchemaConfig` but distinct so the
+    /// API client can route the operator to the correct file.
+    TransitionConfig(String),
+    /// Post-mutation issue violates the declarative status-transition
+    /// rules in `.issuectl/transitions.yaml` (e.g. `done` requires
+    /// assignee, or transition `open` → `done` is forbidden). Mapped
+    /// to 422 — client-actionable by adjusting the request.
+    TransitionViolation(String),
     Io(anyhow::Error),
 }
 
@@ -422,6 +431,8 @@ impl std::fmt::Display for MutateError {
             MutateError::ConflictingIntent(s) => write!(f, "conflicting intent: {s}"),
             MutateError::SchemaViolation(s) => write!(f, "schema: {s}"),
             MutateError::SchemaConfig(s) => write!(f, "schema config: {s}"),
+            MutateError::TransitionConfig(s) => write!(f, "transition config: {s}"),
+            MutateError::TransitionViolation(s) => write!(f, "transition: {s}"),
             MutateError::Io(e) => write!(f, "io: {e}"),
         }
     }
@@ -568,7 +579,51 @@ pub fn update_issue(
         locate_and_migrate(root, slug)?
     };
     let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
-    update_issue_under_lock(root, slug, item_path, req, hub, &schema)
+    let rules = load_validated_rules(root, &schema)?;
+    update_issue_under_lock(root, slug, item_path, req, hub, &schema, &rules)
+}
+
+/// Load `.issuectl/transitions.yaml` and cross-validate every status
+/// it mentions against the schema's `status` enum. Typo'd status
+/// names silently fail open (rule no-ops or denies everything), so
+/// failing fast here gives the operator a precise pointer. All write
+/// paths route through this helper.
+fn load_validated_rules(
+    root: &Path,
+    schema: &crate::schema::Schema,
+) -> Result<crate::transitions::TransitionRules, MutateError> {
+    let rules = crate::transitions::load(root)
+        .map_err(|e| MutateError::TransitionConfig(format!("{e:#}")))?;
+    let universe = crate::schema::status_universe(schema);
+    crate::transitions::validate_status_refs(&rules, &universe)
+        .map_err(|e| MutateError::TransitionConfig(format!("{e:#}")))?;
+    Ok(rules)
+}
+
+/// Project the in-flight `ItemFile` into the canonical `Issue` shape
+/// the rules engine consumes. Serializes the item to the same byte
+/// layout `write_item_atomic` would produce, then runs it through
+/// `parser::parse_item_md_text_with_warnings`. This guarantees the
+/// post-mutation projection cannot drift from the canonical reader
+/// (the alternative — a hand-rolled subset parser — silently diverges
+/// every time `parser` learns to normalise a new field). Cost is one
+/// serialize + one parse per validated mutation.
+fn projected_issue_for_rules(
+    slug: &str,
+    item: &write::ItemFile,
+    item_path: &Path,
+) -> Result<Issue, MutateError> {
+    let text = write::serialize_item(item).map_err(MutateError::Io)?;
+    let parsed =
+        crate::parser::parse_item_md_text_with_warnings(&text, slug, "open", item_path);
+    if !parsed.warnings.is_empty() {
+        return Err(MutateError::Corrupt {
+            warnings: parsed.warnings,
+        });
+    }
+    let mut issue = parsed.issue;
+    issue.folder = folder_for_status(&issue.status).to_string();
+    Ok(issue)
 }
 
 /// Body of `update_issue` that runs with the flock already held. Used
@@ -588,6 +643,7 @@ fn update_issue_under_lock(
     req: UpdateIssueRequest,
     hub: Option<&Arc<EventHub>>,
     schema: &crate::schema::Schema,
+    rules: &crate::transitions::TransitionRules,
 ) -> Result<UpdateOutcome, MutateError> {
     let folder = "open"; // placeholder; folder is derived from status post-write
 
@@ -744,6 +800,18 @@ fn update_issue_under_lock(
         return Err(MutateError::SchemaViolation(msg));
     }
 
+    // 4c) declarative transition-rule check. Coordinates with the
+    //     mutation verbs in the same module by sharing a single hook
+    //     surface — both write paths apply rules through the
+    //     post-mutation `Issue` projection. Rules are loaded once by
+    //     the caller (same pattern as `schema`).
+    let projected = projected_issue_for_rules(slug, &item, &item_path)?;
+    let rule_violations =
+        crate::transitions::evaluate_transition(rules, &projected, &prev_status);
+    if !rule_violations.is_empty() {
+        return Err(MutateError::TransitionViolation(rule_violations.join("; ")));
+    }
+
     // 5) Either dry-run (compute serialized bytes, skip write/publish)
     //    or atomic write. No directory rename — flat layout means
     //    `item_path` is the canonical location regardless of status.
@@ -881,7 +949,8 @@ pub fn close_issue(
     req_normalized.remove_related = normalized_remove_related;
     req_normalized.validate()?;
     let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
-    update_issue_under_lock(root, slug, item_path, req_normalized, hub, &schema)
+    let rules = load_validated_rules(root, &schema)?;
+    update_issue_under_lock(root, slug, item_path, req_normalized, hub, &schema, &rules)
 }
 
 /// PUT-style replacement of an issue's body markdown. Same lock and
@@ -971,6 +1040,20 @@ pub fn update_body(
             .collect::<Vec<_>>()
             .join("; ");
         return Err(MutateError::SchemaViolation(msg));
+    }
+
+    // Transition rules apply on the body-replace path too. Without
+    // this, a client that PATCHed status=done with checked AC could
+    // `update_body` afterwards to wipe / uncheck them, leaving the
+    // issue in a state that violates the rule it just satisfied.
+    // Status doesn't change here, so only `requires_*` checks matter
+    // (graph rules are skipped by the prev==new guard).
+    let rules = load_validated_rules(root, &schema)?;
+    let projected = projected_issue_for_rules(slug, &item, &item_path)?;
+    let rule_violations =
+        crate::transitions::evaluate_transition(&rules, &projected, &prev_issue.status);
+    if !rule_violations.is_empty() {
+        return Err(MutateError::TransitionViolation(rule_violations.join("; ")));
     }
 
     if dry_run {
