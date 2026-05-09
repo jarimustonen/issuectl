@@ -798,15 +798,18 @@ pub fn update_issue(
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
     // Locate without migrating, regardless of dry_run. The legacy →
-    // flat directory rename and the default-schema bootstrap used to
-    // run *before* `update_issue_under_lock`, which meant a body op
-    // (or any other validation failure) could roll the issue's content
-    // back while leaving `.schema.yaml` newly created and the legacy
-    // directory permanently moved — directly contradicting the
+    // flat directory rename and the default-`.schema.yaml` *bootstrap*
+    // used to run *before* `update_issue_under_lock`, which meant a
+    // body op (or any other validation failure) could roll the issue's
+    // content back while leaving `.schema.yaml` newly created and the
+    // legacy directory permanently moved — directly contradicting the
     // documented "all-or-nothing under one flock" contract. We now
     // defer both side effects until validation has passed
     // (`update_issue_under_lock` runs them just before the atomic
-    // write).
+    // write). Schema *load* and transition-rules load still happen
+    // here so that a malformed config fails fast before any work is
+    // attempted; those two paths produce typed errors
+    // (`SchemaConfig` / `TransitionConfig`) and never write to disk.
     let item_path = locate_for_dry_run(root, slug)?;
     let schema = crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let rules = load_validated_rules(root, &schema)?;
@@ -1208,9 +1211,11 @@ pub fn close_issue(
     }
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
-
-    let item_path = locate_and_migrate(root, slug)?;
+    // `update_issue_under_lock` runs `ensure_default_written` and the
+    // legacy → flat migration only after every validation step has
+    // passed. We therefore locate read-only here so a status-precondition
+    // failure (already-closing issue) leaves no repo side effects.
+    let item_path = locate_for_dry_run(root, slug)?;
     let item = write::read_item(&item_path).map_err(MutateError::Io)?;
     let current_status = item
         .frontmatter
@@ -1281,15 +1286,10 @@ pub fn update_body(
     }
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    if !dry_run {
-        crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
-    }
-
-    let item_path = if dry_run {
-        locate_for_dry_run(root, slug)?
-    } else {
-        locate_and_migrate(root, slug)?
-    };
+    // Locate read-only regardless of dry_run so the legacy → flat
+    // migration and `.schema.yaml` bootstrap fire only after every
+    // validation step has passed (parity with `update_issue`).
+    let item_path = locate_for_dry_run(root, slug)?;
 
     let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
     if !parsed.warnings.is_empty() {
@@ -1380,9 +1380,14 @@ pub fn update_body(
         });
     }
 
-    write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
+    // Side effects deferred from the top of the function so a failed
+    // validation above leaves no `.schema.yaml` bootstrap and no
+    // legacy → flat migration on disk.
+    crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
+    let final_path = migrate_to_flat_if_legacy(root, slug, &item_path)?;
+    write_item_atomic(&final_path, &item).map_err(MutateError::Io)?;
 
-    let after = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
+    let after = crate::parser::parse_item_md_with_warnings(&final_path, slug, "open");
     let mut new_issue = after.issue;
     new_issue.folder = folder_for_status(&new_issue.status).to_string();
     let new_version = canonical_hash(&new_issue);
@@ -1398,7 +1403,7 @@ pub fn update_body(
     Ok(UpdateOutcome {
         issue: new_issue,
         version: new_version,
-        issue_dir: item_path
+        issue_dir: final_path
             .parent()
             .expect("item.md has a parent")
             .to_path_buf(),
@@ -1436,11 +1441,10 @@ pub fn note_issue(
         .map_err(|e| MutateError::Validation(e.to_string()))?;
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    let item_path = if dry_run {
-        locate_for_dry_run(root, slug)?
-    } else {
-        locate_and_migrate(root, slug)?
-    };
+    // Locate read-only regardless of `dry_run`. Migration / schema
+    // bootstrap deferred to just before atomic write so that any
+    // validation failure below leaves no repo side effects.
+    let item_path = locate_for_dry_run(root, slug)?;
 
     let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
     if !parsed.warnings.is_empty() {
@@ -1523,9 +1527,11 @@ pub fn note_issue(
         });
     }
 
-    write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
+    crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
+    let final_path = migrate_to_flat_if_legacy(root, slug, &item_path)?;
+    write_item_atomic(&final_path, &item).map_err(MutateError::Io)?;
 
-    let after = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
+    let after = crate::parser::parse_item_md_with_warnings(&final_path, slug, "open");
     let mut new_issue = after.issue;
     new_issue.folder = folder_for_status(&new_issue.status).to_string();
     let new_version = canonical_hash(&new_issue);
@@ -1541,7 +1547,7 @@ pub fn note_issue(
     Ok(UpdateOutcome {
         issue: new_issue,
         version: new_version,
-        issue_dir: item_path
+        issue_dir: final_path
             .parent()
             .expect("item.md has a parent")
             .to_path_buf(),
@@ -1578,15 +1584,9 @@ pub fn toggle_checkbox(
     }
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    if !dry_run {
-        crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
-    }
-
-    let item_path = if dry_run {
-        locate_for_dry_run(root, slug)?
-    } else {
-        locate_and_migrate(root, slug)?
-    };
+    // Locate read-only regardless of `dry_run`. Migration / schema
+    // bootstrap deferred to just before atomic write.
+    let item_path = locate_for_dry_run(root, slug)?;
     let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
     if !parsed.warnings.is_empty() {
         return Err(MutateError::Corrupt {
@@ -1650,8 +1650,10 @@ pub fn toggle_checkbox(
         });
     }
 
-    write_item_atomic(&item_path, &item).map_err(MutateError::Io)?;
-    let after = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
+    crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
+    let final_path = migrate_to_flat_if_legacy(root, slug, &item_path)?;
+    write_item_atomic(&final_path, &item).map_err(MutateError::Io)?;
+    let after = crate::parser::parse_item_md_with_warnings(&final_path, slug, "open");
     let mut new_issue = after.issue;
     new_issue.folder = folder_for_status(&new_issue.status).to_string();
     let new_version = canonical_hash(&new_issue);
@@ -1667,7 +1669,7 @@ pub fn toggle_checkbox(
     Ok(UpdateOutcome {
         issue: new_issue,
         version: new_version,
-        issue_dir: item_path
+        issue_dir: final_path
             .parent()
             .expect("item.md has a parent")
             .to_path_buf(),
@@ -1686,10 +1688,14 @@ pub fn toggle_checkbox(
 /// status before the mutation; for body-only verbs that's the same as
 /// the post-mutation status, so only `requires_*` rules can fire.
 ///
-/// On schema/transitions config load failure we silently return no
-/// warnings — the body verbs predate the rules engine and shouldn't
-/// start failing because the *config* is malformed; the unified PATCH
-/// path catches that with `MutateError::TransitionConfig`.
+/// On schema / transitions config load failure we *surface* the error
+/// as a warning rather than swallow it. The body verbs predate the
+/// rules engine and shouldn't refuse the write because the operator
+/// broke `transitions.yaml`, but they also shouldn't go silent on it —
+/// without a warning, agents iterating with `note` / `check` against a
+/// broken config would never know the rules engine is dead, which is a
+/// trust violation. The unified PATCH path keeps the strict
+/// `MutateError::TransitionConfig` rejection.
 fn transition_warnings(
     root: &Path,
     slug: &str,
@@ -1697,11 +1703,27 @@ fn transition_warnings(
     item_path: &Path,
     prev_status: &str,
 ) -> Vec<String> {
-    let Ok(schema) = crate::schema::load(root) else { return Vec::new() };
-    let Ok(rules) = crate::transitions::load(root) else { return Vec::new() };
+    let schema = match crate::schema::load(root) {
+        Ok(s) => s,
+        Err(e) => {
+            return vec![format!(
+                "rules engine: schema load failed, transition checks skipped: {e:#}"
+            )]
+        }
+    };
+    let rules = match crate::transitions::load(root) {
+        Ok(r) => r,
+        Err(e) => {
+            return vec![format!(
+                "rules engine: transitions config load failed, transition checks skipped: {e:#}"
+            )]
+        }
+    };
     let universe = crate::schema::status_universe(&schema);
-    if crate::transitions::validate_status_refs(&rules, &universe).is_err() {
-        return Vec::new();
+    if let Err(e) = crate::transitions::validate_status_refs(&rules, &universe) {
+        return vec![format!(
+            "rules engine: transitions reference unknown statuses, transition checks skipped: {e:#}"
+        )];
     }
     let projected = match projected_issue_for_rules(slug, item, item_path) {
         Ok(p) => p,
@@ -1769,12 +1791,20 @@ fn prefix_body_op_error(index: usize, err: MutateError) -> MutateError {
             MutateError::ConflictingIntent(format!("body_ops[{index}]: {s}"))
         }
         MutateError::Io(e) => {
-            MutateError::Io(anyhow!("body_ops[{index}]: {e:#}"))
+            // `e.context(...)` preserves the anyhow `source()` chain so
+            // downstream `{e:#}` rendering and `e.chain()` walking still
+            // work; the previous `format!("{e:#}")` flattened the chain
+            // into the inner message and threw away the source links.
+            MutateError::Io(e.context(format!("body_ops[{index}]")))
         }
-        // Variants that don't carry a free-form message (NotFound,
-        // VersionMismatch, AmbiguousSlug, Corrupt, SchemaConfig,
-        // TransitionConfig) round-trip unchanged — there is no
-        // sensible place to splice the index in.
+        // Variants we deliberately pass through unchanged. `NotFound`,
+        // `VersionMismatch`, and `AmbiguousSlug` describe whole-document
+        // state from before the body-op loop — the index doesn't help.
+        // `Corrupt { warnings: Vec<String> }` does carry a payload, but
+        // it's parser warnings about the on-disk file, not a single
+        // body-op error; splicing the index in would mislead. Operator-
+        // facing config errors (`SchemaConfig`, `TransitionConfig`) are
+        // about the repo's configuration, not the request.
         other => other,
     }
 }
@@ -2065,12 +2095,13 @@ fn predicted_flat_issue_dir(root: &Path, slug: &str) -> PathBuf {
     root.join("issues").join(slug)
 }
 
-/// Locate the issue without migrating. Used by dry-run paths so that
-/// `--dry-run` is genuinely no-write — the previous version called
-/// `locate_and_migrate` unconditionally, which silently moved
-/// `issues/{open,closed}/<slug>/` → `issues/<slug>/` even when the
-/// caller asked for a preview. Real writes still go through
-/// `locate_and_migrate` so the on-disk layout converges to flat.
+/// Locate the issue without migrating. Every mutation entry point
+/// (CLI verbs and the unified PATCH path) now uses this read-only
+/// locate; the legacy → flat directory rename and the default
+/// `.schema.yaml` bootstrap are deferred until just before
+/// `write_item_atomic` via `migrate_to_flat_if_legacy`. That guarantees
+/// validation failures (schema, transition rules, body op match) leave
+/// no repo side effects.
 fn locate_for_dry_run(root: &Path, slug: &str) -> Result<PathBuf, MutateError> {
     use repo::LayoutState;
     match repo::resolve_layout(root, slug) {
@@ -2108,40 +2139,6 @@ fn migrate_to_flat_if_legacy(
         LayoutState::Legacy { .. } => Err(MutateError::Io(anyhow!(
             "post-migration state still classifies as legacy"
         ))),
-    }
-}
-
-/// Locate the issue and, if it lives at a legacy path, move it to the
-/// canonical flat path under the held flock. Returns the final flat
-/// `item.md` path.
-///
-/// Delegates classification to `repo::resolve_layout` so the mutate
-/// layer's view of the filesystem matches the loader/watcher/migrate
-/// commands — no per-call-site classification logic. After a legacy →
-/// flat migration, re-resolves to validate the new flat path picked up
-/// by the resolver's symlink/escape hardening (M4 fix).
-#[allow(dead_code)] // retained for `close_issue` / future call-sites that still want eager migration
-fn locate_and_migrate(root: &Path, slug: &str) -> Result<PathBuf, MutateError> {
-    use repo::LayoutState;
-    match repo::resolve_layout(root, slug) {
-        LayoutState::Flat { item_path } => Ok(item_path),
-        LayoutState::Legacy { .. } => {
-            // Migrate, then re-resolve to surface any post-rename
-            // anomaly (e.g. a symlink swapped in concurrently).
-            repo::migrate_to_flat_inplace(root, slug).map_err(MutateError::Io)?;
-            match repo::resolve_layout(root, slug) {
-                LayoutState::Flat { item_path } => Ok(item_path),
-                LayoutState::Absent => Err(MutateError::NotFound),
-                LayoutState::Ambiguous { paths } => Err(MutateError::AmbiguousSlug { paths }),
-                LayoutState::Invalid { reason, .. } => Err(MutateError::Io(anyhow!("{reason}"))),
-                LayoutState::Legacy { .. } => Err(MutateError::Io(anyhow!(
-                    "post-migration state still classifies as legacy"
-                ))),
-            }
-        }
-        LayoutState::Ambiguous { paths } => Err(MutateError::AmbiguousSlug { paths }),
-        LayoutState::Absent => Err(MutateError::NotFound),
-        LayoutState::Invalid { reason, .. } => Err(MutateError::Io(anyhow!("{reason}"))),
     }
 }
 
@@ -4800,6 +4797,182 @@ body_ops:
         assert!(
             !tmp.path().join("issues/body-ops-no-migrate/item.md").exists(),
             "failed body op must NOT migrate to flat layout"
+        );
+    }
+
+    #[test]
+    fn standalone_note_does_not_create_default_schema_on_validation_failure() {
+        // Side-effects deferral on body-only verbs: a `note_issue`
+        // call that fails validation must not bootstrap `.schema.yaml`
+        // (parity with the `update_issue`/`apply` path).
+        let tmp = fresh_repo();
+        let _ = seed_issue(tmp.path(), "open", "note-defer", "open");
+        // Tighten the schema so the post-mutation frontmatter is
+        // rejected (required field that doesn't exist on the issue).
+        // The schema file *exists* before the call, so the failure
+        // path we exercise is "schema validation rejects the write,"
+        // not "schema file missing."
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: true\n",
+        )
+        .unwrap();
+        // Now stage a legacy directory so the migration side-effect
+        // would also leak if not deferred.
+        let legacy = tmp.path().join("issues/open/note-legacy-defer");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            legacy.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\npriority: normal\n---\n\n# T\n",
+        )
+        .unwrap();
+        let err = note_issue(
+            tmp.path(),
+            "note-legacy-defer",
+            "alice",
+            "hi",
+            crate::body_sections::COMMENTS,
+            None,
+            None,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, MutateError::SchemaViolation(_)));
+        assert!(
+            legacy.join("item.md").exists(),
+            "legacy dir must remain on schema-violation rollback"
+        );
+        assert!(
+            !tmp.path().join("issues/note-legacy-defer/item.md").exists(),
+            "no migration must have happened"
+        );
+    }
+
+    #[test]
+    fn standalone_toggle_checkbox_does_not_migrate_legacy_on_match_failure() {
+        let tmp = fresh_repo();
+        let legacy = tmp.path().join("issues/open/cbx-legacy-defer");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            legacy.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\npriority: normal\n---\n\n# T\n\n- [ ] only\n",
+        )
+        .unwrap();
+        let err = toggle_checkbox(
+            tmp.path(),
+            "cbx-legacy-defer",
+            "no-such-substring",
+            None,
+            None,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, MutateError::Validation(_)));
+        assert!(
+            legacy.join("item.md").exists(),
+            "legacy dir must remain on no-match rollback"
+        );
+        assert!(
+            !tmp.path().join("issues/cbx-legacy-defer/item.md").exists(),
+            "no migration must have happened"
+        );
+    }
+
+    #[test]
+    fn idempotent_set_checkbox_keeps_canonical_version_stable() {
+        // Pin the central retry-safety contract: replaying an
+        // already-target set_checkbox produces the same canonical
+        // version (false-409s would defeat optimistic concurrency).
+        // `updated:` IS bumped on disk and an SSE event fires, but
+        // both are excluded from / orthogonal to the canonical hash.
+        let tmp = fresh_repo();
+        let body = "# T\n\n- [x] already on\n";
+        let _ = seed_with_body(tmp.path(), "set-cbx-version-stable", body);
+        let v0 = {
+            let req = UpdateIssueRequest::default();
+            update_issue(tmp.path(), "set-cbx-version-stable", req, None)
+                .unwrap()
+                .version
+        };
+        let req = UpdateIssueRequest {
+            body_ops: vec![BodyOp::SetCheckbox(SetCheckboxOp {
+                match_substring: "already on".into(),
+                checked: true,
+            })],
+            ..Default::default()
+        };
+        let v1 = update_issue(tmp.path(), "set-cbx-version-stable", req, None)
+            .unwrap()
+            .version;
+        assert_eq!(
+            v0, v1,
+            "no-op set_checkbox must not bump the canonical version (retry-safety contract)"
+        );
+    }
+
+    #[test]
+    fn idempotent_set_checkbox_uncheck_already_unchecked() {
+        // Mirror of `set_checkbox_is_idempotent_on_target_state` for
+        // the `checked: false` arm — pin both directions.
+        let tmp = fresh_repo();
+        let body = "# T\n\n- [ ] already off\n";
+        let _ = seed_with_body(tmp.path(), "set-cbx-uncheck-idem", body);
+        let req = UpdateIssueRequest {
+            body_ops: vec![BodyOp::SetCheckbox(SetCheckboxOp {
+                match_substring: "already off".into(),
+                checked: false,
+            })],
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "set-cbx-uncheck-idem", req, None).unwrap();
+        let after = fs::read_to_string(tmp.path().join("issues/set-cbx-uncheck-idem/item.md"))
+            .unwrap();
+        assert!(after.contains("- [ ] already off"));
+    }
+
+    #[test]
+    fn body_ops_visitor_rejects_empty_map() {
+        // `{}` body-op entry must error rather than be accepted as a
+        // mystery default — pin the visitor branch.
+        let json = r#"{"body_ops": [{}]}"#;
+        let err = serde_json::from_str::<UpdateIssueRequest>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("declare exactly one operation"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn transition_warnings_surface_malformed_config_instead_of_silence() {
+        // Regression: previously `transition_warnings` swallowed
+        // `transitions.yaml` load failures, so a body verb on a repo
+        // with a broken rules engine got NO warning while the unified
+        // PATCH path 5xx'd. Now the body verbs surface the load
+        // failure as a warning string so agents and operators see the
+        // outage either way.
+        let tmp = fresh_repo();
+        let _ = seed_issue(tmp.path(), "open", "broken-rules-target", "open");
+        fs::create_dir_all(tmp.path().join(".issuectl")).unwrap();
+        fs::write(
+            tmp.path().join(".issuectl/transitions.yaml"),
+            "this is not: [valid yaml: at all\n",
+        )
+        .unwrap();
+        let out = note_issue(
+            tmp.path(),
+            "broken-rules-target",
+            "alice",
+            "hi",
+            crate::body_sections::COMMENTS,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(
+            out.warnings.iter().any(|w| w.contains("rules engine")),
+            "expected a 'rules engine: ...' warning, got {:?}",
+            out.warnings
         );
     }
 
