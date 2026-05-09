@@ -1,9 +1,10 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-09
 type: task
-status: open
+status: done
 priority: normal
+closed: 2026-05-09
 ---
 
 # Startup reconciliation: extend issuectl doctor to repair status/folder mismatches and orphan tempfiles

@@ -1,13 +1,21 @@
 ---
 created: 2026-05-06
-updated: 2026-05-08
+updated: 2026-05-09
 type: feature
-status: in-progress
+status: done
 priority: high
 reporter: jari
 assignee: jari
 epic: exorbitantly-ill-apples
 labels: [doctor, foundation, validation]
+commits:
+- hash: eccce15
+  summary: 'feat(doctor): full validation suite + installable git hooks'
+- hash: 3def11d
+  summary: 'fix(doctor,hooks): apply review findings from llm-review'
+- hash: 03ec84c
+  summary: 'fix(doctor,hooks): apply round-2 review findings'
+closed: 2026-05-09
 ---
 
 # issuectl doctor: full validation suite + installable git hooks
