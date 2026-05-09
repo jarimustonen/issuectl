@@ -1,3 +1,4 @@
+mod agents;
 mod body_sections;
 mod canonical;
 mod context;
@@ -531,6 +532,15 @@ enum Command {
         action: HooksAction,
     },
 
+    /// Manage `.issuectl/AGENTS.md` — durable, repo-local policy file
+    /// that AI agents read by convention. Distinct from
+    /// `issuectl prompt` (per-issue prompt rendering): this is policy,
+    /// not ephemeral prompt content.
+    Agents {
+        #[command(subcommand)]
+        action: AgentsAction,
+    },
+
     /// Install or preview the /issue skill template (Claude Code or Codex)
     Skill {
         #[command(subcommand)]
@@ -692,6 +702,21 @@ enum BodyAction {
         /// Optimistic-concurrency token; required with --json
         #[arg(long = "expected-version", value_parser = parse_non_empty)]
         expected_version: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentsAction {
+    /// Write `.issuectl/AGENTS.md` with sensible defaults plus a
+    /// schema-derived policy block (fenced with HTML-comment
+    /// sentinels). Without `--force`, refuses to overwrite an
+    /// existing file. `issuectl doctor --fix` regenerates the
+    /// schema-derived block in place; the prose around it is
+    /// preserved.
+    Init {
+        /// Overwrite an existing `.issuectl/AGENTS.md`.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -894,6 +919,9 @@ fn main() -> Result<()> {
             HooksAction::Install { uninstall, force } => {
                 hooks::run(&find_root(), uninstall, force)
             }
+        },
+        Command::Agents { action } => match action {
+            AgentsAction::Init { force } => agents::run_init(&find_root(), force, json_output),
         },
         Command::Skill { action } => match action {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),

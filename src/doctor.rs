@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use regex::{Captures, Regex};
 
+use crate::agents;
 use crate::parser;
 use crate::schema;
 use crate::slug;
@@ -154,6 +155,15 @@ struct DoctorReport {
     /// Issues missing required H2 body sections per
     /// `.issuectl/transitions.yaml` body_sections rules. `(slug, missing_section)`.
     missing_body_sections: Vec<(String, String)>,
+    /// True when `.issuectl/AGENTS.md` exists but its schema-derived
+    /// managed block is out of sync with the live schema +
+    /// transition rules. Non-critical: `--fix` regenerates the block
+    /// in place, preserving prose outside the sentinels. Absent file
+    /// is NOT drift — `agents init` is opt-in.
+    agents_md_drift: bool,
+    /// Set to true after `--fix` regenerates the AGENTS.md managed
+    /// block.
+    agents_md_regenerated: bool,
 }
 
 /// Project an absolute path under the repo root to a repo-relative
@@ -191,6 +201,7 @@ pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
             std::mem::take(&mut report.orphan_tempfiles_removed);
         fresh.status_reconciled = std::mem::take(&mut report.status_reconciled);
         fresh.files_rewritten = report.files_rewritten;
+        fresh.agents_md_regenerated = report.agents_md_regenerated;
         // `fix_applied` means "a mutation actually happened", not "fix
         // mode ran". A clean repo + `--fix` is a no-op; consumers
         // (JSON, text rendering) should be able to distinguish.
@@ -199,7 +210,8 @@ pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
             || !fresh.notes_renamed.is_empty()
             || !fresh.orphan_tempfiles_removed.is_empty()
             || !fresh.status_reconciled.is_empty()
-            || fresh.files_rewritten > 0;
+            || fresh.files_rewritten > 0
+            || fresh.agents_md_regenerated;
         report = fresh;
     }
 
@@ -413,6 +425,20 @@ fn scan(repo_root: &Path) -> Result<DoctorReport> {
         // tests. `read_dir` traversal order is platform-dependent.
         report.transition_warnings.sort();
         report.missing_body_sections.sort();
+    }
+
+    // AGENTS.md drift. Only flag when the file already exists — the
+    // file itself is opt-in (`issuectl agents init`). Loader fall-back
+    // to default rules matches the rendering side.
+    let agents_path = agents::agents_path(repo_root);
+    if agents_path.is_file() {
+        if let Ok(text) = fs::read_to_string(&agents_path) {
+            let s = schema::load(repo_root).unwrap_or_else(|_| schema::default_schema());
+            let r = crate::transitions::load(repo_root).unwrap_or_default();
+            if !agents::managed_in_sync(&text, &s, &r) {
+                report.agents_md_drift = true;
+            }
+        }
     }
 
     let plan = plan_migrate_layout(repo_root)?;
@@ -1219,6 +1245,8 @@ fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
     // unrelated body fixes (round-2 finding O18).
     rename_notes_to_comments(repo_root, report)?;
 
+    regenerate_agents_md(repo_root, report)?;
+
     // Auto-bootstrap the schema file on --fix. Cheap; idempotent. The
     // bootstrap call also ensures the issues/ directory exists so a
     // brand-new repo with `issuectl doctor --fix` ends in a usable
@@ -1309,6 +1337,31 @@ fn apply(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
 /// in `notes_to_rename`. Best-effort, sequential (per round-2
 /// decision: `O17` is intentionally not preflight-bail). Conflicts
 /// are populated by `scan()`; this function does not re-classify.
+/// Regenerate the schema-derived block in `.issuectl/AGENTS.md` when
+/// scan flagged drift. No-op if the file is absent (init is opt-in)
+/// or the block is already in sync.
+fn regenerate_agents_md(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
+    if !report.agents_md_drift {
+        return Ok(());
+    }
+    let path = agents::agents_path(repo_root);
+    if !path.is_file() {
+        return Ok(());
+    }
+    let original = fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let schema = schema::load(repo_root).unwrap_or_else(|_| schema::default_schema());
+    let rules = crate::transitions::load(repo_root).unwrap_or_default();
+    let new_text = agents::regenerate_managed(&original, &schema, &rules);
+    if new_text != original {
+        fs::write(&path, new_text)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        report.agents_md_regenerated = true;
+    }
+    report.agents_md_drift = false;
+    Ok(())
+}
+
 fn rename_notes_to_comments(repo_root: &Path, report: &mut DoctorReport) -> Result<()> {
     let issues = repo_root.join("issues");
     let planned = std::mem::take(&mut report.notes_to_rename);
@@ -1742,7 +1795,9 @@ fn render_text(report: &DoctorReport, fix: bool) {
         || !report.open_with_closing_status.is_empty()
         || !report.status_reconciled.is_empty()
         || !report.transition_warnings.is_empty()
-        || !report.missing_body_sections.is_empty();
+        || !report.missing_body_sections.is_empty()
+        || report.agents_md_drift
+        || report.agents_md_regenerated;
     if !has_problems {
         if report.schema_missing {
             println!(
@@ -1974,6 +2029,19 @@ fn render_text(report: &DoctorReport, fix: bool) {
         }
         println!();
     }
+    if report.agents_md_regenerated {
+        println!(
+            "Regenerated schema-derived block in {}.",
+            agents::AGENTS_RELATIVE_PATH
+        );
+        println!();
+    } else if report.agents_md_drift {
+        println!(
+            "{} schema-derived block is out of date (re-run with --fix to regenerate).",
+            agents::AGENTS_RELATIVE_PATH
+        );
+        println!();
+    }
     if fix {
         println!(
             "Applied. {} dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s).",
@@ -2130,6 +2198,8 @@ fn render_json(report: &DoctorReport, fix: bool, repo_root: &Path) -> serde_json
             .iter()
             .map(|(s, sec)| serde_json::json!({"slug": s, "section": sec}))
             .collect::<Vec<_>>(),
+        "agents_md_drift": report.agents_md_drift,
+        "agents_md_regenerated": report.agents_md_regenerated,
     })
 }
 
@@ -3069,5 +3139,57 @@ mod tests {
         assert!(missing.contains(&"Steps to Reproduce".to_string()));
         assert!(missing.contains(&"Expected".to_string()));
         assert!(missing.contains(&"Actual".to_string()));
+    }
+
+    #[test]
+    fn agents_md_drift_not_flagged_when_file_absent() {
+        let tmp = fresh_repo();
+        let r = scan(tmp.path()).unwrap();
+        assert!(!r.agents_md_drift);
+    }
+
+    #[test]
+    fn agents_md_drift_detected_after_schema_change() {
+        let tmp = fresh_repo();
+        // Write a fresh AGENTS.md against the default schema.
+        agents::run_init(tmp.path(), false, false).unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert!(!r.agents_md_drift, "freshly-written file is in sync");
+
+        // Mutate the schema so the rendered block no longer matches.
+        let schema_path = tmp.path().join("issues/.schema.yaml");
+        fs::write(
+            &schema_path,
+            "version: 1\nbody_sections:\n  bug: [Reproduction]\n",
+        )
+        .unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert!(r.agents_md_drift, "drift after schema edit");
+    }
+
+    #[test]
+    fn agents_md_fix_regenerates_block_preserving_prose() {
+        let tmp = fresh_repo();
+        let path = tmp.path().join(agents::AGENTS_RELATIVE_PATH);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Hand-written file with a stale managed block + custom prose.
+        let custom = format!(
+            "# My custom heading\n\nMy hand-written notes.\n\n{}\n\nstale body\n{}\n\nClosing prose.\n",
+            agents::MANAGED_START,
+            agents::MANAGED_END
+        );
+        fs::write(&path, &custom).unwrap();
+
+        let mut report = scan(tmp.path()).unwrap();
+        assert!(report.agents_md_drift);
+        apply(tmp.path(), &mut report).unwrap();
+        assert!(report.agents_md_regenerated);
+
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with("# My custom heading\n\nMy hand-written notes.\n\n"));
+        assert!(after.contains("Closing prose.\n"));
+        assert!(!after.contains("stale body"));
+        assert!(after.contains(agents::MANAGED_START));
+        assert!(after.contains(agents::MANAGED_END));
     }
 }
