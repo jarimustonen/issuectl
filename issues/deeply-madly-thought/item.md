@@ -2,9 +2,15 @@
 created: 2026-05-10
 updated: 2026-05-10
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 epic: exorbitantly-ill-apples
+commits:
+- hash: a4bd5b2
+  summary: 'fix(doctor): rewrite blocked_by legacy numeric refs in NN-rename'
+- hash: bed24c7
+  summary: 'test(doctor): assert blocked_by/related rewrite structurally'
+closed: 2026-05-10
 ---
 
 # Doctor: rewrite_item_frontmatter ignores blocked_by — legacy numeric refs orphaned across NN-rename
