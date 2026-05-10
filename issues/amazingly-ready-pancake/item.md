@@ -5,6 +5,7 @@ type: chore
 status: in-progress
 priority: normal
 epic: exorbitantly-ill-apples
+related: ['@dreadfully-combative-stomach', '@perfectly-splendid-quiet']
 ---
 
 # Doctor: run rename_notes_to_comments AFTER flat-layout migration so freshly-lifted dirs get one-shot Notes rename
