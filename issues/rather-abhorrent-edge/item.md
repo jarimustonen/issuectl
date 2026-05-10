@@ -2,9 +2,15 @@
 created: 2026-05-10
 updated: 2026-05-10
 type: chore
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
+commits:
+- hash: ace53b2
+  summary: 'feat(doctor): add stop_phase discriminator to apply_outcome envelope'
+- hash: ee7375f
+  summary: 'fix(doctor): apply review fixes to stop_phase envelope'
+closed: 2026-05-10
 ---
 
 # Doctor: split ApplyOutcome.blockers into preflight + post-apply, update JSON envelope and skill templates
