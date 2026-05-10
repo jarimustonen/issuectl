@@ -3,13 +3,16 @@ created: 2026-05-10
 updated: 2026-05-10
 type: improvement
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: hugely-exciting-spiders
 labels: [from-3dbear-0.5.1-feedback]
 commits:
 - hash: a8dbdd4
   summary: render_text long-list collapse via print_section helper; --verbose flag added
+- hash: eedf7cb
+  summary: render_section refactored over fmt::Write; behavioural test asserts rendered text across collapse boundaries
+closed: 2026-05-10
 ---
 
 # doctor: collapse repetitive 240-line layout warnings; add --verbose to expand

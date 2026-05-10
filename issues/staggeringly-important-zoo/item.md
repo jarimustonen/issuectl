@@ -3,13 +3,16 @@ created: 2026-05-10
 updated: 2026-05-10
 type: improvement
 reporter: jari
-status: in-progress
+status: done
 priority: high
 epic: hugely-exciting-spiders
 labels: [from-3dbear-0.5.1-feedback]
 commits:
 - hash: a8dbdd4
   summary: split critical_blockers into ExitCode/ApplyPreflight scopes; layout migration runs even when schema violations remain
+- hash: eedf7cb
+  summary: assertion invariant relaxed to 'no writes beyond schema bootstrap'; mem::replace mask removed; subset test added
+closed: 2026-05-10
 ---
 
 # doctor --fix is all-or-nothing: refuses to run while any schema violation exists

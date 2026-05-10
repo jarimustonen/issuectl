@@ -3,13 +3,16 @@ created: 2026-05-10
 updated: 2026-05-10
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: high
 epic: hugely-exciting-spiders
 labels: [from-3dbear-0.5.1-feedback]
 commits:
 - hash: a8dbdd4
   summary: schema bootstrap moved before preflight refusal in apply()
+- hash: eedf7cb
+  summary: JSON envelope contract change documented in CHANGELOG; (preflight, fix_applied=true) state codified in stop_with_blockers invariant
+closed: 2026-05-10
 ---
 
 # doctor --fix does not create .schema.yaml when other violations block migration (broken promise)
