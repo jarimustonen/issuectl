@@ -1895,38 +1895,43 @@ fn rewrite_item_frontmatter(
         }
     }
 
-    // Migrate `related: ["#NN", ...]` → `["@<slug>", ...]` when unambiguous.
-    let related_key = serde_yaml::Value::String("related".into());
-    if let Some(serde_yaml::Value::Sequence(seq)) = item.frontmatter.get(&related_key).cloned() {
-        let mut new_seq: Vec<serde_yaml::Value> = Vec::with_capacity(seq.len());
-        for v in seq {
-            let migrated = match v {
-                serde_yaml::Value::String(ref s) => {
-                    if let Some(rest) = s.strip_prefix('#') {
-                        if let Ok(n) = rest.parse::<u32>() {
-                            if !ambiguous_numbers.contains(&n) {
-                                number_to_slug
-                                    .get(&n)
-                                    .map(|sl| format!("@{sl}"))
-                                    .unwrap_or_else(|| s.clone())
+    // Migrate `related` / `blocked_by`: ["#NN", ...] → ["@<slug>", ...]
+    // when unambiguous.
+    for key in ["related", "blocked_by"] {
+        let yaml_key = serde_yaml::Value::String(key.into());
+        if let Some(serde_yaml::Value::Sequence(seq)) =
+            item.frontmatter.get(&yaml_key).cloned()
+        {
+            let mut new_seq: Vec<serde_yaml::Value> = Vec::with_capacity(seq.len());
+            for v in seq {
+                let migrated = match v {
+                    serde_yaml::Value::String(ref s) => {
+                        if let Some(rest) = s.strip_prefix('#') {
+                            if let Ok(n) = rest.parse::<u32>() {
+                                if !ambiguous_numbers.contains(&n) {
+                                    number_to_slug
+                                        .get(&n)
+                                        .map(|sl| format!("@{sl}"))
+                                        .unwrap_or_else(|| s.clone())
+                                } else {
+                                    s.clone()
+                                }
                             } else {
                                 s.clone()
                             }
-                        } else {
+                        } else if s.starts_with('@') {
                             s.clone()
+                        } else {
+                            format!("@{s}")
                         }
-                    } else if s.starts_with('@') {
-                        s.clone()
-                    } else {
-                        format!("@{s}")
                     }
-                }
-                _ => continue,
-            };
-            new_seq.push(serde_yaml::Value::String(migrated));
+                    _ => continue,
+                };
+                new_seq.push(serde_yaml::Value::String(migrated));
+            }
+            item.frontmatter
+                .insert(yaml_key, serde_yaml::Value::Sequence(new_seq));
         }
-        item.frontmatter
-            .insert(related_key, serde_yaml::Value::Sequence(new_seq));
     }
 
     write::write_item(item_path, &item)?;
@@ -2713,7 +2718,7 @@ mod tests {
             "open",
             1,
             "first",
-            "---\nnumber: 1\nstatus: open\nepic: 2\nrelated: [\"#3\"]\n---\n# E1. First\n",
+            "---\nnumber: 1\nstatus: open\nepic: 2\nrelated: [\"#3\"]\nblocked_by: [\"#3\"]\n---\n# E1. First\n",
         );
         put_legacy(
             &tmp,
@@ -2744,9 +2749,16 @@ mod tests {
         // epic: 2 → epic: <slug-of-2>
         let mig2 = outcome.legacy_dirs_migrated.iter().find(|m| m.old_number == 2).unwrap();
         assert!(content.contains(&format!("epic: {}", mig2.new_slug)));
-        // related: ['#3'] → ['@<slug-of-3>']
+        // related: ['#3'] → ['@<slug-of-3>'], blocked_by: ['#3'] → ['@<slug-of-3>']
         let mig3 = outcome.legacy_dirs_migrated.iter().find(|m| m.old_number == 3).unwrap();
-        assert!(content.contains(&format!("@{}", mig3.new_slug)));
+        let needle = format!("@{}", mig3.new_slug);
+        let occurrences = content.matches(&needle).count();
+        assert!(
+            occurrences >= 2,
+            "expected `{needle}` in both related and blocked_by; content={content}"
+        );
+        assert!(!content.contains("'#3'") && !content.contains("\"#3\""),
+            "legacy `#3` ref remained: {content}");
     }
 
     #[test]
