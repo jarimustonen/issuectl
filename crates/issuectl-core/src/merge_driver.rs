@@ -739,7 +739,7 @@ mod tests {
         let merged = std::fs::read_to_string(&args.output).unwrap();
         assert!(merged.contains("ours-add"));
         assert!(merged.contains("theirs-add"));
-        assert!(merged.contains("hash: 'a'"));
+        assert!(merged.contains("hash: a"));
     }
 
     #[test]

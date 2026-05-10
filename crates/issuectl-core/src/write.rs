@@ -92,61 +92,53 @@ fn split_text(text: &str) -> (Option<&str>, Option<&str>) {
 }
 
 /// Serialize a mapping back to YAML, then convert simple string arrays to
-/// flow style (`key: ["a", "b"]`) for readability.
+/// flow style (`key: ["a", "b"]`) for readability. `commits[].hash`
+/// values are coerced to `Value::String` *before* serialization so YAML
+/// 1.2 implicit typing cannot turn short hashes like `315194e2` into
+/// floats — and so unrelated frontmatter keys named `hash` (custom
+/// fields, nested maps) are left alone.
 fn serialize_frontmatter(map: &Mapping) -> Result<String> {
-    let yaml = serde_yaml::to_string(map).context("cannot serialize frontmatter back to YAML")?;
-    let yaml = quote_commit_hashes(&yaml);
+    let mut map = map.clone();
+    coerce_commit_hashes_to_string(&mut map);
+    let yaml = serde_yaml::to_string(&map).context("cannot serialize frontmatter back to YAML")?;
     Ok(flowify_string_arrays(&yaml))
 }
 
-/// Force-quote the value of `hash:` lines so YAML 1.2 implicit typing
-/// can never coerce a short git hash like `315194e2` into a float
-/// (would silently round-trip as `31519400.0`). Idempotent — leaves
-/// already-quoted values alone. Targets `hash:` because that is the
-/// only commits-array field where the bug is observed in practice.
-fn quote_commit_hashes(yaml: &str) -> String {
-    let mut out = String::with_capacity(yaml.len());
-    for line in yaml.lines() {
-        if let Some(rewritten) = rewrite_hash_line(line) {
-            out.push_str(&rewritten);
-        } else {
-            out.push_str(line);
+/// Walk the `commits` sequence and ensure each entry's `hash` field is
+/// emitted as a YAML string. A pre-existing numeric value (legacy data
+/// written before this guard, or a hand-edited unquoted hash that
+/// `serde_yaml` already coerced) is converted to its string form so
+/// the on-disk write is round-trip safe; any non-scalar value is left
+/// untouched. Top-level / nested non-commits keys named `hash` are not
+/// touched — the contract is *commits-only*.
+fn coerce_commit_hashes_to_string(map: &mut Mapping) {
+    let key = Value::String("commits".into());
+    let Some(Value::Sequence(commits)) = map.get_mut(&key) else {
+        return;
+    };
+    for entry in commits.iter_mut() {
+        let Value::Mapping(commit) = entry else {
+            continue;
+        };
+        let hash_key = Value::String("hash".into());
+        let Some(hash_val) = commit.get_mut(&hash_key) else {
+            continue;
+        };
+        match hash_val {
+            Value::String(_) => {}
+            Value::Number(n) => {
+                let s = n.to_string();
+                *hash_val = Value::String(s);
+            }
+            Value::Bool(b) => {
+                let s = b.to_string();
+                *hash_val = Value::String(s);
+            }
+            // Null, Sequence, Mapping, Tagged: not a hash shape we
+            // know how to coerce; leave it for downstream validation.
+            _ => {}
         }
-        out.push('\n');
     }
-    if !yaml.ends_with('\n') {
-        out.pop();
-    }
-    out
-}
-
-fn rewrite_hash_line(line: &str) -> Option<String> {
-    let indent_len = line.chars().take_while(|c| *c == ' ').count();
-    let body = &line[indent_len..];
-    let after_dash = body
-        .strip_prefix("- ")
-        .map(|r| ("- ", r))
-        .unwrap_or(("", body));
-    let (dash, rest) = after_dash;
-    let after_key = rest.strip_prefix("hash:")?;
-    let value = after_key.trim_start();
-    if value.is_empty() {
-        return None;
-    }
-    // Already single- or double-quoted — leave it.
-    if value.starts_with('\'') || value.starts_with('"') {
-        return None;
-    }
-    // Skip block / flow scalar starters and YAML aliases/anchors.
-    let first = value.chars().next().unwrap();
-    if matches!(first, '|' | '>' | '*' | '&' | '[' | '{' | '!') {
-        return None;
-    }
-    let escaped = value.replace('\'', "''");
-    Some(format!(
-        "{indent}{dash}hash: '{escaped}'",
-        indent = " ".repeat(indent_len),
-    ))
 }
 
 fn flowify_string_arrays(yaml: &str) -> String {
@@ -534,11 +526,12 @@ mod tests {
         let item = read_item(&path).unwrap();
         write_item(&path, &item).unwrap();
         let after = fs::read_to_string(&path).unwrap();
-        // Hashes are force-quoted on write to defend against YAML
-        // float-coercion of short git hashes like `315194e2`.
-        assert!(after.contains("hash: 'abc'"));
+        // Hashes round-trip as strings. For non-ambiguous values
+        // serde_yaml emits them unquoted; the float-lookalike case
+        // is covered by `round_trip_preserves_float_lookalike_hash`.
+        assert!(after.contains("hash: abc"));
         assert!(after.contains("summary: fix"));
-        assert!(after.contains("hash: 'def'"));
+        assert!(after.contains("hash: def"));
         assert!(after.contains("summary: more"));
     }
 
@@ -628,6 +621,73 @@ mod tests {
                 .get(Value::String("status".into()))
                 .and_then(|v| v.as_str()),
             Some("open")
+        );
+    }
+
+    #[test]
+    fn does_not_quote_top_level_custom_hash_field() {
+        // Regression: previous post-process line rewriter quoted any
+        // `hash:` key, including custom top-level extras. The
+        // commits-only AST coercion must leave unrelated fields
+        // alone.
+        let (_tmp, path) =
+            write_tmp("---\nstatus: open\ntype: bug\npriority: normal\nhash: 12345\n---\n\n# T\n");
+        let item = read_item(&path).unwrap();
+        write_item(&path, &item).unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("hash: 12345") && !after.contains("hash: '12345'"),
+            "top-level custom hash should remain unquoted; got:\n{after}"
+        );
+    }
+
+    #[test]
+    fn does_not_quote_nested_non_commit_hash_field() {
+        let (_tmp, path) = write_tmp(
+            "---\nstatus: open\ntype: bug\npriority: normal\nartifact:\n  hash: 12345\n---\n\n# T\n",
+        );
+        let item = read_item(&path).unwrap();
+        write_item(&path, &item).unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("hash: 12345") && !after.contains("hash: '12345'"),
+            "nested non-commits hash should remain unquoted; got:\n{after}"
+        );
+    }
+
+    #[test]
+    fn coerces_numeric_commit_hash_to_string_on_write() {
+        // Legacy / hand-edited file with an unquoted float-shaped
+        // hash. `serde_yaml` already coerced it to Number(31519400.0)
+        // on read; on write we must emit it as a string so the next
+        // round-trip is stable.
+        let (_tmp, path) = write_tmp(
+            "---\nstatus: open\ntype: bug\npriority: normal\ncommits:\n- hash: 315194e2\n  summary: fix\n---\n\n# T\n",
+        );
+        let item = read_item(&path).unwrap();
+        write_item(&path, &item).unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        // The numeric coercion is lossy, but the on-disk shape must
+        // now be a YAML string, never a bare number.
+        assert!(
+            !after.contains("hash: 31519400")
+                || after.contains("hash: '31519400")
+                || after.contains("hash: \"31519400"),
+            "coerced hash must be quoted as a string; got:\n{after}"
+        );
+        // Re-parse: the value must come back as a string.
+        let item2 = read_item(&path).unwrap();
+        let commits = item2
+            .frontmatter
+            .get(Value::String("commits".into()))
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+        let first = commits[0].as_mapping().unwrap();
+        let hash_val = first.get(Value::String("hash".into())).unwrap();
+        assert!(
+            hash_val.as_str().is_some(),
+            "expected string hash, got {hash_val:?}"
         );
     }
 
