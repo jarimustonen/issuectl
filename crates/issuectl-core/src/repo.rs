@@ -29,6 +29,45 @@ pub enum LoadWarningCode {
     TooLarge,
     /// `item.md` parsed with warnings (bad YAML, partial write, etc.).
     ParseWarning,
+    /// `issues/.schema.yaml` failed to parse; readers fell back to the
+    /// built-in default schema, which means custom `status_classes`
+    /// entries are silently dropped (a custom `archived: closing`
+    /// status would behave like an unknown active status until the
+    /// schema is fixed).
+    SchemaParseError,
+}
+
+/// Load the schema for read-side lifecycle classification, or fall
+/// back to the built-in default after recording a `SchemaParseError`
+/// warning. The fallback path keeps the reader functional (issues
+/// still load, the kanban board still renders) but the warning makes
+/// the silent feature regression visible — without it, a typo in
+/// `.schema.yaml` would invisibly bucket custom-closing statuses as
+/// open. Mutations correctly hard-fail on the same error; readers
+/// only soft-warn so the UI can keep rendering.
+fn load_schema_or_warn(
+    repo_root: &Path,
+    warnings: Option<&mut Vec<LoadWarning>>,
+) -> std::sync::Arc<crate::schema::Schema> {
+    match crate::schema::load(repo_root) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!(
+                "schema parse failed; lifecycle classification falls back to built-in defaults until fixed: {e:#}"
+            );
+            if let Some(ws) = warnings {
+                ws.push(LoadWarning {
+                    slug: String::new(),
+                    folder: String::new(),
+                    message: msg,
+                    code: Some(LoadWarningCode::SchemaParseError),
+                });
+            } else {
+                eprintln!("Warning: {msg}");
+            }
+            std::sync::Arc::new(crate::schema::default_schema())
+        }
+    }
 }
 
 /// Per-slug filesystem state classification. One source of truth used by
@@ -315,8 +354,7 @@ fn check_dir(dir: &Path, canon_root: Option<&Path>) -> Option<ItemCheck> {
 /// Load all issues from the flat layout (and legacy compat paths).
 pub fn load_issues(repo_root: &Path) -> Vec<Issue> {
     let mut result = Vec::new();
-    let schema = crate::schema::load(repo_root)
-        .unwrap_or_else(|_| std::sync::Arc::new(crate::schema::default_schema()));
+    let schema = load_schema_or_warn(repo_root, None);
     for slug in discover_slugs(repo_root) {
         match resolve_layout(repo_root, &slug) {
             LayoutState::Flat { item_path } => {
@@ -355,8 +393,7 @@ pub fn load_issues(repo_root: &Path) -> Vec<Issue> {
 pub fn load_issues_with_warnings(repo_root: &Path) -> (Vec<Issue>, Vec<LoadWarning>) {
     let mut issues = Vec::new();
     let mut warnings = Vec::new();
-    let schema = crate::schema::load(repo_root)
-        .unwrap_or_else(|_| std::sync::Arc::new(crate::schema::default_schema()));
+    let schema = load_schema_or_warn(repo_root, Some(&mut warnings));
 
     for slug in discover_slugs(repo_root) {
         match resolve_layout(repo_root, &slug) {
@@ -501,8 +538,7 @@ pub fn locate_issue(repo_root: &Path, slug: &str) -> Result<(String, PathBuf)> {
     // on-disk folder name. A `status: fixed` issue at `issues/open/foo/`
     // surfaces as folder = "closed".
     let issue = parser::parse_item_md(&located.item_path, slug, "open");
-    let schema = crate::schema::load(repo_root)
-        .unwrap_or_else(|_| std::sync::Arc::new(crate::schema::default_schema()));
+    let schema = load_schema_or_warn(repo_root, None);
     let folder = folder_for_status(&schema, &issue.status).to_string();
     Ok((folder, located.item_path))
 }
@@ -511,8 +547,7 @@ pub fn locate_issue(repo_root: &Path, slug: &str) -> Result<(String, PathBuf)> {
 pub fn load_issue(repo_root: &Path, slug: &str) -> Result<Issue> {
     let located = locate_issue_full(repo_root, slug)?;
     let mut issue = parser::parse_item_md(&located.item_path, slug, "open");
-    let schema = crate::schema::load(repo_root)
-        .unwrap_or_else(|_| std::sync::Arc::new(crate::schema::default_schema()));
+    let schema = load_schema_or_warn(repo_root, None);
     issue.folder = folder_for_status(&schema, &issue.status).to_string();
     Ok(issue)
 }

@@ -1126,6 +1126,29 @@ fn update_issue_under_lock(
             .join("; ");
         return Err(MutateError::SchemaViolation(msg));
     }
+    // Belt-and-braces status check. `schema::validate` only flags
+    // out-of-enum values when `fields.status.enum` is declared — but
+    // the schema's whole-spec replacement semantics let a user redeclare
+    // `fields.status` without `enum:`, which would otherwise let any
+    // string land here and silently default-classify as Active.
+    // `status_universe()` falls back to the built-in `all_statuses()`
+    // list in that no-enum case, so a typo can't sneak past.
+    if let Some(status) = item
+        .frontmatter
+        .get(serde_yaml::Value::String("status".into()))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let universe = crate::schema::status_universe(schema);
+        if !universe.contains(status) {
+            let mut allowed: Vec<&str> = universe.iter().map(String::as_str).collect();
+            allowed.sort();
+            return Err(MutateError::SchemaViolation(format!(
+                "status {status:?} is not in the allowed set [{}]",
+                allowed.join(", ")
+            )));
+        }
+    }
 
     // 4c) declarative transition-rule check. Coordinates with the
     //     mutation verbs in the same module by sharing a single hook
@@ -1261,11 +1284,11 @@ pub fn close_issue(
         .and_then(|v| v.as_str())
         .unwrap_or("bug")
         .to_string();
-    // Default-status selection consults the schema first: if the project
-    // has declared a custom closing status (e.g. `archived`), an explicit
-    // `--status` is still honoured, but absent that the bug/non-bug
-    // built-ins (`fixed` / `done`) remain the defaults — the brief
-    // explicitly keeps built-ins reigning over user-added classes.
+    // Default-status selection: bug → `fixed`, anything else → `done`.
+    // The brief explicitly keeps built-in defaults — projects that
+    // want a custom closing status as the `close` default must pass
+    // it via `--status`. Schema validation under-lock then rejects
+    // values the project's `status` enum disallows.
     let resolved_status = status_override.unwrap_or_else(|| {
         if issue_type == "bug" {
             "fixed".to_string()
@@ -2476,6 +2499,75 @@ mod tests {
         assert!(out.version.starts_with("sha256:"));
         let after = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
         assert!(after.contains("priority: high"));
+    }
+
+    #[test]
+    fn schema_override_of_built_in_done_to_active_drops_closed_stamp() {
+        // A project that re-classifies the built-in `done` as active
+        // via `status_classes:` must see closing→active edge clear
+        // `closed:`. Pins down the override-permitted policy
+        // documented in `schema::status_class`.
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nstatus_classes:\n  done: active\n",
+        )
+        .unwrap();
+        // Seed an issue that's already at `done` with `closed:` stamped.
+        let dir = tmp.path().join("issues/done-active-target");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: done\nclosed: 2026-05-06\npriority: normal\n---\n\n# T\n",
+        )
+        .unwrap();
+        // Move it to `done` again as if the project just re-classified
+        // the status — actually we bump priority so the file rewrites.
+        let req = UpdateIssueRequest {
+            status: Patch::Set("done".into()),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "done-active-target", req, None).unwrap();
+        // Now `done` is active, so the lifecycle treats this as
+        // active→active → no moved_to_closed, and `closed:` should be
+        // dropped because the new status is classified Active.
+        assert!(!out.moved_to_closed);
+        let after = fs::read_to_string(tmp.path().join("issues/done-active-target/item.md")).unwrap();
+        assert!(
+            !after.contains("closed:"),
+            "schema-overridden active `done` must drop closed:; got:\n{after}"
+        );
+        assert_eq!(out.issue.folder, "open");
+    }
+
+    #[test]
+    fn update_with_no_enum_status_field_rejects_unknown_status() {
+        // Whole-spec replacement of `fields.status` without an `enum:`
+        // used to leave `status: pizza` to land. The under-lock
+        // `status_universe` belt-and-braces gate now catches it
+        // (falls back to built-in all_statuses() when no enum is
+        // declared).
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  status:\n    required: true\n",
+        )
+        .unwrap();
+        let _v0 = seed_issue(tmp.path(), "open", "no-enum-target", "open");
+        let req = UpdateIssueRequest {
+            status: Patch::Set("pizza".into()),
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "no-enum-target", req, None).unwrap_err();
+        match err {
+            MutateError::SchemaViolation(msg) => {
+                assert!(
+                    msg.contains("pizza"),
+                    "expected pizza in violation message: {msg}"
+                );
+            }
+            other => panic!("expected SchemaViolation, got {other:?}"),
+        }
     }
 
     #[test]

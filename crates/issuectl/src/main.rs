@@ -7,7 +7,7 @@ use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use issuectl_core::issue_fields::{
-    all_statuses, CLOSING_STATUSES, ISSUE_TYPES, PRIORITIES,
+    ISSUE_TYPES, PRIORITIES,
 };
 use issuectl_core::{
     agents, body_sections, canonical, context, docs, doctor, fmt, hooks, merge_driver, models,
@@ -144,8 +144,11 @@ enum Command {
         #[arg(short = 'p', long, value_parser = PossibleValuesParser::new(PRIORITIES))]
         priority: Option<String>,
 
-        /// Filter by status
-        #[arg(short = 's', long, value_parser = PossibleValuesParser::new(all_statuses()))]
+        /// Filter by status. Schema-aware — accepts any status declared
+        /// in `issues/.schema.yaml`'s `status` enum, including project-
+        /// added values like `archived`. Unknown statuses simply match
+        /// nothing rather than erroring (filter semantics).
+        #[arg(short = 's', long, value_parser = parse_non_empty)]
         status: Option<String>,
 
         /// Filter by parent epic slug
@@ -250,8 +253,12 @@ enum Command {
         #[arg(value_parser = parse_slug_arg)]
         slug: String,
 
-        /// New status (active or closing — frontmatter only, no directory move)
-        #[arg(short = 's', long, value_parser = PossibleValuesParser::new(all_statuses()))]
+        /// New status (active or closing — frontmatter only, no directory move).
+        /// Schema-aware: any status in `issues/.schema.yaml`'s `status` enum
+        /// is accepted; final validation happens under-lock against the
+        /// schema, where invalid statuses are rejected with the project's
+        /// allowed-set spelled out.
+        #[arg(short = 's', long, value_parser = parse_non_empty)]
         status: Option<String>,
 
         /// Change the issue type. Rejected with `MutateError::SchemaViolation`
@@ -331,8 +338,12 @@ enum Command {
         #[arg(value_parser = parse_slug_arg)]
         slug: String,
 
-        /// Closing status (default: `fixed` for bugs, `done` otherwise)
-        #[arg(short = 's', long, value_parser = PossibleValuesParser::new(CLOSING_STATUSES))]
+        /// Closing status (default: `fixed` for bugs, `done` otherwise).
+        /// Schema-aware: a project that declares a custom closing status
+        /// in `issues/.schema.yaml` (`status_classes: { archived: closing }`)
+        /// can pass it here. Schema validation under-lock rejects values
+        /// outside the project's `status` enum.
+        #[arg(short = 's', long, value_parser = parse_non_empty)]
         status: Option<String>,
 
         /// Record a commit, format HASH:summary (repeatable)

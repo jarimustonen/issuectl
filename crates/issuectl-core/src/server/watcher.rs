@@ -520,8 +520,22 @@ fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
     };
 
     let parsed = crate::parser::parse_item_md_text_with_warnings(&text, slug, "open", &item_path);
-    let schema = crate::schema::load(root)
-        .unwrap_or_else(|_| std::sync::Arc::new(crate::schema::default_schema()));
+    // Schema load failure must not stay silent — the readers' fallback
+    // to `default_schema()` would otherwise classify a custom
+    // `archived: closing` status as active and render the issue in the
+    // wrong column with no log trail. Doctor surfaces the same error
+    // for offline diagnosis; here we make sure the live server logs
+    // scream about it on every event until it's fixed.
+    let schema = match crate::schema::load(root) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "Warning: schema parse failed at {}; lifecycle classification falls back to built-in defaults until fixed: {e:#}",
+                slug
+            );
+            std::sync::Arc::new(crate::schema::default_schema())
+        }
+    };
     if !parsed.warnings.is_empty() {
         let derived_folder = crate::repo::folder_for_status(&schema, &parsed.issue.status).to_string();
         let warnings = parsed

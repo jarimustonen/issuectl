@@ -52,13 +52,21 @@ pub struct Schema {
     /// requirement for that type.
     #[serde(default)]
     pub body_sections: BTreeMap<String, Vec<String>>,
-    /// Lifecycle classification for status values. A schema-declared
-    /// status that maps to `Closing` here gets the same treatment as
-    /// a built-in closing status: directory bucketing, `closed:`
-    /// stamping, doctor consistency. Built-in statuses keep their
-    /// classification (this map only adds; it does not override). When
-    /// a status is in neither this map nor the built-in fallback,
-    /// `status_class` defaults to `Active`.
+    /// Lifecycle classification for status values. An entry maps a
+    /// status to `Active` or `Closing`; closing statuses get the
+    /// directory bucketing, `closed:` stamp, and doctor consistency
+    /// treatment that built-ins receive.
+    ///
+    /// Lookup order is **schema-first** — a user entry takes
+    /// precedence over the built-in fallback. So a project that
+    /// writes `status_classes: { done: active }` reclassifies the
+    /// built-in `done` as active everywhere lifecycle decisions are
+    /// made. This is intentional: it lets a workflow re-use built-in
+    /// names with project-specific semantics. Built-in classification
+    /// stays the default whenever this map is silent. A status in
+    /// neither this map nor the built-in fallback defaults to
+    /// `Active` (lenient — chosen so a stray typo doesn't get
+    /// auto-stamped with `closed:`).
     #[serde(default)]
     pub status_classes: BTreeMap<String, StatusClass>,
 }
@@ -171,13 +179,15 @@ fields:
   # string model cannot describe. Unknown fields are allowed, so it
   # passes validation either way.
 
-# Lifecycle classification for custom statuses. Built-in statuses
+# Lifecycle classification for status values. Built-in statuses
 # (`open`, `in-progress`, `testing` → active; `done`, `fixed`, `wontfix`,
 # `duplicate`, `cannot-reproduce`, `obsolete` → closing) are classified
-# automatically. Add a status's class here when you extend the
-# `status` enum above with a custom value — closing statuses get the
-# `closed:` stamp, end up in the closed bucket, and pass doctor's
-# open/closed consistency check the same way `done` does.
+# automatically. Add a status's class here to extend the taxonomy with
+# a custom status (e.g. `archived`), or to *override* a built-in
+# (e.g. `done: active` if your workflow treats `done` as in-progress).
+# Closing statuses get the `closed:` stamp, end up in the closed
+# bucket, and pass doctor's open/closed consistency check the same way
+# `done` does.
 #
 # status_classes:
 #   archived: closing
@@ -487,12 +497,18 @@ pub fn validate(schema: &Schema, fm: &Mapping) -> Vec<ViolationKind> {
     out
 }
 
-/// Lifecycle classification for a status value, with the schema's
-/// `status_classes:` map taking precedence over the built-in fallback
-/// in `issue_fields::is_closing_status`. Statuses unknown to both
-/// (typos, removed enum values) classify as `Active` — the lenient
-/// default chosen so a stray status doesn't get auto-stamped with
-/// `closed:` or banished to the closed bucket.
+/// Lifecycle classification for a status value.
+///
+/// Lookup order:
+/// 1. The schema's `status_classes:` map — wins when present, so the
+///    user can override built-in classifications (`done: active` is a
+///    valid project policy).
+/// 2. Built-in fallback (`issue_fields::is_closing_status`) — covers
+///    `done`/`fixed`/`wontfix`/etc. when the schema is silent.
+/// 3. Default to `Active` for anything unknown to both. This is the
+///    lenient choice: a stray status (typo, removed enum value)
+///    doesn't get auto-stamped with `closed:` or banished to the
+///    closed bucket.
 pub fn status_class(schema: &Schema, status: &str) -> StatusClass {
     if let Some(class) = schema.status_classes.get(status) {
         return *class;

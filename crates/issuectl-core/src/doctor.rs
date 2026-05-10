@@ -1019,31 +1019,33 @@ fn populate_extended_validation(
         // Status/closed consistency. Schema-aware: a project that
         // declares `archived` (or similar) as a closing status via
         // `status_classes:` in `.schema.yaml` flags `archived without
-        // closed:` here just like a built-in `done`. The "active"
-        // branch covers explicitly-active statuses only — an unknown
-        // status (typo, removed enum value) is left alone so doctor
-        // doesn't double-flag the schema-validation failure.
+        // closed:` here just like a built-in `done`. Both branches go
+        // through the same `status_class` lookup so the layering
+        // (schema → built-in → default-active) is applied
+        // consistently. An unknown status defaults to `Active` in
+        // `status_class`; we suppress the active-side check for
+        // unknowns so doctor doesn't pile a confusing "active status
+        // must not carry closed:" on top of the schema-validation
+        // failure that already flagged the typo.
         if let Some(s) = &status {
             let class = schema::status_class(known_schema, s);
-            let known_active =
-                crate::issue_fields::ACTIVE_STATUSES.contains(&s.as_str())
-                    || known_schema
-                        .status_classes
-                        .get(s.as_str())
-                        .copied()
-                        == Some(schema::StatusClass::Active);
-            let closing = class == schema::StatusClass::Closing;
-            if closing && closed.is_none() {
-                report.status_consistency.push((
-                    slug.clone(),
-                    format!("closing status {s:?} requires `closed:` date"),
-                ));
-            }
-            if known_active && closed.is_some() {
-                report.status_consistency.push((
-                    slug.clone(),
-                    format!("active status {s:?} must not carry `closed:`"),
-                ));
+            let recognised = known_schema.status_classes.contains_key(s.as_str())
+                || crate::issue_fields::ACTIVE_STATUSES.contains(&s.as_str())
+                || crate::issue_fields::is_closing_status(s);
+            match class {
+                schema::StatusClass::Closing if closed.is_none() => {
+                    report.status_consistency.push((
+                        slug.clone(),
+                        format!("closing status {s:?} requires `closed:` date"),
+                    ));
+                }
+                schema::StatusClass::Active if recognised && closed.is_some() => {
+                    report.status_consistency.push((
+                        slug.clone(),
+                        format!("active status {s:?} must not carry `closed:`"),
+                    ));
+                }
+                _ => {}
             }
         }
 
@@ -1162,12 +1164,12 @@ fn populate_extended_validation(
                 continue;
             };
             match hit.folder.as_str() {
-                "closed" if crate::issue_fields::ACTIVE_STATUSES.contains(&hit_status)
-                    || known_schema
-                        .status_classes
-                        .get(hit_status)
-                        .copied()
-                        == Some(schema::StatusClass::Active) =>
+                "closed"
+                    if (known_schema.status_classes.contains_key(hit_status)
+                        || crate::issue_fields::ACTIVE_STATUSES.contains(&hit_status)
+                        || crate::issue_fields::is_closing_status(hit_status))
+                        && schema::status_class(known_schema, hit_status)
+                            == schema::StatusClass::Active =>
                 {
                     report.closed_with_active_status.push((
                         slug.clone(),
@@ -2991,6 +2993,58 @@ mod tests {
         let dir = tmp.path().join("issues").join(slug);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("item.md"), body).unwrap();
+    }
+
+    #[test]
+    fn flags_custom_closing_status_without_closed_field() {
+        // Schema declares `archived` as closing. An issue at
+        // `status: archived` without a `closed:` date must be flagged
+        // by status_consistency, just like a built-in `done` would be.
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  status:\n    required: true\n    enum: [open, archived]\nstatus_classes:\n  archived: closing\n",
+        )
+        .unwrap();
+        put_flat(
+            &tmp,
+            "alpha-issue-here",
+            "---\ntype: bug\nstatus: archived\npriority: normal\n---\n# A\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.status_consistency
+                .iter()
+                .any(|(slug, msg)| slug == "alpha-issue-here" && msg.contains("archived")),
+            "expected archived-without-closed flagged, got {:?}",
+            r.status_consistency
+        );
+    }
+
+    #[test]
+    fn flags_custom_active_status_carrying_closed_field() {
+        // Schema declares `verified` as active. An issue with
+        // `status: verified` AND `closed: <date>` must be flagged —
+        // active statuses must not carry `closed:`.
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  status:\n    required: true\n    enum: [open, verified]\nstatus_classes:\n  verified: active\n",
+        )
+        .unwrap();
+        put_flat(
+            &tmp,
+            "beta-issue-here",
+            "---\ntype: bug\nstatus: verified\nclosed: 2026-05-06\npriority: normal\n---\n# B\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.status_consistency
+                .iter()
+                .any(|(slug, msg)| slug == "beta-issue-here" && msg.contains("verified")),
+            "expected verified-with-closed flagged, got {:?}",
+            r.status_consistency
+        );
     }
 
     #[test]
