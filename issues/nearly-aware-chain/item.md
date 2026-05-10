@@ -2,9 +2,15 @@
 created: 2026-05-10
 updated: 2026-05-10
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 epic: exorbitantly-ill-apples
+commits:
+- hash: 04ee376
+  summary: preserve partial flat_layout_migrated on phase-5 mid-loop failure (apply_error field)
+- hash: 5fca048
+  summary: round-1 review fixes — exit non-zero on apply_error; mark aborted summary
+closed: 2026-05-10
 ---
 
 # Doctor: execute_migrate_layout_plan Err discards partial flat_layout_migrated outcome
