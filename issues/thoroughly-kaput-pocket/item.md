@@ -3,10 +3,14 @@ created: 2026-05-10
 updated: 2026-05-10
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 epic: hugely-exciting-spiders
 labels: [from-3dbear-0.5.1-feedback]
+closed: 2026-05-10
+commits:
+- hash: f6220b74
+  summary: 'fix(frontmatter): force-quote commits[].hash on write'
 ---
 
 # Short git hashes like 315194e2 parse as floats in YAML frontmatter (commits[].hash)

@@ -310,25 +310,15 @@ pub fn parse_item_md(path: &Path, slug: &str, folder: &str) -> crate::models::Is
     parsed.issue
 }
 
-/// Split a markdown text into frontmatter and body. The closing `---`
-/// is matched on its own line (`\n---`) — note that this still
-/// mis-extracts when a YAML block scalar contains a `---` line. That
-/// fragility is shared with `write::split_text` and is tracked as a
-/// pre-existing issue; centralising the splitter here at least keeps
-/// the scope of the bug to one function.
+/// Split a markdown text into frontmatter and body. The opening and
+/// closing `---` markers must each occupy their own line — anything
+/// like `---foo` or `----` is treated as body content, not a marker.
+/// This delegates to the shared strict splitter in `item_text` so the
+/// reader, writer, formatter and merge driver agree on exactly the
+/// same boundary.
 pub(crate) fn split_frontmatter(text: &str) -> (Option<&str>, Option<&str>) {
-    let text = text.trim_start();
-    if !text.starts_with("---") {
-        return (None, Some(text));
-    }
-    let rest = &text[3..];
-    if let Some(end) = rest.find("\n---") {
-        let yaml_text = &rest[..end];
-        let body = &rest[end + 4..];
-        (Some(yaml_text), Some(body))
-    } else {
-        (None, Some(text))
-    }
+    let split = crate::item_text::split(text);
+    (split.frontmatter, Some(split.body))
 }
 
 fn extract_title(body: Option<&str>) -> String {
@@ -403,5 +393,85 @@ mod tests {
     #[test]
     fn keeps_e_prefixed_title_without_dot_number() {
         assert_eq!(strip_legacy_title_number("Eager parser"), "Eager parser");
+    }
+
+    use super::{parse_item_md_text_with_warnings, split_frontmatter};
+    use std::path::Path;
+
+    #[test]
+    fn split_frontmatter_does_not_leak_into_body_yaml_block() {
+        // Regression: doctor flagged keys inside body ```yaml fenced
+        // blocks as "unknown frontmatter keys" because some splitter
+        // path matched `\n---` mid-body. Strict splitter must end
+        // at the first `---` line that follows the opener and ignore
+        // any subsequent `---` (whether in markdown rules or fenced
+        // YAML).
+        let text = "---\ntype: bug\nstatus: open\n---\n\n# Title\n\n```yaml\nshortname: foo\ncourse_id: 123\n```\n";
+        let (fm, body) = split_frontmatter(text);
+        let fm = fm.expect("frontmatter present");
+        assert!(fm.contains("type: bug"), "fm={fm:?}");
+        assert!(fm.contains("status: open"), "fm={fm:?}");
+        assert!(
+            !fm.contains("shortname"),
+            "frontmatter leaked body keys: {fm:?}"
+        );
+        assert!(
+            !fm.contains("course_id"),
+            "frontmatter leaked body keys: {fm:?}"
+        );
+        let body = body.unwrap_or_default();
+        assert!(body.contains("shortname: foo"));
+        assert!(body.contains("course_id: 123"));
+    }
+
+    #[test]
+    fn split_frontmatter_requires_closing_marker_on_its_own_line() {
+        // `\n---foo` mid-body must NOT be treated as the closing
+        // marker. Without strict line-bounding, a stray `---xyz`
+        // inside body prose or a fenced block could end frontmatter
+        // early, leaking body content into the YAML parse.
+        let text =
+            "---\nstatus: open\ntype: bug\npriority: normal\n---\n\n# Title\n\n```\n---xyz\n```\n";
+        let (fm, _body) = split_frontmatter(text);
+        let fm = fm.expect("frontmatter present");
+        // Frontmatter must contain only the three real keys.
+        assert!(fm.contains("status: open"));
+        assert!(fm.contains("type: bug"));
+        assert!(fm.contains("priority: normal"));
+        assert!(!fm.contains("xyz"));
+    }
+
+    #[test]
+    fn split_frontmatter_handles_missing_closing_marker_with_dashes_in_body() {
+        // The real-world scenario behind virtually-callous-rainstorm:
+        // when the user forgets the closing `---` of frontmatter and
+        // the body contains a YAML fence with `---` inside, the lazy
+        // splitter ate body content into the frontmatter, producing
+        // bogus "unknown key" warnings. With the strict splitter, a
+        // missing terminator means there is no frontmatter at all.
+        let text = "---\nstatus: open\ntype: bug\n\n# Body\n\n```yaml\nshortname: foo\ncourse_id: 123\n---\n```\n";
+        let (fm, _body) = split_frontmatter(text);
+        // No real closing `---` line — frontmatter must be reported
+        // as missing rather than swallowing body content.
+        assert!(
+            fm.is_none()
+                || (!fm.unwrap().contains("shortname") && !fm.unwrap().contains("course_id")),
+            "fm leaked body keys: {fm:?}"
+        );
+    }
+
+    #[test]
+    fn parse_item_does_not_pick_up_body_yaml_keys_as_unknown() {
+        // End-to-end: doctor uses the parsed mapping to flag unknown
+        // keys. Body YAML must NOT show up there.
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n# T\n\n```yaml\nshortname: foo\ncourse_id: 123\n```\n";
+        let parsed = parse_item_md_text_with_warnings(text, "slug", "flat", Path::new("/tmp/x.md"));
+        let map = parsed.mapping.expect("mapping parsed");
+        let keys: Vec<String> = map
+            .keys()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        assert!(!keys.iter().any(|k| k == "shortname"), "keys={keys:?}");
+        assert!(!keys.iter().any(|k| k == "course_id"), "keys={keys:?}");
     }
 }

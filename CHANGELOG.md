@@ -53,6 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanly. Regression of the 0.3.1 byte-boundary issue that resurfaced
   when the table renderer was refactored.
   (#marginally-receptive-kettle)
+- Frontmatter splitter is now fence-aware: a `---` line inside a
+  fenced code block (` ```yaml ... ``` `) can no longer be mistaken
+  for the closing frontmatter marker. Doctor's "unknown frontmatter
+  key" warnings no longer fire on `shortname:` / `course_id:` /
+  similar lines that live inside body code blocks. Routed all callers
+  through the strict shared splitter in `item_text` so the reader,
+  writer, formatter, and merge driver all agree on the same boundary.
+  (#virtually-callous-rainstorm)
 - Frontmatter writes now force-quote `commits[].hash` values so YAML
   1.2 implicit typing cannot coerce a short hash like `315194e2`
   into a float (`31519400.0`). Previously such hashes round-tripped

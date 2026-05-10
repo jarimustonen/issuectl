@@ -144,7 +144,10 @@ fn quote_commit_hashes(yaml: &str) -> String {
 fn rewrite_hash_line(line: &str) -> Option<String> {
     let indent_len = line.chars().take_while(|c| *c == ' ').count();
     let body = &line[indent_len..];
-    let after_dash = body.strip_prefix("- ").map(|r| ("- ", r)).unwrap_or(("", body));
+    let after_dash = body
+        .strip_prefix("- ")
+        .map(|r| ("- ", r))
+        .unwrap_or(("", body));
     let (dash, rest) = after_dash;
     let after_key = rest.strip_prefix("hash:")?;
     let value = after_key.trim_start();
