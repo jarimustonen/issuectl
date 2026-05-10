@@ -1,9 +1,9 @@
 ---
 created: 2026-05-08
-updated: 2026-05-08
+updated: 2026-05-10
 type: task
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 ---
 

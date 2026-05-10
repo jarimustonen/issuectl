@@ -2,10 +2,12 @@
 created: 2026-05-07
 updated: 2026-05-10
 type: chore
-status: in-progress
+status: done
 priority: normal
 epic: hugely-exciting-spiders
 labels: [monitoring]
+commit: 71a440d
+closed: 2026-05-10
 ---
 
 # Investigate watcher race: stale snapshot after concurrent PATCH

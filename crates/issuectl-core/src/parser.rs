@@ -41,12 +41,46 @@ pub struct Frontmatter {
 }
 
 fn deser_epic<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    use serde::de::Error;
     let v = Option::<serde_yaml::Value>::deserialize(d)?;
-    Ok(v.and_then(|val| match val {
-        serde_yaml::Value::String(s) => Some(s),
-        serde_yaml::Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    }))
+    let Some(val) = v else { return Ok(None) };
+    match val {
+        serde_yaml::Value::Null => Ok(None),
+        serde_yaml::Value::String(s) => {
+            if s.is_empty() {
+                Err(D::Error::custom(
+                    "epic: empty string is not a valid slug — \
+                     omit the field or use `epic: ~` to clear",
+                ))
+            } else {
+                Ok(Some(s))
+            }
+        }
+        // Legacy numeric refs (pre-slug repos) are still accepted so
+        // `issuectl doctor --fix` can read them; a warning is emitted
+        // downstream in `parse_item_md_text_with_warnings`.
+        serde_yaml::Value::Number(n) => Ok(Some(n.to_string())),
+        serde_yaml::Value::Bool(_)
+        | serde_yaml::Value::Sequence(_)
+        | serde_yaml::Value::Mapping(_)
+        | serde_yaml::Value::Tagged(_) => Err(D::Error::custom(format!(
+            "epic: expected a slug string (e.g. `epic: my-slug` or `epic: @my-slug`), \
+             got {}",
+            shape_name(&val),
+        ))),
+    }
+}
+
+fn shape_name(v: &serde_yaml::Value) -> &'static str {
+    match v {
+        serde_yaml::Value::Null => "null",
+        serde_yaml::Value::Bool(_) => "bool",
+        serde_yaml::Value::Number(_) => "number",
+        serde_yaml::Value::String(_) => "string",
+        serde_yaml::Value::Sequence(_) => "sequence",
+        serde_yaml::Value::Mapping(_) => "mapping",
+        serde_yaml::Value::Tagged(_) => "tagged value",
+    }
 }
 
 /// Lossy parse result with per-issue warnings collected instead of
@@ -473,5 +507,86 @@ mod tests {
             .collect();
         assert!(!keys.iter().any(|k| k == "shortname"), "keys={keys:?}");
         assert!(!keys.iter().any(|k| k == "course_id"), "keys={keys:?}");
+    }
+
+    #[test]
+    fn deser_epic_accepts_string() {
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\nepic: my-epic\n---\n\nbody\n";
+        let parsed = parse_item_md_text_with_warnings(text, "s", "flat", Path::new("/tmp/x.md"));
+        assert_eq!(parsed.fm_typed_error, None);
+        assert_eq!(parsed.issue.epic.as_deref(), Some("my-epic"));
+    }
+
+    #[test]
+    fn deser_epic_accepts_null_and_missing() {
+        for fm in [
+            "type: bug\nstatus: open\npriority: normal\nepic: ~\n",
+            "type: bug\nstatus: open\npriority: normal\n",
+        ] {
+            let text = format!("---\n{fm}---\n\nbody\n");
+            let parsed = parse_item_md_text_with_warnings(&text, "s", "flat", Path::new("/tmp/x.md"));
+            assert_eq!(parsed.fm_typed_error, None, "fm={fm}");
+            assert_eq!(parsed.issue.epic, None, "fm={fm}");
+        }
+    }
+
+    #[test]
+    fn deser_epic_rejects_empty_string() {
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\nepic: \"\"\n---\n\nbody\n";
+        let parsed = parse_item_md_text_with_warnings(text, "s", "flat", Path::new("/tmp/x.md"));
+        let err = parsed
+            .fm_typed_error
+            .as_deref()
+            .expect("empty-string epic must fail typed parse");
+        assert!(err.contains("epic"), "err={err}");
+        assert!(err.contains("empty"), "err={err}");
+    }
+
+    #[test]
+    fn deser_epic_rejects_sequence() {
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\nepic: [1, 2]\n---\n\nbody\n";
+        let parsed = parse_item_md_text_with_warnings(text, "s", "flat", Path::new("/tmp/x.md"));
+        let err = parsed
+            .fm_typed_error
+            .as_deref()
+            .expect("sequence epic must fail typed parse");
+        assert!(err.contains("epic"), "err={err}");
+        assert!(err.contains("sequence"), "err={err}");
+    }
+
+    #[test]
+    fn deser_epic_rejects_mapping() {
+        let text =
+            "---\ntype: bug\nstatus: open\npriority: normal\nepic: {a: 1}\n---\n\nbody\n";
+        let parsed = parse_item_md_text_with_warnings(text, "s", "flat", Path::new("/tmp/x.md"));
+        let err = parsed
+            .fm_typed_error
+            .as_deref()
+            .expect("mapping epic must fail typed parse");
+        assert!(err.contains("epic"), "err={err}");
+        assert!(err.contains("mapping"), "err={err}");
+    }
+
+    #[test]
+    fn deser_epic_rejects_bool() {
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\nepic: true\n---\n\nbody\n";
+        let parsed = parse_item_md_text_with_warnings(text, "s", "flat", Path::new("/tmp/x.md"));
+        let err = parsed
+            .fm_typed_error
+            .as_deref()
+            .expect("bool epic must fail typed parse");
+        assert!(err.contains("epic"), "err={err}");
+        assert!(err.contains("bool"), "err={err}");
+    }
+
+    #[test]
+    fn deser_epic_still_accepts_legacy_numeric() {
+        // Numeric epic refs predate slugs; doctor --fix migrates them.
+        // Strict-rejecting them here would brick affected repos before
+        // the migration could run.
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\nepic: 42\n---\n\nbody\n";
+        let parsed = parse_item_md_text_with_warnings(text, "s", "flat", Path::new("/tmp/x.md"));
+        assert_eq!(parsed.fm_typed_error, None);
+        assert_eq!(parsed.issue.epic.as_deref(), Some("42"));
     }
 }

@@ -127,6 +127,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#thoroughly-kaput-pocket)
 
 ### Internals
+- `parser::deser_epic` now strict-errors on malformed `epic:` shapes
+  (sequence, mapping, bool, tagged value, empty string) instead of
+  silently coercing them to `None`. The malformed value previously
+  flowed through to disk via the raw mapping but never reached
+  `canonical_hash`, leaving a blind spot for optimistic concurrency.
+  `null` / absent / non-empty string / legacy numeric (for
+  `doctor --fix` migration) remain accepted. Wraps through the existing
+  typed-frontmatter fallback, so affected files surface as
+  `fm_typed_error` and route to `MutateError::Corrupt`.
+  (#especially-bumpy-way)
 - Documented the watcher stale-snapshot race in
   `parse_slug_state` (concurrent PATCH bursts can publish V1 after
   V2 at a higher seq, producing a transient UI flip-back). Decision
