@@ -3,10 +3,14 @@ created: 2026-05-10
 updated: 2026-05-10
 type: improvement
 reporter: jari
-status: in-progress
+status: fixed
 priority: high
 epic: hugely-exciting-spiders
 labels: [from-3dbear-0.5.1-feedback]
+closed: 2026-05-10
+commits:
+- hash: at(doctor)
+  summary: warn when canonical files are gitignored
 ---
 
 # doctor: warn when issuectl-relevant files (.issuectl/AGENTS.md, .schema.yaml) are gitignored

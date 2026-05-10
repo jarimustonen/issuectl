@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `issuectl agents init` now logs which schema source it used —
+  `Using project schema at issues/.schema.yaml.` or `Using built-in
+  default schema (issues/.schema.yaml not found).` — so the silent
+  default-fallback path is no longer invisible. `--json` includes a
+  `schema_source: "default" | "project"` field in the same envelope.
+  (#eminently-dramatic-anger)
 - `issuectl doctor` warns when canonical issuectl-tracked files
   (`.issuectl/AGENTS.md`, `issues/.schema.yaml`) match a `.gitignore`
   pattern. Asymmetric footgun: works locally, fails for teammates and

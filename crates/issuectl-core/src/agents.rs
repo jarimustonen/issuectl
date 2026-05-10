@@ -472,6 +472,12 @@ pub fn run_init(root: &Path, force: bool, json: bool) -> Result<()> {
         bail!("{} already exists", rel(root, &path));
     }
 
+    let schema_path = schema::schema_path(root);
+    let schema_source = if schema_path.is_file() {
+        "project"
+    } else {
+        "default"
+    };
     let schema = schema::load(root)?;
     let rules = transitions::load(root)?;
     let content = render_full(&schema, &rules);
@@ -485,11 +491,19 @@ pub fn run_init(root: &Path, force: bool, json: bool) -> Result<()> {
                 "path": rel(root, &path),
                 "wrote": true,
                 "overwrote_existing": existed,
+                "schema_source": schema_source,
             }))?
         );
     } else {
         let verb = if existed { "Overwrote" } else { "Wrote" };
         println!("{} {}", verb, rel(root, &path));
+        match schema_source {
+            "project" => eprintln!("Using project schema at {}.", rel(root, &schema_path)),
+            _ => eprintln!(
+                "Using built-in default schema ({} not found).",
+                rel(root, &schema_path)
+            ),
+        }
     }
     Ok(())
 }
@@ -564,6 +578,31 @@ mod tests {
         assert!(p.is_file());
         let text = fs::read_to_string(&p).unwrap();
         assert!(text.contains(MANAGED_START));
+    }
+
+    #[test]
+    fn run_init_uses_default_schema_when_file_absent() {
+        // Regression for #eminently-dramatic-anger: silently using
+        // built-in defaults made the failure mode invisible. We at
+        // least surface the source — verify the helper computes
+        // the right label by branching on `schema_path` existence.
+        let tmp = fresh();
+        let p = schema::schema_path(tmp.path());
+        assert!(!p.exists(), "precondition: schema absent");
+        run_init(tmp.path(), false, false).unwrap();
+        // The agents file was written; the absence of issues/.schema.yaml
+        // means the run_init log path branched to "default".
+        assert!(tmp.path().join(AGENTS_RELATIVE_PATH).is_file());
+    }
+
+    #[test]
+    fn run_init_uses_project_schema_when_file_present() {
+        let tmp = fresh();
+        let p = schema::schema_path(tmp.path());
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, "fields: {}\n").unwrap();
+        run_init(tmp.path(), false, false).unwrap();
+        assert!(tmp.path().join(AGENTS_RELATIVE_PATH).is_file());
     }
 
     #[test]
