@@ -6,17 +6,22 @@
 //! reads boards on every request — no caching beyond the schema cache
 //! the loader already participates in.
 //!
-//! The two error tiers exist so the route can decide between "hide the
-//! board" (404) and "show the board read-only" (200 + banner). Hard
-//! errors are author-fixable in the YAML; soft errors are author-
-//! fixable in `.schema.yaml` or the filter expression — different
-//! files, different banner copy.
+//! Validation philosophy follows `AGENTS-AI-FIRST-CLI.md`: the loader
+//! rejects malformed input strictly so the AI caller can fix its YAML
+//! and retry. Whitespace, unknown enum values, list-typed group_by,
+//! and empty columns on required fields are all hard errors. The only
+//! soft (read-only banner) failure mode is when the board file is
+//! itself well-formed but references something *outside* the board
+//! YAML that's now broken — typically a `.schema.yaml` field that
+//! disappeared. That's a different file's problem; the banner points
+//! the user there rather than 404'ing the URL.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::query;
 use crate::schema;
 
 /// Built-in scalar fields a board may group on. Multi-valued fields
@@ -26,25 +31,40 @@ const BUILTIN_SCALAR_GROUP_BY: &[&str] = &[
     "epic", "assignee", "owner", "priority", "type", "reporter", "status",
 ];
 
-/// Schema fields that exist but are list-typed. Listed for a clearer
-/// error message — the loader rejects them up front instead of
-/// letting the user discover at runtime that drag does nothing
-/// sensible.
-fn is_schema_list_field(schema: &schema::Schema, name: &str) -> bool {
-    schema.fields.get(name).map(|s| s.list).unwrap_or(false)
-}
+/// Built-in list-typed fields that v1 boards explicitly reject. Listed
+/// independently of `.schema.yaml` so a user-edited schema that omits
+/// them still gets the right error message ("list-typed not
+/// supported") instead of falling through to the generic "not
+/// declared" path.
+const BUILTIN_LIST_FIELDS: &[&str] = &["labels", "related"];
+
+/// Built-in scalars that cannot be cleared (`null`). Boards grouping
+/// on these reject the empty `value: ""` column at load time — the
+/// server's PATCH would 422 every drag attempt anyway.
+const BUILTIN_NON_NULLABLE: &[&str] = &["priority", "type", "status"];
+
+/// Filter-bar field keys the JS recognizes. A board YAML's
+/// `filters: [...]` may include any subset of these. Empty (or
+/// omitted) means "hide all", matching the v0 behavior of the custom
+/// board.
+const FILTER_KEYS: &[&str] = &["search", "type", "assignee", "epic", "label"];
 
 #[derive(Debug, Clone)]
 pub struct Board {
     pub name: String,
     pub group_by: String,
     pub columns: Vec<BoardColumn>,
-    pub filter: Option<String>,
-    /// Set when the board file itself is well-formed but its
-    /// `group_by` field is missing from the schema or its `filter`
-    /// fails to parse. The route returns 200 with `read_only=true`;
-    /// the JS surfaces a banner and disables drag.
-    pub read_only_reason: Option<String>,
+    pub filter_src: Option<String>,
+    /// Pre-parsed `filter:` query, populated at load time so the route
+    /// never re-parses or guesses what to skip. `None` when no filter
+    /// was declared.
+    pub parsed_filter: Option<query::Query>,
+    /// Filter-bar fields the client should render (subset of
+    /// `FILTER_KEYS`). Empty vec = hide the filter bar entirely.
+    pub filters: Vec<String>,
+    /// Typed soft errors. Empty vec = healthy board. Non-empty = render
+    /// read-only with all listed reasons surfaced; drag is disabled.
+    pub soft_errors: Vec<SoftError>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,13 +73,34 @@ pub struct BoardColumn {
     pub label: String,
 }
 
+/// Soft errors are recoverable misconfigurations whose root cause
+/// lives *outside* the board YAML — typically `.schema.yaml`. The
+/// route renders the board read-only with a banner; the caller fixes
+/// the schema (or filter expression) and reloads.
+#[derive(Debug, Clone)]
+pub enum SoftError {
+    /// `group_by` references a field that's neither a built-in nor
+    /// declared in `.schema.yaml`. Carries the offending field name.
+    UnknownGroupBy(String),
+}
+
+impl SoftError {
+    pub fn message(&self) -> String {
+        match self {
+            SoftError::UnknownGroupBy(field) => format!(
+                "group_by field {field:?} is not declared in .schema.yaml; \
+                 add it (or fix the typo) and reload"
+            ),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum BoardError {
     NotFound,
-    /// Hard validation failure in the YAML itself (parse error,
-    /// duplicate column values, list-typed group_by, ...). Mapped to
-    /// 404 by the route — a board this broken has no useful read-only
-    /// fallback.
+    /// Hard validation failure — the YAML itself is wrong. Mapped to
+    /// 404 by the route. Carries a public-safe message (no filesystem
+    /// paths).
     Validation(String),
     Io(anyhow::Error),
 }
@@ -84,6 +125,8 @@ struct BoardFile {
     columns: Vec<BoardColumnFile>,
     #[serde(default)]
     filter: Option<String>,
+    #[serde(default)]
+    filters: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -103,11 +146,10 @@ fn board_file_path(root: &Path, name: &str) -> PathBuf {
     boards_dir(root).join(format!("{name}.yaml"))
 }
 
-/// Slug-shaped predicate; matches the issue slug rules so the URL
-/// `/board/<name>` survives a round-trip without escaping. Loose
-/// enough to allow underscores too because YAML basenames typically
-/// permit them.
-fn is_valid_board_name(name: &str) -> bool {
+/// Slug-shaped predicate: lowercase alphanumeric, hyphens, underscores.
+/// Public so route handlers reuse the same predicate as the loader —
+/// keeping two copies in sync was the original maintenance hazard.
+pub fn is_valid_board_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name
@@ -152,14 +194,27 @@ pub fn load(root: &Path, name: &str) -> Result<Board, BoardError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(BoardError::NotFound),
         Err(e) => return Err(BoardError::Io(e.into())),
     };
+    // Public-safe parse error: no filesystem path. Operators read the
+    // detailed path from server logs; clients see a localized message.
     let file: BoardFile = serde_yaml::from_str(&text)
-        .map_err(|e| BoardError::Validation(format!("parse {}: {e}", path.display())))?;
+        .map_err(|e| BoardError::Validation(format!("YAML parse error: {e}")))?;
 
     if file.name != name {
         return Err(BoardError::Validation(format!(
             "board name {:?} disagrees with filename {:?}",
             file.name, name
         )));
+    }
+    if file.group_by.trim() != file.group_by {
+        return Err(BoardError::Validation(format!(
+            "group_by {:?} must not have leading/trailing whitespace",
+            file.group_by
+        )));
+    }
+    if file.group_by.is_empty() {
+        return Err(BoardError::Validation(
+            "group_by must not be empty".to_string(),
+        ));
     }
     if file.columns.is_empty() {
         return Err(BoardError::Validation(
@@ -168,6 +223,12 @@ pub fn load(root: &Path, name: &str) -> Result<Board, BoardError> {
     }
     let mut seen = BTreeSet::new();
     for c in &file.columns {
+        if c.value.trim() != c.value {
+            return Err(BoardError::Validation(format!(
+                "column value {:?} must not have leading/trailing whitespace",
+                c.value
+            )));
+        }
         if c.label.trim().is_empty() {
             return Err(BoardError::Validation(format!(
                 "column with value {:?}: label must not be empty",
@@ -182,33 +243,114 @@ pub fn load(root: &Path, name: &str) -> Result<Board, BoardError> {
         }
     }
 
-    // Pre-flight schema lookup to classify hard-vs-soft errors.
+    // Built-in list fields are rejected explicitly so the diagnostic
+    // is correct even if the user's `.schema.yaml` doesn't declare
+    // them. Schema-declared list fields fall through to the same
+    // error, just via the schema lookup.
+    if BUILTIN_LIST_FIELDS.contains(&file.group_by.as_str()) {
+        return Err(BoardError::Validation(format!(
+            "group_by {:?} is a list-typed field; v1 boards only support scalar fields",
+            file.group_by
+        )));
+    }
     let schema_arc =
         schema::load(root).map_err(|e| BoardError::Io(anyhow::anyhow!("load schema: {e}")))?;
-    if is_schema_list_field(&schema_arc, &file.group_by) {
+    if schema_arc
+        .fields
+        .get(&file.group_by)
+        .map(|s| s.list)
+        .unwrap_or(false)
+    {
         return Err(BoardError::Validation(format!(
             "group_by {:?} is a list-typed field; v1 boards only support scalar fields",
             file.group_by
         )));
     }
 
-    let mut read_only_reason: Option<String> = None;
+    // Required built-ins reject the empty/unassigned column.
+    if BUILTIN_NON_NULLABLE.contains(&file.group_by.as_str())
+        && file.columns.iter().any(|c| c.value.is_empty())
+    {
+        return Err(BoardError::Validation(format!(
+            "group_by {:?} is a required field; the empty/unassigned column is not allowed \
+             (a drop here would clear a required value and 422 every time)",
+            file.group_by
+        )));
+    }
+
+    // Enum-constrained fields: column values must be in the schema's
+    // `enum` list. Empty (clear) is allowed only for nullable fields,
+    // which is enforced above.
+    if let Some(spec) = schema_arc.fields.get(&file.group_by) {
+        if let Some(allowed) = &spec.allowed {
+            for c in &file.columns {
+                if c.value.is_empty() {
+                    continue; // clear semantics; nullability already checked
+                }
+                if !allowed.iter().any(|v| v == &c.value) {
+                    return Err(BoardError::Validation(format!(
+                        "column value {:?} is not allowed by .schema.yaml's enum for {:?}: {:?}",
+                        c.value, file.group_by, allowed
+                    )));
+                }
+            }
+        }
+    }
+
+    // Filter parses to a real `Query` at load time, hard-rejected on
+    // failure. The route never re-parses; it consumes
+    // `Board::parsed_filter` directly. A typo in `filter:` is the
+    // caller's bug — fail loudly so it can be fixed, rather than
+    // silently rendering all issues with a banner.
+    let (filter_src, parsed_filter) = match &file.filter {
+        Some(f) if !f.trim().is_empty() => {
+            let trimmed = f.trim();
+            match query::parse(trimmed) {
+                Ok(q) => (Some(trimmed.to_string()), Some(q)),
+                Err(e) => {
+                    return Err(BoardError::Validation(format!(
+                        "filter does not parse: {e}"
+                    )));
+                }
+            }
+        }
+        _ => (None, None),
+    };
+
+    // Validate the filter-bar config: each entry must be one of
+    // `FILTER_KEYS`, no duplicates. Default (omitted) is hide-all
+    // (empty Vec).
+    let filters = match file.filters {
+        Some(list) => {
+            let mut seen = BTreeSet::new();
+            let mut out = Vec::new();
+            for f in list {
+                if !FILTER_KEYS.contains(&f.as_str()) {
+                    return Err(BoardError::Validation(format!(
+                        "filters entry {f:?} is not a known filter key; allowed: {FILTER_KEYS:?}"
+                    )));
+                }
+                if !seen.insert(f.clone()) {
+                    return Err(BoardError::Validation(format!(
+                        "filters entry {f:?} listed twice"
+                    )));
+                }
+                out.push(f);
+            }
+            out
+        }
+        None => Vec::new(),
+    };
+
+    // Soft-error pass: things that may have changed under the board's
+    // feet without it being a YAML defect. Today: the schema field
+    // disappeared. (filter was hard-rejected above; list-typed was
+    // hard-rejected above.)
+    let mut soft_errors = Vec::new();
     let group_by_known = BUILTIN_SCALAR_GROUP_BY.contains(&file.group_by.as_str())
         || schema_arc.fields.contains_key(&file.group_by);
     if !group_by_known {
-        read_only_reason = Some(format!(
-            "group_by field {:?} is not declared in .schema.yaml; board is read-only",
-            file.group_by
-        ));
-    }
-
-    if let Some(filter) = &file.filter {
-        let trimmed = filter.trim();
-        if !trimmed.is_empty() {
-            if let Err(e) = crate::query::parse(trimmed) {
-                read_only_reason = Some(format!("filter does not parse ({e}); board is read-only"));
-            }
-        }
+        soft_errors.push(SoftError::UnknownGroupBy(file.group_by.clone()));
     }
 
     Ok(Board {
@@ -222,14 +364,19 @@ pub fn load(root: &Path, name: &str) -> Result<Board, BoardError> {
                 label: c.label,
             })
             .collect(),
-        filter: file.filter.filter(|s| !s.trim().is_empty()),
-        read_only_reason,
+        filter_src,
+        parsed_filter,
+        filters,
+        soft_errors,
     })
 }
 
 /// Resolve the group_by value of an issue for a given field name.
 /// Returns the empty string when the field is missing/null — that's
-/// the empty-bucket key.
+/// the empty-bucket key. Non-string values from `extra` (numbers,
+/// bools) round-trip via `to_string`; arrays/objects are rejected at
+/// load time via the list-typed check, so this is the sane scalar
+/// fallback.
 pub fn group_value_for(issue: &crate::models::Issue, group_by: &str) -> String {
     match group_by {
         "epic" => issue.epic.clone().unwrap_or_default(),
@@ -241,11 +388,14 @@ pub fn group_value_for(issue: &crate::models::Issue, group_by: &str) -> String {
         "status" => issue.status.clone(),
         other => match issue.extra.get(other) {
             Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            Some(serde_json::Value::Bool(b)) => b.to_string(),
             Some(serde_json::Value::Null) | None => String::new(),
-            // Numeric/bool/etc. round-trip through to_string for a
-            // reasonable display; v1 docs say boards target scalar
-            // fields, so this is the rare fallback.
-            Some(other) => other.to_string(),
+            // Arrays/objects in a "scalar" custom field are
+            // misdeclared schema. Treat as the unassigned bucket
+            // rather than stringifying to a JSON literal that no
+            // user-declared column will ever match.
+            Some(_) => String::new(),
         },
     }
 }
@@ -282,7 +432,8 @@ mod tests {
         let b = load(d.path(), "triage").unwrap();
         assert_eq!(b.group_by, "epic");
         assert_eq!(b.columns.len(), 2);
-        assert!(b.read_only_reason.is_none());
+        assert!(b.soft_errors.is_empty());
+        assert!(b.filters.is_empty());
     }
 
     #[test]
@@ -376,6 +527,32 @@ mod tests {
         }
     }
 
+    /// Even if the user's `.schema.yaml` happens not to declare
+    /// `labels`, the loader still rejects it as a list-typed built-in
+    /// — the `BUILTIN_LIST_FIELDS` constant is the source of truth.
+    #[test]
+    fn load_rejects_labels_even_without_schema_declaration() {
+        let d = tmp();
+        // Schema overrides labels as scalar; we still reject because
+        // labels is built-in list-typed.
+        let schema_path = d.path().join("issues").join(".schema.yaml");
+        fs::create_dir_all(schema_path.parent().unwrap()).unwrap();
+        fs::write(
+            &schema_path,
+            "version: 1\nfields:\n  labels:\n    required: false\n",
+        )
+        .unwrap();
+        write_board(
+            d.path(),
+            "triage",
+            "name: triage\ngroup_by: labels\ncolumns: [{value: '', label: U}]\n",
+        );
+        match load(d.path(), "triage") {
+            Err(BoardError::Validation(s)) => assert!(s.contains("list-typed")),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
     #[test]
     fn load_unknown_group_by_renders_read_only() {
         let d = tmp();
@@ -385,23 +562,95 @@ mod tests {
             "name: triage\ngroup_by: nonexistent_field\ncolumns: [{value: '', label: U}]\n",
         );
         let b = load(d.path(), "triage").unwrap();
-        assert!(b
-            .read_only_reason
-            .as_ref()
-            .unwrap()
-            .contains("not declared"));
+        assert_eq!(b.soft_errors.len(), 1);
+        match &b.soft_errors[0] {
+            SoftError::UnknownGroupBy(f) => assert_eq!(f, "nonexistent_field"),
+        }
     }
 
     #[test]
-    fn load_bad_filter_renders_read_only() {
+    fn load_bad_filter_is_hard_rejected() {
         let d = tmp();
         write_board(
             d.path(),
             "triage",
             "name: triage\ngroup_by: epic\ncolumns: [{value: '', label: U}]\nfilter: \"bogus:value\"\n",
         );
+        match load(d.path(), "triage") {
+            Err(BoardError::Validation(s)) => assert!(s.contains("filter")),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_empty_column_on_required_builtin() {
+        let d = tmp();
+        write_board(
+            d.path(),
+            "triage",
+            "name: triage\ngroup_by: priority\ncolumns:\n  - {value: '', label: Unscoped}\n  - {value: high, label: High}\n",
+        );
+        match load(d.path(), "triage") {
+            Err(BoardError::Validation(s)) => assert!(s.contains("required")),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_column_value_outside_schema_enum() {
+        let d = tmp();
+        write_board(
+            d.path(),
+            "triage",
+            "name: triage\ngroup_by: priority\ncolumns:\n  - {value: medium, label: Medium}\n  - {value: high, label: High}\n",
+        );
+        match load(d.path(), "triage") {
+            Err(BoardError::Validation(s)) => {
+                assert!(s.contains("medium"), "msg: {s}");
+                assert!(s.contains("enum"), "msg: {s}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_accepts_in_enum_column_values() {
+        let d = tmp();
+        write_board(
+            d.path(),
+            "triage",
+            "name: triage\ngroup_by: priority\ncolumns:\n  - {value: normal, label: Normal}\n  - {value: high, label: High}\n",
+        );
         let b = load(d.path(), "triage").unwrap();
-        assert!(b.read_only_reason.as_ref().unwrap().contains("filter"));
+        assert_eq!(b.columns.len(), 2);
+    }
+
+    #[test]
+    fn load_rejects_whitespace_in_group_by() {
+        let d = tmp();
+        write_board(
+            d.path(),
+            "triage",
+            "name: triage\ngroup_by: \"epic \"\ncolumns: [{value: '', label: U}]\n",
+        );
+        match load(d.path(), "triage") {
+            Err(BoardError::Validation(s)) => assert!(s.contains("whitespace")),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_whitespace_in_column_value() {
+        let d = tmp();
+        write_board(
+            d.path(),
+            "triage",
+            "name: triage\ngroup_by: epic\ncolumns: [{value: 'foo ', label: F}]\n",
+        );
+        match load(d.path(), "triage") {
+            Err(BoardError::Validation(s)) => assert!(s.contains("whitespace")),
+            other => panic!("expected Validation, got {other:?}"),
+        }
     }
 
     #[test]
@@ -414,6 +663,71 @@ mod tests {
         );
         match load(d.path(), "triage") {
             Err(BoardError::Validation(_)) => {}
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_accepts_filters_subset() {
+        let d = tmp();
+        write_board(
+            d.path(),
+            "triage",
+            "name: triage\ngroup_by: epic\ncolumns: [{value: '', label: U}]\nfilters: [search, type]\n",
+        );
+        let b = load(d.path(), "triage").unwrap();
+        assert_eq!(b.filters, vec!["search".to_string(), "type".to_string()]);
+    }
+
+    #[test]
+    fn load_rejects_unknown_filter_key() {
+        let d = tmp();
+        write_board(
+            d.path(),
+            "triage",
+            "name: triage\ngroup_by: epic\ncolumns: [{value: '', label: U}]\nfilters: [bogus]\n",
+        );
+        match load(d.path(), "triage") {
+            Err(BoardError::Validation(s)) => assert!(s.contains("bogus")),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_duplicate_filter_key() {
+        let d = tmp();
+        write_board(
+            d.path(),
+            "triage",
+            "name: triage\ngroup_by: epic\ncolumns: [{value: '', label: U}]\nfilters: [search, search]\n",
+        );
+        match load(d.path(), "triage") {
+            Err(BoardError::Validation(s)) => assert!(s.contains("twice")),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_parses_filter_into_query() {
+        let d = tmp();
+        write_board(
+            d.path(),
+            "bugs",
+            "name: bugs\ngroup_by: epic\ncolumns: [{value: '', label: U}]\nfilter: \"type:bug\"\n",
+        );
+        let b = load(d.path(), "bugs").unwrap();
+        assert!(b.parsed_filter.is_some());
+        assert_eq!(b.filter_src.as_deref(), Some("type:bug"));
+    }
+
+    #[test]
+    fn validation_error_does_not_leak_filesystem_path() {
+        let d = tmp();
+        write_board(d.path(), "triage", "this is not yaml: : :\n: : :");
+        match load(d.path(), "triage") {
+            Err(BoardError::Validation(s)) => {
+                assert!(!s.contains(d.path().to_str().unwrap()), "leaked path: {s}");
+            }
             other => panic!("expected Validation, got {other:?}"),
         }
     }

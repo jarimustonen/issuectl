@@ -46,15 +46,20 @@ pub struct BoardResponse {
     pub group_by: String,
     pub columns: Vec<BoardColumnDto>,
     pub filter: Option<String>,
+    /// Filter-bar fields the client should render. Subset of
+    /// `["search", "type", "assignee", "epic", "label"]`. Empty means
+    /// hide the filter bar entirely.
+    pub filters: Vec<String>,
     pub issues: Vec<BoardIssueDto>,
     pub warnings: Vec<LoadWarning>,
     pub snapshot_seq: u64,
     pub instance_id: Uuid,
-    /// True when the board renders but drag is disabled. The matching
-    /// `read_only_reason` carries the user-facing message for the
-    /// banner (missing schema field or unparseable filter).
+    /// True when the board renders but drag is disabled.
     pub read_only: bool,
-    pub read_only_reason: Option<String>,
+    /// All soft-error messages, one per misconfiguration. Concatenated
+    /// `\n` for display in a single banner; individual entries are
+    /// also available for tooling.
+    pub read_only_reasons: Vec<String>,
     /// True when the group_by maps to a dedicated `UpdateIssueRequest`
     /// slot. JS uses this to choose between the dedicated PATCH shape
     /// (`{<field>: ...}`) and the `custom_fields` map.
@@ -85,19 +90,10 @@ pub async fn get_board_api(State(state): State<AppState>, Path(name): Path<Strin
         let _g = crate::repo_config::enter(cache);
         let board = boards::load(root.as_path(), &board_name)?;
 
-        // Filter parses guaranteed-OK here for non-read-only boards;
-        // for read-only-due-to-bad-filter we just skip filtering.
-        let parsed_filter = match (&board.filter, board.read_only_reason.as_deref()) {
-            (Some(f), reason) if reason.map(|r| r.contains("filter")).unwrap_or(false) => {
-                let _ = f;
-                None
-            }
-            (Some(f), _) => match crate::query::parse(f) {
-                Ok(q) => Some(q),
-                Err(_) => None,
-            },
-            (None, _) => None,
-        };
+        // `parsed_filter` is populated at load time; no string-matching
+        // dance, no late re-parse, no fail-open on bad filter (those
+        // are now hard errors at load time per AGENTS-AI-FIRST-CLI).
+        let parsed_filter = board.parsed_filter.clone();
 
         let (full_issues, warnings) = repo::load_issues_with_warnings(root.as_path());
         let issues: Vec<BoardIssueDto> = full_issues
@@ -121,7 +117,9 @@ pub async fn get_board_api(State(state): State<AppState>, Path(name): Path<Strin
 
     match result {
         Ok(Ok((board, issues, warnings))) => {
-            let read_only = board.read_only_reason.is_some();
+            let read_only = !board.soft_errors.is_empty();
+            let read_only_reasons: Vec<String> =
+                board.soft_errors.iter().map(|s| s.message()).collect();
             let builtin = boards::is_builtin_group_by(&board.group_by);
             Json(BoardResponse {
                 name: board.name,
@@ -135,21 +133,26 @@ pub async fn get_board_api(State(state): State<AppState>, Path(name): Path<Strin
                         label: c.label,
                     })
                     .collect(),
-                filter: board.filter,
+                filter: board.filter_src,
+                filters: board.filters,
                 issues,
                 warnings,
                 snapshot_seq,
                 instance_id,
                 read_only,
-                read_only_reason: board.read_only_reason,
+                read_only_reasons,
             })
             .into_response()
         }
         Ok(Err(BoardError::NotFound)) => {
             super::api::error_response(StatusCode::NOT_FOUND, "not_found", "board not found")
         }
+        // Hard validation errors get 422 (Unprocessable Entity) — the
+        // YAML exists but is malformed. Distinct from NotFound so the
+        // JS can render a different banner ("fix this file" vs.
+        // "typo in URL").
         Ok(Err(BoardError::Validation(s))) => {
-            super::api::error_response(StatusCode::NOT_FOUND, "invalid_board", &s)
+            super::api::error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_board", &s)
         }
         Ok(Err(BoardError::Io(e))) => {
             super::api::error_response(StatusCode::INTERNAL_SERVER_ERROR, "io", &e.to_string())
@@ -162,17 +165,33 @@ pub async fn get_board_api(State(state): State<AppState>, Path(name): Path<Strin
     }
 }
 
-/// `GET /board/<name>` — same shell as the default board, but with
-/// `<body data-board-name="...">` so `board.js` knows to fetch
-/// `/api/boards/<name>` instead of `/api/issues`.
-pub async fn board_view_html(Path(name): Path<String>) -> Result<Html<String>, StatusCode> {
-    if name.is_empty()
-        || name.len() > 64
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-    {
+/// `GET /board/<name>` — renders the shell only when the board YAML
+/// exists and parses. A bad/missing board returns a 404 page instead
+/// of a broken shell so the user can distinguish a URL typo from a
+/// broken YAML.
+pub async fn board_view_html(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Html<String>, StatusCode> {
+    if !boards::is_valid_board_name(&name) {
         return Err(StatusCode::NOT_FOUND);
     }
-    Ok(Html(super::render::render_custom_board_shell(&name)))
+    let root = state.root.clone();
+    let cache = state.config.clone();
+    let board_name = name.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _g = crate::repo_config::enter(cache);
+        boards::load(root.as_path(), &board_name)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match result {
+        Ok(_) => Ok(Html(super::render::render_custom_board_shell(&name))),
+        // Soft errors (UnknownGroupBy) still produce a `Board`; that's
+        // the read-only path and the shell renders normally. Hard
+        // validation errors return 404 here too — there's no useful
+        // shell to show when the YAML itself is broken.
+        Err(BoardError::NotFound) | Err(BoardError::Validation(_)) => Err(StatusCode::NOT_FOUND),
+        Err(BoardError::Io(_)) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }

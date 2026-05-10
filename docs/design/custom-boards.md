@@ -46,6 +46,7 @@ columns:
   - value: future
     label: "Future"
 filter: "type:bug status:open"   # optional; query-engine syntax
+filters: [search, type]          # optional; filter-bar fields to show
 ```
 
 Fields:
@@ -53,27 +54,52 @@ Fields:
 - `name` — must equal the file's basename (sanity check; otherwise
   rejected at load).
 - `group_by` — built-in scalar field (`epic`, `assignee`, `owner`,
-  `priority`, `type`) or a custom **scalar** field declared in
-  `.schema.yaml`. List-typed fields (`labels`, `related`) are
-  intentionally rejected in v1; see *Open questions* below.
+  `priority`, `type`, `reporter`, `status`) or a custom **scalar** field
+  declared in `.schema.yaml`. List-typed fields (`labels`, `related`)
+  are intentionally rejected in v1; see *Open questions* below.
+  Grouping by `status` is allowed but produces a literal-status board
+  without the default `/`'s closing-status collapse or status picker.
 - `columns` — explicit ordered list. Values not listed do not appear on
   the board (no implicit "Other" bucket in v1; the rationale matches
   the brief — keeps unbounded value spaces like `assignee` from filling
   the screen with one column per name). The empty-string value is the
   unassigned bucket (issue's frontmatter is missing or null).
 - `filter` — optional `crate::query` string. Reused, no DSL.
+- `filters` — optional subset of
+  `["search", "type", "assignee", "epic", "label"]`. Each entry shows
+  one client-side filter-bar field on top of the board. Default
+  (omitted): hide the bar entirely. Server-side `filter:` rajaa
+  tietojoukkoa, client-side filters etsivät sen sisältä.
 
-The loader rejects:
+### Validation philosophy (AGENTS-AI-FIRST-CLI.md)
 
-- Unknown `group_by` (not built-in, not in `.schema.yaml`).
-- List-typed `group_by` (v1 scope).
-- Empty / missing `columns`.
-- Duplicate `value` entries within `columns`.
-- Filter that doesn't parse.
+The primary author of these YAMLs is an AI agent. Per the project's
+AI-first CLI principles, the loader validates **strictly** and
+**fails loudly** on malformed input — surfacing errors so the agent
+can correct its output and retry. The loader rejects (with a hard
+422 from `/api/boards/<name>`):
 
-Validation failures of `group_by` and `filter` are reported separately so
-the runtime can choose between "404 / refuse to render" vs. "render
-read-only with banner" — see *Read-only fallbacks*.
+- Unknown `group_by` field that isn't built-in *and* isn't in
+  `.schema.yaml` — though see "soft errors" below for a different
+  classification of this case post-write.
+- List-typed `group_by` (built-in `labels`/`related` or a
+  schema-declared list field).
+- Empty `value: ""` column when grouping on a required built-in
+  (`priority`, `type`, `status`) — a drop here would 422 every time.
+- Column values outside the schema's enum constraint for the
+  group_by field.
+- Leading/trailing whitespace in `group_by` or any column `value`.
+- Empty / missing `columns` or duplicate `value` entries.
+- Unknown / duplicate `filters` keys.
+- Unparseable `filter` expression.
+- Top-level keys the loader doesn't recognize (`deny_unknown_fields`).
+
+Hard errors return **404** for `/board/<name>` (no useful shell to
+render) and **422** for `/api/boards/<name>` (the YAML exists but is
+malformed — distinct from URL-typo NotFound).
+
+The two-tier error model exists *only* for misconfigurations whose
+root cause lives outside the board YAML — see *Read-only fallbacks*.
 
 ## URL & routing
 
@@ -86,8 +112,10 @@ read-only with banner" — see *Read-only fallbacks*.
   {
     "name": "triage",
     "group_by": "epic",
+    "builtin_group_by": true,
     "columns": [ { "value": "", "label": "Unscoped" }, ... ],
     "filter": "type:bug status:open",
+    "filters": ["search", "type"],
     "issues": [
       { ...IssueSummary fields...,
         "group_value": "hugely-exciting-spiders" }
@@ -96,7 +124,7 @@ read-only with banner" — see *Read-only fallbacks*.
     "snapshot_seq": 42,
     "instance_id": "...",
     "read_only": false,
-    "read_only_reason": null
+    "read_only_reasons": []
   }
   ```
 
@@ -128,18 +156,21 @@ unambiguously to one PATCH.
 ## Read-only fallbacks
 
 The board renders read-only with a banner — the cards still show, drag
-is disabled — when:
+is disabled — when the YAML itself is well-formed but its references
+to *external* state have rotted:
 
 - `group_by` field is missing from `.schema.yaml` and is not a built-in
-  scalar (typo, schema regression).
-- `filter:` is set but does not parse.
+  scalar. The fix lives in `.schema.yaml`, not in the board file.
 
-Hard errors (file unreadable, malformed YAML, duplicate column values,
-list-typed group_by) return 404 from `/api/boards/<name>` rather than
-rendering, because the user has no chance of forming a coherent mental
-model from a half-broken board. The loader returns a typed
-`BoardError`; the route maps `Validation` → 404, `Soft` (missing field
-or bad filter) → 200 with `read_only=true`.
+This is the only soft error today (`SoftError::UnknownGroupBy`).
+Multiple soft errors are reported as a `Vec<SoftError>` and surfaced
+to the client as `read_only_reasons: [...]` in the API response.
+
+`filter:` parse failures are **not** a soft error — they're a hard
+422. The agent author can fix `filter:` directly without touching
+`.schema.yaml`; failing closed prevents the dangerous "scoped board
+silently becomes a firehose" UX where a typo turns
+`type:bug status:open` into "every issue".
 
 ## Enumeration vs. open-set columns
 
@@ -161,20 +192,27 @@ pub struct Board {
     pub name: String,
     pub group_by: String,
     pub columns: Vec<BoardColumn>,
-    pub filter: Option<String>,
+    pub filter_src: Option<String>,
+    pub parsed_filter: Option<query::Query>,  // pre-parsed at load time
+    pub filters: Vec<String>,                 // visible filter-bar keys
+    pub soft_errors: Vec<SoftError>,          // empty = healthy
 }
 
 pub struct BoardColumn { pub value: String, pub label: String }
 
+pub enum SoftError {
+    UnknownGroupBy(String),
+}
+
 pub enum BoardError {
-    NotFound,
+    NotFound,             // → 404 (also missing YAML at /board/<name>)
+    Validation(String),   // → 404 at /board, 422 at /api/boards
     Io(anyhow::Error),
-    Validation(String),  // → 404
-    Soft(String),        // → 200 read_only=true
 }
 
 pub fn load(root: &Path, name: &str) -> Result<Board, BoardError>;
 pub fn list(root: &Path) -> Vec<String>;
+pub fn is_valid_board_name(name: &str) -> bool;  // shared with route
 ```
 
 The loader is **stateless** (re-reads on every request). Schema lookups

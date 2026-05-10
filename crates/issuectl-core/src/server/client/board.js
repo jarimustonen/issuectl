@@ -199,6 +199,10 @@
           if (i.version) nextVersions[i.slug] = i.version;
         });
         state.versions = nextVersions;
+        // Snapshot replaces the authoritative state — drop stale
+        // optimistic tags so a later PATCH-failure revert can't pin
+        // an even-older `prevValue` on top of this fresh data.
+        state.optimistic_tags = {};
         renderWarnings();
         populateFilters();
         normalizeFiltersToOptions();
@@ -336,20 +340,37 @@
       headers: { Accept: 'application/json' },
     })
       .then(function (r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
+        if (!r.ok) {
+          // 422 (Unprocessable Entity) signals a hard YAML
+          // validation error; surface its detail so the operator
+          // can fix the file. Other non-2xx → generic message.
+          if (r.status === 422) {
+            return r.json().then(function (d) {
+              throw new Error(d.detail || 'invalid board YAML');
+            }, function () { throw new Error('HTTP 422'); });
+          }
+          throw new Error('HTTP ' + r.status);
+        }
         return r.json();
       })
       .then(function (data) {
         state.board = data;
+        // Snapshot-authoritative: rebuild side maps from scratch.
+        // Stale entries for removed slugs would otherwise linger and
+        // mislead optimistic-drop revert logic.
+        var nextGroupValues = {};
         state.issues = (data.issues || []).map(function (i) {
-          // Server response carries group_value flattened next to the
-          // IssueSummary fields. Stash it so optimistic drops can
-          // mutate it without parsing frontmatter.
           var clone = Object.assign({}, i);
-          state.group_values[clone.slug] = i.group_value || '';
+          nextGroupValues[clone.slug] = i.group_value || '';
           delete clone.group_value;
           return clone;
         });
+        state.group_values = nextGroupValues;
+        // Clear optimistic tags too: a snapshot replaces the
+        // authoritative state for every slug it carries, so a later
+        // PATCH-failure revert against this load's data must not
+        // restore an even-older `prevValue`.
+        state.optimistic_tags = {};
         state.warnings = data.warnings || [];
         state.snapshot_seq = data.snapshot_seq || 0;
         if (data.instance_id) state.instance_id = data.instance_id;
@@ -360,12 +381,7 @@
         state.versions = nextVersions;
         renderBoardBanner();
         renderWarnings();
-        // The board defines its own filter; the global filter-bar
-        // would be redundant and confusingly named (no "Status" axis
-        // here). Hide it wholesale — re-enable later if a use case
-        // appears.
-        var fb = document.querySelector('.filter-bar');
-        if (fb) fb.hidden = true;
+        applyFilterBarVisibility(data.filters || []);
         render();
         openSse();
       })
@@ -376,12 +392,42 @@
       .finally(function () { els.board.setAttribute('aria-busy', 'false'); });
   }
 
+  // Show only the filter-bar fields the board YAML opts into via
+  // `filters: [...]`. Empty list (default) hides the whole row.
+  function applyFilterBarVisibility(visibleKeys) {
+    var fb = document.querySelector('.filter-bar');
+    if (!fb) return;
+    if (!visibleKeys || visibleKeys.length === 0) {
+      fb.hidden = true;
+      return;
+    }
+    fb.hidden = false;
+    // Each <label> wraps one input. The map mirrors FILTER_KEYS from
+    // boards.rs and the JS `state.filters` keys.
+    var inputs = {
+      search: els.search,
+      type: els.type,
+      assignee: els.assignee,
+      epic: els.epic,
+      label: els.label,
+    };
+    Object.keys(inputs).forEach(function (key) {
+      var input = inputs[key];
+      if (!input) return;
+      var label = input.closest('label');
+      if (!label) return;
+      label.hidden = visibleKeys.indexOf(key) < 0;
+    });
+  }
+
   function renderBoardBanner() {
     var el = document.getElementById('board-banner');
     if (!el || !state.board) return;
     if (state.board.read_only) {
       el.hidden = false;
-      el.textContent = 'Read-only: ' + (state.board.read_only_reason || 'board misconfigured');
+      var reasons = state.board.read_only_reasons || [];
+      el.textContent = 'Read-only: ' +
+        (reasons.length ? reasons.join('; ') : 'board misconfigured');
     } else {
       el.hidden = true;
       el.textContent = '';
@@ -419,7 +465,9 @@
       } else {
         group.items.forEach(function (i) { col.appendChild(renderCard(i)); });
       }
-      if (!state.board.read_only) wireCustomColumnDrop(col, group.col.value);
+      if (!state.board || !state.board.read_only) {
+        wireCustomColumnDrop(col, group.col.value);
+      }
       els.board.appendChild(col);
     });
   }
@@ -452,114 +500,7 @@
   }
 
   function handleCustomDrop(drag, newValue) {
-    if (drag.cancelled) {
-      state.dragging = null;
-      showToast('Drop cancelled — issue changed in another window', 'error');
-      return;
-    }
-    var idx = findIssueIndex(drag.slug);
-    if (idx < 0) { state.dragging = null; return; }
-    if ((state.pending_writes[drag.slug] || 0) > 0) {
-      state.dragging = null;
-      showToast('Move already in progress for this issue', 'error');
-      return;
-    }
-    var expected = state.versions[drag.slug];
-    if (!expected) {
-      state.dragging = null;
-      showToast('Cannot move — version unknown, refreshing…', 'error');
-      loadBoard();
-      return;
-    }
-    var prevValue = state.group_values[drag.slug] || '';
-    var opId = nextOpId++;
-    drag.patchStarted = true;
-    state.optimistic_tags[drag.slug] = opId;
-    state.group_values[drag.slug] = newValue;
-    renderCustomBoard();
-
-    // Empty-string drop clears the field (`null` in PATCH); non-empty
-    // sets the value. The PATCH shape depends on whether group_by maps
-    // to a dedicated request slot — built-in fields ride on their own
-    // key, custom keys route through `custom_fields`.
-    var patch = { expected_version: expected };
-    var fieldValue = newValue === '' ? null : newValue;
-    if (state.board.builtin_group_by) {
-      patch[state.board.group_by] = fieldValue;
-    } else {
-      patch.custom_fields = {};
-      patch.custom_fields[state.board.group_by] = fieldValue;
-    }
-
-    beginPendingWrite(drag.slug);
-    fetch('/api/issues/' + encodeURIComponent(drag.slug), {
-      method: 'PATCH',
-      headers: csrfJson(),
-      body: JSON.stringify(patch),
-    })
-      .then(function (r) {
-        return r.json().then(
-          function (d) { return { status: r.status, body: d, headers: r.headers }; },
-          function () { return { status: r.status, body: {}, headers: r.headers }; }
-        );
-      })
-      .then(function (res) {
-        var responseVersion = res.body && res.body.version;
-        finishPendingWrite(drag.slug, responseVersion);
-        if (state.dragging === drag) state.dragging = null;
-        if (res.status >= 200 && res.status < 300) {
-          if (responseVersion) {
-            state.local_versions[drag.slug] = responseVersion;
-            state.versions[drag.slug] = responseVersion;
-          }
-          // Trust server: re-resolve the group_value from the issue
-          // payload via the same logic the server applied (mirrored in
-          // JS so we don't need a second round-trip). For built-in
-          // fields the PATCH response carries `issue` with the field
-          // updated; for custom fields the value lands in
-          // `issue.extra` — which the server doesn't include in the
-          // summary, so we accept the optimistic value as authoritative
-          // until the next loadBoard().
-          if (res.body.issue && state.board.builtin_group_by) {
-            state.group_values[drag.slug] = String(
-              res.body.issue[state.board.group_by] || ''
-            );
-            // also refresh the issue summary
-            var i = findIssueIndex(drag.slug);
-            if (i >= 0) state.issues[i] = Object.assign({}, state.issues[i], res.body.issue);
-          }
-          clearOptimisticTag(drag.slug, opId);
-          renderCustomBoard();
-          return;
-        }
-        // Failure: revert to previous value if our optimistic move is
-        // still the latest write for this slug.
-        if (state.optimistic_tags[drag.slug] === opId) {
-          delete state.optimistic_tags[drag.slug];
-          state.group_values[drag.slug] = prevValue;
-          renderCustomBoard();
-        }
-        if (res.status === 409 && res.body && res.body.code === 'version_mismatch') {
-          loadBoard();
-          showToast('This issue changed externally — refreshed', 'error');
-        } else if (res.status === 429) {
-          var retry = (res.headers && res.headers.get && res.headers.get('Retry-After')) || '?';
-          showToast('Rate limited — retry after ' + retry + 's', 'error');
-        } else {
-          var detail = (res.body && res.body.detail) || ('HTTP ' + res.status);
-          showToast('Move failed: ' + detail, 'error');
-        }
-      })
-      .catch(function (err) {
-        finishPendingWrite(drag.slug, null);
-        if (state.dragging === drag) state.dragging = null;
-        if (state.optimistic_tags[drag.slug] === opId) {
-          delete state.optimistic_tags[drag.slug];
-          state.group_values[drag.slug] = prevValue;
-          renderCustomBoard();
-        }
-        showToast('Move failed: ' + err, 'error');
-      });
+    performDragWrite(drag, newValue, customBoardMode());
   }
 
   function render() {
@@ -649,11 +590,23 @@
   // the authoritative status).
   var nextOpId = 1;
 
-  function handleDrop(drag, newStatus) {
+  // Shared drag-write lifecycle. Both the status board (`handleDrop`)
+  // and custom boards (`handleCustomDrop`) parameterise this with a
+  // `mode` object that names the per-axis bits: how to capture the
+  // previous value, how to apply the optimistic mutation locally, how
+  // to build the PATCH body, how to apply the server response, how to
+  // heal a 409, and which `render`/`refresh` to invoke.
+  //
+  // Keeping the lifecycle in one place is what closed the original
+  // class of custom-board bugs (response not applied for !builtin,
+  // `applyIssueToBoard` skipped, post-success `group_values` drift).
+  // The price is that two simple drop paths now share one descriptor;
+  // the savings is that any future race fix lands once for both.
+  function performDragWrite(drag, target, mode) {
     if (drag.cancelled) {
       // External SSE write landed mid-drag (or the slug was removed).
-      // Bail without a PATCH; the load()/render() the SSE handler
-      // already triggered carries the authoritative state.
+      // Bail without a PATCH; the refresh the SSE handler triggered
+      // already carries authoritative state.
       state.dragging = null;
       showToast('Drop cancelled — issue changed in another window', 'error');
       return;
@@ -663,11 +616,11 @@
       state.dragging = null;
       return;
     }
-    // Block overlapping writes on the same slug. Without this, a
-    // failed first PATCH followed by a failed second PATCH leaves the
-    // optimistic state of the second write applied permanently — the
-    // first revert refuses (opId mismatch) and the second reverts to
-    // the already-overwritten "previous" status, not the original.
+    // Block overlapping writes on the same slug. A failed first PATCH
+    // followed by a failed second PATCH would otherwise leave the
+    // optimistic state of the second permanently applied: the first
+    // revert refuses (opId mismatch), and the second reverts against
+    // the already-overwritten "previous" value.
     if ((state.pending_writes[drag.slug] || 0) > 0) {
       state.dragging = null;
       showToast('Move already in progress for this issue', 'error');
@@ -676,75 +629,54 @@
     var expected = state.versions[drag.slug];
     if (!expected) {
       // No version cached → optimistic concurrency would degenerate to
-      // an unconditional write. Refuse and refresh; the user can retry
-      // once the cache repopulates.
+      // an unconditional write. Refuse and refresh.
       state.dragging = null;
       showToast('Cannot move — version unknown, refreshing…', 'error');
-      load();
+      mode.refresh();
       return;
     }
-    var prevStatus = state.issues[idx].status;
+    var prev = mode.capturePrev(drag.slug);
     var opId = nextOpId++;
-    // Mark ownership transfer: dragend must not null state.dragging
-    // for this drag once we've started a PATCH; the SSE handler still
-    // needs the cancellation observation window.
     drag.patchStarted = true;
-    // Optimistic move so the user sees the column change immediately.
-    // The opId is tracked in a side map so revertDrop can refuse to
-    // undo a mutation that has been superseded by a concurrent SSE
-    // load() (which replaces the issue object wholesale).
     state.optimistic_tags[drag.slug] = opId;
-    state.issues[idx] = Object.assign({}, state.issues[idx], {
-      status: newStatus,
-    });
-    render();
+    mode.applyOptimistic(drag.slug, target);
+    mode.render();
 
     beginPendingWrite(drag.slug);
     fetch('/api/issues/' + encodeURIComponent(drag.slug), {
       method: 'PATCH',
       headers: csrfJson(),
-      body: JSON.stringify({ expected_version: expected, status: newStatus }),
+      body: JSON.stringify(mode.buildPatch(expected, target)),
     })
       .then(function (r) {
-        return r.json().then(function (d) { return { status: r.status, body: d, headers: r.headers }; },
-          function () { return { status: r.status, body: {}, headers: r.headers }; });
+        return r.json().then(
+          function (d) { return { status: r.status, body: d, headers: r.headers }; },
+          function () { return { status: r.status, body: {}, headers: r.headers }; }
+        );
       })
       .then(function (res) {
         var responseVersion = res.body && res.body.version;
         finishPendingWrite(drag.slug, responseVersion);
-        // Clear dragging only after the write resolves so an SSE event
-        // arriving during the round-trip can still flip
-        // `state.dragging.cancelled` and prevent the user-facing
-        // "drop cancelled" race from misfiring on the next drag.
         if (state.dragging === drag) state.dragging = null;
 
         if (res.status >= 200 && res.status < 300) {
-          // Trust the server response over the optimistic guess: a
-          // status PATCH can ripple `closed:` / `updated:` / `folder`,
-          // and the response payload already reflects all of them.
           if (responseVersion) {
             state.local_versions[drag.slug] = responseVersion;
           }
-          if (res.body.issue) {
-            applyIssueToBoard(res.body.issue, responseVersion);
-          }
-          // Drop the optimistic tag if applyIssueToBoard didn't already
-          // (e.g. response missing `issue` for some reason).
+          mode.applySuccess(drag.slug, target, res, responseVersion);
           clearOptimisticTag(drag.slug, opId);
           return;
         }
-        // Failure path: revert the card to its previous column, but
-        // only if the optimistic mutation is still the latest write
-        // for this slug. SSE/load() may have superseded it.
-        revertDrop(drag.slug, prevStatus, opId);
+        // Failure: revert only if our optimistic tag is still the
+        // latest write for this slug. A concurrent reload may have
+        // produced authoritative state we must not clobber.
+        if (state.optimistic_tags[drag.slug] === opId) {
+          delete state.optimistic_tags[drag.slug];
+          mode.revert(drag.slug, prev);
+          mode.render();
+        }
         if (res.status === 409 && res.body && res.body.code === 'version_mismatch') {
-          // 409 envelope carries the current issue state; refresh the
-          // card in place. If the envelope is missing the embedded
-          // issue (proxy truncation, server bug), fall back to
-          // load() — claiming "refreshed" while not refreshing would
-          // mislead the user and pin stale state.
-          if (res.body.issue) applyIssueToBoard(res.body.issue, responseVersion);
-          else load();
+          mode.healOnConflict(res, responseVersion);
           showToast('This issue changed externally — refreshed', 'error');
         } else if (res.status === 429) {
           var retry = (res.headers && res.headers.get && res.headers.get('Retry-After')) || '?';
@@ -757,22 +689,111 @@
       .catch(function (err) {
         finishPendingWrite(drag.slug, null);
         if (state.dragging === drag) state.dragging = null;
-        revertDrop(drag.slug, prevStatus, opId);
+        if (state.optimistic_tags[drag.slug] === opId) {
+          delete state.optimistic_tags[drag.slug];
+          mode.revert(drag.slug, prev);
+          mode.render();
+        }
         showToast('Move failed: ' + err, 'error');
       });
   }
 
-  function revertDrop(slug, prevStatus, opId) {
-    // If a concurrent SSE update already produced authoritative state
-    // (different opId, or the tag was cleared by a 409/200 response),
-    // the current display is newer than our optimistic guess —
-    // clobbering it with stale prevStatus would be wrong.
-    if (state.optimistic_tags[slug] !== opId) return;
-    delete state.optimistic_tags[slug];
-    var idx = findIssueIndex(slug);
-    if (idx < 0) return;
-    state.issues[idx] = Object.assign({}, state.issues[idx], { status: prevStatus });
-    render();
+  // Status-board mode descriptor.
+  var STATUS_MODE = {
+    capturePrev: function (slug) {
+      var idx = findIssueIndex(slug);
+      return idx >= 0 ? state.issues[idx].status : null;
+    },
+    applyOptimistic: function (slug, target) {
+      var idx = findIssueIndex(slug);
+      if (idx >= 0) {
+        state.issues[idx] = Object.assign({}, state.issues[idx], { status: target });
+      }
+    },
+    revert: function (slug, prev) {
+      if (prev == null) return;
+      var idx = findIssueIndex(slug);
+      if (idx >= 0) {
+        state.issues[idx] = Object.assign({}, state.issues[idx], { status: prev });
+      }
+    },
+    buildPatch: function (expected, target) {
+      return { expected_version: expected, status: target };
+    },
+    applySuccess: function (slug, target, res, responseVersion) {
+      if (res.body.issue) applyIssueToBoard(res.body.issue, responseVersion);
+    },
+    healOnConflict: function (res, responseVersion) {
+      // 409 envelope carries the current issue state; refresh the
+      // card in place. If the envelope is missing `issue` (proxy
+      // truncation, server bug), fall back to a full reload.
+      if (res.body.issue) applyIssueToBoard(res.body.issue, responseVersion);
+      else load();
+    },
+    refresh: function () { load(); },
+    render: function () { render(); },
+  };
+
+  // Custom-board mode descriptor (group_by != status). Built fresh per
+  // call so it captures the current `state.board` reference; the JSON
+  // can change underfoot via SSE-triggered reloads.
+  function customBoardMode() {
+    return {
+      capturePrev: function (slug) { return state.group_values[slug] || ''; },
+      applyOptimistic: function (slug, target) { state.group_values[slug] = target; },
+      revert: function (slug, prev) { state.group_values[slug] = prev || ''; },
+      buildPatch: function (expected, target) {
+        // Empty-bucket drop clears the field. The loader already
+        // rejected this for non-nullable built-ins, so by the time
+        // we get here `null` is a legal payload.
+        var fieldValue = target === '' ? null : target;
+        var patch = { expected_version: expected };
+        if (state.board.builtin_group_by) {
+          patch[state.board.group_by] = fieldValue;
+        } else {
+          var custom = {};
+          custom[state.board.group_by] = fieldValue;
+          patch.custom_fields = custom;
+        }
+        return patch;
+      },
+      applySuccess: function (slug, target, res, responseVersion) {
+        if (state.board.builtin_group_by && res.body.issue) {
+          // Built-in field: the PATCH response carries the canonical
+          // issue. applyIssueToBoard projects the IssueSummary
+          // explicitly; group_values still needs the new value
+          // (server-canonicalized) since it's a side map.
+          applyIssueToBoard(res.body.issue, responseVersion);
+          state.group_values[slug] = String(res.body.issue[state.board.group_by] || '');
+        } else {
+          // Custom field: the response does not include `extra`, so
+          // there's no server-canonical value to mirror. The 2xx
+          // means the server accepted `target`; trust it.
+          if (responseVersion) state.versions[slug] = responseVersion;
+          state.group_values[slug] = target;
+        }
+      },
+      healOnConflict: function (res, responseVersion) {
+        if (state.board.builtin_group_by && res.body.issue) {
+          applyIssueToBoard(res.body.issue, responseVersion);
+          state.group_values[res.body.issue.slug] = String(
+            res.body.issue[state.board.group_by] || ''
+          );
+          renderCustomBoard();
+        } else {
+          // Custom group_by: full reload — without `extra` in the
+          // 409 envelope, in-place healing can't compute the new
+          // group_value.
+          loadBoard();
+        }
+      },
+      refresh: function () { loadBoard(); },
+      render: function () { renderCustomBoard(); },
+    };
+  }
+
+  function handleDrop(drag, newStatus) {
+    performDragWrite(drag, newStatus, STATUS_MODE);
   }
 
   function clearOptimisticTag(slug, opId) {

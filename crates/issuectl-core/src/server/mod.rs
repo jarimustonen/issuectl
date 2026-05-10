@@ -2111,10 +2111,9 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
         assert_eq!(json["read_only"], true);
-        assert!(json["read_only_reason"]
-            .as_str()
-            .unwrap()
-            .contains("not declared"));
+        let reasons = json["read_only_reasons"].as_array().unwrap();
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].as_str().unwrap().contains("not declared"));
     }
 
     #[tokio::test]
@@ -2133,13 +2132,207 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp.into_body()).await;
         assert!(body.contains("data-board-name=\"triage\""));
-        // The HTML route is decoupled from the YAML loader (the loader
-        // runs at /api/boards/...), so a bad name only 404s when it
-        // fails the slug-shape check, not when the file is missing.
+        // Bad slug shape → 404 before any disk access.
         let resp = make_router(tmp.path())
             .oneshot(Request::get("/board/INVALID").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        // Valid-shaped name with no matching YAML → also 404. Avoids
+        // the "broken shell with confusing JS error" UX where the
+        // route 200s and the API then 404s.
+        let resp = make_router(tmp.path())
+            .oneshot(
+                Request::get("/board/no-such-board")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        // Hard-validation error (bad YAML) → 404. Operator must fix
+        // the file; the API call would 422.
+        write_board(tmp.path(), "broken-yaml", "this is: not: valid yaml: : :");
+        let resp = make_router(tmp.path())
+            .oneshot(
+                Request::get("/board/broken-yaml")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Same drag-mutation round-trip as `board_drag_mutation_round_trip_via_patch`,
+    /// but for a custom scalar field declared in `.schema.yaml`. The
+    /// PATCH body uses `custom_fields` instead of a dedicated slot.
+    /// Verifies the on-disk YAML is updated and the next board fetch
+    /// resolves the new `group_value` server-side.
+    #[tokio::test]
+    async fn board_drag_mutation_round_trip_via_custom_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        // Custom scalar field `team` declared in the schema so the
+        // mutate layer accepts custom_fields writes for it.
+        fs::write(
+            tmp.path().join("issues").join(".schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: false\n",
+        )
+        .unwrap();
+        seed_open_issue(tmp.path(), "drag-customfield-1");
+        write_board(
+            tmp.path(),
+            "byteam",
+            "name: byteam\ngroup_by: team\ncolumns:\n  - {value: '', label: Unscoped}\n  - {value: alpha, label: Alpha}\n",
+        );
+        let r = make_router(tmp.path());
+
+        // 1. Initial board fetch: the issue starts in the unassigned bucket.
+        let resp = r
+            .clone()
+            .oneshot(
+                Request::get("/api/boards/byteam")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert_eq!(json["builtin_group_by"], false, "team is a custom field");
+        let issue = json["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["slug"] == "drag-customfield-1")
+            .cloned()
+            .unwrap();
+        assert_eq!(issue["group_value"], "");
+        let version = issue["version"].as_str().unwrap().to_string();
+
+        // 2. PATCH via custom_fields shape — what the JS sends for a
+        //    custom-board drag.
+        let payload = serde_json::json!({
+            "expected_version": version,
+            "custom_fields": { "team": "alpha" },
+        });
+        let resp = r
+            .clone()
+            .oneshot(
+                Request::patch("/api/issues/drag-customfield-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 3. Re-fetch the board — server-side group_value resolution
+        //    reads `team` from `extra` and surfaces it.
+        let resp = r
+            .clone()
+            .oneshot(
+                Request::get("/api/boards/byteam")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        let issue = json["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["slug"] == "drag-customfield-1")
+            .cloned()
+            .unwrap();
+        assert_eq!(issue["group_value"], "alpha");
+
+        // 4. Empty-bucket clear: drag back to "Unscoped" via
+        //    custom_fields: { team: null }.
+        let version = issue["version"].as_str().unwrap().to_string();
+        let payload = serde_json::json!({
+            "expected_version": version,
+            "custom_fields": { "team": null },
+        });
+        let resp = r
+            .clone()
+            .oneshot(
+                Request::patch("/api/issues/drag-customfield-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = r
+            .oneshot(
+                Request::get("/api/boards/byteam")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        let issue = json["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["slug"] == "drag-customfield-1")
+            .cloned()
+            .unwrap();
+        assert_eq!(issue["group_value"], "", "null clears the custom field");
+    }
+
+    /// Hard validation errors at `/api/boards/<name>` return 422 (not
+    /// 404) so clients can distinguish "URL typo" from "broken YAML".
+    #[tokio::test]
+    async fn api_board_hard_validation_returns_422() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        // Required built-in (priority) with empty bucket: hard reject.
+        write_board(
+            tmp.path(),
+            "broken",
+            "name: broken\ngroup_by: priority\ncolumns:\n  - {value: '', label: U}\n  - {value: high, label: High}\n",
+        );
+        let resp = make_router(tmp.path())
+            .oneshot(
+                Request::get("/api/boards/broken")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Filter-bar visibility config round-trips into `BoardResponse`.
+    #[tokio::test]
+    async fn api_board_surfaces_filters_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        write_board(
+            tmp.path(),
+            "triage",
+            "name: triage\ngroup_by: epic\ncolumns: [{value: '', label: U}]\nfilters: [search, type]\n",
+        );
+        let resp = make_router(tmp.path())
+            .oneshot(
+                Request::get("/api/boards/triage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert_eq!(json["filters"], serde_json::json!(["search", "type"]));
     }
 }
