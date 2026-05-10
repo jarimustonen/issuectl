@@ -1626,10 +1626,13 @@ fn apply(
 }
 
 
-/// Apply the Notes → Comments rename to every slug `scan()` flagged
-/// in `notes_to_rename`. Best-effort, sequential (per round-2
+/// Apply the Notes → Comments rename to every slug in
+/// `actions.notes_to_rename`. Best-effort, sequential (per round-2
 /// decision: `O17` is intentionally not preflight-bail). Conflicts
-/// are populated by `scan()`; this function does not re-classify.
+/// are populated by the upstream scan; this function does not
+/// re-classify. Callable multiple times in one `apply` pass —
+/// `mem::take` drains the input on each call and outcomes append to
+/// `outcome.notes_renamed` / `outcome.notes_conflicts_at_apply`.
 /// Regenerate the schema-derived block in `.issuectl/AGENTS.md` when
 /// scan flagged drift. No-op if the file is absent (init is opt-in),
 /// the block is already in sync, the file is malformed (refuse —
@@ -3760,6 +3763,57 @@ mod tests {
             outcome.notes_renamed,
             vec!["legacy-notes-slug".to_string()],
             "outcome must record the post-migration rename"
+        );
+    }
+
+    #[test]
+    fn apply_renames_notes_for_numbered_legacy_folder_in_one_pass() {
+        // Companion to the slug-named regression above: verify the
+        // post-migration rename also fires for a numbered-legacy
+        // dir that lived under `issues/open/` and goes through
+        // BOTH flat-layout migration AND NN-rename in the same
+        // `--fix` pass. The body must end up at the canonical slug
+        // path with `## Comments`. We intentionally do not assert
+        // on `outcome.notes_renamed` slug identity here — that's a
+        // pre-existing reporting skew tracked separately.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/open/3-foo-bar");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2026-01-01\n---\n# T\n\n## Notes\n\nhello\n",
+        )
+        .unwrap();
+
+        let mut r = scan(tmp.path()).unwrap();
+        let actions = DoctorActions::from_findings(&mut r);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.legacy_dirs_migrated.len(),
+            1,
+            "NN-rename must run on the lifted numbered-legacy dir"
+        );
+        let new_slug = &outcome.legacy_dirs_migrated[0].new_slug;
+        let final_item = tmp.path().join("issues").join(new_slug).join("item.md");
+        assert!(
+            final_item.is_file(),
+            "expected file at canonical slug path, got missing: {}",
+            final_item.display()
+        );
+        let after = fs::read_to_string(&final_item).unwrap();
+        assert!(
+            after.contains("## Comments"),
+            "## Notes must be renamed at the canonical slug location, got: {after}"
+        );
+        assert!(
+            !after.contains("## Notes\n"),
+            "## Notes heading must be gone, got: {after}"
         );
     }
 
