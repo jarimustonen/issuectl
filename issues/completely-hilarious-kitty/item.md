@@ -2,9 +2,13 @@
 created: 2026-05-09
 updated: 2026-05-10
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 epic: exorbitantly-ill-apples
+closed: 2026-05-10
+commits:
+- hash: f371b30
+  summary: 'fixed in parallel on main — slug: short-circuits before number:; option-2 work on worktree abandoned'
 ---
 
 # Doctor: legacy_number_from_mapping ignores user-supplied slug when number is also present (data loss)
