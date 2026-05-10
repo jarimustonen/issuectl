@@ -157,12 +157,27 @@ to keep the epic in sync with the worktree:
   critical-blockers re-check).
 - [x] @quite-rigid-horses — Derive lifecycle status classification
   from schema/transitions. Landed `3280f7b` + review fixes `313aac6`.
-- [ ] @completely-hilarious-kitty — Doctor: `legacy_number_from_mapping`
-  ignores user-supplied slug when number is also present (data loss).
-  Spin-off from @greatly-flat-sleet /llm-review round 2.
-- [ ] @slightly-hellish-airport — Doctor: post-flat-layout migration
-  must re-check `critical_blockers` before NN-rename. Spin-off from
-  @greatly-flat-sleet /llm-review round 2.
+- [x] @completely-hilarious-kitty — Doctor: fix `legacy_number_from_mapping`
+  data-loss when `number` and `slug` coexist. Resolved by `f371b30`
+  (superseded — closed via `4d4157e`).
+- [x] @slightly-hellish-airport — Doctor: post-flat-layout migration
+  re-checks `critical_blockers` before NN-rename. Landed `1d762c8` +
+  review fixes `f371b30`. Spin-offs: @amazingly-ready-pancake
+  (rename_notes ordering), @deeply-madly-thought (`blocked_by`
+  ref-rewrite gap), @nearly-aware-chain (Err-discards-partial-outcome),
+  @rather-abhorrent-edge (split blockers preflight + post-apply).
+
+### Doctor follow-ups (open, last v0.5.0 batch)
+- [ ] @amazingly-ready-pancake — Run `rename_notes_to_comments` AFTER
+  flat-layout migration so freshly-lifted dirs get the one-shot
+  Notes rename.
+- [ ] @deeply-madly-thought — `rewrite_item_frontmatter` must rewrite
+  `blocked_by: ["#NN"]` legacy refs alongside `epic` and `related`.
+- [ ] @nearly-aware-chain — `execute_migrate_layout_plan` Err path
+  must preserve partial `flat_layout_migrated` in the outcome.
+- [ ] @rather-abhorrent-edge — Split `ApplyOutcome.blockers` into
+  `preflight_blockers` + `post_apply_blockers`; update JSON envelope
+  + skill templates to match.
 
 ## Phases
 
