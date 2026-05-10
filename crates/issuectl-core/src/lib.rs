@@ -21,6 +21,8 @@
 #[doc(hidden)]
 pub mod agents;
 #[doc(hidden)]
+pub mod boards;
+#[doc(hidden)]
 pub mod body_sections;
 #[doc(hidden)]
 pub mod canonical;

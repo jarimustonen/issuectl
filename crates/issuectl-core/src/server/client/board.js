@@ -17,6 +17,15 @@
 // by version equality so no flash on save.
 
 (function () {
+  // Custom-board mode is selected by the server-rendered shell setting
+  // `<body data-board-name="...">` for `/board/<name>`. When non-null
+  // the board config (group_by, columns, read-only flag) is fetched
+  // from `/api/boards/<name>` and drives column rendering + drag PATCH
+  // shape. The default (status) board flow is the `else` branch
+  // throughout — kept in one file so helpers (toasts, SSE, CSRF, drag
+  // chrome, detail dialog) are shared.
+  var BOARD_NAME = document.body.getAttribute('data-board-name') || null;
+
   // Status taxonomy mirrors src/main.rs ACTIVE_STATUSES + CLOSING_STATUSES.
   // Closing statuses collapse into one "Closed" column for at-a-glance use.
   // The "Other" trailing column catches any status the server emits that we
@@ -88,6 +97,14 @@
     // change for the dragged slug mid-drag — the drop then becomes a
     // no-op rather than racing against an already-superseded version.
     dragging: null,
+    // Custom-board metadata (BoardResponse from /api/boards/<name>).
+    // Null on the default status board. When set, the render + drop
+    // paths branch off the status code path.
+    board: null,
+    // slug -> resolved group_value for the active custom board. Mirrors
+    // `versions[]` in role: locally tracked alongside the issue list so
+    // optimistic moves can update without re-fetching.
+    group_values: {},
   };
 
   var els = {
@@ -311,7 +328,242 @@
     });
   }
 
+  // === Custom-board (group_by != status) mode ===
+
+  function loadBoard() {
+    els.board.setAttribute('aria-busy', 'true');
+    fetch('/api/boards/' + encodeURIComponent(BOARD_NAME), {
+      headers: { Accept: 'application/json' },
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        state.board = data;
+        state.issues = (data.issues || []).map(function (i) {
+          // Server response carries group_value flattened next to the
+          // IssueSummary fields. Stash it so optimistic drops can
+          // mutate it without parsing frontmatter.
+          var clone = Object.assign({}, i);
+          state.group_values[clone.slug] = i.group_value || '';
+          delete clone.group_value;
+          return clone;
+        });
+        state.warnings = data.warnings || [];
+        state.snapshot_seq = data.snapshot_seq || 0;
+        if (data.instance_id) state.instance_id = data.instance_id;
+        var nextVersions = {};
+        state.issues.forEach(function (i) {
+          if (i.version) nextVersions[i.slug] = i.version;
+        });
+        state.versions = nextVersions;
+        renderBoardBanner();
+        renderWarnings();
+        // The board defines its own filter; the global filter-bar
+        // would be redundant and confusingly named (no "Status" axis
+        // here). Hide it wholesale — re-enable later if a use case
+        // appears.
+        var fb = document.querySelector('.filter-bar');
+        if (fb) fb.hidden = true;
+        render();
+        openSse();
+      })
+      .catch(function (err) {
+        els.board.innerHTML = '<p class="empty">Failed to load board: ' +
+          escapeHtml(String(err)) + '</p>';
+      })
+      .finally(function () { els.board.setAttribute('aria-busy', 'false'); });
+  }
+
+  function renderBoardBanner() {
+    var el = document.getElementById('board-banner');
+    if (!el || !state.board) return;
+    if (state.board.read_only) {
+      el.hidden = false;
+      el.textContent = 'Read-only: ' + (state.board.read_only_reason || 'board misconfigured');
+    } else {
+      el.hidden = true;
+      el.textContent = '';
+    }
+  }
+
+  function renderCustomBoard() {
+    var board = state.board;
+    var byCol = board.columns.map(function (c) { return { col: c, items: [] }; });
+    var unmatched = 0;
+    state.issues.forEach(function (i) {
+      var v = state.group_values[i.slug] || '';
+      var hit = false;
+      for (var k = 0; k < byCol.length; k++) {
+        if (byCol[k].col.value === v) { byCol[k].items.push(i); hit = true; break; }
+      }
+      if (!hit) unmatched++;
+    });
+    var totalShown = state.issues.length - unmatched;
+    els.count.textContent = totalShown + ' of ' + state.issues.length +
+      ' issue' + (state.issues.length === 1 ? '' : 's');
+    els.board.innerHTML = '';
+    byCol.forEach(function (group) {
+      var col = document.createElement('section');
+      col.className = 'column';
+      // Column id is the literal group_by value; the data attribute
+      // doubles as the PATCH payload value (with empty == clear).
+      col.setAttribute('data-column-id', group.col.value);
+      col.innerHTML =
+        '<div class="column-header"><h2>' + escapeHtml(group.col.label) + '</h2>' +
+        '<span class="column-count">' + group.items.length + '</span></div>';
+      if (group.items.length === 0) {
+        var e = document.createElement('p'); e.className = 'empty'; e.textContent = '—';
+        col.appendChild(e);
+      } else {
+        group.items.forEach(function (i) { col.appendChild(renderCard(i)); });
+      }
+      if (!state.board.read_only) wireCustomColumnDrop(col, group.col.value);
+      els.board.appendChild(col);
+    });
+  }
+
+  function wireCustomColumnDrop(col, columnValue) {
+    col.addEventListener('dragover', function (ev) {
+      if (!state.dragging) return;
+      var sameColumn = state.dragging.sourceColumnValue === columnValue;
+      if (sameColumn) {
+        col.classList.add('drop-invalid');
+        col.classList.remove('drop-target');
+        return;
+      }
+      ev.preventDefault();
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+      col.classList.add('drop-target');
+      col.classList.remove('drop-invalid');
+    });
+    col.addEventListener('dragleave', function (ev) {
+      if (col.contains(ev.relatedTarget)) return;
+      col.classList.remove('drop-target', 'drop-invalid');
+    });
+    col.addEventListener('drop', function (ev) {
+      col.classList.remove('drop-target', 'drop-invalid');
+      if (!state.dragging) return;
+      if (state.dragging.sourceColumnValue === columnValue) return;
+      ev.preventDefault();
+      handleCustomDrop(state.dragging, columnValue);
+    });
+  }
+
+  function handleCustomDrop(drag, newValue) {
+    if (drag.cancelled) {
+      state.dragging = null;
+      showToast('Drop cancelled — issue changed in another window', 'error');
+      return;
+    }
+    var idx = findIssueIndex(drag.slug);
+    if (idx < 0) { state.dragging = null; return; }
+    if ((state.pending_writes[drag.slug] || 0) > 0) {
+      state.dragging = null;
+      showToast('Move already in progress for this issue', 'error');
+      return;
+    }
+    var expected = state.versions[drag.slug];
+    if (!expected) {
+      state.dragging = null;
+      showToast('Cannot move — version unknown, refreshing…', 'error');
+      loadBoard();
+      return;
+    }
+    var prevValue = state.group_values[drag.slug] || '';
+    var opId = nextOpId++;
+    drag.patchStarted = true;
+    state.optimistic_tags[drag.slug] = opId;
+    state.group_values[drag.slug] = newValue;
+    renderCustomBoard();
+
+    // Empty-string drop clears the field (`null` in PATCH); non-empty
+    // sets the value. The PATCH shape depends on whether group_by maps
+    // to a dedicated request slot — built-in fields ride on their own
+    // key, custom keys route through `custom_fields`.
+    var patch = { expected_version: expected };
+    var fieldValue = newValue === '' ? null : newValue;
+    if (state.board.builtin_group_by) {
+      patch[state.board.group_by] = fieldValue;
+    } else {
+      patch.custom_fields = {};
+      patch.custom_fields[state.board.group_by] = fieldValue;
+    }
+
+    beginPendingWrite(drag.slug);
+    fetch('/api/issues/' + encodeURIComponent(drag.slug), {
+      method: 'PATCH',
+      headers: csrfJson(),
+      body: JSON.stringify(patch),
+    })
+      .then(function (r) {
+        return r.json().then(
+          function (d) { return { status: r.status, body: d, headers: r.headers }; },
+          function () { return { status: r.status, body: {}, headers: r.headers }; }
+        );
+      })
+      .then(function (res) {
+        var responseVersion = res.body && res.body.version;
+        finishPendingWrite(drag.slug, responseVersion);
+        if (state.dragging === drag) state.dragging = null;
+        if (res.status >= 200 && res.status < 300) {
+          if (responseVersion) {
+            state.local_versions[drag.slug] = responseVersion;
+            state.versions[drag.slug] = responseVersion;
+          }
+          // Trust server: re-resolve the group_value from the issue
+          // payload via the same logic the server applied (mirrored in
+          // JS so we don't need a second round-trip). For built-in
+          // fields the PATCH response carries `issue` with the field
+          // updated; for custom fields the value lands in
+          // `issue.extra` — which the server doesn't include in the
+          // summary, so we accept the optimistic value as authoritative
+          // until the next loadBoard().
+          if (res.body.issue && state.board.builtin_group_by) {
+            state.group_values[drag.slug] = String(
+              res.body.issue[state.board.group_by] || ''
+            );
+            // also refresh the issue summary
+            var i = findIssueIndex(drag.slug);
+            if (i >= 0) state.issues[i] = Object.assign({}, state.issues[i], res.body.issue);
+          }
+          clearOptimisticTag(drag.slug, opId);
+          renderCustomBoard();
+          return;
+        }
+        // Failure: revert to previous value if our optimistic move is
+        // still the latest write for this slug.
+        if (state.optimistic_tags[drag.slug] === opId) {
+          delete state.optimistic_tags[drag.slug];
+          state.group_values[drag.slug] = prevValue;
+          renderCustomBoard();
+        }
+        if (res.status === 409 && res.body && res.body.code === 'version_mismatch') {
+          loadBoard();
+          showToast('This issue changed externally — refreshed', 'error');
+        } else if (res.status === 429) {
+          var retry = (res.headers && res.headers.get && res.headers.get('Retry-After')) || '?';
+          showToast('Rate limited — retry after ' + retry + 's', 'error');
+        } else {
+          var detail = (res.body && res.body.detail) || ('HTTP ' + res.status);
+          showToast('Move failed: ' + detail, 'error');
+        }
+      })
+      .catch(function (err) {
+        finishPendingWrite(drag.slug, null);
+        if (state.dragging === drag) state.dragging = null;
+        if (state.optimistic_tags[drag.slug] === opId) {
+          delete state.optimistic_tags[drag.slug];
+          state.group_values[drag.slug] = prevValue;
+          renderCustomBoard();
+        }
+        showToast('Move failed: ' + err, 'error');
+      });
+  }
+
   function render() {
+    if (state.board) { renderCustomBoard(); return; }
     var visible = applyFilters(state.issues);
     var byCol = COLUMNS.map(function (c) { return { col: c, items: [] }; });
     visible.forEach(function (i) {
@@ -683,6 +935,11 @@
       startedDrag = {
         slug: issue.slug,
         sourceColumnId: columnIdFor(currentStatus),
+        // Custom-board source-column key; null on the status board.
+        // Same role as `sourceColumnId` but uses the group_value
+        // directly so the drop handler can compare without
+        // round-tripping through `columnIdFor`.
+        sourceColumnValue: state.board ? (state.group_values[issue.slug] || '') : null,
         cancelled: false,
       };
       state.dragging = startedDrag;
@@ -1483,7 +1740,7 @@
           state.dragging.cancelled = true;
         }
         // Other tabs' edits still propagate via a refetch.
-        load();
+        if (state.board) loadBoard(); else load();
         // Clear stale invalid marker if the issue is now valid.
         if (state.invalid[evt.slug]) {
           delete state.invalid[evt.slug];
@@ -1519,7 +1776,7 @@
           state.degraded_reason = null;
           renderDegradedBanner();
         }
-        load();
+        if (state.board) loadBoard(); else load();
         return;
       }
       case 'Degraded': {
@@ -1598,12 +1855,16 @@
       state.filters[k] = e.target.value; syncFiltersToUrl(); render();
     });
   });
-  els.refresh.addEventListener('click', load);
+  els.refresh.addEventListener('click', function () {
+    if (BOARD_NAME) loadBoard(); else load();
+  });
   els.detailClose.addEventListener('click', closeDetail);
   els.detail.addEventListener('click', function (e) {
     if (e.target === els.detail) closeDetail();
   });
 
   pruneOldDrafts();
-  fetchSession().then(load);
+  fetchSession().then(function () {
+    if (BOARD_NAME) loadBoard(); else load();
+  });
 })();

@@ -18,6 +18,7 @@ use axum::Router;
 use tokio::net::TcpListener;
 
 mod api;
+mod boards;
 pub(crate) mod events;
 pub(crate) mod ratelimit;
 mod render;
@@ -129,6 +130,9 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(render::board_html))
+        .route("/board/{name}", get(boards::board_view_html))
+        .route("/api/boards", get(boards::list_boards_api))
+        .route("/api/boards/{name}", get(boards::get_board_api))
         .route("/issue/{slug}", get(render::issue_html))
         .route("/assets/board.css", get(render::board_css))
         .route("/assets/board.js", get(render::board_js))
@@ -1892,5 +1896,250 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
         assert!(body["version"].as_str().unwrap().starts_with("sha256:"));
+    }
+
+    fn write_board(root: &Path, name: &str, body: &str) {
+        let dir = root.join(".issuectl").join("boards");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("{name}.yaml")), body).unwrap();
+    }
+
+    /// Happy path: epic-grouped board renders with columns ordered as
+    /// declared and group_value resolved per issue.
+    #[tokio::test]
+    async fn api_board_returns_columns_and_grouped_issues() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        write_issue(
+            tmp.path(),
+            "open",
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: high\nepic: alpha\n",
+            "# t\n",
+        );
+        write_issue(
+            tmp.path(),
+            "open",
+            "calm-bright-newt",
+            "type: feature\nstatus: open\npriority: normal\n",
+            "# u\n",
+        );
+        write_board(
+            tmp.path(),
+            "triage",
+            "name: triage\ngroup_by: epic\ncolumns:\n  - {value: '', label: Unscoped}\n  - {value: alpha, label: Alpha}\n",
+        );
+        let resp = make_router(tmp.path())
+            .oneshot(
+                Request::get("/api/boards/triage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert_eq!(json["group_by"], "epic");
+        assert_eq!(json["builtin_group_by"], true);
+        assert_eq!(json["read_only"], false);
+        let cols = json["columns"].as_array().unwrap();
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0]["value"], "");
+        assert_eq!(cols[1]["value"], "alpha");
+        let issues = json["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), 2);
+        let fox = issues
+            .iter()
+            .find(|i| i["slug"] == "amber-loud-fox")
+            .unwrap();
+        assert_eq!(fox["group_value"], "alpha");
+        let newt = issues
+            .iter()
+            .find(|i| i["slug"] == "calm-bright-newt")
+            .unwrap();
+        assert_eq!(newt["group_value"], "");
+    }
+
+    #[tokio::test]
+    async fn api_board_filter_excludes_non_matching_issues() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        write_issue(
+            tmp.path(),
+            "open",
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: high\nepic: alpha\n",
+            "# t\n",
+        );
+        write_issue(
+            tmp.path(),
+            "open",
+            "calm-bright-newt",
+            "type: feature\nstatus: open\npriority: normal\n",
+            "# u\n",
+        );
+        write_board(
+            tmp.path(),
+            "bugs",
+            "name: bugs\ngroup_by: epic\ncolumns: [{value: '', label: U}, {value: alpha, label: A}]\nfilter: \"type:bug\"\n",
+        );
+        let resp = make_router(tmp.path())
+            .oneshot(
+                Request::get("/api/boards/bugs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        let issues = json["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0]["slug"], "amber-loud-fox");
+    }
+
+    /// Drag-mutation round-trip: PATCH the issue's `epic` field via
+    /// the existing `/api/issues/<slug>` PATCH path, then re-fetch the
+    /// board and confirm the card moved columns.
+    #[tokio::test]
+    async fn board_drag_mutation_round_trip_via_patch() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        seed_open_issue(tmp.path(), "drag-roundtrip-1");
+        write_board(
+            tmp.path(),
+            "release",
+            "name: release\ngroup_by: epic\ncolumns:\n  - {value: '', label: Unscoped}\n  - {value: v-six, label: v0.6}\n",
+        );
+        let r = make_router(tmp.path());
+
+        // 1. Initial fetch: card sits in unassigned bucket.
+        let resp = r
+            .clone()
+            .oneshot(
+                Request::get("/api/boards/release")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        let issue = json["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["slug"] == "drag-roundtrip-1")
+            .cloned()
+            .unwrap();
+        assert_eq!(issue["group_value"], "");
+        let version = issue["version"].as_str().unwrap().to_string();
+
+        // 2. Simulate the drag PATCH: set epic = v-six.
+        let payload = serde_json::json!({
+            "expected_version": version,
+            "epic": "v-six",
+        });
+        let resp = r
+            .clone()
+            .oneshot(
+                Request::patch("/api/issues/drag-roundtrip-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 3. Re-fetch the board: card is now in the v-six column.
+        let resp = r
+            .oneshot(
+                Request::get("/api/boards/release")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        let issue = json["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["slug"] == "drag-roundtrip-1")
+            .cloned()
+            .unwrap();
+        assert_eq!(issue["group_value"], "v-six");
+    }
+
+    #[tokio::test]
+    async fn api_board_unknown_name_404s() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        let resp = make_router(tmp.path())
+            .oneshot(
+                Request::get("/api/boards/nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_board_unknown_group_by_renders_read_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        write_board(
+            tmp.path(),
+            "broken",
+            "name: broken\ngroup_by: not_a_field\ncolumns: [{value: '', label: U}]\n",
+        );
+        let resp = make_router(tmp.path())
+            .oneshot(
+                Request::get("/api/boards/broken")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value =
+            serde_json::from_str(&body_string(resp.into_body()).await).unwrap();
+        assert_eq!(json["read_only"], true);
+        assert!(json["read_only_reason"]
+            .as_str()
+            .unwrap()
+            .contains("not declared"));
+    }
+
+    #[tokio::test]
+    async fn board_html_route_includes_board_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        write_board(
+            tmp.path(),
+            "triage",
+            "name: triage\ngroup_by: epic\ncolumns: [{value: '', label: U}]\n",
+        );
+        let resp = make_router(tmp.path())
+            .oneshot(Request::get("/board/triage").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp.into_body()).await;
+        assert!(body.contains("data-board-name=\"triage\""));
+        // The HTML route is decoupled from the YAML loader (the loader
+        // runs at /api/boards/...), so a bad name only 404s when it
+        // fails the slug-shape check, not when the file is missing.
+        let resp = make_router(tmp.path())
+            .oneshot(Request::get("/board/INVALID").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

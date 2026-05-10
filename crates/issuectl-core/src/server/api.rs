@@ -846,7 +846,7 @@ fn mutate_error_to_response(err: MutateError) -> Response {
     }
 }
 
-fn error_response(status: StatusCode, code: &str, detail: &str) -> Response {
+pub(super) fn error_response(status: StatusCode, code: &str, detail: &str) -> Response {
     let body = serde_json::json!({
         "type": format!("https://issuectl/errors/{code}"),
         "title": code.replace('_', " "),

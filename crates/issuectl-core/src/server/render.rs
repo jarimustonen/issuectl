@@ -66,22 +66,55 @@ pub async fn issue_html(
     Ok(Html(render_issue_page(&issue)))
 }
 
+/// `<body>` shell for `/board/<name>`. Same DOM scaffold as the
+/// default board so the JS can reuse all helpers (toasts, SSE, drag
+/// chrome). The board name lives in `data-board-name` and triggers
+/// the custom-board fetch path; without it the JS falls back to the
+/// status-board flow at `/api/issues`.
+pub(super) fn render_custom_board_shell(name: &str) -> String {
+    render_board_shell_inner(Some(name))
+}
+
 fn render_board_shell() -> String {
-    // No interpolated values; the literal lives here only so the same
-    // function can grow markup later without changing the route signature.
-    r##"<!DOCTYPE html>
+    render_board_shell_inner(None)
+}
+
+fn render_board_shell_inner(board_name: Option<&str>) -> String {
+    // `data-board-name` is the only signal the JS uses to pick custom
+    // vs. status mode. Escaped because the route validates the name
+    // pattern, but defense-in-depth keeps the attribute parser-safe
+    // even if a future caller forgets.
+    let (body_attr, title, h1, banner) = match board_name {
+        Some(n) => {
+            let escaped = html_escape(n);
+            (
+                format!(" data-board-name=\"{escaped}\""),
+                format!("{} — issuectl board", escaped),
+                format!("Board: {}", escaped),
+                "<section id=\"board-banner\" class=\"warnings\" hidden></section>".to_string(),
+            )
+        }
+        None => (
+            String::new(),
+            "issuectl board".to_string(),
+            "Issues".to_string(),
+            String::new(),
+        ),
+    };
+    format!(
+        r##"<!DOCTYPE html>
 <html lang="en" data-theme="auto">
 <head>
 <meta charset="utf-8">
-<title>issuectl board</title>
+<title>{title}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/assets/board.css">
 <script src="/assets/theme-bootstrap.js"></script>
 </head>
-<body>
+<body{body_attr}>
 <header class="page-header">
   <div>
-    <h1>Issues</h1>
+    <h1>{h1}</h1>
     <p class="description" id="issue-count">Loading…</p>
   </div>
   <div class="header-actions">
@@ -91,6 +124,7 @@ fn render_board_shell() -> String {
 </header>
 
 <section id="degraded-banner" class="degraded-banner" hidden></section>
+{banner}
 <section id="warnings" class="warnings" hidden></section>
 
 <section class="filter-bar" aria-label="Filters">
@@ -115,8 +149,8 @@ fn render_board_shell() -> String {
 <script src="/assets/theme-toggle.js" defer></script>
 <script src="/assets/board.js" defer></script>
 </body>
-</html>"##
-        .to_string()
+</html>"##,
+    )
 }
 
 fn render_issue_page(issue: &crate::models::Issue) -> String {
