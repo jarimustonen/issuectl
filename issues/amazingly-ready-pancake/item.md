@@ -2,10 +2,18 @@
 created: 2026-05-10
 updated: 2026-05-10
 type: chore
-status: in-progress
+status: fixed
 priority: normal
 epic: exorbitantly-ill-apples
 related: ['@dreadfully-combative-stomach', '@perfectly-splendid-quiet']
+commits:
+- hash: 481b702
+  summary: fix(doctor) rerun notes→comments rename after flat-layout migration
+- hash: '4036820'
+  summary: test(doctor) add numbered-legacy + Notes regression; clarify rename_notes_to_comments doc
+- hash: ecc72fa
+  summary: chore(issues) file two spin-offs from notes-rename-after-migrate review
+closed: 2026-05-10
 ---
 
 # Doctor: run rename_notes_to_comments AFTER flat-layout migration so freshly-lifted dirs get one-shot Notes rename
