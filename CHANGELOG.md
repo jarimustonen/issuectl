@@ -126,6 +126,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the contract is now explicit.
   (#thoroughly-kaput-pocket)
 
+### Internals
+- Canonical version tokens now carry a scheme marker:
+  `sha256:v1:<64hex>` instead of `sha256:<64hex>`. Old tokens
+  presented to a new binary mismatch as before; the marker exists so
+  the *next* canonical-projection break can bump `v1`→`v2` and
+  reject stale tokens with a recognisable shape rather than as an
+  opaque content-conflict 409. Wire format is otherwise unchanged
+  and the token is still compared as an opaque string on the hot
+  path. (#singularly-melodic-haircut)
+
 ## [0.5.1] - 2026-05-10
 
 Cleanup release for the `issues/AGENTS.md` scaffold and skill version

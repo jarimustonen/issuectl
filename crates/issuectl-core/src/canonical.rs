@@ -5,6 +5,17 @@
 //! `updated:`, plus CRLF-normalised body) so a no-op resave that only
 //! bumps `updated:` does not produce a new version.
 //!
+//! ## Token format
+//!
+//! Tokens are emitted as `sha256:v1:<64hex>`. The `v1` segment is a
+//! scheme version: when the canonical projection changes in a way
+//! that invalidates outstanding tokens, bump it (`v2`, `v3`, ...) so a
+//! stale token presented to a new binary mismatches with a recognisable
+//! shape rather than silently looking like a content-conflict 409.
+//! Tokens are still compared as opaque strings on the hot path; the
+//! prefix exists for forensics and for future explicit rejection of
+//! old-scheme tokens.
+//!
 //! Post-flat-layout (issue `awfully-faint-sound`): status is taken
 //! directly from frontmatter — the on-disk path no longer participates
 //! in identity, so there is no separate "directory authoritative"
@@ -35,7 +46,7 @@ pub fn canonical_hash(issue: &Issue) -> String {
     h.update(serde_json::to_vec(&json).expect("canonical projection cannot fail to serialize"));
     h.update(b"\n---\n");
     h.update(normalize_body(&issue.body).as_bytes());
-    format!("sha256:{}", hex::encode(h.finalize()))
+    format!("sha256:v1:{}", hex::encode(h.finalize()))
 }
 
 /// Project the issue's frontmatter into a canonical JSON object.
@@ -238,7 +249,7 @@ mod tests {
         i.title = "Example title".into();
         assert_eq!(
             canonical_hash(&i),
-            "sha256:342ad2308c37e7e3c443bef5d2243800e723955d5d28d75fb6a69de05143d5c4"
+            "sha256:v1:342ad2308c37e7e3c443bef5d2243800e723955d5d28d75fb6a69de05143d5c4"
         );
     }
 
@@ -425,12 +436,27 @@ mod tests {
     }
 
     #[test]
+    fn version_token_carries_scheme_marker() {
+        // The `v1` segment lets future projection breaks bump to `v2`
+        // and reject stale tokens explicitly, instead of silently
+        // colliding with the new namespace.
+        let i = issue("foo", "open", "open", "body");
+        let v = canonical_hash(&i);
+        let parts: Vec<&str> = v.splitn(3, ':').collect();
+        assert_eq!(parts.len(), 3, "expected algo:version:hex, got {v}");
+        assert_eq!(parts[0], "sha256");
+        assert_eq!(parts[1], "v1");
+        assert_eq!(parts[2].len(), 64);
+        assert!(parts[2].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
     fn hash_is_stable() {
         let i = issue("foo", "open", "open", "body");
         // Hash is deterministic — running it twice must give the same
         // 64-hex string. Format itself is stable across runs.
         assert_eq!(canonical_hash(&i), canonical_hash(&i));
-        assert!(canonical_hash(&i).starts_with("sha256:"));
-        assert_eq!(canonical_hash(&i).len(), 7 + 64);
+        assert!(canonical_hash(&i).starts_with("sha256:v1:"));
+        assert_eq!(canonical_hash(&i).len(), "sha256:v1:".len() + 64);
     }
 }
