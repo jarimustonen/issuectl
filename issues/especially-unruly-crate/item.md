@@ -1,9 +1,9 @@
 ---
 created: 2026-05-09
-updated: 2026-05-09
+updated: 2026-05-10
 type: bug
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
 related: ['@remarkably-chivalrous-discovery']
@@ -13,6 +13,7 @@ commits:
   summary: include title in canonical_frontmatter_value
 - hash: 1320eeb
   summary: add round-2 review-fix coverage for title in hash
+closed: 2026-05-10
 ---
 
 # Add title to canonical_frontmatter_value (concurrency-control gap)

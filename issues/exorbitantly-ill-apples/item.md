@@ -147,16 +147,22 @@ to keep the epic in sync with the worktree:
   `web-edit-sync.md`. Landed `f90d345` + review fixes (`d0141c7`,
   `39d4777`). Spin-off: @especially-unruly-crate (title in
   canonical_hash).
-- [ ] @especially-unruly-crate — Add `title` to
-  `canonical_frontmatter_value` (concurrency-control gap). Spin-off
-  from @remarkably-chivalrous-discovery /llm-review.
-- [ ] @greatly-flat-sleet — Doctor: structural Findings + Actions +
-  ApplyOutcome refactor. Spin-off from @ridiculously-outgoing-brass
-  /llm-review round 2.
-- [ ] @quite-rigid-horses — Derive lifecycle status classification
-  (active vs closing) from schema/transitions instead of hardcoded
-  `CLOSING_STATUSES`. Spin-off from @ridiculously-outgoing-brass
-  /llm-review.
+- [x] @especially-unruly-crate — Add `title` to
+  `canonical_frontmatter_value`. Landed `81712f1` + review fixes
+  `540a30b`.
+- [x] @greatly-flat-sleet — Doctor: structural Findings + Actions +
+  ApplyOutcome pipeline. Landed `a760a9b` + review fixes `e10b21b`.
+  Spin-offs: @completely-hilarious-kitty (legacy_number_from_mapping
+  data-loss bug), @slightly-hellish-airport (post-flat-layout
+  critical-blockers re-check).
+- [x] @quite-rigid-horses — Derive lifecycle status classification
+  from schema/transitions. Landed `3280f7b` + review fixes `313aac6`.
+- [ ] @completely-hilarious-kitty — Doctor: `legacy_number_from_mapping`
+  ignores user-supplied slug when number is also present (data loss).
+  Spin-off from @greatly-flat-sleet /llm-review round 2.
+- [ ] @slightly-hellish-airport — Doctor: post-flat-layout migration
+  must re-check `critical_blockers` before NN-rename. Spin-off from
+  @greatly-flat-sleet /llm-review round 2.
 
 ## Phases
 

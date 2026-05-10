@@ -1,13 +1,14 @@
 ---
 created: 2026-05-09
-updated: 2026-05-09
+updated: 2026-05-10
 type: chore
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: exorbitantly-ill-apples
 related: ['@ridiculously-outgoing-brass']
 labels: [release-v0.5.0]
+closed: 2026-05-10
 ---
 
 # Derive lifecycle status classification (active vs closing) from schema/transitions
