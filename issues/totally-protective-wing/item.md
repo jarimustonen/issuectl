@@ -4,12 +4,15 @@ updated: 2026-05-10
 type: feature
 reporter: jari
 assignee: jari
-status: in-progress
+status: done
 priority: normal
 epic: hugely-exciting-spiders
 commits:
 - hash: e38559f
   summary: add issuectl init
+- hash: eb98d2c
+  summary: apply review feedback — structured JSON + prose-preserving --force
+closed: 2026-05-10
 ---
 
 # Add 'issuectl init' command that bootstraps schema, AGENTS.md, skills, hooks, and merge driver in one step
