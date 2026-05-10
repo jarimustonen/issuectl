@@ -1548,6 +1548,19 @@ fn apply(
                 outcome.blockers = post_blockers;
                 return Ok(outcome);
             }
+            // Re-run the Notes → Comments rename against the
+            // post-migration state. `populate_notes_migration` walks
+            // only `folder == "flat"` dirs, so any issue still under
+            // `issues/{open,closed}/<slug>/` whose body has `## Notes`
+            // is invisible to the pre-migration scan. After phase 5
+            // lifts it to `issues/<slug>/`, the rename is applicable —
+            // running it here closes the one-shot `--fix` contract so
+            // users don't have to invoke `doctor --fix` twice. Safe to
+            // call twice in the same apply: `rename_notes_to_comments`
+            // appends to `outcome.notes_renamed`, and the first call
+            // already drained `actions.notes_to_rename`.
+            actions.notes_to_rename = fresh.notes_to_rename;
+            rename_notes_to_comments(repo_root, &mut actions, &mut outcome)?;
             legacy_dirs = fresh.legacy_dirs;
         }
     }
@@ -3696,6 +3709,58 @@ mod tests {
         // The numbered-legacy dir is still at its post-flat-layout
         // position (no NN-rename), preserving the partial migration.
         assert!(tmp.path().join("issues/3-old/item.md").is_file());
+    }
+
+    #[test]
+    fn apply_renames_notes_for_pre_migration_legacy_folder_in_one_pass() {
+        // Regression: `## Notes` in a body still under
+        // `issues/open/<slug>/` is invisible to the pre-migration
+        // scan (`populate_notes_migration` walks only flat-folder
+        // dirs). The phase-3 rename in `apply` therefore did
+        // nothing for this issue, and the user had to invoke
+        // `doctor --fix` a second time. After the post-migration
+        // re-scan now feeds `rename_notes_to_comments`, a single
+        // `--fix` invocation must lift the dir AND rename the
+        // heading.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/open/legacy-notes-slug");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2026-01-01\n---\n# T\n\n## Notes\n\nhello\n",
+        )
+        .unwrap();
+
+        let mut r = scan(tmp.path()).unwrap();
+        assert!(
+            r.notes_to_rename.is_empty(),
+            "pre-migration scan must not see the legacy-folder Notes heading, got {:?}",
+            r.notes_to_rename
+        );
+        let actions = DoctorActions::from_findings(&mut r);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+
+        let migrated = tmp.path().join("issues/legacy-notes-slug/item.md");
+        assert!(migrated.is_file(), "flat-layout migration must run");
+        let after = fs::read_to_string(&migrated).unwrap();
+        assert!(
+            after.contains("## Comments"),
+            "## Notes must be renamed in the same --fix pass, got: {after}"
+        );
+        assert!(
+            !after.contains("## Notes\n"),
+            "## Notes heading must be gone, got: {after}"
+        );
+        assert_eq!(
+            outcome.notes_renamed,
+            vec!["legacy-notes-slug".to_string()],
+            "outcome must record the post-migration rename"
+        );
     }
 
     #[cfg(unix)]
