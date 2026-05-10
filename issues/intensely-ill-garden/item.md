@@ -270,7 +270,38 @@ that scroll off the screen. A `--no-layout-warnings` flag, or
 collapsing to "240 issues need layout migration" by default with
 `--verbose` to expand, would help.
 
-## Finding 10 (minor): `agents init` always succeeds even when `issues/.schema.yaml` doesn't exist yet
+## Finding 10: doctor doesn't notice when issuectl-relevant files are gitignored
+
+After running `issuectl agents init`, the new `.issuectl/AGENTS.md`
+file appeared. But our repo's `.gitignore` had a blanket
+`.issuectl/` rule from an earlier setup, so the file was silently
+untracked — invisible to teammates and to CI.
+
+Doctor reported nothing about this. It happily references
+`.issuectl/AGENTS.md` in its policy hints (`run issuectl agents init
+to opt in`) but doesn't check whether the file would actually be
+tracked once written. The same blind spot likely applies to
+`issues/.schema.yaml` — if a user has `issues/.*` or similar in
+gitignore, the schema file gets created but never committed.
+
+The footgun is asymmetric: untracked-but-present feels normal on the
+author's machine (everything works), but agents on other machines
+(or CI) see a "missing schema" / "missing AGENTS.md" repo and may
+silently fall back to defaults, diverging from local behavior.
+
+**Suggested fix:** when doctor sees that `.issuectl/AGENTS.md`,
+`issues/.schema.yaml`, or any tracked-by-design issuectl file is
+matched by `git check-ignore`, surface a warning:
+
+```
+.issuectl/AGENTS.md is gitignored — agents on other machines won't
+see your policy file. Adjust .gitignore or move the file.
+```
+
+This is cheap to detect (`git check-ignore -v <path>`) and would
+have saved me from silently committing a half-working setup.
+
+## Finding 11 (minor): `agents init` always succeeds even when `issues/.schema.yaml` doesn't exist yet
 
 I ran `issuectl agents init` after the migration completed. It
 wrote `.issuectl/AGENTS.md` using the schema-derived block. But
