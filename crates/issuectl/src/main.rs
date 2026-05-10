@@ -494,9 +494,9 @@ enum Command {
     /// pre-commit hook and YAML merge driver. Idempotent — safe to
     /// re-run on an already-initialized repo.
     Init {
-        /// Which agent's skill format(s) to install (claude, codex, all)
-        #[arg(short = 'a', long, default_value = "all", value_parser = PossibleValuesParser::new(["claude", "codex", "all"]))]
-        agent: String,
+        /// Which agent's skill format(s) to install
+        #[arg(short = 'a', long, value_enum, default_value_t = AgentArg::All)]
+        agent: AgentArg,
 
         /// Also install the opt-in pre-commit hook that runs
         /// `issuectl doctor` on staged issue files.
@@ -509,8 +509,13 @@ enum Command {
         #[arg(long)]
         with_merge_driver: bool,
 
-        /// Overwrite existing per-step artifacts (skill files,
-        /// `.issuectl/AGENTS.md`, hook block).
+        /// Overwrite existing per-step artifacts. For
+        /// `.issuectl/AGENTS.md` only the schema-derived managed block
+        /// is regenerated; user prose above the sentinels is preserved
+        /// (use `issuectl agents init --force` to fully overwrite that
+        /// file). For the merge driver, also bypasses the refusal to
+        /// clobber an existing differing `merge.issuectl-yaml.driver`
+        /// git config value.
         #[arg(long)]
         force: bool,
     },
@@ -706,6 +711,25 @@ enum Command {
 enum LabelOp {
     Add,
     Remove,
+}
+
+/// Clap-side mirror of `init_cmd::AgentSelection`. Kept here so the
+/// core crate doesn't have to depend on clap.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum AgentArg {
+    Claude,
+    Codex,
+    All,
+}
+
+impl From<AgentArg> for init_cmd::AgentSelection {
+    fn from(a: AgentArg) -> Self {
+        match a {
+            AgentArg::Claude => Self::Claude,
+            AgentArg::Codex => Self::Codex,
+            AgentArg::All => Self::All,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -958,7 +982,7 @@ fn main() -> Result<()> {
         } => {
             let root = find_root();
             let opts = init_cmd::InitOptions {
-                agent: init_cmd::AgentSelection::parse(&agent)?,
+                agent: agent.into(),
                 with_hooks,
                 with_merge_driver,
                 force,

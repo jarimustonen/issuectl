@@ -14,8 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hook (`--with-hooks`) and YAML merge driver (`--with-merge-driver`)
   are opt-in. Idempotent: re-running on an already-initialized repo
   reports each step as "already exists" and exits 0. `--json` emits
-  a `steps[]` summary with per-step status and paths.
-  (#totally-protective-wing)
+  a structured `steps[]` summary with per-artifact status, typed
+  effects (e.g. `git_config` writes), and machine-parseable
+  `next_steps[]`. `--force` regenerates the managed block in
+  `.issuectl/AGENTS.md` while preserving user prose, and overrides
+  refusal to clobber an existing differing
+  `merge.issuectl-yaml.driver` git-config value. Quotes the binary
+  path in the merge-driver invocation so installs survive paths with
+  spaces. (#totally-protective-wing)
 - `issuectl sync-commits` walks `git log <range>` (default
   `<merge-base of HEAD and main/master>..HEAD`) and appends commits
   to each issue's `commits[]` based on `Refs-Issue:` / `Fixes-Issue:`

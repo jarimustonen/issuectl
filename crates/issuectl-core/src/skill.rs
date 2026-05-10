@@ -55,8 +55,10 @@ impl Agent {
 /// re-running file-existence checks of their own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallOutcome {
-    /// File did not exist (or `--force` was supplied) and was written.
+    /// File did not exist; we wrote it.
     Created,
+    /// File existed and `--force` was supplied; we overwrote it.
+    Overwritten,
     /// File already existed and `--force` was not supplied.
     AlreadyExists,
 }
@@ -117,17 +119,18 @@ pub fn print_install_result(repo_root: &Path, r: &InstallResult) {
         .unwrap_or(&r.path)
         .display()
         .to_string();
-    match r.outcome {
-        InstallOutcome::Created => {
-            if r.label.is_empty() {
-                println!("  ✓ Created {display}");
-            } else {
-                println!("  ✓ Created {display} ({})", r.label);
-            }
-        }
+    let verb = match r.outcome {
+        InstallOutcome::Created => "Created",
+        InstallOutcome::Overwritten => "Overwrote",
         InstallOutcome::AlreadyExists => {
             println!("  ~ {display} already exists (use --force to overwrite)");
+            return;
         }
+    };
+    if r.label.is_empty() {
+        println!("  ✓ {verb} {display}");
+    } else {
+        println!("  ✓ {verb} {display} ({})", r.label);
     }
 }
 
@@ -140,10 +143,15 @@ fn install_issues_scaffold(repo_root: &Path, force: bool) -> Result<InstallResul
             .with_context(|| format!("cannot create {}", issues_dir.display()))?;
     }
 
-    let outcome = if force || !agents_md.exists() {
+    let existed = agents_md.exists();
+    let outcome = if force || !existed {
         std::fs::write(&agents_md, ISSUES_AGENTS_TEMPLATE)
             .with_context(|| format!("cannot write {}", agents_md.display()))?;
-        InstallOutcome::Created
+        if existed {
+            InstallOutcome::Overwritten
+        } else {
+            InstallOutcome::Created
+        }
     } else {
         InstallOutcome::AlreadyExists
     };
@@ -156,8 +164,9 @@ fn install_issues_scaffold(repo_root: &Path, force: bool) -> Result<InstallResul
 
 fn install_agent_template(repo_root: &Path, agent: Agent, force: bool) -> Result<InstallResult> {
     let path = agent.install_path(repo_root);
+    let existed = path.exists();
 
-    if !force && path.exists() {
+    if !force && existed {
         return Ok(InstallResult {
             path,
             label: agent.label().to_string(),
@@ -174,7 +183,11 @@ fn install_agent_template(repo_root: &Path, agent: Agent, force: bool) -> Result
     Ok(InstallResult {
         path,
         label: agent.label().to_string(),
-        outcome: InstallOutcome::Created,
+        outcome: if existed {
+            InstallOutcome::Overwritten
+        } else {
+            InstallOutcome::Created
+        },
     })
 }
 

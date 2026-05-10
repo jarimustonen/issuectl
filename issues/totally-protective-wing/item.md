@@ -7,6 +7,9 @@ assignee: jari
 status: in-progress
 priority: normal
 epic: hugely-exciting-spiders
+commits:
+- hash: e38559f
+  summary: add issuectl init
 ---
 
 # Add 'issuectl init' command that bootstraps schema, AGENTS.md, skills, hooks, and merge driver in one step

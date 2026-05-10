@@ -155,11 +155,9 @@ pub enum InstallOutcome {
 /// whether the hook block was newly added (or rewritten) or was already
 /// present and current. Idempotent — re-running with the hook already
 /// in place is a no-op aside from the `core.hooksPath` reassertion.
-pub fn install_quiet(repo_root: &Path, force: bool) -> Result<InstallOutcome> {
-    install_hook(repo_root, force)
-}
-
-fn install_hook(repo_root: &Path, force: bool) -> Result<InstallOutcome> {
+/// Used by `issuectl init` directly; `hooks::run` wraps this and
+/// adds human-readable output.
+pub fn install_hook(repo_root: &Path, force: bool) -> Result<InstallOutcome> {
     // Refuse to be in a non-git directory before touching the
     // filesystem — `git config --local` would fail later anyway, but
     // not before we'd already written `.githooks/pre-commit`.

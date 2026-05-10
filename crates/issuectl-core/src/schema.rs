@@ -336,13 +336,22 @@ fn validate_loadability(schema: &Schema) -> Result<()> {
 /// was written by this call (callers use that to clear stale
 /// `schema_parse_error` state in the doctor report).
 pub fn ensure_default_written(root: &Path) -> Result<bool> {
+    write_default(root, false)
+}
+
+/// Atomically write the default schema. With `force=false`, refuses to
+/// clobber an existing schema (returns `Ok(false)`). With `force=true`,
+/// replaces an existing schema in place via tempfile-rename, which is
+/// what `issuectl init --force` uses to reset a corrupted scaffold.
+/// Returns whether bytes were actually written.
+pub fn write_default(root: &Path, force: bool) -> Result<bool> {
     use std::io::Write;
     let path = schema_path(root);
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("schema path has no parent: {}", path.display()))?;
     fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
-    if path.exists() {
+    if path.exists() && !force {
         return Ok(false);
     }
     let mut tmp = tempfile::Builder::new()
@@ -355,11 +364,18 @@ pub fn ensure_default_written(root: &Path) -> Result<bool> {
     tmp.as_file()
         .sync_all()
         .with_context(|| format!("cannot fsync temp schema for {}", path.display()))?;
-    match tmp.persist_noclobber(&path) {
-        Ok(_) => Ok(true),
-        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(e) => Err(anyhow::Error::from(e.error))
-            .with_context(|| format!("cannot persist {}", path.display())),
+    if force {
+        tmp.persist(&path)
+            .map_err(|e| e.error)
+            .with_context(|| format!("cannot persist {}", path.display()))?;
+        Ok(true)
+    } else {
+        match tmp.persist_noclobber(&path) {
+            Ok(_) => Ok(true),
+            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(anyhow::Error::from(e.error))
+                .with_context(|| format!("cannot persist {}", path.display())),
+        }
     }
 }
 

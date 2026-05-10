@@ -46,7 +46,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_yaml::{Mapping, Value};
 
 use crate::fmt::format_text;
@@ -600,7 +600,10 @@ pub fn install(root: &Path, apply: bool) -> Result<()> {
     println!("Then run (per-repo, in your local config):");
     println!("  {config_cmd}");
     if apply {
-        let outcome = apply_driver_config(root, &driver_value)?;
+        // `--apply` is the explicit user request, so existing differing
+        // values are overwritten — matches the behavior in place
+        // before init grew its own consent gate.
+        let outcome = apply_driver_config(root, &driver_value, true)?;
         match outcome {
             InstallOutcome::Configured => println!(
                 "\nApplied: merge.issuectl-yaml.driver is now configured for {}.",
@@ -627,23 +630,40 @@ pub enum InstallOutcome {
 
 /// Apply the merge-driver git-config without printing. Returns whether
 /// the config value was already set to the expected merge-driver
-/// invocation. Used by `issuectl init`.
-pub fn install_quiet(root: &Path) -> Result<InstallOutcome> {
-    apply_driver_config(root, &driver_value())
+/// invocation. With `force=false`, refuses to overwrite an existing
+/// differing value (e.g. a user's wrapper script). Used by
+/// `issuectl init`; `install` wraps this and adds human-readable
+/// output + the `.gitattributes` reminder.
+pub fn install_config(root: &Path, force: bool) -> Result<InstallOutcome> {
+    apply_driver_config(root, &driver_value(), force)
 }
 
 fn driver_value() -> String {
     // Use the absolute path of the running binary so installs survive
     // PATH changes and cargo-installed binaries that get relocated.
     // Falls back to bare `issuectl` if current_exe fails (cross-arch
-    // builds, exotic platforms).
+    // builds, exotic platforms). Quote the path so that binaries
+    // installed under directories with spaces (e.g. macOS' "Application
+    // Support" or iCloud-synced paths) still resolve correctly when
+    // git's merge driver is invoked through a shell.
     let exe = std::env::current_exe()
-        .map(|p| p.display().to_string())
+        .map(|p| sh_quote(&p.to_string_lossy()))
         .unwrap_or_else(|_| "issuectl".to_string());
     format!("{exe} merge-driver --base %O --ours %A --theirs %B --output %A")
 }
 
-fn apply_driver_config(root: &Path, driver_value: &str) -> Result<InstallOutcome> {
+/// POSIX single-quote escape: wraps the value in `'…'`, replacing any
+/// embedded `'` with the canonical `'\''` sequence. Sufficient for
+/// every shell git invokes the merge driver under (sh, bash, zsh).
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn apply_driver_config(
+    root: &Path,
+    driver_value: &str,
+    force: bool,
+) -> Result<InstallOutcome> {
     let existing = Command::new("git")
         .current_dir(root)
         .args(["config", "--local", "--get", "merge.issuectl-yaml.driver"])
@@ -654,14 +674,24 @@ fn apply_driver_config(root: &Path, driver_value: &str) -> Result<InstallOutcome
         if cur == driver_value {
             return Ok(InstallOutcome::AlreadyConfigured);
         }
+        if !force {
+            bail!(
+                "merge.issuectl-yaml.driver is already set to a different value \
+                 ({cur:?}); pass --force to overwrite, or unset it manually first"
+            );
+        }
     }
-    let status = Command::new("git")
+    let out = Command::new("git")
         .current_dir(root)
         .args(["config", "merge.issuectl-yaml.driver", driver_value])
-        .status()
+        .output()
         .context("cannot invoke `git config`")?;
-    if !status.success() {
-        return Err(anyhow!("git config failed with status {status}"));
+    if !out.status.success() {
+        bail!(
+            "git config merge.issuectl-yaml.driver failed (exit {}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(InstallOutcome::Configured)
 }

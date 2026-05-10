@@ -445,25 +445,35 @@ pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
 }
 
 /// Outcome of orchestrated initialization (e.g. from `issuectl init`)
-/// for `.issuectl/AGENTS.md`. Mirrors the create / already-exists
-/// distinction used by the skill installer.
+/// for `.issuectl/AGENTS.md`.
 #[derive(Debug, Clone)]
 pub struct EnsureDefaultOutcome {
     pub path: PathBuf,
-    /// `true` if this call wrote the file; `false` if it was already
-    /// present and `force` was not set.
-    pub wrote: bool,
-    /// Whether the file existed before this call (independent of
-    /// `wrote` — both true means we overwrote with `force`).
-    pub existed: bool,
+    pub outcome: EnsureOutcome,
     pub schema_source: SchemaSource,
 }
 
-/// Write `.issuectl/AGENTS.md` if missing, leaving an existing file
-/// intact when `force` is `false`. Idempotent — re-running on an
-/// already-initialized repo is a no-op and reports `wrote=false`.
-/// Used by `issuectl init` so that the orchestrated bootstrap doesn't
-/// abort when the agents file already exists.
+/// Distinguishes "fresh write", "managed-block refresh in place", and
+/// "left existing file untouched" so callers (and `--json`) can
+/// faithfully report which happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnsureOutcome {
+    /// File did not exist; we wrote the full default scaffold.
+    Created,
+    /// File existed and `force` was set; we regenerated the
+    /// schema-derived block in place and preserved the user's prose.
+    /// (We never silently rewrite the prose; that path is reserved for
+    /// `issuectl agents init --force`.)
+    ManagedRefreshed,
+    /// File existed and `force` was not set; left untouched.
+    AlreadyExists,
+}
+
+/// Write `.issuectl/AGENTS.md` if missing, leaving an existing file's
+/// user prose intact when `force` is set (only the schema-derived
+/// managed block is regenerated, mirroring `doctor --fix`).
+/// Idempotent — safe to re-run on an already-initialized repo.
+/// Used by `issuectl init`.
 pub fn ensure_default_written(root: &Path, force: bool) -> Result<EnsureDefaultOutcome> {
     let _lock = crate::mutate::WriteLock::acquire(root)?;
     let path = agents_path(root);
@@ -473,21 +483,35 @@ pub fn ensure_default_written(root: &Path, force: bool) -> Result<EnsureDefaultO
     if existed && !force {
         return Ok(EnsureDefaultOutcome {
             path,
-            wrote: false,
-            existed,
+            outcome: EnsureOutcome::AlreadyExists,
             schema_source,
         });
     }
 
     let schema = schema::load(root)?;
     let rules = transitions::load(root)?;
-    let content = render_full(&schema, &rules);
+
+    let (content, outcome) = if existed {
+        // --force on an existing file: refresh only the managed block.
+        // `regenerate_managed` requires well-formed sentinels; if the
+        // file is malformed we fall through to a full rewrite as a
+        // last resort, which is the same behavior `agents init --force`
+        // has had since the feature shipped.
+        let current = fs::read_to_string(&path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        match regenerate_managed(&current, &schema, &rules) {
+            Ok(updated) => (updated, EnsureOutcome::ManagedRefreshed),
+            Err(_) => (render_full(&schema, &rules), EnsureOutcome::ManagedRefreshed),
+        }
+    } else {
+        (render_full(&schema, &rules), EnsureOutcome::Created)
+    };
+
     atomic_write(&path, content.as_bytes())?;
 
     Ok(EnsureDefaultOutcome {
         path,
-        wrote: true,
-        existed,
+        outcome,
         schema_source,
     })
 }
