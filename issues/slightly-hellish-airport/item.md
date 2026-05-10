@@ -2,9 +2,15 @@
 created: 2026-05-09
 updated: 2026-05-10
 type: chore
-status: in-progress
+status: fixed
 priority: normal
 epic: exorbitantly-ill-apples
+commits:
+- hash: 1d762c8
+  summary: re-check critical_blockers after flat-layout migration
+- hash: f371b30
+  summary: apply review fixes to post-migration blocker re-check
+closed: 2026-05-10
 ---
 
 # Doctor: post-flat-layout migration must re-check critical_blockers before NN-rename
