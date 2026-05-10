@@ -412,6 +412,31 @@ impl DoctorActions {
     }
 }
 
+/// Discriminator on `ApplyOutcome` that disambiguates the two
+/// blocker-bail paths. `Ok` means apply ran to completion; `Preflight`
+/// means we refused to mutate (no writes); `PostApply` means the
+/// post-flat-layout safety re-check fired AFTER phase-5 writes
+/// already landed (partial progress, forward-only). `--json`
+/// consumers should branch on this rather than inferring from the
+/// presence of `blockers` + `fix_applied`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum StopPhase {
+    #[default]
+    Ok,
+    Preflight,
+    PostApply,
+}
+
+impl StopPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            StopPhase::Ok => "ok",
+            StopPhase::Preflight => "preflight",
+            StopPhase::PostApply => "post_apply",
+        }
+    }
+}
+
 /// Stage 3: result of running `apply`. The single source of truth for
 /// "what was actually written". `fix_applied` is computed from the
 /// outcome alone — no `report.fix_applied = true` early-return path
@@ -419,23 +444,24 @@ impl DoctorActions {
 #[derive(Debug, Default)]
 struct ApplyOutcome {
     /// Critical blockers found during the apply pass. Populated in
-    /// two places:
-    ///   1. **Preflight** — set from `actions.preflight_blockers`
-    ///      before any write; coexists with all-zero/empty fields.
-    ///   2. **Post-flat-layout safety re-check** — set after phase 5
-    ///      when the post-migration scan surfaces a condition the
-    ///      pre-migration scan could not see (e.g. `## Notes` /
-    ///      `## Comments` ambiguity in a freshly-lifted dir). In
-    ///      this case `flat_layout_migrated` and other
-    ///      already-completed phase fields may be non-empty —
-    ///      `--fix` is forward-progress only and does not roll back.
-    /// `apply` returns `Ok(outcome)` (not `Err`) in both cases so
-    /// `--json` callers receive a structured envelope rather than an
-    /// anyhow-formatted stderr blob. JSON consumers should treat
-    /// `blockers != []` as "doctor refused to complete" rather than
-    /// "no writes happened" — pair with `fix_applied()` to detect
-    /// partial-progress runs.
+    /// two places (use `stop_phase` to tell them apart):
+    ///   1. **Preflight** (`stop_phase == Preflight`) — set from
+    ///      `actions.preflight_blockers` before any write; coexists
+    ///      with all-zero/empty fields and `fix_applied() == false`.
+    ///   2. **Post-flat-layout safety re-check**
+    ///      (`stop_phase == PostApply`) — set after phase 5 when the
+    ///      post-migration scan surfaces a condition the pre-migration
+    ///      scan could not see (e.g. `## Notes` / `## Comments`
+    ///      ambiguity in a freshly-lifted dir). In this case
+    ///      `flat_layout_migrated` (and possibly other already-
+    ///      completed phase fields) is non-empty and
+    ///      `fix_applied() == true` — `--fix` is forward-progress only
+    ///      and does not roll back. JSON consumers should branch on
+    ///      `stop_phase` rather than inferring from `blockers` +
+    ///      `fix_applied`.
     blockers: Vec<String>,
+    /// See `StopPhase`. Default `Ok`.
+    stop_phase: StopPhase,
     legacy_dirs_migrated: Vec<LegacyMigration>,
     flat_layout_migrated: Vec<MigrateMove>,
     notes_renamed: Vec<String>,
@@ -1483,6 +1509,7 @@ fn apply(
     // "always `--json` when scripting" promise).
     if !actions.preflight_blockers.is_empty() {
         outcome.blockers = std::mem::take(&mut actions.preflight_blockers);
+        outcome.stop_phase = StopPhase::Preflight;
         return Ok(outcome);
     }
 
@@ -1571,6 +1598,7 @@ fn apply(
             let post_blockers = critical_blockers(&fresh);
             if !post_blockers.is_empty() {
                 outcome.blockers = post_blockers;
+                outcome.stop_phase = StopPhase::PostApply;
                 return Ok(outcome);
             }
             // Re-run the Notes → Comments rename against the
@@ -2638,6 +2666,7 @@ fn render_json(
                 "apply_outcome".to_string(),
                 serde_json::json!({
                     "fix_applied": oc.fix_applied(),
+                    "stop_phase": oc.stop_phase.as_str(),
                     "blockers": oc.blockers,
                     "schema_bootstrapped": oc.schema_bootstrapped,
                     "agents_md_regenerated": oc.agents_md_regenerated,
@@ -3751,6 +3780,29 @@ mod tests {
             !outcome.blockers.is_empty(),
             "post-migration blockers should be populated, got empty"
         );
+        assert_eq!(
+            outcome.stop_phase, StopPhase::PostApply,
+            "post-migration bail must set stop_phase = PostApply"
+        );
+        // `fix_applied: true` AND `blockers != []` is the documented
+        // post_apply combination: writes landed (the flat-layout
+        // moves) before the post-apply re-check fired.
+        assert!(
+            outcome.fix_applied(),
+            "post_apply path leaves prior writes in place, so fix_applied must be true"
+        );
+        // The JSON envelope carries the discriminator so scripted
+        // consumers can distinguish this from a preflight bail.
+        let scan_after = scan(tmp.path()).unwrap();
+        let json = render_json(&scan_after, Some(&outcome), true, tmp.path());
+        assert_eq!(
+            json["apply_outcome"]["stop_phase"],
+            serde_json::Value::String("post_apply".into())
+        );
+        assert_eq!(
+            json["apply_outcome"]["fix_applied"],
+            serde_json::Value::Bool(true)
+        );
         assert!(
             outcome.blockers.iter().any(|b| b.contains("Notes") && b.contains("Comments")),
             "expected notes/comments conflict blocker, got {:?}",
@@ -4324,12 +4376,14 @@ mod tests {
         .unwrap();
         assert!(!outcome.blockers.is_empty());
         assert!(!outcome.fix_applied());
+        assert_eq!(outcome.stop_phase, StopPhase::Preflight);
 
         let json = render_json(&findings, Some(&outcome), true, tmp.path());
         let ao = json
             .get("apply_outcome")
             .expect("apply_outcome must be present on --fix");
         assert_eq!(ao["fix_applied"], serde_json::Value::Bool(false));
+        assert_eq!(ao["stop_phase"], serde_json::Value::String("preflight".into()));
         let blockers = ao["blockers"].as_array().unwrap();
         assert!(!blockers.is_empty(), "blockers must surface in JSON");
         assert!(
@@ -4338,6 +4392,36 @@ mod tests {
                 .any(|v| v.as_str().unwrap_or("").contains("BOTH")),
             "expected `BOTH issues/open/...` blocker, got {blockers:?}"
         );
+    }
+
+    /// Clean-success path: when `apply` runs to completion with no
+    /// blockers, `stop_phase` is `Ok` and the JSON envelope reflects
+    /// it so consumers don't have to infer the success case from
+    /// `blockers.is_empty()`.
+    #[test]
+    fn clean_success_envelope_carries_stop_phase_ok() {
+        let tmp = fresh_repo();
+        // A fresh repo without blockers — `--fix` ends up writing the
+        // bootstrap `.schema.yaml` and nothing else.
+        let mut findings = scan(tmp.path()).unwrap();
+        let actions = DoctorActions::from_findings(&mut findings);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        assert!(outcome.blockers.is_empty(), "clean repo: no blockers");
+        assert_eq!(outcome.stop_phase, StopPhase::Ok);
+
+        let scan_after = scan(tmp.path()).unwrap();
+        let json = render_json(&scan_after, Some(&outcome), true, tmp.path());
+        assert_eq!(
+            json["apply_outcome"]["stop_phase"],
+            serde_json::Value::String("ok".into())
+        );
+        let blockers = json["apply_outcome"]["blockers"].as_array().unwrap();
+        assert!(blockers.is_empty(), "no blockers on clean success");
     }
 
     /// Bug #4 (manual splice list): the post-apply rendering pulls

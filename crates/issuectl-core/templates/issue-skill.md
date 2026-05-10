@@ -394,6 +394,19 @@ rewrites `number:` → `slug:` in frontmatter, migrates `epic:` and
 also flags invalid slugs, duplicates, missing item.md files, and orphan
 epic refs.
 
+On `--fix`, the JSON envelope carries an `apply_outcome` object with a
+`stop_phase` discriminator that you should branch on:
+
+- `"ok"` — apply ran to completion; `blockers == []`.
+- `"preflight"` — doctor refused to mutate the repo because of a
+  critical finding. `fix_applied: false`, `blockers` lists the reasons.
+  Resolve them and re-run.
+- `"post_apply"` — `--fix` is forward-progress only: some phases
+  already wrote to disk before a later safety re-check surfaced a new
+  blocker. `fix_applied: true` AND `blockers != []` is the documented
+  combination here. Resolve the blockers and re-run `--fix`; do NOT
+  attempt to roll back the partial progress.
+
 ## Notes
 
 - **Today's date** is set automatically by the CLI for `created`/`updated`

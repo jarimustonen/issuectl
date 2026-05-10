@@ -102,8 +102,16 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
   critical blocker, doctor bails with the partial progress intact
   rather than rolling back. Rolling back N already-completed renames
   is itself a multi-step operation that can fail mid-rollback. The
-  `ApplyOutcome` carries both the work that landed and the new
-  blockers; the user resolves the blockers and re-runs `--fix`.
+  `apply_outcome` JSON envelope carries both the work that landed and
+  the new blockers, distinguished by `stop_phase`:
+  - `"ok"` — apply ran to completion (`blockers == []`).
+  - `"preflight"` — refused to write; no mutations landed
+    (`fix_applied: false`, `blockers != []`).
+  - `"post_apply"` — partial-progress bail; some writes already
+    landed (`fix_applied: true`, `blockers != []`). The user
+    resolves the blockers and re-runs `--fix`.
+  Scripted callers should branch on `stop_phase` rather than infer
+  from `blockers` + `fix_applied`.
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, repo layout,
   PR process, and commit-message conventions.
 - See [issues/AGENTS.md](issues/AGENTS.md) for how this project's own
