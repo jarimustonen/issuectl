@@ -127,6 +127,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#thoroughly-kaput-pocket)
 
 ### Internals
+- `body_sections::parse_section` now returns a structured
+  `ParsedSection { found, blocks, warnings, duplicate_sections }`
+  instead of a bare `Vec<Block>`. The previous shape collapsed five
+  distinct outcomes — section absent, present-but-empty, all-headings-
+  malformed, swallowed-by-unclosed-fence, duplicate sections — into a
+  single empty vec, which sister tickets (`decide`, `agent-run`)
+  cannot tell apart. `ParseWarning::{MalformedBlockHeading,
+  UnclosedFence, DuplicateSection}` carries the diagnostics. Success-
+  case behaviour is unchanged: `.blocks` matches the prior return
+  value byte-for-byte and a missing section still produces no
+  warnings. (#totally-placid-push)
 - Web client (`board.js`): PATCH and PUT write requests now run with
   an `AbortController` and a 30 s timeout each. A hung server
   previously left `pending_writes[slug] > 0` forever and queued every

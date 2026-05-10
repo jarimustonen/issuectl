@@ -2,8 +2,10 @@
 created: 2026-05-07
 updated: 2026-05-10
 type: improvement
-status: in-progress
+status: fixed
 priority: normal
+commit: ac9c982
+closed: 2026-05-10
 ---
 
 # Add timeout / AbortController to all client write paths

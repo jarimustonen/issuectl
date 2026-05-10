@@ -356,22 +356,93 @@ pub struct Block {
     pub body: String,
 }
 
-/// Parse all blocks under the H2 section named `section`. Returns
-/// an empty vec if the section is absent. Headings inside fenced
-/// code blocks are treated as content (matching the writer).
+/// A parse warning surfaced by [`parse_section`]. Distinct shapes
+/// previously collapsed into "empty vec" — sister tickets (`decide`,
+/// `agent-run`) need to tell them apart so a hand-edited section with
+/// an unclosed fence isn't reported the same way as a missing section.
+#[allow(dead_code)] // sister tickets consume the diagnostic surface
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseWarning {
+    /// An `###` line inside the section did not match
+    /// `### <ts> · @<author>`. The line is folded into the previous
+    /// block's body (preserving content) but flagged so callers can
+    /// surface it as a soft-corruption warning.
+    MalformedBlockHeading {
+        /// 0-based line index inside the body.
+        line_no: usize,
+        /// Raw line text, trimmed of trailing whitespace.
+        line: String,
+    },
+    /// A code fence opened inside the section but never closed before
+    /// EOF. Anything after the opener is consumed as fence content,
+    /// which can swallow subsequent block headings entirely.
+    UnclosedFence {
+        /// 0-based line index of the opening fence.
+        line_no: usize,
+    },
+    /// More than one `## <section>` heading was present at H2 level.
+    /// The first occurrence wins (matching `extract_section_text`);
+    /// later occurrences are reported here so callers can flag the
+    /// duplicate without parsing the body twice.
+    DuplicateSection {
+        /// 0-based line index of the duplicate heading.
+        line_no: usize,
+    },
+}
+
+/// Result of [`parse_section`]. Disambiguates the cases that used to
+/// collapse into "empty `Vec<Block>`":
+///
+/// | case                                  | `found` | `blocks` | `warnings` | `duplicate_sections` |
+/// |---------------------------------------|---------|----------|------------|----------------------|
+/// | section absent                        | `false` | empty    | empty      | 0                    |
+/// | section present, no blocks            | `true`  | empty    | empty      | 0                    |
+/// | section present, all H3 malformed     | `true`  | empty    | non-empty  | 0                    |
+/// | section swallowed by unclosed fence   | `true`  | empty    | non-empty  | 0                    |
+/// | duplicate `## <section>` headings     | `true`  | (first)  | non-empty  | ≥ 1                  |
+#[allow(dead_code)] // sister tickets (`decide`, `agent-run`) consume this
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ParsedSection {
+    /// True when the named H2 heading was found at least once.
+    pub found: bool,
+    /// Successfully parsed blocks, in source order.
+    pub blocks: Vec<Block>,
+    /// Soft-failure diagnostics — see [`ParseWarning`]. An empty list
+    /// means the section was either absent or cleanly parsed.
+    pub warnings: Vec<ParseWarning>,
+    /// Count of duplicate `## <section>` headings beyond the first.
+    /// A non-zero value implies at least that many
+    /// `ParseWarning::DuplicateSection` entries in `warnings`.
+    pub duplicate_sections: usize,
+}
+
+/// Parse all blocks under the H2 section named `section`. Headings
+/// inside fenced code blocks are treated as content (matching the
+/// writer).
 ///
 /// Block heading shape: `### <ts> · @<author>`. The middle-dot
 /// separator is U+00B7 with single ASCII spaces on each side. Only
 /// well-formed H3 headings start a new block — a malformed `###`
 /// line is folded into the *previous* block's body so legacy /
-/// hand-edited content is preserved (round-2 finding G2/O3).
+/// hand-edited content is preserved (round-2 finding G2/O3) and a
+/// `MalformedBlockHeading` warning is recorded.
+///
+/// Returns a [`ParsedSection`] that distinguishes "section absent"
+/// from "section present but empty" from "section present but
+/// malformed" — see the table on `ParsedSection`.
 #[allow(dead_code)] // sister tickets (`decide`, `agent-run`) consume this
-pub fn parse_section(body: &str, section: &str) -> Vec<Block> {
+pub fn parse_section(body: &str, section: &str) -> ParsedSection {
     let lines: Vec<&str> = body.split('\n').collect();
     let section_starts = scan_outside_fences(&lines, |_, l| is_h2_named(l, section));
     let Some(&start) = section_starts.first() else {
-        return Vec::new();
+        return ParsedSection::default();
     };
+
+    let mut warnings = Vec::new();
+    let duplicate_sections = section_starts.len().saturating_sub(1);
+    for &dup in section_starts.iter().skip(1) {
+        warnings.push(ParseWarning::DuplicateSection { line_no: dup });
+    }
 
     // Section ends at the next H2 outside any fence, or at EOF.
     let after = &lines[start + 1..];
@@ -381,17 +452,33 @@ pub fn parse_section(body: &str, section: &str) -> Vec<Block> {
         .unwrap_or(after.len());
     let span = &after[..next_offset];
 
-    // Only *valid* block headings become boundaries — malformed H3
-    // lines pass through as body content of the previous block. This
-    // is what the docstring promises; the previous version dropped
-    // the body of any malformed H3 entirely.
-    let valid_block_starts: Vec<(usize, (String, String))> =
-        scan_outside_fences(span, |_, l| is_h3(l))
-            .into_iter()
-            .filter_map(|i| parse_block_heading(span[i]).map(|p| (i, p)))
-            .collect();
+    // Detect an unclosed fence inside the section span. Without this,
+    // a writer who forgot the closing ``` silently has their later
+    // blocks eaten as fence content; surface it explicitly so callers
+    // can flag the issue rather than reporting "no blocks".
+    if let Some(open_idx) = unclosed_fence_index(span) {
+        warnings.push(ParseWarning::UnclosedFence {
+            line_no: start + 1 + open_idx,
+        });
+    }
 
-    let mut out = Vec::with_capacity(valid_block_starts.len());
+    // Only *valid* block headings become boundaries — malformed H3
+    // lines pass through as body content of the previous block. The
+    // malformed lines are recorded as warnings so a caller can
+    // surface them; the body content remains visible to the user.
+    let h3_indices = scan_outside_fences(span, |_, l| is_h3(l));
+    let mut valid_block_starts: Vec<(usize, (String, String))> = Vec::new();
+    for i in &h3_indices {
+        match parse_block_heading(span[*i]) {
+            Some(parsed) => valid_block_starts.push((*i, parsed)),
+            None => warnings.push(ParseWarning::MalformedBlockHeading {
+                line_no: start + 1 + *i,
+                line: span[*i].trim_end().to_string(),
+            }),
+        }
+    }
+
+    let mut blocks = Vec::with_capacity(valid_block_starts.len());
     for (idx, (h_idx, parsed)) in valid_block_starts.iter().enumerate() {
         let end_idx = valid_block_starts
             .get(idx + 1)
@@ -399,13 +486,43 @@ pub fn parse_section(body: &str, section: &str) -> Vec<Block> {
             .unwrap_or(span.len());
         let body_lines = &span[*h_idx + 1..end_idx];
         let body_text = trim_blank_borders(body_lines);
-        out.push(Block {
+        blocks.push(Block {
             timestamp: parsed.0.clone(),
             author: parsed.1.clone(),
             body: body_text,
         });
     }
-    out
+
+    ParsedSection {
+        found: true,
+        blocks,
+        warnings,
+        duplicate_sections,
+    }
+}
+
+/// Line index of the *unclosed* opening fence in `lines`, or `None`
+/// if every opener was matched by a closer. State-aware so a fence
+/// that opens inside an already-open fence is not double-counted.
+fn unclosed_fence_index(lines: &[&str]) -> Option<usize> {
+    let mut fence: Option<Fence> = None;
+    let mut open_at: Option<usize> = None;
+    for (i, l) in lines.iter().enumerate() {
+        match fence {
+            Some(open) if closes_fence(l, open) => {
+                fence = None;
+                open_at = None;
+            }
+            Some(_) => {}
+            None => {
+                if let Some(o) = opening_fence(l) {
+                    fence = Some(o);
+                    open_at = Some(i);
+                }
+            }
+        }
+    }
+    if fence.is_some() { open_at } else { None }
 }
 
 /// Extract the raw text between `## <section>` and the next H2 (or EOF),
@@ -607,7 +724,10 @@ mod tests {
             ### 2026-05-01T00:00:00Z · @bob\n\nfirst note\n\n\
             ### 2026-05-02T00:00:00Z · @alice\n\nsecond note\n\n## Decisions\n\n\
             ### 2026-05-03T00:00:00Z · @cara\n\npicked X\n";
-        let blocks = parse_section(body, COMMENTS);
+        let parsed = parse_section(body, COMMENTS);
+        assert!(parsed.found);
+        assert!(parsed.warnings.is_empty(), "warnings={:?}", parsed.warnings);
+        let blocks = &parsed.blocks;
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].timestamp, "2026-05-01T00:00:00Z");
         assert_eq!(blocks[0].author, "bob");
@@ -616,8 +736,9 @@ mod tests {
         assert_eq!(blocks[1].body, "second note");
         // Decisions parses independently
         let decs = parse_section(body, DECISIONS);
-        assert_eq!(decs.len(), 1);
-        assert_eq!(decs[0].author, "cara");
+        assert!(decs.found);
+        assert_eq!(decs.blocks.len(), 1);
+        assert_eq!(decs.blocks[0].author, "cara");
     }
 
     #[test]
@@ -625,11 +746,12 @@ mod tests {
         let body0 = "\n# T\n";
         let block = render_note_block("2026-05-07T12:00:00Z", "alice", "hello world").unwrap();
         let body1 = append_block(body0, COMMENTS, &block);
-        let blocks = parse_section(&body1, COMMENTS);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].timestamp, "2026-05-07T12:00:00Z");
-        assert_eq!(blocks[0].author, "alice");
-        assert_eq!(blocks[0].body, "hello world");
+        let parsed = parse_section(&body1, COMMENTS);
+        assert!(parsed.found);
+        assert_eq!(parsed.blocks.len(), 1);
+        assert_eq!(parsed.blocks[0].timestamp, "2026-05-07T12:00:00Z");
+        assert_eq!(parsed.blocks[0].author, "alice");
+        assert_eq!(parsed.blocks[0].body, "hello world");
     }
 
     #[test]
@@ -639,15 +761,19 @@ mod tests {
         let body = "\n## Comments\n\n\
             ### 2026-05-01T00:00:00Z · @bob\n\n\
             example:\n```\n### 2020-01-01 · @ghost\n```\n";
-        let blocks = parse_section(body, COMMENTS);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].author, "bob");
+        let parsed = parse_section(body, COMMENTS);
+        assert_eq!(parsed.blocks.len(), 1);
+        assert_eq!(parsed.blocks[0].author, "bob");
     }
 
     #[test]
     fn parse_missing_section_returns_empty() {
         let body = "\n# T\n\nNo sections.\n";
-        assert!(parse_section(body, COMMENTS).is_empty());
+        let parsed = parse_section(body, COMMENTS);
+        assert!(!parsed.found);
+        assert!(parsed.blocks.is_empty());
+        assert!(parsed.warnings.is_empty());
+        assert_eq!(parsed.duplicate_sections, 0);
     }
 
     #[test]
@@ -682,9 +808,9 @@ mod tests {
             ### 2026-05-02T00:00:00Z · @cara\n\npicked X\n";
         let coms = parse_section(body, COMMENTS);
         let decs = parse_section(body, DECISIONS);
-        assert_eq!(coms.len(), 1, "Comments section parsed correctly");
-        assert_eq!(decs.len(), 1, "Decisions parsed after longer close fence");
-        assert_eq!(decs[0].author, "cara");
+        assert_eq!(coms.blocks.len(), 1, "Comments section parsed correctly");
+        assert_eq!(decs.blocks.len(), 1, "Decisions parsed after longer close fence");
+        assert_eq!(decs.blocks[0].author, "cara");
     }
 
     #[test]
@@ -700,8 +826,8 @@ mod tests {
             \n## Decisions\n\n\
             ### 2026-05-02T00:00:00Z · @cara\n\npicked\n";
         let decs = parse_section(body, DECISIONS);
-        assert_eq!(decs.len(), 1);
-        assert_eq!(decs[0].author, "cara");
+        assert_eq!(decs.blocks.len(), 1);
+        assert_eq!(decs.blocks[0].author, "cara");
     }
 
     #[test]
@@ -716,7 +842,8 @@ mod tests {
             legacy text that should remain visible\n\n\
             ### 2026-05-02T00:00:00Z · @bob\n\n\
             second\n";
-        let blocks = parse_section(body, COMMENTS);
+        let parsed = parse_section(body, COMMENTS);
+        let blocks = &parsed.blocks;
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].author, "alice");
         assert!(
@@ -725,6 +852,93 @@ mod tests {
             blocks[0].body
         );
         assert_eq!(blocks[1].author, "bob");
+        // The malformed `### not a valid block heading` line is now
+        // surfaced as a warning (still folded into the previous body
+        // for content preservation).
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::MalformedBlockHeading { .. })),
+            "expected a MalformedBlockHeading warning, got {:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn parse_section_present_but_empty_distinguishes_from_missing() {
+        // Section heading exists but contains no H3 blocks. Was
+        // indistinguishable from "no such section" before — sister
+        // tickets infer different things from each.
+        let body = "\n## Comments\n\n(none yet)\n";
+        let parsed = parse_section(body, COMMENTS);
+        assert!(parsed.found);
+        assert!(parsed.blocks.is_empty());
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn parse_section_reports_unclosed_fence_inside_section() {
+        // An unclosed ``` inside the section silently ate every later
+        // block as fence content. Now flagged explicitly.
+        let body = "\n## Comments\n\n\
+            ### 2026-05-01T00:00:00Z · @bob\n\nfirst\n\n\
+            ```\nstill inside fence\n\
+            ### 2026-05-02T00:00:00Z · @alice\n\nsecond\n";
+        let parsed = parse_section(body, COMMENTS);
+        assert!(parsed.found);
+        // Only bob's block parses — alice is consumed by the open fence.
+        assert_eq!(parsed.blocks.len(), 1);
+        assert_eq!(parsed.blocks[0].author, "bob");
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::UnclosedFence { .. })),
+            "expected UnclosedFence warning, got {:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn parse_section_reports_duplicate_section_headings() {
+        // First wins for content (matching extract_section_text), but
+        // duplicates are reported so callers can flag the corruption.
+        let body = "\n## Comments\n\n\
+            ### 2026-05-01T00:00:00Z · @bob\n\nfirst\n\n\
+            ## Comments\n\n\
+            ### 2026-05-02T00:00:00Z · @alice\n\nsecond\n";
+        let parsed = parse_section(body, COMMENTS);
+        assert!(parsed.found);
+        assert_eq!(parsed.blocks.len(), 1);
+        assert_eq!(parsed.blocks[0].author, "bob");
+        assert_eq!(parsed.duplicate_sections, 1);
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::DuplicateSection { .. })),
+            "expected DuplicateSection warning, got {:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn parse_section_all_malformed_h3_distinguishes_from_missing() {
+        // Section present, every H3 line malformed. Was empty-vec
+        // before; now found=true with malformed-heading warnings.
+        let body = "\n## Comments\n\n\
+            ### not a real heading\n\n\
+            ### nor is this\n";
+        let parsed = parse_section(body, COMMENTS);
+        assert!(parsed.found);
+        assert!(parsed.blocks.is_empty());
+        let malformed = parsed
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, ParseWarning::MalformedBlockHeading { .. }))
+            .count();
+        assert_eq!(malformed, 2, "warnings={:?}", parsed.warnings);
     }
 
     #[test]
