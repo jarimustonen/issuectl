@@ -1,10 +1,10 @@
 ---
 created: 2026-05-09
-updated: 2026-05-09
+updated: 2026-05-10
 type: task
 reporter: jari
 assignee: jari
-status: in-progress
+status: done
 priority: normal
 epic: hugely-exciting-spiders
 related: ['@excessively-beneficial-owner', '@profoundly-domineering-wound', '@markedly-terrific-angle']
@@ -18,6 +18,7 @@ commits:
   summary: 'docs(design): revise web control surface for workmux + integrate review'
 - hash: b6ba2f5
   summary: 'docs(design): integrate round-2 review findings (R1-R19)'
+closed: 2026-05-10
 ---
 
 # Design web control surface for triggering issue work from kanban

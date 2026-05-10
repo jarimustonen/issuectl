@@ -3,8 +3,9 @@ created: 2026-05-10
 updated: 2026-05-10
 type: bug
 reporter: jari
-status: open
+status: done
 priority: normal
+closed: 2026-05-10
 ---
 
 # 0.5.1: bugs and friction encountered during 3DBear monorepo adoption
@@ -340,3 +341,9 @@ The 3DBear monorepo migration produced four commits in `main`:
 
 Total: ~360 unique files touched across the four phases. Doctor is
 now fully clean.
+
+## Comments
+
+### 2026-05-10T12:16:10Z · @jari
+
+Split into 11 separate issues, all labelled 'from-3dbear-0.5.1-feedback' under @hugely-exciting-spiders. See: marginally-receptive-kettle, staggeringly-important-zoo, unreasonably-attractive-star, virtually-callous-rainstorm, thoroughly-kaput-pocket, reasonably-likeable-stone, tremendously-broken-brain, extremely-poor-dirt, ridiculously-outrageous-fold, simply-workable-umbrella, eminently-dramatic-anger.

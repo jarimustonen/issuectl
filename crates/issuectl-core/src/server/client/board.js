@@ -260,24 +260,36 @@
 
   function populateFilters() {
     var types = new Set(), assignees = new Set(), epics = new Set(), labels = new Set();
+    var epicTitleBySlug = {};
     state.issues.forEach(function (i) {
       if (i.type) types.add(i.type);
       var a = effectiveAssignee(i);
       if (a) assignees.add(a);
       if (i.epic) epics.add(i.epic);
       if (Array.isArray(i.labels)) i.labels.forEach(function (l) { labels.add(l); });
+      if (i.type === 'epic' && i.slug && i.title) epicTitleBySlug[i.slug] = i.title;
     });
     fillSelect(els.type, types);
     fillSelect(els.assignee, assignees);
-    fillSelect(els.epic, epics);
+    fillSelect(els.epic, epics, function (slug) {
+      var title = epicTitleBySlug[slug];
+      return title ? title + ' (' + slug + ')' : slug;
+    });
     fillSelect(els.label, labels);
   }
 
-  function fillSelect(sel, set) {
+  function fillSelect(sel, set, labelFor) {
     var current = sel.value;
-    var values = Array.from(set).sort();
+    var values = Array.from(set).sort(function (a, b) {
+      var la = labelFor ? labelFor(a) : a;
+      var lb = labelFor ? labelFor(b) : b;
+      return la.localeCompare(lb);
+    });
     sel.innerHTML = '<option value="">all</option>' +
-      values.map(function (v) { return '<option value="' + escapeHtml(v) + '">' + escapeHtml(v) + '</option>'; }).join('');
+      values.map(function (v) {
+        var label = labelFor ? labelFor(v) : v;
+        return '<option value="' + escapeHtml(v) + '">' + escapeHtml(label) + '</option>';
+      }).join('');
     if (values.indexOf(current) >= 0) sel.value = current;
   }
 

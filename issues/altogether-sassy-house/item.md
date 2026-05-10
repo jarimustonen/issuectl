@@ -1,8 +1,8 @@
 ---
 created: 2026-05-05
-updated: 2026-05-05
+updated: 2026-05-10
 type: feature
-status: in-progress
+status: done
 priority: normal
 reporter: jari
 assignee: jari
@@ -18,6 +18,7 @@ commits:
 - hash: '95523e1'
   summary: RandomState PRNG seeding, drop broken fallback
 slug: altogether-sassy-house
+closed: 2026-05-10
 ---
 
 # Replace sequential issue numbers with random word slugs

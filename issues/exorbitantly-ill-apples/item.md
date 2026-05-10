@@ -1,11 +1,12 @@
 ---
 created: 2026-05-06
-updated: 2026-05-07
+updated: 2026-05-10
 type: epic
-status: in-progress
+status: done
 priority: high
 owner: jari
 labels: [release-v0.5.0]
+closed: 2026-05-10
 ---
 
 # v0.5.0: Writable, agent-safe kanban board
