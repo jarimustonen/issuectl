@@ -35,6 +35,68 @@ use parking_lot::RwLock;
 use crate::schema::{self, Schema};
 use crate::transitions::{self, TransitionRules};
 
+/// Read-side abstraction over "where do `schema` and `transitions`
+/// come from for this call?". The two implementations are
+/// [`UncachedConfig`] (re-parse on every call — what the CLI wants:
+/// each command parses both YAMLs at most once) and
+/// [`RepoConfigCache`] (re-parse only on freshness-stamp change —
+/// what the long-running server wants).
+///
+/// The trait exists so future mutate-side / read-side APIs can grow
+/// an explicit `&dyn ConfigSource` parameter and stop relying on
+/// the thread-local [`enter`] / [`current`] activation. The
+/// activation mechanism is documented at length below; its removal
+/// is tracked under `@hugely-madly-haircut` follow-up work — the
+/// type-level migration plan is to take `&dyn ConfigSource` on
+/// every mutate entry point so the server's cache reaches the load
+/// site through the type signature instead of through a
+/// thread-local slot. Until that lands, the trait is callable
+/// directly by any new code path that wants explicit injection
+/// without participating in the thread-local dance.
+pub trait ConfigSource: Send + Sync {
+    /// Return a snapshot of the parsed schema for `root`. Implementations
+    /// may cache (`RepoConfigCache`) or always re-parse (`UncachedConfig`).
+    fn schema(&self, root: &Path) -> Result<Arc<Schema>>;
+    /// Return a snapshot of the parsed transition rules for `root`.
+    fn rules(&self, root: &Path) -> Result<Arc<TransitionRules>>;
+}
+
+/// Always-re-parse implementation of [`ConfigSource`]. The CLI's
+/// natural fit: each command runs once, so parsing the YAMLs once
+/// is fine and a cache would just be dead code.
+///
+/// Zero-sized — construct via `UncachedConfig` directly. Cheap to
+/// pass by reference; safe to share.
+pub struct UncachedConfig;
+
+impl ConfigSource for UncachedConfig {
+    fn schema(&self, root: &Path) -> Result<Arc<Schema>> {
+        Ok(Arc::new(schema::load_uncached(root)?))
+    }
+    fn rules(&self, root: &Path) -> Result<Arc<TransitionRules>> {
+        Ok(Arc::new(transitions::load_uncached(root)?))
+    }
+}
+
+impl ConfigSource for RepoConfigCache {
+    fn schema(&self, root: &Path) -> Result<Arc<Schema>> {
+        debug_assert_eq!(
+            root,
+            self.root(),
+            "RepoConfigCache::schema called with a root that disagrees with the cache's bound root",
+        );
+        RepoConfigCache::schema(self)
+    }
+    fn rules(&self, root: &Path) -> Result<Arc<TransitionRules>> {
+        debug_assert_eq!(
+            root,
+            self.root(),
+            "RepoConfigCache::rules called with a root that disagrees with the cache's bound root",
+        );
+        RepoConfigCache::rules(self)
+    }
+}
+
 /// Freshness fingerprint for a config file. `(mtime, len)` is cheap to
 /// compute and catches any edit that changes either value — `mtime`
 /// alone misses same-second rewrites on coarse-resolution filesystems,
@@ -568,5 +630,46 @@ mod tests {
         let prev = std::fs::metadata(path).unwrap().modified().unwrap();
         let next = FileTime::from_system_time(prev + std::time::Duration::from_secs(10));
         set_file_mtime(path, next).unwrap();
+    }
+
+    #[test]
+    fn uncached_config_parses_schema_and_rules_on_every_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("issues")).unwrap();
+        let cfg = UncachedConfig;
+
+        // Two consecutive calls return distinct `Arc`s — UncachedConfig
+        // does not memoise. Same root, but a fresh parse each time.
+        let a = cfg.schema(root).unwrap();
+        let b = cfg.schema(root).unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+        let r1 = cfg.rules(root).unwrap();
+        let r2 = cfg.rules(root).unwrap();
+        assert!(!Arc::ptr_eq(&r1, &r2));
+    }
+
+    #[test]
+    fn cache_impl_of_config_source_reuses_arc_when_files_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("issues")).unwrap();
+        fs::create_dir_all(root.join(".issuectl")).unwrap();
+        fs::write(root.join("issues/.schema.yaml"), "version: 1\nfields: {}\n").unwrap();
+        fs::write(
+            root.join(".issuectl/transitions.yaml"),
+            "version: 1\nstatus_rules: {}\n",
+        )
+        .unwrap();
+
+        let cache: Arc<dyn ConfigSource> =
+            Arc::new(RepoConfigCache::new(root.to_path_buf()));
+        let a = cache.schema(root).unwrap();
+        let b = cache.schema(root).unwrap();
+        // Same Arc reused → cache is doing its job through the trait.
+        assert!(Arc::ptr_eq(&a, &b));
+        let r1 = cache.rules(root).unwrap();
+        let r2 = cache.rules(root).unwrap();
+        assert!(Arc::ptr_eq(&r1, &r2));
     }
 }

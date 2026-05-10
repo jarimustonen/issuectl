@@ -1,9 +1,9 @@
 ---
 created: 2026-05-09
-updated: 2026-05-09
+updated: 2026-05-10
 type: improvement
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 epic: hugely-exciting-spiders
 related: ['@deeply-wistful-beam']

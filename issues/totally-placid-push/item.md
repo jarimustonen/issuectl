@@ -3,10 +3,12 @@ created: 2026-05-08
 updated: 2026-05-10
 type: feature
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: hugely-exciting-spiders
 labels: [agent-friendly, v0.6.0-candidate]
+commit: 85ffc7d
+closed: 2026-05-10
 ---
 
 # body_sections::parse_section: richer return type with diagnostics

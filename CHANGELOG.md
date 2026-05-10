@@ -127,6 +127,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#thoroughly-kaput-pocket)
 
 ### Internals
+- New `ConfigSource` trait + `UncachedConfig` zero-sized impl in
+  `repo_config`, with a blanket impl on the existing
+  `RepoConfigCache`. Provides explicit dependency injection for the
+  schema + transitions parses so future code paths can take
+  `&dyn ConfigSource` instead of consulting the thread-local
+  activation slot. The thread-local activation (`enter` / `current`
+  / `ActiveGuard`) is intentionally retained for now: removing it
+  is a separate, coordinated migration of the four `mutate::*`
+  public functions plus their ~100 call sites and is tracked
+  under `@hugely-madly-haircut` follow-up. The trait is the
+  foundation that migration will build on.
 - `body_sections::parse_section` now returns a structured
   `ParsedSection { found, blocks, warnings, duplicate_sections }`
   instead of a bare `Vec<Block>`. The previous shape collapsed five
