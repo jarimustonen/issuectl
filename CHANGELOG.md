@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `issuectl agents init` now logs which schema source it used —
+  `Using project schema at issues/.schema.yaml.` or `Using built-in
+  default schema (issues/.schema.yaml not found).` — so the silent
+  default-fallback path is no longer invisible. `--json` includes a
+  `schema_source: "default" | "project"` field in the same envelope.
+  (#eminently-dramatic-anger)
+- `issuectl doctor` warns when canonical issuectl-tracked files
+  (`.issuectl/AGENTS.md`, `issues/.schema.yaml`) match a `.gitignore`
+  pattern. Asymmetric footgun: works locally, fails for teammates and
+  CI. Surfaced in `--json` as `gitignored_paths: [...]`.
+  (#simply-workable-umbrella)
+
 ### Changed
 - `commits[].hash` quoting is now applied at the AST level (only to
   the `commits` sequence), not via post-serialization line rewriting.
@@ -26,21 +39,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `truncate` returns the empty string for `max_len = 0` instead of
   `"…"`; documented that the helper counts scalar values, not
   terminal-display columns.
-
-### Added
-- `issuectl agents init` now logs which schema source it used —
-  `Using project schema at issues/.schema.yaml.` or `Using built-in
-  default schema (issues/.schema.yaml not found).` — so the silent
-  default-fallback path is no longer invisible. `--json` includes a
-  `schema_source: "default" | "project"` field in the same envelope.
-  (#eminently-dramatic-anger)
-- `issuectl doctor` warns when canonical issuectl-tracked files
-  (`.issuectl/AGENTS.md`, `issues/.schema.yaml`) match a `.gitignore`
-  pattern. Asymmetric footgun: works locally, fails for teammates and
-  CI. Surfaced in `--json` as `gitignored_paths: [...]`.
-  (#simply-workable-umbrella)
-
-### Changed
 - `issuectl doctor --fix` no longer refuses the flat-layout migration
   when schema-shape findings (schema violations, broken cross-refs,
   dependency cycles, status/timestamp consistency) are present.

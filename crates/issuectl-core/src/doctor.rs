@@ -5217,7 +5217,10 @@ mod tests {
             !outcome.flat_layout_migrated.is_empty(),
             "flat-layout migration must run when only schema violations remain"
         );
-        assert!(tmp.path().join("issues/quiet-brave-otter/item.md").is_file());
+        assert!(tmp
+            .path()
+            .join("issues/quiet-brave-otter/item.md")
+            .is_file());
         assert_eq!(outcome.stop_phase, StopPhase::Ok);
 
         // Post-migration scan still surfaces the unresolved schema
@@ -5255,7 +5258,10 @@ mod tests {
             "thing(s)",
             |i| i.to_string(),
         );
-        assert!(buf.is_empty(), "empty list must render nothing, got {buf:?}");
+        assert!(
+            buf.is_empty(),
+            "empty list must render nothing, got {buf:?}"
+        );
 
         // Exactly LIMIT entries: full list, not collapsed.
         let mut buf = String::new();
@@ -5279,14 +5285,9 @@ mod tests {
         // LIMIT+1 entries, non-verbose: collapsed to a one-liner
         // with the count and the verb phrase.
         let mut buf = String::new();
-        render_section(
-            &mut buf,
-            "Title:",
-            &one_over,
-            false,
-            "thing(s)",
-            |i| i.to_string(),
-        );
+        render_section(&mut buf, "Title:", &one_over, false, "thing(s)", |i| {
+            i.to_string()
+        });
         assert!(
             buf.contains(&format!("{} thing(s)", one_over.len())),
             "expected collapsed count line, got {buf:?}"
@@ -5302,14 +5303,9 @@ mod tests {
 
         // LIMIT+1 entries, verbose: full list, no collapse hint.
         let mut buf = String::new();
-        render_section(
-            &mut buf,
-            "Title:",
-            &one_over,
-            true,
-            "thing(s)",
-            |i| i.to_string(),
-        );
+        render_section(&mut buf, "Title:", &one_over, true, "thing(s)", |i| {
+            i.to_string()
+        });
         assert!(buf.contains("Title:"), "verbose must print title: {buf:?}");
         for i in &one_over {
             assert!(buf.contains(&i.to_string()), "verbose missing {i}: {buf:?}");
