@@ -96,6 +96,14 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
   (see its `lib.rs` doc comment) — `pub` items there are *not* a
   semver contract. The semver contract lives in the `issuectl`
   binary's CLI surface.
+- **Doctor `--fix` is forward-progress only.** When the apply
+  pipeline mutates the repo (flat-layout migration, status
+  reconciliation, notes rename, ...) and a *later* phase finds a new
+  critical blocker, doctor bails with the partial progress intact
+  rather than rolling back. Rolling back N already-completed renames
+  is itself a multi-step operation that can fail mid-rollback. The
+  `ApplyOutcome` carries both the work that landed and the new
+  blockers; the user resolves the blockers and re-runs `--fix`.
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, repo layout,
   PR process, and commit-message conventions.
 - See [issues/AGENTS.md](issues/AGENTS.md) for how this project's own

@@ -941,14 +941,16 @@ fn populate_extended_validation(
         };
 
         // Skip lints that flag findings critical_blockers treats as
-        // hard refusals when the issue is a legacy `<NN>-<slug>` dir
-        // under `issues/{open,closed}/`. Those issues are migrated
-        // wholesale by `--fix` (frontmatter rewritten, refs translated,
-        // file moved), so flagging their numeric epic refs as broken
-        // would refuse the very fix designed to heal them. Mirrors
-        // the existing skip in populate_schema_violations.
-        let primary_is_legacy = (primary.folder == "open" || primary.folder == "closed")
-            && parser::parse_legacy_dir(&primary.dir_name).is_some();
+        // hard refusals when the issue is queued for the NN-rename
+        // pipeline. `--fix` migrates these wholesale (frontmatter
+        // rewritten, refs translated, file renamed), so emitting
+        // hard findings on them would refuse the very fix designed
+        // to heal them. The typed signal is `legacy_number.is_some()`
+        // — applies whether the dir lives at `issues/{open,closed}/`
+        // (pre-migration) or at the flat root (post flat-layout
+        // migration but before NN-rename). Mirrors the skip in
+        // `populate_schema_violations`.
+        let primary_is_legacy = primary.legacy_number.is_some();
         if primary_is_legacy {
             // Still run the per-hit status/folder reconciliation pass
             // below — that is exactly the legacy state `--fix` heals,
@@ -1305,13 +1307,20 @@ fn populate_schema_violations(
         if !s.item_present {
             continue;
         }
-        // Skip legacy <NN>-<slug> dirs under the legacy `open/`/`closed/`
-        // folders — `--fix` rewrites their frontmatter, so flagging them
-        // is just noise. Don't apply the skip to the flat root: a flat
-        // issue named `7-alpha` is not legacy by location even though
-        // its name matches the legacy shape.
-        let in_legacy_folder = s.folder == "open" || s.folder == "closed";
-        if in_legacy_folder && parser::parse_legacy_dir(&s.dir_name).is_some() {
+        // Skip dirs queued for the NN-rename pipeline — `--fix`
+        // rewrites their frontmatter wholesale, so flagging schema
+        // violations on them is noise that would refuse the very
+        // fix designed to heal them. The typed signal is
+        // `legacy_number.is_some()`, set by `legacy_number_from_mapping`
+        // when frontmatter has neither `number:` nor `slug:` and the
+        // dirname parses as `<NN>-<rest>`. This applies regardless of
+        // folder: pre-migration a numbered-legacy lives under
+        // `issues/{open,closed}/`, but after the flat-layout migration
+        // moves it up, the same dir lives at `issues/<NN>-<rest>/`
+        // pending NN-rename. A user-named flat slug like
+        // `12-things-to-do` carries `slug:` in frontmatter (written
+        // by `issuectl new`) and so does NOT trip this skip.
+        if s.legacy_number.is_some() {
             continue;
         }
         let location = format!(
@@ -1486,6 +1495,28 @@ fn apply(
             // `old_path`s and picks up frontmatter-only legacy issues
             // that just moved into the flat layout.
             let fresh = scan(repo_root)?;
+            // Re-check `critical_blockers` against the fresh scan
+            // before the NN-rename phase. Migration can surface a
+            // critical condition that was hidden by the legacy layout
+            // (e.g. a numbered-legacy `<NN>-<slug>/` whose schema
+            // violations were skipped under `issues/{open,closed}/`
+            // but become visible once the dir lives at the flat root).
+            // NN-rename builds `number_to_slug` against `legacy_dirs`
+            // and rewrites refs + renames dirs based on it; running
+            // that pass over a critically-unhealthy repo can rewrite
+            // refs to the wrong target or have `fs::rename` overwrite
+            // a sibling. Bail cleanly with the partial flat-layout
+            // migration intact: the user resolves the new blocker
+            // and re-runs `--fix`. We do not roll back the moves —
+            // the moves are forward-progress and rolling back N
+            // partial renames is itself a multi-step operation that
+            // can fail mid-rollback. (See AGENTS.md: doctor `--fix`
+            // is forward-progress only.)
+            let post_blockers = critical_blockers(&fresh);
+            if !post_blockers.is_empty() {
+                outcome.blockers = post_blockers;
+                return Ok(outcome);
+            }
             legacy_dirs = fresh.legacy_dirs;
         }
     }
@@ -2970,13 +3001,17 @@ mod tests {
     fn schema_walk_does_not_skip_flat_issue_with_legacy_shape_name() {
         // A user who passes `--slug 12-things-to-do` ends up with a
         // flat-layout issue whose name matches the legacy `<NN>-<slug>`
-        // shape. It must still be checked for schema violations.
+        // shape. `issuectl new` writes a `slug:` field for new issues,
+        // and that `slug:` is the typed signal that suppresses the
+        // numbered-legacy classification — without it, doctor would
+        // queue this dir for the NN-rename pipeline and skip schema
+        // checks. With `slug:` present, schema validation must run.
         let tmp = fresh_repo();
         let dir = tmp.path().join("issues/12-things-to-do");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("item.md"),
-            "---\ntype: bug\nstatus: open\n---\n# T\n",
+            "---\nslug: 12-things-to-do\ntype: bug\nstatus: open\n---\n# T\n",
         )
         .unwrap();
         let r = scan(tmp.path()).unwrap();
@@ -3478,6 +3513,96 @@ mod tests {
         let after = fs::read_to_string(&migrated).unwrap();
         assert!(after.contains("status: open"), "got: {after}");
         assert!(!after.contains("closed:"), "closed should be dropped: {after}");
+    }
+
+    #[test]
+    fn apply_bails_when_post_migration_rescan_finds_new_blocker() {
+        // Two-issue setup that exercises the post-migration safety
+        // boundary:
+        //   1. `issues/open/foo-bar/item.md` — slug-named, body has
+        //      both `## Notes` and `## Comments`. `populate_notes_migration`
+        //      only inspects `folder == "flat"` dirs, so the conflict
+        //      is INVISIBLE pre-migration. After flat-layout migration
+        //      moves it to `issues/foo-bar/`, the fresh scan picks up
+        //      `notes_conflicts` — a critical blocker.
+        //   2. `issues/closed/3-old/item.md` — numbered-legacy
+        //      (frontmatter has no `slug:` / `number:`; dirname carries
+        //      the number). Pre-migration the planner moves it to
+        //      `issues/3-old/`, and the rescan would normally queue it
+        //      for NN-rename.
+        // The post-migration `critical_blockers` re-check must catch
+        // (1) and bail BEFORE NN-rename runs against (2). Without the
+        // re-check, NN-rename would rewrite refs + `fs::rename` the
+        // numbered-legacy dir on top of a repo carrying an unresolved
+        // `## Notes`/`## Comments` ambiguity.
+        let tmp = fresh_repo();
+        let foo = tmp.path().join("issues/open/foo-bar");
+        fs::create_dir_all(&foo).unwrap();
+        fs::write(
+            foo.join("item.md"),
+            "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2026-01-01\n---\n# T\n\n## Notes\n\nfirst\n\n## Comments\n\nsecond\n",
+        )
+        .unwrap();
+        let old = tmp.path().join("issues/closed/3-old");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(
+            old.join("item.md"),
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# Old\n",
+        )
+        .unwrap();
+
+        let mut r = scan(tmp.path()).unwrap();
+        // Pre-migration: no critical blockers. `notes_conflicts` is
+        // empty (foo-bar is at `open/`, scan does not classify
+        // notes-state for legacy folders); 3-old is numbered-legacy
+        // and carries the `legacy_number` skip across all critical
+        // lints.
+        assert!(
+            critical_blockers(&r).is_empty(),
+            "pre-migration scan must not flag any critical blocker, got {:?}",
+            critical_blockers(&r)
+        );
+
+        let actions = DoctorActions::from_findings(&mut r);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+
+        // Flat-layout migration ran and both moves landed.
+        assert_eq!(
+            outcome.flat_layout_migrated.len(),
+            2,
+            "flat-layout migration should have moved two dirs, got {:?}",
+            outcome.flat_layout_migrated
+        );
+        assert!(tmp.path().join("issues/foo-bar/item.md").is_file());
+        assert!(tmp.path().join("issues/3-old/item.md").is_file());
+
+        // Post-migration re-check surfaced the new blocker; NN-rename
+        // was skipped, so the numbered-legacy dir at `issues/3-old/`
+        // was NOT renamed to a fresh canonical slug, and no markdown
+        // refs were rewritten.
+        assert!(
+            !outcome.blockers.is_empty(),
+            "post-migration blockers should be populated, got empty"
+        );
+        assert!(
+            outcome.blockers.iter().any(|b| b.contains("Notes") && b.contains("Comments")),
+            "expected notes/comments conflict blocker, got {:?}",
+            outcome.blockers
+        );
+        assert!(
+            outcome.legacy_dirs_migrated.is_empty(),
+            "NN-rename must not run when post-migration blockers exist, got {:?}",
+            outcome.legacy_dirs_migrated
+        );
+        assert_eq!(outcome.files_rewritten, 0);
+        // The numbered-legacy dir is still at its post-flat-layout
+        // position (no NN-rename), preserving the partial migration.
+        assert!(tmp.path().join("issues/3-old/item.md").is_file());
     }
 
     #[cfg(unix)]
