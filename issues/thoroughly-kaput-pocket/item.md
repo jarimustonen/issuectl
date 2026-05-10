@@ -3,7 +3,7 @@ created: 2026-05-10
 updated: 2026-05-10
 type: bug
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 epic: hugely-exciting-spiders
 labels: [from-3dbear-0.5.1-feedback]

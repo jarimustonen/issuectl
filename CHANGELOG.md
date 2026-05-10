@@ -53,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanly. Regression of the 0.3.1 byte-boundary issue that resurfaced
   when the table renderer was refactored.
   (#marginally-receptive-kettle)
+- Frontmatter writes now force-quote `commits[].hash` values so YAML
+  1.2 implicit typing cannot coerce a short hash like `315194e2`
+  into a float (`31519400.0`). Previously such hashes round-tripped
+  losslessly only by accident of `serde_yaml`'s emission heuristics;
+  the contract is now explicit.
+  (#thoroughly-kaput-pocket)
 
 ## [0.5.1] - 2026-05-10
 

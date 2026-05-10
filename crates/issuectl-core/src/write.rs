@@ -116,7 +116,55 @@ fn split_text(text: &str) -> (Option<&str>, Option<&str>) {
 /// flow style (`key: ["a", "b"]`) for readability.
 fn serialize_frontmatter(map: &Mapping) -> Result<String> {
     let yaml = serde_yaml::to_string(map).context("cannot serialize frontmatter back to YAML")?;
+    let yaml = quote_commit_hashes(&yaml);
     Ok(flowify_string_arrays(&yaml))
+}
+
+/// Force-quote the value of `hash:` lines so YAML 1.2 implicit typing
+/// can never coerce a short git hash like `315194e2` into a float
+/// (would silently round-trip as `31519400.0`). Idempotent — leaves
+/// already-quoted values alone. Targets `hash:` because that is the
+/// only commits-array field where the bug is observed in practice.
+fn quote_commit_hashes(yaml: &str) -> String {
+    let mut out = String::with_capacity(yaml.len());
+    for line in yaml.lines() {
+        if let Some(rewritten) = rewrite_hash_line(line) {
+            out.push_str(&rewritten);
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if !yaml.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn rewrite_hash_line(line: &str) -> Option<String> {
+    let indent_len = line.chars().take_while(|c| *c == ' ').count();
+    let body = &line[indent_len..];
+    let after_dash = body.strip_prefix("- ").map(|r| ("- ", r)).unwrap_or(("", body));
+    let (dash, rest) = after_dash;
+    let after_key = rest.strip_prefix("hash:")?;
+    let value = after_key.trim_start();
+    if value.is_empty() {
+        return None;
+    }
+    // Already single- or double-quoted — leave it.
+    if value.starts_with('\'') || value.starts_with('"') {
+        return None;
+    }
+    // Skip block / flow scalar starters and YAML aliases/anchors.
+    let first = value.chars().next().unwrap();
+    if matches!(first, '|' | '>' | '*' | '&' | '[' | '{' | '!') {
+        return None;
+    }
+    let escaped = value.replace('\'', "''");
+    Some(format!(
+        "{indent}{dash}hash: '{escaped}'",
+        indent = " ".repeat(indent_len),
+    ))
 }
 
 fn flowify_string_arrays(yaml: &str) -> String {
@@ -504,10 +552,61 @@ mod tests {
         let item = read_item(&path).unwrap();
         write_item(&path, &item).unwrap();
         let after = fs::read_to_string(&path).unwrap();
-        assert!(after.contains("hash: abc"));
+        // Hashes are force-quoted on write to defend against YAML
+        // float-coercion of short git hashes like `315194e2`.
+        assert!(after.contains("hash: 'abc'"));
         assert!(after.contains("summary: fix"));
-        assert!(after.contains("hash: def"));
+        assert!(after.contains("hash: 'def'"));
         assert!(after.contains("summary: more"));
+    }
+
+    #[test]
+    fn round_trip_preserves_float_lookalike_hash() {
+        // Regression: short git hashes like "315194e2" parse as
+        // scientific-notation floats in YAML 1.2 implicit typing,
+        // producing 31519400.0 — irreversibly lossy. Always emit
+        // commit hashes quoted so they round-trip as strings.
+        let (_tmp, path) = write_tmp(
+            "---\nstatus: open\ncommits:\n- hash: '315194e2'\n  summary: fix\n---\n\n# T\n",
+        );
+        let item = read_item(&path).unwrap();
+        write_item(&path, &item).unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        // Hash must remain a string; either quoted form is acceptable.
+        let has_quoted = after.contains("hash: '315194e2'") || after.contains("hash: \"315194e2\"");
+        assert!(
+            has_quoted,
+            "expected quoted hash to survive round-trip; got:\n{}",
+            after
+        );
+        // And re-parsing must still see the original string value.
+        let item2 = read_item(&path).unwrap();
+        let commits = item2
+            .frontmatter
+            .get(Value::String("commits".into()))
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+        let first = commits[0].as_mapping().unwrap();
+        assert_eq!(
+            first.get(Value::String("hash".into())).unwrap().as_str(),
+            Some("315194e2")
+        );
+    }
+
+    #[test]
+    fn add_commit_emits_quoted_hash_for_float_lookalike() {
+        // Even if a caller passes an unquoted-looking hash string, the
+        // serialized output must quote it so subsequent reads don't
+        // collapse it into a float.
+        let yaml = "---\nstatus: open\n---\n\n# T\n";
+        let (_tmp, path) = write_tmp(yaml);
+        let mut item = read_item(&path).unwrap();
+        add_commit(&mut item.frontmatter, "315194e2", "fix").unwrap();
+        write_item(&path, &item).unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        let has_quoted = after.contains("hash: '315194e2'") || after.contains("hash: \"315194e2\"");
+        assert!(has_quoted, "got:\n{}", after);
     }
 
     #[test]
