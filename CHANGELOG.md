@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `commits[].hash` quoting is now applied at the AST level (only to
+  the `commits` sequence), not via post-serialization line rewriting.
+  Top-level / nested user `extra` fields named `hash` are no longer
+  silently coerced to strings.
+- `read_item` now goes through the strict shared splitter
+  (`item_text::split`); previously it kept its own naive scanner that
+  could disagree with the parser/doctor and corrupt files on write.
+- `doctor` no longer passes `--no-index` to `git check-ignore`, so
+  tracked files matching a `.gitignore` pattern are not falsely
+  flagged as "agents on other machines won't see it".
+- `item_text::split` strips a leading UTF-8 BOM so editor-prepended
+  `\u{feff}` no longer breaks frontmatter detection.
+- `agents init` schema-source detection is now a typed `SchemaSource`
+  enum tested directly; the previous string-compare branched
+  silently on unknown variants.
+- `truncate` returns the empty string for `max_len = 0` instead of
+  `"…"`; documented that the helper counts scalar values, not
+  terminal-display columns.
+
 ### Added
 - `issuectl agents init` now logs which schema source it used —
   `Using project schema at issues/.schema.yaml.` or `Using built-in
