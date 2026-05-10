@@ -337,17 +337,50 @@ Show the created issue/epic path and a brief summary.
 ### Action: View visually (kanban board)
 
 If the user wants to **see** issues — "show me the board", "open the
-kanban", "let me browse them visually" — start the read-only web board
-and hand them the URL:
+kanban", "let me browse them visually" — start the web board and hand
+them the URL:
 
 ```
 issuectl serve
 # then open http://127.0.0.1:7878
 ```
 
-The board is read-only; keep using the CLI for any create / update /
-close action. For details (port/host flags, security model, routes),
-run `issuectl docs kanban`.
+The board supports drag-and-drop on loopback: dropping a card into a
+status column writes the new `status` via the same `mutate.rs` path
+the CLI uses, under flock + `expected_version`. The body editor in
+the detail dialog (`PUT /body`) is also available.
+
+### Action: Triage by something other than status (custom boards)
+
+When the user wants to bucket issues by **a non-status axis** — "let me
+triage by target release / epic / priority / a custom field" — write
+a custom-board YAML at `.issuectl/boards/<name>.yaml`:
+
+```yaml
+name: triage
+group_by: epic                       # built-in scalar OR custom scalar
+columns:
+  - {value: "", label: Unscoped}
+  - {value: hugely-exciting-spiders, label: "v0.6 candidates"}
+  - {value: exorbitantly-ill-apples, label: "v0.5.0"}
+filter: "status:open"                # optional; query-engine syntax
+filters: [search, type]              # optional; client filter-bar fields
+```
+
+Then the board lives at `/board/<name>`. Drag updates the `group_by`
+field via the same PATCH path; built-in fields use dedicated slots,
+custom fields route through `custom_fields`. The empty-bucket value
+clears the field.
+
+Strict validation (per `AGENTS-AI-FIRST-CLI.md`): the loader rejects
+unparseable `filter:`, list-typed group_by (`labels`, `related`),
+empty bucket on required built-ins (`priority`, `type`, `status`),
+column values outside schema enums, and whitespace in field values.
+A 422 response from `/api/boards/<name>` means "fix the YAML"; a 404
+on `/board/<name>` means "URL typo or YAML missing".
+
+For details (port/host flags, security model, routes, full custom
+board reference), run `issuectl docs kanban`.
 
 ### Action: Render an agent context bundle
 

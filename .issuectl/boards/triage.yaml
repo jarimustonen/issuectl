@@ -1,0 +1,11 @@
+name: triage
+group_by: epic
+columns:
+  - value: ""
+    label: Unscoped
+  - value: hugely-exciting-spiders
+    label: v0.6 candidates
+  - value: exorbitantly-ill-apples
+    label: v0.5.0
+filter: status:open
+filters: [search, type]
