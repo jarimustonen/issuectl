@@ -127,6 +127,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#thoroughly-kaput-pocket)
 
 ### Internals
+- Documented the watcher stale-snapshot race in
+  `parse_slug_state` (concurrent PATCH bursts can publish V1 after
+  V2 at a higher seq, producing a transient UI flip-back). Decision
+  is to monitor rather than fix preemptively — the window is narrow
+  and local-loopback single-user usage rarely tickles it. Mitigations
+  (hub-level version dedup, client-side recent-version cache,
+  read-flock around parse) are catalogued in the doc comment.
+  (#incredibly-real-hour)
 - Canonical version tokens now carry a scheme marker:
   `sha256:v1:<64hex>` instead of `sha256:<64hex>`. Old tokens
   presented to a new binary mismatch as before; the marker exists so

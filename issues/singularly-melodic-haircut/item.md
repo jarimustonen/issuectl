@@ -3,11 +3,13 @@ created: 2026-05-09
 updated: 2026-05-10
 type: improvement
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: hugely-exciting-spiders
 related: ['@especially-unruly-crate']
 labels: [web-edit-sync, canonical-hash]
+commit: c699137
+closed: 2026-05-10
 ---
 
 # Add version-token scheme marker to canonical_hash

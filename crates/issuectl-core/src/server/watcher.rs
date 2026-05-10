@@ -433,6 +433,21 @@ const MAX_ITEM_MD_BYTES: u64 = 16 * 1024 * 1024;
 /// visible with a warning badge but is not treated as healthy until the
 /// user runs `issuectl doctor --fix` (or any write triggers in-line
 /// migration under the flock).
+///
+/// ## Known race: stale snapshot after concurrent PATCH
+/// (`@incredibly-real-hour`)
+///
+/// This function does *not* take the repo's write flock, so a parse
+/// scheduled after PATCH 1 but pre-empted by PATCH 2 can read the V1
+/// bytes after PATCH 2 already published V2 — emitting V1 at a
+/// later seq than V2 (transient UI flip-back, recovers on next
+/// trigger). Mitigations considered: per-slug version dedup at the
+/// hub (cheap, fixes the symptom), client-side recent-version cache
+/// (cheap, no server change), shared flock for parse (heavy —
+/// serialises watcher reads against PATCH bursts). Decision: do not
+/// fix preemptively; window is narrow (two PATCHes < ~150 ms apart)
+/// and local-loopback single-user usage rarely tickles it. Reopen
+/// `@incredibly-real-hour` if it surfaces in real use.
 fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
     if !slug::is_valid(slug) {
         return ParseOutcome::Vanished;
