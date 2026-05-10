@@ -166,6 +166,15 @@ Example flows:
 - `issuectl --json update extremely-quiet-otter --add-commit "abc123:fix login state"`
 - `issuectl --json update extremely-quiet-otter --add-label backend --add-label api`
 
+Prefer commit trailers over manual `--add-commit`. Add
+`Refs-Issue: @<slug>` (or `Fixes-Issue: @<slug>` to also signal
+"close when verified") as the last paragraph of the commit
+message, then run `issuectl sync-commits` to walk
+`<merge-base..HEAD>` and append matching commits to each issue's
+`commits[]`. Idempotent — safe to re-run. `--dry-run` previews
+the plan; `--no-branch-fallback` disables the implicit
+"branch named after a slug" attribution.
+
 Output shape:
 
 ```json

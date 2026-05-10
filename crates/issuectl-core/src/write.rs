@@ -265,6 +265,20 @@ pub fn add_commit(map: &mut Mapping, hash: &str, summary: &str) -> Result<()> {
         Value::Sequence(s) => s,
         _ => bail!("frontmatter field commits is not a list"),
     };
+    // Idempotent: skip if a commit with the same hash (or a
+    // prefix-compatible abbreviation in either direction) already
+    // exists. Lets `sync-commits` re-run safely, and lets a manual
+    // `--add-commit <full-hash>` after a trailer-driven sync that used
+    // `%h` not double-add.
+    if seq.iter().any(|v| {
+        v.as_mapping()
+            .and_then(|m| m.get(Value::String("hash".into())))
+            .and_then(|h| h.as_str())
+            .map(|existing| hashes_match(existing, hash))
+            .unwrap_or(false)
+    }) {
+        return Ok(());
+    }
     let mut commit = Mapping::new();
     commit.insert(
         Value::String("hash".into()),
@@ -276,6 +290,19 @@ pub fn add_commit(map: &mut Mapping, hash: &str, summary: &str) -> Result<()> {
     );
     seq.push(Value::Mapping(commit));
     Ok(())
+}
+
+/// Two commit-hash strings are treated as the same commit when one is
+/// a prefix of the other (and both are pure hex). Lets idempotency
+/// survive different `core.abbrev` settings between runs.
+pub fn hashes_match(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if !a.chars().all(|c| c.is_ascii_hexdigit()) || !b.chars().all(|c| c.is_ascii_hexdigit()) {
+        return a == b;
+    }
+    a.starts_with(b) || b.starts_with(a)
 }
 
 // ── New-issue rendering ─────────────────────────────────────────────────────

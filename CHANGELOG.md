@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `issuectl sync-commits` walks `git log <range>` (default
+  `<merge-base of HEAD and main/master>..HEAD`) and appends commits
+  to each issue's `commits[]` based on `Refs-Issue:` / `Fixes-Issue:`
+  trailers in the message body. Idempotent — `write::add_commit` now
+  skips entries whose hash (or hex-prefix-equivalent abbreviation)
+  is already present, so re-running the same range is a no-op.
+  `--dry-run` previews the plan; `--no-branch-fallback` disables the
+  implicit "branch named after a known slug → attribute commits to
+  that slug" attribution. `Fixes-Issue:` triggers a stderr `Hint:`
+  suggesting `issuectl close <slug>` rather than auto-transitioning.
+  The opt-in pre-commit hook also prints a non-blocking reminder
+  when the current branch resolves to a known slug, nudging the
+  user toward `Refs-Issue:` trailers. (#strikingly-absorbing-cows)
 - `issuectl agents init` now logs which schema source it used —
   `Using project schema at issues/.schema.yaml.` or `Using built-in
   default schema (issues/.schema.yaml not found).` — so the silent

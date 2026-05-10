@@ -20,15 +20,22 @@ terminal users only. All examples below already include `--json`.
 when a command fails — the error message names the offending value and
 the valid alternatives.
 
-## Install `issuectl` if needed
+## Install or upgrade `issuectl`
 
-Assume `issuectl` but if it is not (the repo uses it but the user hasn't
-installed it yet), suggest one of:
+This skill was installed for `issuectl 0.5.1`. On the
+first invocation in a session, run `issuectl --version` and compare:
 
-- **Homebrew** (macOS/Linux): `brew install jarimustonen/issuectl/issuectl`
-- **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
-- **Shell installer** (no toolchain):
-  `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
+- **Missing**: install one of:
+  - **Homebrew** (macOS/Linux): `brew install jarimustonen/issuectl/issuectl`
+  - **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
+  - **Shell installer** (no toolchain):
+    `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
+- **Older than `0.5.1`**: tell the user the skill expects
+  `0.5.1` and suggest upgrading via the same channel
+  they originally used (`brew upgrade jarimustonen/issuectl/issuectl`,
+  `cargo install issuectl --force`, or re-run the shell installer).
+  Stop and wait — schema/CLI surface may have changed.
+- **Equal or newer**: proceed normally.
 
 ## Identifiers
 
@@ -154,6 +161,15 @@ Example flows:
 - `issuectl --json update extremely-quiet-otter --assignee alice --status testing`
 - `issuectl --json update extremely-quiet-otter --add-commit "abc123:fix login state"`
 - `issuectl --json update extremely-quiet-otter --add-label backend --add-label api`
+
+Prefer commit trailers over manual `--add-commit`. Add
+`Refs-Issue: @<slug>` (or `Fixes-Issue: @<slug>` to also signal
+"close when verified") as the last paragraph of the commit
+message, then run `issuectl sync-commits` to walk
+`<merge-base..HEAD>` and append matching commits to each issue's
+`commits[]`. Idempotent — safe to re-run. `--dry-run` previews
+the plan; `--no-branch-fallback` disables the implicit
+"branch named after a slug" attribution.
 
 Output shape:
 
@@ -389,6 +405,19 @@ rewrites `number:` → `slug:` in frontmatter, migrates `epic:` and
 `related:` references, and rewrites `#NN` body refs to `@<slug>`. It
 also flags invalid slugs, duplicates, missing item.md files, and orphan
 epic refs.
+
+On `--fix`, the JSON envelope carries an `apply_outcome` object with a
+`stop_phase` discriminator that you should branch on:
+
+- `"ok"` — apply ran to completion; `blockers == []`.
+- `"preflight"` — doctor refused to mutate the repo because of a
+  critical finding. `fix_applied: false`, `blockers` lists the reasons.
+  Resolve them and re-run.
+- `"post_apply"` — `--fix` is forward-progress only: some phases
+  already wrote to disk before a later safety re-check surfaced a new
+  blocker. `fix_applied: true` AND `blockers != []` is the documented
+  combination here. Resolve the blockers and re-run `--fix`; do NOT
+  attempt to roll back the partial progress.
 
 ## Notes
 

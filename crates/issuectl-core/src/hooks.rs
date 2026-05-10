@@ -21,6 +21,38 @@ const HOOK_BODY: &str = r#"set -eu
 # otherwise smuggle broken content past the hook. Skip with
 # `--no-verify` or `ISSUECTL_SKIP_DOCTOR=1`.
 
+# Non-blocking reminder when the current branch name resolves to a
+# known issue slug — direct or `<prefix>-<slug>` / `<prefix>/<slug>`
+# shape. Encourages adding `Refs-Issue: @<slug>` trailers so
+# `issuectl sync-commits` can attribute the commit. Always advisory;
+# never fails the commit.
+branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+if [ -n "$branch" ]; then
+    candidate=""
+    if [ -f "issues/$branch/item.md" ]; then
+        candidate="$branch"
+    else
+        # Try `<prefix>/<tail>` and `<prefix>-<tail>` shapes.
+        tail_slash="${branch##*/}"
+        if [ "$tail_slash" != "$branch" ] && [ -f "issues/$tail_slash/item.md" ]; then
+            candidate="$tail_slash"
+        else
+            rest="$branch"
+            while case "$rest" in *-*) true;; *) false;; esac; do
+                rest="${rest#*-}"
+                if [ -f "issues/$rest/item.md" ]; then
+                    candidate="$rest"
+                    break
+                fi
+            done
+        fi
+    fi
+    if [ -n "$candidate" ]; then
+        printf 'issuectl: branch matches @%s; consider adding `Refs-Issue: @%s` to your commit message (or run `issuectl sync-commits`).\n' \
+            "$candidate" "$candidate" >&2
+    fi
+fi
+
 if [ "${ISSUECTL_SKIP_DOCTOR:-}" = "1" ]; then
     exit 0
 fi

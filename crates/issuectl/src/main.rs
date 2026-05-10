@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::{
     agents, body_sections, canonical, context, docs, doctor, fmt, hooks, merge_driver, models,
-    mutate, query, repo, server, skill, slug,
+    mutate, query, repo, server, skill, slug, sync_commits,
 };
 
 const TOP_LEVEL_HELP: &str = "\
@@ -510,6 +510,29 @@ enum Command {
         action: HooksAction,
     },
 
+    /// Walk git history and append commits to issue `commits[]`
+    /// arrays based on `Refs-Issue:` / `Fixes-Issue:` trailers
+    /// (with branch-name fallback). Idempotent.
+    SyncCommits {
+        /// Range expression passed to `git log` (e.g. `main..HEAD`,
+        /// `<sha>..`). Defaults to `<merge-base of HEAD and
+        /// main/master>..HEAD`; falls back to `HEAD` when no
+        /// merge-base is found.
+        #[arg(long)]
+        range: Option<String>,
+
+        /// Disable branch-name fallback. By default, commits with
+        /// no trailer on a branch named after a known slug (or
+        /// `<prefix>/<slug>` / `<prefix>-<slug>`) are attributed
+        /// to that slug.
+        #[arg(long = "no-branch-fallback")]
+        no_branch_fallback: bool,
+
+        /// Print the planned mutations without writing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+
     /// Manage `.issuectl/AGENTS.md` — durable, repo-local policy file
     /// that AI agents read by convention. Distinct from
     /// `issuectl prompt` (per-issue prompt rendering): this is policy,
@@ -904,6 +927,11 @@ fn main() -> Result<()> {
         Command::Hooks { action } => match action {
             HooksAction::Install { uninstall, force } => hooks::run(&find_root(), uninstall, force),
         },
+        Command::SyncCommits {
+            range,
+            no_branch_fallback,
+            dry_run,
+        } => cmd_sync_commits(json_output, range, no_branch_fallback, dry_run),
         Command::Agents { action } => match action {
             AgentsAction::Init { force } => agents::run_init(&find_root(), force, json_output),
         },
@@ -1542,6 +1570,107 @@ pub(crate) fn do_close(
 /// legacy compat reads.
 pub fn locate_issue(root: &Path, slug: &str) -> Result<(String, PathBuf)> {
     repo::locate_issue(root, slug)
+}
+
+fn cmd_sync_commits(
+    json: bool,
+    range: Option<String>,
+    no_branch_fallback: bool,
+    dry_run: bool,
+) -> Result<()> {
+    let root = find_root();
+    let report = sync_commits::run(
+        &root,
+        sync_commits::SyncOptions {
+            range,
+            no_branch_fallback,
+            dry_run,
+        },
+    )?;
+
+    if json {
+        let planned: Vec<_> = report
+            .planned
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "slug": p.slug,
+                    "hash": p.hash,
+                    "summary": p.summary,
+                    "kind": match p.kind {
+                        sync_commits::AttributionKind::Refs => "refs",
+                        sync_commits::AttributionKind::Fixes => "fixes",
+                        sync_commits::AttributionKind::Branch => "branch",
+                    },
+                    "already_present": p.already_present,
+                })
+            })
+            .collect();
+        let applied: serde_json::Map<_, _> = report
+            .applied
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::from(*v)))
+            .collect();
+        let envelope = serde_json::json!({
+            "range": report.range,
+            "branch_slug": report.branch,
+            "planned": planned,
+            "applied": serde_json::Value::Object(applied),
+            "fixes_hints": report.fixes_hints.iter().collect::<Vec<_>>(),
+            "unknown_slugs": report.unknown_slugs.iter().collect::<Vec<_>>(),
+            "dry_run": report.dry_run,
+        });
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else {
+        println!("Range: {}", report.range);
+        if let Some(b) = &report.branch {
+            println!("Branch fallback slug: @{b}");
+        }
+        if report.planned.is_empty() {
+            println!("No commits with Refs-Issue / Fixes-Issue trailers in range.");
+        } else {
+            for p in &report.planned {
+                let tag = match p.kind {
+                    sync_commits::AttributionKind::Refs => "refs",
+                    sync_commits::AttributionKind::Fixes => "fixes",
+                    sync_commits::AttributionKind::Branch => "branch",
+                };
+                let suffix = if p.already_present {
+                    " (already present)"
+                } else if dry_run {
+                    " (would add)"
+                } else {
+                    ""
+                };
+                println!(
+                    "  @{slug:<32} {hash} {summary} [{tag}]{suffix}",
+                    slug = p.slug,
+                    hash = p.hash,
+                    summary = p.summary,
+                );
+            }
+        }
+        if !report.applied.is_empty() {
+            let total: usize = report.applied.values().sum();
+            println!(
+                "Added {total} commit(s) across {n} issue(s).",
+                n = report.applied.len()
+            );
+        } else if !dry_run && !report.planned.is_empty() {
+            println!("No new commits to add (all already present).");
+        }
+        for slug in &report.fixes_hints {
+            eprintln!(
+                "Hint: @{slug} has Fixes-Issue trailer — consider `issuectl close {slug}`",
+            );
+        }
+        for slug in &report.unknown_slugs {
+            eprintln!(
+                "Warning: trailer references unknown slug @{slug} (no issue with that slug)",
+            );
+        }
+    }
+    Ok(())
 }
 
 fn parse_commit_spec(spec: &str) -> Result<(String, String)> {

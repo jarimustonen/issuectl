@@ -22,7 +22,7 @@ the valid alternatives.
 
 ## Install or upgrade `issuectl`
 
-This prompt was installed for `issuectl {{ISSUECTL_VERSION}}`. On the
+This skill was installed for `issuectl {{ISSUECTL_VERSION}}`. On the
 first invocation in a session, run `issuectl --version` and compare:
 
 - **Missing**: install one of:
@@ -30,7 +30,7 @@ first invocation in a session, run `issuectl --version` and compare:
   - **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
   - **Shell installer** (no toolchain):
     `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
-- **Older than `{{ISSUECTL_VERSION}}`**: tell the user the prompt expects
+- **Older than `{{ISSUECTL_VERSION}}`**: tell the user the skill expects
   `{{ISSUECTL_VERSION}}` and suggest upgrading via the same channel
   they originally used (`brew upgrade jarimustonen/issuectl/issuectl`,
   `cargo install issuectl --force`, or re-run the shell installer).
@@ -161,6 +161,15 @@ Example flows:
 - `issuectl --json update extremely-quiet-otter --assignee alice --status testing`
 - `issuectl --json update extremely-quiet-otter --add-commit "abc123:fix login state"`
 - `issuectl --json update extremely-quiet-otter --add-label backend --add-label api`
+
+Prefer commit trailers over manual `--add-commit`. Add
+`Refs-Issue: @<slug>` (or `Fixes-Issue: @<slug>` to also signal
+"close when verified") as the last paragraph of the commit
+message, then run `issuectl sync-commits` to walk
+`<merge-base..HEAD>` and append matching commits to each issue's
+`commits[]`. Idempotent — safe to re-run. `--dry-run` previews
+the plan; `--no-branch-fallback` disables the implicit
+"branch named after a slug" attribution.
 
 Output shape:
 

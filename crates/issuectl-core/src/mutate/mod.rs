@@ -175,7 +175,10 @@ pub const RESERVED_CUSTOM_FIELD_KEYS: &[(&str, &str)] = &[
         "closed",
         "set automatically when status moves to a closing value",
     ),
-    ("commits", "use `update --add-commit` after creation"),
+    (
+        "commits",
+        "use `update --add-commit` (or commit trailers + `sync-commits`) after creation",
+    ),
 ];
 
 /// Returns the user-facing hint for a reserved key, or `None` if the

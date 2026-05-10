@@ -35,6 +35,8 @@ pub mod doctor;
 #[doc(hidden)]
 pub mod fmt;
 #[doc(hidden)]
+pub mod git_trailers;
+#[doc(hidden)]
 pub mod hooks;
 #[doc(hidden)]
 pub mod issue_fields;
@@ -66,6 +68,8 @@ pub mod server;
 pub mod skill;
 #[doc(hidden)]
 pub mod slug;
+#[doc(hidden)]
+pub mod sync_commits;
 #[doc(hidden)]
 pub mod transitions;
 #[doc(hidden)]
