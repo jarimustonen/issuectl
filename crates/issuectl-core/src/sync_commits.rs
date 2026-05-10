@@ -55,6 +55,11 @@ pub struct SyncReport {
     pub range: String,
     /// Branch name used for branch-name fallback, if any.
     pub branch: Option<String>,
+    /// Issue-load warnings surfaced from `repo::load_issue_summaries`
+    /// (malformed frontmatter, ambiguous layout, etc.). Bubbled up so
+    /// callers can warn — silently dropping them lets sync run
+    /// against a partial picture of the repo.
+    pub load_warnings: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -83,9 +88,10 @@ pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
 
     let commits = git_trailers::parse_log(repo_root, &range)?;
 
-    let (summaries, _warnings) = repo::load_issue_summaries(repo_root);
+    let (summaries, warnings) = repo::load_issue_summaries(repo_root);
     let known_slugs: BTreeSet<String> =
         summaries.iter().map(|s| s.slug.clone()).collect();
+    let load_warnings: Vec<String> = warnings.into_iter().map(|w| w.message).collect();
     let mut commit_index: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for s in &summaries {
         let m = commit_index.entry(s.slug.clone()).or_default();
@@ -110,9 +116,18 @@ pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
     let mut unknown_slugs: BTreeSet<String> = BTreeSet::new();
 
     for c in &commits {
-        let mut attributed = false;
+        // "Attributed" only counts trailer slugs that actually
+        // resolve to a known issue. A trailer pointing at an
+        // unknown slug (typo, deleted issue) shouldn't suppress the
+        // branch-name fallback — otherwise the commit silently
+        // drops onto the floor when the user clearly intended to
+        // attribute it.
+        let mut attributed_to_known = false;
         for slug in &c.refs_issue {
-            attributed = true;
+            let known = known_slugs.contains(slug);
+            if known {
+                attributed_to_known = true;
+            }
             push_planned(
                 &mut planned,
                 &known_slugs,
@@ -124,8 +139,9 @@ pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
             );
         }
         for slug in &c.fixes_issue {
-            attributed = true;
-            if known_slugs.contains(slug) {
+            let known = known_slugs.contains(slug);
+            if known {
+                attributed_to_known = true;
                 fixes_hints.insert(slug.clone());
             }
             push_planned(
@@ -138,7 +154,7 @@ pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
                 AttributionKind::Fixes,
             );
         }
-        if !attributed {
+        if !attributed_to_known {
             if let Some(slug) = &branch_slug {
                 push_planned(
                     &mut planned,
@@ -161,6 +177,7 @@ pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
         dry_run: opts.dry_run,
         range,
         branch: branch_slug,
+        load_warnings,
     };
 
     if opts.dry_run {

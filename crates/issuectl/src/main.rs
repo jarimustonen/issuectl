@@ -1618,6 +1618,7 @@ fn cmd_sync_commits(
             "applied": serde_json::Value::Object(applied),
             "fixes_hints": report.fixes_hints.iter().collect::<Vec<_>>(),
             "unknown_slugs": report.unknown_slugs.iter().collect::<Vec<_>>(),
+            "load_warnings": report.load_warnings,
             "dry_run": report.dry_run,
         });
         println!("{}", serde_json::to_string_pretty(&envelope)?);
@@ -1668,6 +1669,9 @@ fn cmd_sync_commits(
             eprintln!(
                 "Warning: trailer references unknown slug @{slug} (no issue with that slug)",
             );
+        }
+        for w in &report.load_warnings {
+            eprintln!("Warning: {w}");
         }
     }
     Ok(())

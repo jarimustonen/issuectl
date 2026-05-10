@@ -292,18 +292,34 @@ pub fn add_commit(map: &mut Mapping, hash: &str, summary: &str) -> Result<()> {
     Ok(())
 }
 
-/// Two commit-hash strings are treated as the same commit when one is
-/// a prefix of the other (and both are pure hex). Lets idempotency
-/// survive different `core.abbrev` settings between runs.
+/// Two commit-hash strings are treated as the same commit when one
+/// is a hex prefix of the other AND the shorter side has at least
+/// `MIN_HEX_PREFIX_FOR_MATCH` characters. The new sync path always
+/// writes full 40-char SHAs; the prefix relaxation exists to dedupe
+/// against legacy `commits[]` entries that were added via manual
+/// `--add-commit <short-hash>` — without a minimum length, a stored
+/// `abc` would falsely match every new hash starting with `abc`.
 pub fn hashes_match(a: &str, b: &str) -> bool {
     if a.is_empty() || b.is_empty() {
         return false;
     }
+    if a == b {
+        return true;
+    }
     if !a.chars().all(|c| c.is_ascii_hexdigit()) || !b.chars().all(|c| c.is_ascii_hexdigit()) {
-        return a == b;
+        return false;
+    }
+    let shorter = a.len().min(b.len());
+    if shorter < MIN_HEX_PREFIX_FOR_MATCH {
+        return false;
     }
     a.starts_with(b) || b.starts_with(a)
 }
+
+/// Minimum hex-prefix length before two unequal hashes can be
+/// treated as the same commit. Git itself refuses ambiguous
+/// abbreviations and defaults to 7 characters; we use the same.
+const MIN_HEX_PREFIX_FOR_MATCH: usize = 7;
 
 // ── New-issue rendering ─────────────────────────────────────────────────────
 

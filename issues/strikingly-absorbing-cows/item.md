@@ -11,6 +11,8 @@ labels: [automation, git-native]
 commits:
 - hash: d59c1e7
   summary: 'feat(sync-commits): trailer-driven commit linking'
+- hash: d4fa6cbc101453558f0049430674663ae7eb545d
+  summary: 'chore(issues): record trailer-feature commit via sync-commits'
 ---
 
 # Git-native commit linking: trailers (Refs-Issue / Fixes-Issue) + sync-commits + branch-name detection

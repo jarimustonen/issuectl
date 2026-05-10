@@ -26,30 +26,45 @@ const HOOK_BODY: &str = r#"set -eu
 # shape. Encourages adding `Refs-Issue: @<slug>` trailers so
 # `issuectl sync-commits` can attribute the commit. Always advisory;
 # never fails the commit.
-branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-if [ -n "$branch" ]; then
-    candidate=""
-    if [ -f "issues/$branch/item.md" ]; then
-        candidate="$branch"
-    else
-        # Try `<prefix>/<tail>` and `<prefix>-<tail>` shapes.
-        tail_slash="${branch##*/}"
-        if [ "$tail_slash" != "$branch" ] && [ -f "issues/$tail_slash/item.md" ]; then
-            candidate="$tail_slash"
+#
+# Skipped during in-progress rebase / cherry-pick / merge so the
+# reminder doesn't spam the user once per replayed commit during an
+# interactive rebase.
+git_dir=$(git rev-parse --git-dir 2>/dev/null || echo .git)
+if [ ! -d "$git_dir/rebase-merge" ] && [ ! -d "$git_dir/rebase-apply" ] \
+   && [ ! -f "$git_dir/CHERRY_PICK_HEAD" ] && [ ! -f "$git_dir/MERGE_HEAD" ]; then
+    branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if [ -n "$branch" ]; then
+        candidate=""
+        if [ -f "issues/$branch/item.md" ]; then
+            candidate="$branch"
         else
-            rest="$branch"
-            while case "$rest" in *-*) true;; *) false;; esac; do
-                rest="${rest#*-}"
-                if [ -f "issues/$rest/item.md" ]; then
-                    candidate="$rest"
-                    break
-                fi
-            done
+            # Always reduce to the last path segment first so a
+            # branch like `dir-name/feat-foo-bar-baz` peels off the
+            # `dir-name/feat-` prefix to reach `foo-bar-baz`.
+            base="${branch##*/}"
+            if [ "$base" != "$branch" ] && [ -f "issues/$base/item.md" ]; then
+                candidate="$base"
+            else
+                rest="$base"
+                while case "$rest" in *-*) true;; *) false;; esac; do
+                    rest="${rest#*-}"
+                    # `${rest#*-}` on `-foo` yields `foo`, but on a
+                    # branch named `-` yields the empty string —
+                    # without this guard, `[ -f "issues//item.md" ]`
+                    # would match `issues/item.md` if it existed.
+                    [ -n "$rest" ] || break
+                    if [ -f "issues/$rest/item.md" ]; then
+                        candidate="$rest"
+                        break
+                    fi
+                done
+            fi
         fi
-    fi
-    if [ -n "$candidate" ]; then
-        printf 'issuectl: branch matches @%s; consider adding `Refs-Issue: @%s` to your commit message (or run `issuectl sync-commits`).\n' \
-            "$candidate" "$candidate" >&2
+        if [ -n "$candidate" ]; then
+            printf 'issuectl: branch matches @%s; consider adding `Refs-Issue: @%s` to your commit message (or run `issuectl sync-commits`).\n' \
+                "$candidate" "$candidate" >&2
+        fi
     fi
 fi
 
