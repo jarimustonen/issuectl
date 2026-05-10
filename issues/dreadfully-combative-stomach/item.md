@@ -2,10 +2,11 @@
 created: 2026-05-10
 updated: 2026-05-10
 type: improvement
-status: open
+status: wontfix
 priority: normal
 epic: exorbitantly-ill-apples
 related: ['@amazingly-ready-pancake']
+closed: 2026-05-10
 ---
 
 # Doctor: outcome.notes_renamed reports pre-NN-rename dir name instead of canonical slug

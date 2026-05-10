@@ -2,10 +2,11 @@
 created: 2026-05-10
 updated: 2026-05-10
 type: chore
-status: open
+status: wontfix
 priority: normal
 epic: exorbitantly-ill-apples
 related: ['@amazingly-ready-pancake', '@dreadfully-combative-stomach']
+closed: 2026-05-10
 ---
 
 # Doctor: walk all folders in populate_notes_migration so notes-rename can run once before flat-layout migration
