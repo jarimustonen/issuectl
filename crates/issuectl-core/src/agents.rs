@@ -473,11 +473,7 @@ pub fn run_init(root: &Path, force: bool, json: bool) -> Result<()> {
     }
 
     let schema_path = schema::schema_path(root);
-    let schema_source = if schema_path.is_file() {
-        "project"
-    } else {
-        "default"
-    };
+    let schema_source = detect_schema_source(root);
     let schema = schema::load(root)?;
     let rules = transitions::load(root)?;
     let content = render_full(&schema, &rules);
@@ -491,15 +487,17 @@ pub fn run_init(root: &Path, force: bool, json: bool) -> Result<()> {
                 "path": rel(root, &path),
                 "wrote": true,
                 "overwrote_existing": existed,
-                "schema_source": schema_source,
+                "schema_source": schema_source.as_str(),
             }))?
         );
     } else {
         let verb = if existed { "Overwrote" } else { "Wrote" };
         println!("{} {}", verb, rel(root, &path));
         match schema_source {
-            "project" => eprintln!("Using project schema at {}.", rel(root, &schema_path)),
-            _ => eprintln!(
+            SchemaSource::Project => {
+                eprintln!("Using project schema at {}.", rel(root, &schema_path))
+            }
+            SchemaSource::Default => eprintln!(
                 "Using built-in default schema ({} not found).",
                 rel(root, &schema_path)
             ),
@@ -513,6 +511,34 @@ fn rel(root: &Path, p: &Path) -> String {
         .unwrap_or(p)
         .to_string_lossy()
         .into_owned()
+}
+
+/// Whether `agents init` rendered the managed block from a project's
+/// own `issues/.schema.yaml` or fell back to the built-in default
+/// schema. Surfaced both in `--json` (as `"project"` / `"default"`)
+/// and as a stderr log line in text mode so the silent-fallback path
+/// is no longer invisible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaSource {
+    Project,
+    Default,
+}
+
+impl SchemaSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            SchemaSource::Project => "project",
+            SchemaSource::Default => "default",
+        }
+    }
+}
+
+fn detect_schema_source(root: &Path) -> SchemaSource {
+    if schema::schema_path(root).is_file() {
+        SchemaSource::Project
+    } else {
+        SchemaSource::Default
+    }
 }
 
 #[cfg(test)]
@@ -581,28 +607,25 @@ mod tests {
     }
 
     #[test]
-    fn run_init_uses_default_schema_when_file_absent() {
+    fn detect_schema_source_returns_default_when_file_absent() {
         // Regression for #eminently-dramatic-anger: silently using
-        // built-in defaults made the failure mode invisible. We at
-        // least surface the source — verify the helper computes
-        // the right label by branching on `schema_path` existence.
+        // built-in defaults made the failure mode invisible. The
+        // detection helper is the source of truth for both the JSON
+        // envelope and the text log.
         let tmp = fresh();
-        let p = schema::schema_path(tmp.path());
-        assert!(!p.exists(), "precondition: schema absent");
-        run_init(tmp.path(), false, false).unwrap();
-        // The agents file was written; the absence of issues/.schema.yaml
-        // means the run_init log path branched to "default".
-        assert!(tmp.path().join(AGENTS_RELATIVE_PATH).is_file());
+        assert!(!schema::schema_path(tmp.path()).exists());
+        assert_eq!(detect_schema_source(tmp.path()), SchemaSource::Default);
+        assert_eq!(SchemaSource::Default.as_str(), "default");
     }
 
     #[test]
-    fn run_init_uses_project_schema_when_file_present() {
+    fn detect_schema_source_returns_project_when_file_present() {
         let tmp = fresh();
         let p = schema::schema_path(tmp.path());
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(&p, "fields: {}\n").unwrap();
-        run_init(tmp.path(), false, false).unwrap();
-        assert!(tmp.path().join(AGENTS_RELATIVE_PATH).is_file());
+        assert_eq!(detect_schema_source(tmp.path()), SchemaSource::Project);
+        assert_eq!(SchemaSource::Project.as_str(), "project");
     }
 
     #[test]
