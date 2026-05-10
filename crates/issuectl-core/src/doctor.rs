@@ -504,6 +504,39 @@ impl ApplyOutcome {
             || self.agents_md_regenerated
             || self.schema_bootstrapped
     }
+
+    /// Set `blockers` and `stop_phase` together. Forces callers to
+    /// supply the phase at the assignment site, preventing a future
+    /// `outcome.blockers = ...; return Ok(outcome);` site from silently
+    /// emitting `stop_phase: "ok"` because the field defaults to it.
+    /// Debug-asserts the documented invariants:
+    ///   - phase ∈ {Preflight, PostApply}
+    ///   - blockers != []
+    ///   - Preflight ⇒ no prior writes
+    ///   - PostApply  ⇒ at least one prior write
+    fn stop_with_blockers(&mut self, phase: StopPhase, blockers: Vec<String>) {
+        debug_assert!(
+            matches!(phase, StopPhase::Preflight | StopPhase::PostApply),
+            "stop_with_blockers requires Preflight or PostApply, got {phase:?}"
+        );
+        debug_assert!(
+            !blockers.is_empty(),
+            "stop_with_blockers requires at least one blocker"
+        );
+        match phase {
+            StopPhase::Preflight => debug_assert!(
+                !self.fix_applied(),
+                "Preflight stop must precede any writes"
+            ),
+            StopPhase::PostApply => debug_assert!(
+                self.fix_applied(),
+                "PostApply stop must follow at least one write"
+            ),
+            StopPhase::Ok => unreachable!(),
+        }
+        self.blockers = blockers;
+        self.stop_phase = phase;
+    }
 }
 
 /// Project an absolute path under the repo root to a repo-relative
@@ -556,7 +589,11 @@ pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
         render_text(&findings, outcome.as_ref(), fix);
     }
     let has_critical = !critical_blockers(&findings).is_empty();
-    let preflight_blocked = outcome
+    // Renamed from `preflight_blocked`: now also catches the
+    // post-apply re-check bail (`stop_phase: post_apply`), not just
+    // preflight. The exit-1 trigger is "any blocker on the apply
+    // path", regardless of phase.
+    let apply_blocked = outcome
         .as_ref()
         .map(|o| !o.blockers.is_empty())
         .unwrap_or(false);
@@ -569,7 +606,7 @@ pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
         .as_ref()
         .map(|o| o.apply_error.is_some())
         .unwrap_or(false);
-    if has_critical || preflight_blocked || apply_failed {
+    if has_critical || apply_blocked || apply_failed {
         std::process::exit(1);
     }
     Ok(())
@@ -1508,8 +1545,10 @@ fn apply(
     // instead of an anyhow-formatted stderr blob (the AGENTS.md
     // "always `--json` when scripting" promise).
     if !actions.preflight_blockers.is_empty() {
-        outcome.blockers = std::mem::take(&mut actions.preflight_blockers);
-        outcome.stop_phase = StopPhase::Preflight;
+        outcome.stop_with_blockers(
+            StopPhase::Preflight,
+            std::mem::take(&mut actions.preflight_blockers),
+        );
         return Ok(outcome);
     }
 
@@ -1597,8 +1636,7 @@ fn apply(
             // multi-step operation that can fail mid-rollback.
             let post_blockers = critical_blockers(&fresh);
             if !post_blockers.is_empty() {
-                outcome.blockers = post_blockers;
-                outcome.stop_phase = StopPhase::PostApply;
+                outcome.stop_with_blockers(StopPhase::PostApply, post_blockers);
                 return Ok(outcome);
             }
             // Re-run the Notes → Comments rename against the
@@ -2684,6 +2722,7 @@ fn render_json(
                         })
                         .collect::<Vec<_>>(),
                     "notes_renamed": oc.notes_renamed,
+                    "notes_conflicts_at_apply": oc.notes_conflicts_at_apply,
                     "orphan_tempfiles_removed": oc
                         .orphan_tempfiles_removed
                         .iter()
@@ -4394,15 +4433,14 @@ mod tests {
         );
     }
 
-    /// Clean-success path: when `apply` runs to completion with no
-    /// blockers, `stop_phase` is `Ok` and the JSON envelope reflects
-    /// it so consumers don't have to infer the success case from
-    /// `blockers.is_empty()`.
+    /// Clean-success path with writes: when `apply` runs to completion
+    /// with no blockers AND at least one write happened (fresh repo
+    /// triggers schema bootstrap), `stop_phase: "ok"` MUST coexist
+    /// with `fix_applied: true`. JSON consumers should not have to
+    /// infer the success case from `blockers.is_empty()`.
     #[test]
-    fn clean_success_envelope_carries_stop_phase_ok() {
+    fn clean_success_with_writes_envelope_carries_ok_and_fix_applied_true() {
         let tmp = fresh_repo();
-        // A fresh repo without blockers — `--fix` ends up writing the
-        // bootstrap `.schema.yaml` and nothing else.
         let mut findings = scan(tmp.path()).unwrap();
         let actions = DoctorActions::from_findings(&mut findings);
         let outcome = apply(
@@ -4413,6 +4451,8 @@ mod tests {
         .unwrap();
         assert!(outcome.blockers.is_empty(), "clean repo: no blockers");
         assert_eq!(outcome.stop_phase, StopPhase::Ok);
+        assert!(outcome.schema_bootstrapped, "fresh repo: schema bootstrap landed");
+        assert!(outcome.fix_applied(), "schema_bootstrapped flips fix_applied");
 
         let scan_after = scan(tmp.path()).unwrap();
         let json = render_json(&scan_after, Some(&outcome), true, tmp.path());
@@ -4420,8 +4460,51 @@ mod tests {
             json["apply_outcome"]["stop_phase"],
             serde_json::Value::String("ok".into())
         );
+        assert_eq!(
+            json["apply_outcome"]["fix_applied"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(
+            json["apply_outcome"]["schema_bootstrapped"],
+            serde_json::Value::Bool(true)
+        );
         let blockers = json["apply_outcome"]["blockers"].as_array().unwrap();
         assert!(blockers.is_empty(), "no blockers on clean success");
+    }
+
+    /// Clean-success path with NO writes: schema already bootstrapped
+    /// from a prior run, no findings ⇒ `apply` is a no-op.
+    /// `stop_phase: "ok"` MUST coexist with `fix_applied: false`.
+    /// This pins the second `(ok, fix_applied)` combination — the
+    /// matrix is undertested without it.
+    #[test]
+    fn clean_success_no_writes_envelope_carries_ok_and_fix_applied_false() {
+        let tmp = fresh_repo();
+        // Pre-bootstrap the schema so the second `apply` writes nothing.
+        schema::ensure_default_written(tmp.path()).unwrap();
+
+        let mut findings = scan(tmp.path()).unwrap();
+        let actions = DoctorActions::from_findings(&mut findings);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        assert!(outcome.blockers.is_empty());
+        assert_eq!(outcome.stop_phase, StopPhase::Ok);
+        assert!(!outcome.fix_applied(), "no-op apply must not flip fix_applied");
+
+        let scan_after = scan(tmp.path()).unwrap();
+        let json = render_json(&scan_after, Some(&outcome), true, tmp.path());
+        assert_eq!(
+            json["apply_outcome"]["stop_phase"],
+            serde_json::Value::String("ok".into())
+        );
+        assert_eq!(
+            json["apply_outcome"]["fix_applied"],
+            serde_json::Value::Bool(false)
+        );
     }
 
     /// Bug #4 (manual splice list): the post-apply rendering pulls
@@ -4614,6 +4697,20 @@ mod tests {
             outcome
         );
         assert!(outcome.notes_renamed.is_empty(), "no rename when conflict");
+
+        // The conflict MUST also surface in the JSON envelope, not
+        // only on the typed outcome — the field's docstring promises
+        // `--json --fix` consumers a signal that some planned work
+        // didn't run.
+        let scan_after = scan(tmp.path()).unwrap();
+        let json = render_json(&scan_after, Some(&outcome), true, tmp.path());
+        let conflicts = json["apply_outcome"]["notes_conflicts_at_apply"]
+            .as_array()
+            .expect("notes_conflicts_at_apply must be in apply_outcome envelope");
+        assert!(
+            conflicts.iter().any(|v| v.as_str() == Some("legacy-notes-here")),
+            "JSON envelope must surface notes_conflicts_at_apply, got {conflicts:?}"
+        );
     }
 
     /// Round-2 regression #4 (hard parse errors on legacy dirs): a
