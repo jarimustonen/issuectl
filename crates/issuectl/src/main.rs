@@ -1999,7 +1999,16 @@ fn print_issue_detail(issue: &models::Issue) {
     println!("{}", issue.body);
 }
 
+/// Truncate `text` to roughly `max_len` Unicode scalar values, ending
+/// with `…` when truncated. Note: this counts `chars()` (scalar
+/// values), not grapheme clusters or terminal-display columns — CJK
+/// wide characters and emoji ZWJ sequences may still misalign the
+/// table. Switching to `unicode-width` is tracked as a follow-up;
+/// this guard exists only to avoid panicking on UTF-8 byte boundaries.
 fn truncate(text: &str, max_len: usize) -> String {
+    if max_len == 0 {
+        return String::new();
+    }
     let char_count = text.chars().count();
     if char_count <= max_len {
         text.to_string()
@@ -2096,6 +2105,14 @@ mod tests {
     fn truncate_keeps_short_text_unchanged() {
         assert_eq!(truncate("ä", 5), "ä");
         assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_max_len_zero_returns_empty() {
+        // Without the guard, `max_len = 0` would push `…` and return
+        // a single-character string, violating the contract.
+        assert_eq!(truncate("anything", 0), "");
+        assert_eq!(truncate("", 0), "");
     }
 
     #[test]
