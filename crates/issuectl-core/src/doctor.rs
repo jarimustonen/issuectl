@@ -534,7 +534,16 @@ pub fn run(repo_root: &Path, fix: bool, json: bool) -> Result<()> {
         .as_ref()
         .map(|o| !o.blockers.is_empty())
         .unwrap_or(false);
-    if has_critical || preflight_blocked {
+    // Mid-pipeline `--fix` aborts (`apply_error`) now surface as
+    // `Ok(outcome)` so the structured envelope reaches `render_json`.
+    // Without this exit-code branch a phase-5 abort would render the
+    // partial JSON and then exit 0 — a silent failure for shell
+    // callers that only check `$?` instead of parsing `apply_outcome`.
+    let apply_failed = outcome
+        .as_ref()
+        .map(|o| o.apply_error.is_some())
+        .unwrap_or(false);
+    if has_critical || preflight_blocked || apply_failed {
         std::process::exit(1);
     }
     Ok(())
@@ -2426,9 +2435,15 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         println!();
     }
     if fix {
+        let prefix = if oc.apply_error.is_some() {
+            "Aborted mid-pipeline."
+        } else {
+            "Applied."
+        };
         println!(
-            "Applied. {} dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} AGENTS.md block(s) regenerated.",
+            "{prefix} {} legacy dir(s) migrated, {} flat-layout dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} AGENTS.md block(s) regenerated.",
             oc.legacy_dirs_migrated.len(),
+            oc.flat_layout_migrated.len(),
             oc.files_rewritten,
             oc.notes_renamed.len(),
             if oc.agents_md_regenerated { 1 } else { 0 }
