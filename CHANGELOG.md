@@ -127,6 +127,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#thoroughly-kaput-pocket)
 
 ### Internals
+- Web client (`board.js`): PATCH and PUT write requests now run with
+  an `AbortController` and a 30 s timeout each. A hung server
+  previously left `pending_writes[slug] > 0` forever and queued every
+  same-slug SSE event in `deferred_events` until the user reloaded;
+  on timeout the request now aborts, the queue drains, and the user
+  gets a "timed out" toast / save-status. A `pagehide` listener
+  aborts every outstanding write so a navigation/close cannot land
+  a write the user has already moved on from. (#absolutely-aberrant-caption)
 - `parser::deser_epic` now strict-errors on malformed `epic:` shapes
   (sequence, mapping, bool, tagged value, empty string) instead of
   silently coercing them to `None`. The malformed value previously

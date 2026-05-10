@@ -643,10 +643,12 @@
     mode.render();
 
     beginPendingWrite(drag.slug);
+    var abort = newWriteAbort();
     fetch('/api/issues/' + encodeURIComponent(drag.slug), {
       method: 'PATCH',
       headers: csrfJson(),
       body: JSON.stringify(mode.buildPatch(expected, target)),
+      signal: abort.signal,
     })
       .then(function (r) {
         return r.json().then(
@@ -655,6 +657,7 @@
         );
       })
       .then(function (res) {
+        abort.finalize();
         var responseVersion = res.body && res.body.version;
         finishPendingWrite(drag.slug, responseVersion);
         if (state.dragging === drag) state.dragging = null;
@@ -687,6 +690,7 @@
         }
       })
       .catch(function (err) {
+        abort.finalize();
         finishPendingWrite(drag.slug, null);
         if (state.dragging === drag) state.dragging = null;
         if (state.optimistic_tags[drag.slug] === opId) {
@@ -694,7 +698,13 @@
           mode.revert(drag.slug, prev);
           mode.render();
         }
-        showToast('Move failed: ' + err, 'error');
+        if (abort.isTimeout()) {
+          showToast('Move timed out — refresh to see current state', 'error');
+        } else if (err && err.name === 'AbortError') {
+          // Cancelled by pagehide/unload. Page is going away; no toast.
+        } else {
+          showToast('Move failed: ' + err, 'error');
+        }
       });
   }
 
@@ -1409,10 +1419,12 @@
     beginPendingWrite(editor.slug);
     setSaveBusy(true);
     setSaveStatus('Saving…');
+    var abort = newWriteAbort();
     fetch('/api/issues/' + encodeURIComponent(editor.slug) + '/body', {
       method: 'PUT',
       headers: csrfJson(),
       body: JSON.stringify({ expected_version: editor.expected_version, body: body }),
+      signal: abort.signal,
     })
       .then(function (r) {
         return r.json().then(function (d) { return { status: r.status, body: d }; },
@@ -1421,6 +1433,7 @@
           function () { return { status: r.status, body: {} }; });
       })
       .then(function (res) {
+        abort.finalize();
         // Editor may have been torn down (Cancel, dialog close) while
         // the request was in flight. If so, we still need to drain the
         // pending-write counter so SSE echoes don't queue forever.
@@ -1483,11 +1496,18 @@
         }
       })
       .catch(function (e) {
+        abort.finalize();
         finishPendingWrite(state.lastDetailSlug, null);
         if (!editor) return;
         editor.saving = false;
         setSaveBusy(false);
-        setSaveStatus('Save failed: ' + e);
+        if (abort.isTimeout()) {
+          setSaveStatus('Save timed out after ' + (WRITE_TIMEOUT_MS / 1000) + 's — try again');
+        } else if (e && e.name === 'AbortError') {
+          // Cancelled by pagehide/unload — no message needed.
+        } else {
+          setSaveStatus('Save failed: ' + e);
+        }
       });
   }
 
@@ -1689,6 +1709,48 @@
       setSaveStatus('Edit the textarea, then Save to write your merged version');
     });
   }
+
+  // Hard ceiling on a single PATCH/PUT round trip. A hung server (or
+  // dropped connection on a flaky network) without this leaves
+  // pending_writes[slug] > 0 forever and queues every same-slug SSE
+  // event in deferred_events until the user reloads. 30s is long
+  // enough that a slow git-merge-driven write completes naturally and
+  // short enough that a stalled connection surfaces as a toast.
+  var WRITE_TIMEOUT_MS = 30000;
+  // Active AbortControllers for in-flight write requests. On
+  // pagehide / beforeunload we abort all of them so the browser does
+  // not keep a zombie request alive that lands a write the user no
+  // longer expects.
+  var inFlightWrites = new Set();
+
+  function newWriteAbort() {
+    var ctrl = new AbortController();
+    var timedOut = false;
+    var timer = setTimeout(function () {
+      timedOut = true;
+      ctrl.abort();
+    }, WRITE_TIMEOUT_MS);
+    inFlightWrites.add(ctrl);
+    return {
+      signal: ctrl.signal,
+      isTimeout: function () { return timedOut; },
+      finalize: function () {
+        clearTimeout(timer);
+        inFlightWrites.delete(ctrl);
+      },
+    };
+  }
+
+  function abortInFlightWrites() {
+    inFlightWrites.forEach(function (ctrl) {
+      try { ctrl.abort(); } catch (e) {}
+    });
+    inFlightWrites.clear();
+  }
+  // pagehide fires for both navigation and bfcache eviction; it's the
+  // one cross-browser hook that reliably runs on tab close. Abort all
+  // outstanding writes so they don't land after the user has moved on.
+  window.addEventListener('pagehide', abortInFlightWrites);
 
   function csrfJson() {
     var h = { 'Content-Type': 'application/json', Accept: 'application/json' };

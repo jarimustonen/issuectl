@@ -1606,6 +1606,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn board_js_wires_abortcontroller_on_write_paths() {
+        // Smoke-pin the @absolutely-aberrant-caption fix: the bundled
+        // client must keep the AbortController + per-write timeout +
+        // pagehide-cancel wiring. Catches accidental removal of any
+        // of the three (e.g. someone resurrecting a `fetch(...)`
+        // without `signal:`).
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        let r = make_router(tmp.path());
+        let resp = r
+            .oneshot(
+                Request::get("/assets/board.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let js = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            js.contains("new AbortController"),
+            "board.js missing AbortController"
+        );
+        assert!(js.contains("WRITE_TIMEOUT_MS"), "board.js missing write timeout");
+        assert!(
+            js.contains("'pagehide'"),
+            "board.js missing pagehide listener for in-flight aborts"
+        );
+        // Both write paths must pass `signal:` to `fetch`. The
+        // simplest pin is that a `signal:` field appears in the
+        // bundle at all — without it, the AbortController is dead
+        // wiring.
+        assert!(js.contains("signal:"), "board.js fetch calls missing signal:");
+    }
+
     // ── M2: body + preview + rate limit ────────────────────────────
 
     #[tokio::test]

@@ -3,8 +3,10 @@ created: 2026-05-08
 updated: 2026-05-10
 type: task
 reporter: jari
-status: in-progress
+status: done
 priority: normal
+commit: 117f33f
+closed: 2026-05-10
 ---
 
 # deser_epic must error on malformed shape
