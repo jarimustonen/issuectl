@@ -494,6 +494,13 @@ enum Command {
         /// Apply migrations and fixes (otherwise read-only report)
         #[arg(long)]
         fix: bool,
+        /// Print every entry in long warning lists. By default,
+        /// lists with more than a handful of entries collapse to a
+        /// one-line count so "fix-something-rerun-doctor" loops
+        /// don't refill the screen with the same warnings each
+        /// iteration. (issue: @ridiculously-outrageous-fold)
+        #[arg(long)]
+        verbose: bool,
     },
 
     /// Install / uninstall the opt-in pre-commit hook that runs
@@ -893,7 +900,7 @@ fn main() -> Result<()> {
                 expected_version,
             } => cmd_body_set(json_output, &slug, stdin, from_file, expected_version),
         },
-        Command::Doctor { fix } => doctor::run(&find_root(), fix, json_output),
+        Command::Doctor { fix, verbose } => doctor::run(&find_root(), fix, json_output, verbose),
         Command::Hooks { action } => match action {
             HooksAction::Install { uninstall, force } => hooks::run(&find_root(), uninstall, force),
         },

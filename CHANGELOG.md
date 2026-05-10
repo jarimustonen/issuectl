@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `issuectl doctor --fix` no longer refuses the flat-layout migration
+  when schema-shape findings (schema violations, broken cross-refs,
+  dependency cycles, status/timestamp consistency) are present.
+  Layout migration is a directory rename and is independent of
+  frontmatter content; gating it on schema cleanliness was the
+  largest single adoption blocker reported in 3DBear 0.5.1 feedback
+  (240 dirs need layout migration, 216 schema violations — `--fix`
+  would refuse until every violation was hand-fixed first against the
+  pre-migration layout). Schema findings still drive exit-1 so they
+  remain visible as forward work, surfaced against post-migration
+  paths. Layout-fatal preflight blockers (flat-layout conflicts,
+  duplicate slugs, slug present in both legacy folders, conflict
+  markers, unparseable frontmatter, missing `item.md`, symlinked
+  dirs, `## Notes` / `## Comments` ambiguity, malformed AGENTS.md,
+  schema parse error) still bail with no writes. (issue:
+  `@staggeringly-important-zoo`)
+- `issuectl doctor --fix` now bootstraps `issues/.schema.yaml`
+  unconditionally, even when other preflight blockers refuse the
+  rest of the apply pipeline. The read-only output already
+  advertised auto-creation on first `--fix`; gating bootstrap on an
+  empty blocker list broke that promise. The operation is
+  idempotent. (issue: `@unreasonably-attractive-star`)
+- `issuectl doctor` collapses long warning lists (more than ten
+  entries) to a one-line count by default. Re-run with `--verbose`
+  to print the full list. The previous behaviour filled the screen
+  with the same 240-line layout-migration list every iteration of
+  "fix-something-rerun-doctor" loops. (issue:
+  `@ridiculously-outrageous-fold`)
+
 ## [0.5.1] - 2026-05-10
 
 Cleanup release for the `issues/AGENTS.md` scaffold and skill version
