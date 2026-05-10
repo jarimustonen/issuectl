@@ -20,15 +20,22 @@ terminal users only. All examples below already include `--json`.
 when a command fails — the error message names the offending value and
 the valid alternatives.
 
-## Install `issuectl` if needed
+## Install or upgrade `issuectl`
 
-Assume `issuectl` but if it is not (the repo uses it but the user hasn't
-installed it yet), suggest one of:
+This prompt was installed for `issuectl {{ISSUECTL_VERSION}}`. On the
+first invocation in a session, run `issuectl --version` and compare:
 
-- **Homebrew** (macOS/Linux): `brew install jarimustonen/issuectl/issuectl`
-- **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
-- **Shell installer** (no toolchain):
-  `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
+- **Missing**: install one of:
+  - **Homebrew** (macOS/Linux): `brew install jarimustonen/issuectl/issuectl`
+  - **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
+  - **Shell installer** (no toolchain):
+    `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
+- **Older than `{{ISSUECTL_VERSION}}`**: tell the user the prompt expects
+  `{{ISSUECTL_VERSION}}` and suggest upgrading via the same channel
+  they originally used (`brew upgrade jarimustonen/issuectl/issuectl`,
+  `cargo install issuectl --force`, or re-run the shell installer).
+  Stop and wait — schema/CLI surface may have changed.
+- **Equal or newer**: proceed normally.
 
 ## Identifiers
 

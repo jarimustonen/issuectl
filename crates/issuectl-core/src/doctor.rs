@@ -363,6 +363,18 @@ struct DoctorFindings {
     /// the user fixes the unrelated YAML typo. Holds the loader
     /// error message for rendering.
     agents_md_check_skipped: Option<String>,
+    /// True when `.issuectl/AGENTS.md` does not exist. Init is opt-in
+    /// so this is informational only — `--fix` does not create the
+    /// file (the user runs `issuectl agents init` to opt in). Surfaces
+    /// the missing-policy condition that drift detection alone would
+    /// otherwise hide.
+    agents_md_missing: bool,
+    /// True when `issues/AGENTS.md` exists with pre-v0.5.0 scaffold
+    /// content (numbered layout, `open/`/`closed/` subdirs, sequential
+    /// numbering section). `--fix` rewrites it with the current
+    /// minimal pointer template. Only flagged when legacy markers are
+    /// present, so user-customized content is left alone.
+    legacy_issues_agents_md: bool,
 }
 
 /// Stage 2: planned writes derived from `DoctorFindings`. Built by
@@ -381,6 +393,9 @@ struct DoctorActions {
     /// True when scan flagged AGENTS.md drift AND the file is present
     /// AND drift is regeneratable (not malformed / not check-skipped).
     regenerate_agents_md: bool,
+    /// True when scan flagged a legacy `issues/AGENTS.md` (pre-v0.5.0
+    /// scaffold). `--fix` overwrites with the current template.
+    rewrite_issues_agents_md: bool,
     /// Critical findings that block `--fix`. Computed via
     /// `critical_blockers` from the same predicate that drives the
     /// run-time exit code, guaranteeing the two are aligned (no class
@@ -405,6 +420,7 @@ impl DoctorActions {
             regenerate_agents_md: findings.agents_md_drift
                 && findings.agents_md_malformed.is_none()
                 && findings.agents_md_check_skipped.is_none(),
+            rewrite_issues_agents_md: findings.legacy_issues_agents_md,
             preflight_blockers,
         }
     }
@@ -467,6 +483,7 @@ struct ApplyOutcome {
     status_reconciled: Vec<String>,
     files_rewritten: usize,
     agents_md_regenerated: bool,
+    issues_agents_md_rewritten: bool,
     schema_bootstrapped: bool,
     /// Slugs whose `## Notes` rename was planned by scan but skipped
     /// at apply time because a concurrent edit introduced a
@@ -500,6 +517,7 @@ impl ApplyOutcome {
             || !self.status_reconciled.is_empty()
             || self.files_rewritten > 0
             || self.agents_md_regenerated
+            || self.issues_agents_md_rewritten
             || self.schema_bootstrapped
     }
 
@@ -810,6 +828,9 @@ fn scan(repo_root: &Path) -> Result<DoctorFindings> {
     // trouble and we MUST NOT regenerate from defaults (would
     // overwrite real policy with empty rules).
     let agents_path = agents::agents_path(repo_root);
+    if !agents_path.exists() {
+        report.agents_md_missing = true;
+    }
     if agents_path.is_file() {
         if let Ok(text) = fs::read_to_string(&agents_path) {
             match (schema::load(repo_root), crate::transitions::load(repo_root)) {
@@ -826,6 +847,19 @@ fn scan(repo_root: &Path) -> Result<DoctorFindings> {
                 (Err(e), _) | (_, Err(e)) => {
                     report.agents_md_check_skipped = Some(format!("{e:#}"));
                 }
+            }
+        }
+    }
+
+    // Legacy `issues/AGENTS.md` scaffold (pre-v0.5.0): the old template
+    // documented numbered `<NN>-<slug>/` layout, `open/` / `closed/`
+    // subdirs, and sequential numbering — none of which apply now. Flag
+    // only when known legacy markers appear so customized files survive.
+    let issues_agents_path = repo_root.join("issues").join("AGENTS.md");
+    if issues_agents_path.is_file() {
+        if let Ok(text) = fs::read_to_string(&issues_agents_path) {
+            if text != crate::skill::ISSUES_AGENTS_TEMPLATE && is_legacy_issues_agents(&text) {
+                report.legacy_issues_agents_md = true;
             }
         }
     }
@@ -1567,6 +1601,7 @@ fn apply(
     rename_notes_to_comments(repo_root, &mut actions, &mut outcome)?;
 
     regenerate_agents_md(repo_root, &actions, &mut outcome)?;
+    rewrite_legacy_issues_agents_md(repo_root, &actions, &mut outcome)?;
 
     // Auto-bootstrap the schema file on --fix. Cheap; idempotent. The
     // bootstrap call also ensures the issues/ directory exists so a
@@ -1750,6 +1785,39 @@ fn regenerate_agents_md(
         agents::atomic_write(&path, new_text.as_bytes())?;
         outcome.agents_md_regenerated = true;
     }
+    Ok(())
+}
+
+/// Heuristic for "this is the pre-v0.5.0 `issues/AGENTS.md` scaffold,
+/// not user-authored content." Any one of the markers is enough — they
+/// all point at concepts (numbered layout, `open/`/`closed/` subdirs,
+/// sequential numbering) that no current template would produce.
+fn is_legacy_issues_agents(text: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "## Issue Numbering",
+        "├── open/",
+        "└── open/",
+        "NN-short-title",
+        "moved from `open/` to `closed/`",
+    ];
+    MARKERS.iter().any(|m| text.contains(m))
+}
+
+fn rewrite_legacy_issues_agents_md(
+    repo_root: &Path,
+    actions: &DoctorActions,
+    outcome: &mut ApplyOutcome,
+) -> Result<()> {
+    if !actions.rewrite_issues_agents_md {
+        return Ok(());
+    }
+    let path = repo_root.join("issues").join("AGENTS.md");
+    if !path.is_file() {
+        return Ok(());
+    }
+    fs::write(&path, crate::skill::ISSUES_AGENTS_TEMPLATE)
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    outcome.issues_agents_md_rewritten = true;
     Ok(())
 }
 
@@ -2214,6 +2282,9 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         || report.agents_md_malformed.is_some()
         || report.agents_md_check_skipped.is_some()
         || oc.agents_md_regenerated
+        || report.agents_md_missing
+        || report.legacy_issues_agents_md
+        || oc.issues_agents_md_rewritten
         || !oc.blockers.is_empty()
         || oc.apply_error.is_some();
     if !oc.blockers.is_empty() {
@@ -2482,6 +2553,24 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         );
         println!();
     }
+    if report.agents_md_missing {
+        println!(
+            "{} not present — run `issuectl agents init` to opt in to the agent policy file.",
+            agents::AGENTS_RELATIVE_PATH
+        );
+        println!();
+    }
+    if oc.issues_agents_md_rewritten {
+        println!(
+            "Rewrote stale issues/AGENTS.md (pre-v0.5.0 scaffold) with current pointer template."
+        );
+        println!();
+    } else if report.legacy_issues_agents_md {
+        println!(
+            "issues/AGENTS.md still carries the pre-v0.5.0 scaffold (re-run with --fix to replace)."
+        );
+        println!();
+    }
     if oc.agents_md_regenerated {
         println!(
             "Regenerated schema-derived block in {}.",
@@ -2684,6 +2773,9 @@ fn render_json(
         "agents_md_malformed": report.agents_md_malformed,
         "agents_md_check_skipped": report.agents_md_check_skipped,
         "agents_md_regenerated": oc.agents_md_regenerated,
+        "agents_md_missing": report.agents_md_missing,
+        "legacy_issues_agents_md": report.legacy_issues_agents_md,
+        "issues_agents_md_rewritten": oc.issues_agents_md_rewritten,
     });
     // `apply_outcome` is the new structured envelope: emitted only on
     // `--fix` runs so the read-only JSON shape (golden snapshot) stays
@@ -2703,6 +2795,7 @@ fn render_json(
                     "blockers": oc.blockers,
                     "schema_bootstrapped": oc.schema_bootstrapped,
                     "agents_md_regenerated": oc.agents_md_regenerated,
+                    "issues_agents_md_rewritten": oc.issues_agents_md_rewritten,
                     "files_rewritten": oc.files_rewritten,
                     "legacy_dirs_migrated": migrated_legacy,
                     "flat_layout_migrated": oc
@@ -4289,6 +4382,50 @@ mod tests {
         assert!(after.contains(agents::MANAGED_END));
     }
 
+    #[test]
+    fn legacy_issues_agents_md_is_detected_and_rewritten() {
+        let tmp = fresh_repo();
+        let issues_dir = tmp.path().join("issues");
+        fs::create_dir_all(&issues_dir).unwrap();
+        let path = issues_dir.join("AGENTS.md");
+        // Pre-v0.5.0 scaffold marker.
+        fs::write(
+            &path,
+            "# Issues\n\n## Issue Numbering\n\nIssue numbers are sequential...\n",
+        )
+        .unwrap();
+
+        let mut report = scan(tmp.path()).unwrap();
+        assert!(report.legacy_issues_agents_md);
+
+        let actions = DoctorActions::from_findings(&mut report);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        assert!(outcome.issues_agents_md_rewritten);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            crate::skill::ISSUES_AGENTS_TEMPLATE
+        );
+    }
+
+    #[test]
+    fn customized_issues_agents_md_is_left_alone() {
+        let tmp = fresh_repo();
+        let issues_dir = tmp.path().join("issues");
+        fs::create_dir_all(&issues_dir).unwrap();
+        let path = issues_dir.join("AGENTS.md");
+        let custom = "# Our team's policy\n\nWe write our own rules here.\n";
+        fs::write(&path, custom).unwrap();
+
+        let report = scan(tmp.path()).unwrap();
+        assert!(!report.legacy_issues_agents_md);
+        assert_eq!(fs::read_to_string(&path).unwrap(), custom);
+    }
+
     /// Single-pass `scan_issues` powers every check. This fixture wires
     /// up many independent findings in one repo and asserts the merged
     /// `DoctorFindings` looks the same as the multi-walk produced — a
@@ -4416,6 +4553,7 @@ mod tests {
   "agents_md_check_skipped": null,
   "agents_md_drift": false,
   "agents_md_malformed": null,
+  "agents_md_missing": true,
   "agents_md_regenerated": false,
   "blocked_by_cycles": [],
   "both_open_and_closed": [],
@@ -4435,6 +4573,8 @@ mod tests {
   "flat_layout_migrated": [],
   "flat_layout_planned": [],
   "invalid_slugs": [],
+  "issues_agents_md_rewritten": false,
+  "legacy_issues_agents_md": false,
   "migrations": [],
   "missing_body_sections": [],
   "missing_item_md": [

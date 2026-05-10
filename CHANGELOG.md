@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-05-10
+
+Cleanup release for the `issues/AGENTS.md` scaffold and skill version
+hygiene. No behavior change in the CLI core.
+
+### Changed
+- `issues/AGENTS.md` template (installed by `issuectl skill install`)
+  rewritten as a minimal pointer to the `/issue` skill and
+  `.issuectl/AGENTS.md`. The pre-v0.5.0 scaffold described the
+  numbered `<NN>-<slug>/` layout with `open/`/`closed/` subdirs and a
+  sequential numbering section — none of which apply since v0.2.0
+  (slugs) and v0.5.0 (flat layout). The new template is a few lines
+  pointing readers at the supported tooling.
+- `/issue` skill and Codex prompt templates now include a version-check
+  section. The on-disk skill is pinned to the `issuectl` version that
+  wrote it (`{{ISSUECTL_VERSION}}` substituted at install time); on
+  first invocation in a session the agent runs `issuectl --version`
+  and prompts the user to upgrade if the runtime is older. `skill
+  install` and `skill print` both render the template with the current
+  version.
+
+### Added
+- `issuectl doctor` flags a stale `issues/AGENTS.md` (pre-v0.5.0
+  scaffold detected via legacy markers — `## Issue Numbering`,
+  `open/<NN>` paths, etc.) and `--fix` rewrites it with the current
+  pointer template. Customized `issues/AGENTS.md` files without legacy
+  markers are left alone. Reflected in `--json` as
+  `legacy_issues_agents_md` (read-only flag) and
+  `apply_outcome.issues_agents_md_rewritten` (post-fix).
+- `issuectl doctor` reports when `.issuectl/AGENTS.md` is absent so
+  users can opt in via `issuectl agents init` (informational only;
+  `--fix` does not create the file because the policy is opt-in).
+  Reflected in `--json` as `agents_md_missing`.
+
 ## [0.5.0] - 2026-05-10
 
 The "writable, agent-safe kanban" release. The web board moves from
@@ -325,7 +359,8 @@ Initial public release.
 - `issuectl dedup` stub — moved to a future release until properly
   implemented.
 
-[Unreleased]: https://github.com/jarimustonen/issuectl/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jarimustonen/issuectl/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/jarimustonen/issuectl/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jarimustonen/issuectl/compare/v0.3.1...v0.5.0
 [0.3.1]: https://github.com/jarimustonen/issuectl/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jarimustonen/issuectl/compare/v0.2.0...v0.3.0
