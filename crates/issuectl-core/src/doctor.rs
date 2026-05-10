@@ -452,6 +452,15 @@ struct ApplyOutcome {
     /// visible — and because users running `--json --fix` need a
     /// signal that some planned work didn't run.
     notes_conflicts_at_apply: Vec<String>,
+    /// Failure cause from a mid-pipeline `--fix` step that aborted
+    /// before completion. Currently populated only by phase 5
+    /// (flat-layout migration) when `execute_migrate_layout_plan`
+    /// returns mid-loop with a partial `flat_layout_migrated`
+    /// already on disk. Set instead of returning `Err` from `apply`
+    /// so `--json --fix` callers receive a structured envelope
+    /// (with the partial `flat_layout_migrated` intact) rather than
+    /// an anyhow-formatted stderr blob that hides what landed.
+    apply_error: Option<String>,
 }
 
 impl ApplyOutcome {
@@ -1520,7 +1529,14 @@ fn apply(
             // simpler than gating it at every exit.
             crate::migrate_layout::prune_empty_legacy_parents(&repo_root.join("issues"));
             if let Some(err) = exec_outcome.error {
-                return Err(err);
+                // Forward-progress only: surface the failure cause on
+                // the structured outcome and bail. Returning `Err` here
+                // would propagate past `render_text` / `render_json` and
+                // strand the partial `flat_layout_migrated` (already on
+                // disk) inside an anyhow text blob on stderr — invisible
+                // to `--json` consumers.
+                outcome.apply_error = Some(format!("{err:#}"));
+                return Ok(outcome);
             }
             // Re-scan so the NN-rename pass operates on fresh
             // `old_path`s and picks up frontmatter-only legacy issues
@@ -2130,12 +2146,18 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         || report.agents_md_malformed.is_some()
         || report.agents_md_check_skipped.is_some()
         || oc.agents_md_regenerated
-        || !oc.blockers.is_empty();
+        || !oc.blockers.is_empty()
+        || oc.apply_error.is_some();
     if !oc.blockers.is_empty() {
         println!("doctor: cannot safely apply --fix until these issues are resolved:");
         for b in &oc.blockers {
             println!("  - {b}");
         }
+        println!();
+    }
+    if let Some(err) = &oc.apply_error {
+        println!("doctor: --fix aborted mid-pipeline; partial progress retained:");
+        println!("  {err}");
         println!();
     }
     if !has_problems {
@@ -2624,6 +2646,7 @@ fn render_json(
                         .map(|p| rel(repo_root, p))
                         .collect::<Vec<_>>(),
                     "status_reconciled": oc.status_reconciled,
+                    "apply_error": oc.apply_error,
                 }),
             );
         }
@@ -3830,6 +3853,82 @@ mod tests {
             !after.contains("## Notes\n"),
             "## Notes heading must be gone, got: {after}"
         );
+    }
+
+    #[test]
+    fn apply_preserves_partial_flat_layout_migration_on_mid_loop_failure() {
+        // Phase-5 mid-loop failure must surface as `Ok(outcome)` with
+        // `flat_layout_migrated` carrying the move(s) that landed and
+        // `apply_error` carrying the failure cause — NOT propagate as
+        // `Err` (which would strand the partial progress inside an
+        // anyhow text blob and bypass `--json` consumers).
+        let tmp = fresh_repo();
+        // Two flat-eligible issues. Slugs sorted alphabetically by the
+        // BTreeMap inside `plan_migrate_layout` → `aaa-foo` is move #1,
+        // `zzz-bar` is move #2.
+        for slug in ["aaa-foo", "zzz-bar"] {
+            let dir = tmp.path().join("issues/open").join(slug);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("item.md"),
+                "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n",
+            )
+            .unwrap();
+        }
+
+        let mut r = scan(tmp.path()).unwrap();
+        let actions = DoctorActions::from_findings(&mut r);
+
+        // Sabotage move #2 *after* the planner has classified the
+        // moves: planting a regular file at the destination of the
+        // second rename. `fs::rename(<dir>, <regular_file>)` returns
+        // ENOTDIR on Unix / equivalent on Windows. Pre-creating before
+        // planning would have been caught by `plan_migrate_layout`'s
+        // `symlink_metadata` conflict check; doing it after lets the
+        // failure surface inside `execute_migrate_layout_plan`.
+        fs::write(tmp.path().join("issues/zzz-bar"), "blocker\n").unwrap();
+
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .expect("apply must return Ok with partial outcome, not Err");
+
+        assert_eq!(
+            outcome.flat_layout_migrated.len(),
+            1,
+            "first move should have landed before the failure, got {:?}",
+            outcome.flat_layout_migrated
+        );
+        assert_eq!(outcome.flat_layout_migrated[0].slug, "aaa-foo");
+        assert!(
+            tmp.path().join("issues/aaa-foo/item.md").is_file(),
+            "first move should be visible on disk"
+        );
+        let err_msg = outcome
+            .apply_error
+            .as_ref()
+            .expect("apply_error must carry the failure cause");
+        assert!(
+            err_msg.contains("zzz-bar") || err_msg.contains("rename"),
+            "apply_error should mention the failed rename, got {err_msg:?}"
+        );
+
+        // The structured `--json --fix` envelope must echo both pieces
+        // so scripts can recover without parsing stderr.
+        let json = render_json(&scan(tmp.path()).unwrap(), Some(&outcome), true, tmp.path());
+        let envelope = json
+            .get("apply_outcome")
+            .expect("apply_outcome present on --fix runs");
+        assert_eq!(
+            envelope
+                .get("flat_layout_migrated")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1),
+        );
+        assert!(envelope.get("apply_error").map(|v| !v.is_null()).unwrap_or(false));
     }
 
     #[cfg(unix)]
