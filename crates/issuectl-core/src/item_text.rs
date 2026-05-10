@@ -32,7 +32,11 @@ pub struct Split<'a> {
 /// surface as bogus "unknown frontmatter keys" warnings (regression
 /// `virtually-callous-rainstorm`).
 pub fn split(text: &str) -> Split<'_> {
-    let trimmed = text.trim_start();
+    // Strip an optional UTF-8 BOM before whitespace trimming so files
+    // saved by editors that prepend `\u{feff}` still parse. `trim_start`
+    // alone does not remove the BOM.
+    let after_bom = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let trimmed = after_bom.trim_start();
     if !trimmed.starts_with("---") {
         return Split {
             frontmatter: None,

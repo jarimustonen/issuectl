@@ -87,29 +87,8 @@ pub fn serialize_item(item: &ItemFile) -> Result<String> {
 }
 
 fn split_text(text: &str) -> (Option<&str>, Option<&str>) {
-    let trimmed = text.trim_start();
-    if !trimmed.starts_with("---") {
-        return (None, Some(text));
-    }
-    let rest = &trimmed[3..];
-    if let Some(end) = rest.find("\n---") {
-        let yaml = &rest[..end];
-        // Skip past the closing "\n---" plus one trailing newline (the line
-        // terminator of the closing `---`). A blank line between fm and body
-        // shows up as a *second* leading newline in the resulting `after`.
-        let mut after_idx = end + 4;
-        if rest.as_bytes().get(after_idx) == Some(&b'\n') {
-            after_idx += 1;
-        } else if rest.as_bytes().get(after_idx) == Some(&b'\r')
-            && rest.as_bytes().get(after_idx + 1) == Some(&b'\n')
-        {
-            after_idx += 2;
-        }
-        let after = &rest[after_idx..];
-        (Some(yaml), Some(after))
-    } else {
-        (None, Some(text))
-    }
+    let s = crate::item_text::split(text);
+    (s.frontmatter, Some(s.body))
 }
 
 /// Serialize a mapping back to YAML, then convert simple string arrays to
@@ -610,6 +589,46 @@ mod tests {
         let after = fs::read_to_string(&path).unwrap();
         let has_quoted = after.contains("hash: '315194e2'") || after.contains("hash: \"315194e2\"");
         assert!(has_quoted, "got:\n{}", after);
+    }
+
+    #[test]
+    fn read_item_uses_strict_splitter_for_body_with_fenced_dashes() {
+        // Regression: `read_item` previously had its own naive
+        // splitter that matched any `\n---` mid-body. A body fence
+        // containing `---` could prematurely terminate frontmatter
+        // and leak body keys into the parsed mapping. Routed
+        // through the shared `item_text::split` so reader, writer,
+        // formatter and merge driver all agree.
+        let (_tmp, path) = write_tmp(
+            "---\nstatus: open\ntype: bug\npriority: normal\n---\n\n# Body\n\n```yaml\nshortname: foo\n---\ncourse_id: 123\n```\n",
+        );
+        let item = read_item(&path).unwrap();
+        assert!(item
+            .frontmatter
+            .get(Value::String("status".into()))
+            .is_some());
+        // Body keys must NOT appear in the parsed frontmatter.
+        assert!(item
+            .frontmatter
+            .get(Value::String("shortname".into()))
+            .is_none());
+        assert!(item
+            .frontmatter
+            .get(Value::String("course_id".into()))
+            .is_none());
+        assert!(item.body.contains("shortname: foo"));
+    }
+
+    #[test]
+    fn read_item_strips_utf8_bom_before_frontmatter() {
+        let (_tmp, path) = write_tmp("\u{feff}---\nstatus: open\n---\n# Title\n");
+        let item = read_item(&path).unwrap();
+        assert_eq!(
+            item.frontmatter
+                .get(Value::String("status".into()))
+                .and_then(|v| v.as_str()),
+            Some("open")
+        );
     }
 
     #[test]

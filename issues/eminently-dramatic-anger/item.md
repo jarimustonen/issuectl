@@ -3,10 +3,14 @@ created: 2026-05-10
 updated: 2026-05-10
 type: improvement
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 epic: hugely-exciting-spiders
 labels: [from-3dbear-0.5.1-feedback]
+closed: 2026-05-10
+commits:
+- hash: at(agents-init)
+  summary: log which schema source was used
 ---
 
 # agents init: log which schema source was used (project vs. built-in defaults)
