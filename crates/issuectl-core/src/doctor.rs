@@ -1406,9 +1406,18 @@ fn populate_extended_validation(
 /// developer will believe `agents init` / schema setup worked.
 const GITIGNORE_CANONICAL_PATHS: &[&str] = &[".issuectl/AGENTS.md", "issues/.schema.yaml"];
 
-/// Run `git check-ignore -v -- <path>...` against the canonical paths
-/// that exist on disk and return those that git would ignore. Silent
-/// no-op when this is not a git repo or `git` is unavailable.
+/// Run `git check-ignore -- <path>...` against the canonical paths
+/// that exist on disk and return those that git would actually ignore.
+/// Silent no-op when this is not a git repo or `git` is unavailable.
+///
+/// Deliberately does NOT pass `--no-index`. Without that flag, git
+/// returns exit 1 (not ignored) for any tracked file even when the
+/// path matches a `.gitignore` pattern — which is the correct
+/// semantics for the "teammates won't see this file" warning. With
+/// `--no-index`, git reports tracked-but-pattern-matched files as
+/// ignored, producing false positives in the common migration
+/// scenario where someone committed `.issuectl/AGENTS.md` and later
+/// added `.issuectl/` to `.gitignore`.
 fn detect_gitignored_canonical_paths(repo_root: &Path) -> Vec<String> {
     let candidates: Vec<&str> = GITIGNORE_CANONICAL_PATHS
         .iter()
@@ -1422,7 +1431,6 @@ fn detect_gitignored_canonical_paths(repo_root: &Path) -> Vec<String> {
         .arg("-C")
         .arg(repo_root)
         .arg("check-ignore")
-        .arg("--no-index")
         .arg("--")
         .args(&candidates)
         .output();
@@ -3099,6 +3107,62 @@ mod tests {
         assert!(
             !report.gitignored_paths.is_empty(),
             "expected gitignored_paths populated; got empty"
+        );
+    }
+
+    #[test]
+    fn detect_gitignored_canonical_paths_does_not_flag_tracked_files() {
+        // Followup-review regression: with `--no-index`, git reports
+        // tracked-but-pattern-matched files as ignored, producing
+        // false positives. Without `--no-index` (current behavior),
+        // a tracked file is correctly considered visible to teammates
+        // even when `.gitignore` would otherwise have masked it.
+        let tmp = fresh_repo();
+        let init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(["init", "--quiet"])
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+        // First track the file, THEN add the ignore rule that would
+        // have masked it. Tracked files are not ignored from git's
+        // perspective.
+        fs::create_dir_all(tmp.path().join(".issuectl")).unwrap();
+        fs::write(tmp.path().join(".issuectl/AGENTS.md"), "# x\n").unwrap();
+        let add = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(["add", "-f", ".issuectl/AGENTS.md"])
+            .output()
+            .expect("git add");
+        assert!(add.status.success(), "git add failed: {add:?}");
+        // Configure user.email/name so commit can succeed even on a
+        // CI host without global git config.
+        for (k, v) in [
+            ("user.email", "test@example.invalid"),
+            ("user.name", "test"),
+        ] {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(tmp.path())
+                .args(["config", k, v])
+                .output()
+                .expect("git config");
+        }
+        let commit = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(["commit", "--quiet", "-m", "track AGENTS.md"])
+            .output()
+            .expect("git commit");
+        assert!(commit.status.success(), "git commit failed: {commit:?}");
+        fs::write(tmp.path().join(".gitignore"), ".issuectl/\n").unwrap();
+
+        let hits = detect_gitignored_canonical_paths(tmp.path());
+        assert!(
+            hits.is_empty(),
+            "tracked file must NOT be flagged as gitignored; got {hits:?}"
         );
     }
 
