@@ -2,7 +2,7 @@
 created: 2026-05-06
 updated: 2026-05-10
 type: feature
-status: in-progress
+status: done
 priority: normal
 reporter: jari
 assignee: jari
@@ -13,6 +13,9 @@ commits:
   summary: 'feat(sync-commits): trailer-driven commit linking'
 - hash: d4fa6cbc101453558f0049430674663ae7eb545d
   summary: 'chore(issues): record trailer-feature commit via sync-commits'
+- hash: 8118c968f91ba669b98336ef0b063a8ad2ce11c8
+  summary: 'fix(sync-commits): apply review findings'
+closed: 2026-05-10
 ---
 
 # Git-native commit linking: trailers (Refs-Issue / Fixes-Issue) + sync-commits + branch-name detection
