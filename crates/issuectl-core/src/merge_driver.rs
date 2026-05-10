@@ -592,14 +592,7 @@ fn repo_root_for(output: &Path) -> Option<PathBuf> {
 /// global config (cross-repo blast radius).
 pub fn install(root: &Path, apply: bool) -> Result<()> {
     let attr_line = "issues/**/item.md merge=issuectl-yaml";
-    // Use the absolute path of the running binary so installs survive
-    // PATH changes and cargo-installed binaries that get relocated.
-    // Falls back to bare `issuectl` if current_exe fails (cross-arch
-    // builds, exotic platforms).
-    let exe = std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "issuectl".to_string());
-    let driver_value = format!("{exe} merge-driver --base %O --ours %A --theirs %B --output %A");
+    let driver_value = driver_value();
     let config_cmd = format!("git config merge.issuectl-yaml.driver \"{driver_value}\"");
     println!("Add to .gitattributes (commit this):");
     println!("  {attr_line}");
@@ -607,21 +600,70 @@ pub fn install(root: &Path, apply: bool) -> Result<()> {
     println!("Then run (per-repo, in your local config):");
     println!("  {config_cmd}");
     if apply {
-        let status = Command::new("git")
-            .current_dir(root)
-            .args(["config", "merge.issuectl-yaml.driver", &driver_value])
-            .status()
-            .context("cannot invoke `git config`")?;
-        if !status.success() {
-            return Err(anyhow!("git config failed with status {status}"));
+        let outcome = apply_driver_config(root, &driver_value)?;
+        match outcome {
+            InstallOutcome::Configured => println!(
+                "\nApplied: merge.issuectl-yaml.driver is now configured for {}.",
+                root.display()
+            ),
+            InstallOutcome::AlreadyConfigured => println!(
+                "\nAlready configured: merge.issuectl-yaml.driver is set for {}.",
+                root.display()
+            ),
         }
-        println!(
-            "\nApplied: merge.issuectl-yaml.driver is now configured for {}.",
-            root.display()
-        );
         println!("Note: .gitattributes is NOT modified — add the line yourself and commit.");
     }
     Ok(())
+}
+
+/// Outcome reporter for `install_quiet`. `Configured` means we wrote
+/// (or rewrote) the `merge.issuectl-yaml.driver` git-config value;
+/// `AlreadyConfigured` means it was already set to the expected value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallOutcome {
+    Configured,
+    AlreadyConfigured,
+}
+
+/// Apply the merge-driver git-config without printing. Returns whether
+/// the config value was already set to the expected merge-driver
+/// invocation. Used by `issuectl init`.
+pub fn install_quiet(root: &Path) -> Result<InstallOutcome> {
+    apply_driver_config(root, &driver_value())
+}
+
+fn driver_value() -> String {
+    // Use the absolute path of the running binary so installs survive
+    // PATH changes and cargo-installed binaries that get relocated.
+    // Falls back to bare `issuectl` if current_exe fails (cross-arch
+    // builds, exotic platforms).
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "issuectl".to_string());
+    format!("{exe} merge-driver --base %O --ours %A --theirs %B --output %A")
+}
+
+fn apply_driver_config(root: &Path, driver_value: &str) -> Result<InstallOutcome> {
+    let existing = Command::new("git")
+        .current_dir(root)
+        .args(["config", "--local", "--get", "merge.issuectl-yaml.driver"])
+        .output()
+        .context("cannot invoke `git config --get`")?;
+    if existing.status.success() {
+        let cur = String::from_utf8_lossy(&existing.stdout).trim().to_string();
+        if cur == driver_value {
+            return Ok(InstallOutcome::AlreadyConfigured);
+        }
+    }
+    let status = Command::new("git")
+        .current_dir(root)
+        .args(["config", "merge.issuectl-yaml.driver", driver_value])
+        .status()
+        .context("cannot invoke `git config`")?;
+    if !status.success() {
+        return Err(anyhow!("git config failed with status {status}"));
+    }
+    Ok(InstallOutcome::Configured)
 }
 
 #[cfg(test)]

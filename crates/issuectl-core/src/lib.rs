@@ -39,6 +39,8 @@ pub mod git_trailers;
 #[doc(hidden)]
 pub mod hooks;
 #[doc(hidden)]
+pub mod init;
+#[doc(hidden)]
 pub mod issue_fields;
 #[doc(hidden)]
 pub mod item_text;

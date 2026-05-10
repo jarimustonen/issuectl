@@ -8,8 +8,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::{
-    agents, body_sections, canonical, context, docs, doctor, fmt, hooks, merge_driver, models,
-    mutate, query, repo, server, skill, slug, sync_commits,
+    agents, body_sections, canonical, context, docs, doctor, fmt, hooks, init as init_cmd,
+    merge_driver, models, mutate, query, repo, server, skill, slug, sync_commits,
 };
 
 const TOP_LEVEL_HELP: &str = "\
@@ -22,6 +22,7 @@ Examples:
   issuectl new --type bug --title \"...\"    Create a new issue (random slug)
   issuectl update <slug> --status testing  Change status
   issuectl close <slug> --status fixed     Set a closing status (fixed/done/...)
+  issuectl init                            Bootstrap a new repo (schema, agents, skill)
   issuectl doctor                          Health-check the repo
   issuectl doctor --fix                    Migrate legacy numbered issues
   issuectl skill install                   Install /issue skill in current repo
@@ -488,6 +489,32 @@ enum Command {
         action: BodyAction,
     },
 
+    /// Bootstrap a new repo: schema scaffold, `.issuectl/AGENTS.md`,
+    /// `/issue` skill (Claude + Codex by default), and optionally the
+    /// pre-commit hook and YAML merge driver. Idempotent — safe to
+    /// re-run on an already-initialized repo.
+    Init {
+        /// Which agent's skill format(s) to install (claude, codex, all)
+        #[arg(short = 'a', long, default_value = "all", value_parser = PossibleValuesParser::new(["claude", "codex", "all"]))]
+        agent: String,
+
+        /// Also install the opt-in pre-commit hook that runs
+        /// `issuectl doctor` on staged issue files.
+        #[arg(long)]
+        with_hooks: bool,
+
+        /// Also configure the `issuectl-yaml` git merge driver. You
+        /// still need to add `issues/**/item.md merge=issuectl-yaml`
+        /// to `.gitattributes` and commit it.
+        #[arg(long)]
+        with_merge_driver: bool,
+
+        /// Overwrite existing per-step artifacts (skill files,
+        /// `.issuectl/AGENTS.md`, hook block).
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Health-check the repo and (with --fix) migrate legacy layouts and
     /// numbered issues to the canonical flat slug layout
     Doctor {
@@ -923,6 +950,21 @@ fn main() -> Result<()> {
                 expected_version,
             } => cmd_body_set(json_output, &slug, stdin, from_file, expected_version),
         },
+        Command::Init {
+            agent,
+            with_hooks,
+            with_merge_driver,
+            force,
+        } => {
+            let root = find_root();
+            let opts = init_cmd::InitOptions {
+                agent: init_cmd::AgentSelection::parse(&agent)?,
+                with_hooks,
+                with_merge_driver,
+                force,
+            };
+            init_cmd::run(&root, opts, json_output)
+        }
         Command::Doctor { fix, verbose } => doctor::run(&find_root(), fix, json_output, verbose),
         Command::Hooks { action } => match action {
             HooksAction::Install { uninstall, force } => hooks::run(&find_root(), uninstall, force),

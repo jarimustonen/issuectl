@@ -444,6 +444,54 @@ pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Outcome of orchestrated initialization (e.g. from `issuectl init`)
+/// for `.issuectl/AGENTS.md`. Mirrors the create / already-exists
+/// distinction used by the skill installer.
+#[derive(Debug, Clone)]
+pub struct EnsureDefaultOutcome {
+    pub path: PathBuf,
+    /// `true` if this call wrote the file; `false` if it was already
+    /// present and `force` was not set.
+    pub wrote: bool,
+    /// Whether the file existed before this call (independent of
+    /// `wrote` — both true means we overwrote with `force`).
+    pub existed: bool,
+    pub schema_source: SchemaSource,
+}
+
+/// Write `.issuectl/AGENTS.md` if missing, leaving an existing file
+/// intact when `force` is `false`. Idempotent — re-running on an
+/// already-initialized repo is a no-op and reports `wrote=false`.
+/// Used by `issuectl init` so that the orchestrated bootstrap doesn't
+/// abort when the agents file already exists.
+pub fn ensure_default_written(root: &Path, force: bool) -> Result<EnsureDefaultOutcome> {
+    let _lock = crate::mutate::WriteLock::acquire(root)?;
+    let path = agents_path(root);
+    let existed = classify_target(&path)?;
+    let schema_source = detect_schema_source(root);
+
+    if existed && !force {
+        return Ok(EnsureDefaultOutcome {
+            path,
+            wrote: false,
+            existed,
+            schema_source,
+        });
+    }
+
+    let schema = schema::load(root)?;
+    let rules = transitions::load(root)?;
+    let content = render_full(&schema, &rules);
+    atomic_write(&path, content.as_bytes())?;
+
+    Ok(EnsureDefaultOutcome {
+        path,
+        wrote: true,
+        existed,
+        schema_source,
+    })
+}
+
 pub fn run_init(root: &Path, force: bool, json: bool) -> Result<()> {
     // Repo write lock — same convention as every other mutation path
     // in the codebase. Prevents `agents init --force` from racing with
@@ -519,13 +567,13 @@ fn rel(root: &Path, p: &Path) -> String {
 /// and as a stderr log line in text mode so the silent-fallback path
 /// is no longer invisible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SchemaSource {
+pub enum SchemaSource {
     Project,
     Default,
 }
 
 impl SchemaSource {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             SchemaSource::Project => "project",
             SchemaSource::Default => "default",
@@ -533,7 +581,7 @@ impl SchemaSource {
     }
 }
 
-fn detect_schema_source(root: &Path) -> SchemaSource {
+pub fn detect_schema_source(root: &Path) -> SchemaSource {
     if schema::schema_path(root).is_file() {
         SchemaSource::Project
     } else {

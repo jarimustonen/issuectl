@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `issuectl init` — one-command bootstrap for a fresh repo. Runs the
+  schema scaffold, `.issuectl/AGENTS.md`, and the `/issue` skill
+  (Claude + Codex by default; override with `--agent`). Pre-commit
+  hook (`--with-hooks`) and YAML merge driver (`--with-merge-driver`)
+  are opt-in. Idempotent: re-running on an already-initialized repo
+  reports each step as "already exists" and exits 0. `--json` emits
+  a `steps[]` summary with per-step status and paths.
+  (#totally-protective-wing)
 - `issuectl sync-commits` walks `git log <range>` (default
   `<merge-base of HEAD and main/master>..HEAD`) and appends commits
   to each issue's `commits[]` based on `Refs-Issue:` / `Fixes-Issue:`

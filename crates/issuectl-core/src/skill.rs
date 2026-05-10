@@ -50,12 +50,45 @@ impl Agent {
     }
 }
 
+/// Outcome of installing a single skill-related file. `init` and other
+/// orchestrators consume this to report per-file status without
+/// re-running file-existence checks of their own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallOutcome {
+    /// File did not exist (or `--force` was supplied) and was written.
+    Created,
+    /// File already existed and `--force` was not supplied.
+    AlreadyExists,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstallResult {
+    pub path: PathBuf,
+    pub label: String,
+    pub outcome: InstallOutcome,
+}
+
+/// Install the issues/AGENTS.md scaffold and one or more agent skill
+/// files. Returns one [`InstallResult`] per file touched (or considered)
+/// in the order: scaffold, then each agent in input order.
+pub fn install_skill_summary(
+    repo_root: &Path,
+    agents: &[Agent],
+    force: bool,
+) -> Result<Vec<InstallResult>> {
+    let mut results = Vec::with_capacity(agents.len() + 1);
+    results.push(install_issues_scaffold(repo_root, force)?);
+    for agent in agents {
+        results.push(install_agent_template(repo_root, *agent, force)?);
+    }
+    Ok(results)
+}
+
 /// Install the issues/AGENTS.md scaffold and one or more agent skill files.
 pub fn install_skill(repo_root: &Path, agents: &[Agent], force: bool) -> Result<()> {
-    install_issues_scaffold(repo_root, force)?;
-
-    for agent in agents {
-        install_agent_template(repo_root, *agent, force)?;
+    let results = install_skill_summary(repo_root, agents, force)?;
+    for r in &results {
+        print_install_result(repo_root, r);
     }
 
     println!();
@@ -75,7 +108,30 @@ pub fn print_skill(agent: Agent) -> Result<()> {
     Ok(())
 }
 
-fn install_issues_scaffold(repo_root: &Path, force: bool) -> Result<()> {
+/// Render a single [`InstallResult`] in the `~ already exists` / `✓ Created`
+/// style shared by `skill install` and `init`.
+pub fn print_install_result(repo_root: &Path, r: &InstallResult) {
+    let display = r
+        .path
+        .strip_prefix(repo_root)
+        .unwrap_or(&r.path)
+        .display()
+        .to_string();
+    match r.outcome {
+        InstallOutcome::Created => {
+            if r.label.is_empty() {
+                println!("  ✓ Created {display}");
+            } else {
+                println!("  ✓ Created {display} ({})", r.label);
+            }
+        }
+        InstallOutcome::AlreadyExists => {
+            println!("  ~ {display} already exists (use --force to overwrite)");
+        }
+    }
+}
+
+fn install_issues_scaffold(repo_root: &Path, force: bool) -> Result<InstallResult> {
     let issues_dir = repo_root.join("issues");
     let agents_md = issues_dir.join("AGENTS.md");
 
@@ -84,27 +140,29 @@ fn install_issues_scaffold(repo_root: &Path, force: bool) -> Result<()> {
             .with_context(|| format!("cannot create {}", issues_dir.display()))?;
     }
 
-    if force || !agents_md.exists() {
+    let outcome = if force || !agents_md.exists() {
         std::fs::write(&agents_md, ISSUES_AGENTS_TEMPLATE)
             .with_context(|| format!("cannot write {}", agents_md.display()))?;
-        println!("  ✓ Created issues/AGENTS.md");
+        InstallOutcome::Created
     } else {
-        println!("  ~ issues/AGENTS.md already exists (use --force to overwrite)");
-    }
-    Ok(())
+        InstallOutcome::AlreadyExists
+    };
+    Ok(InstallResult {
+        path: agents_md,
+        label: String::new(),
+        outcome,
+    })
 }
 
-fn install_agent_template(repo_root: &Path, agent: Agent, force: bool) -> Result<()> {
+fn install_agent_template(repo_root: &Path, agent: Agent, force: bool) -> Result<InstallResult> {
     let path = agent.install_path(repo_root);
-    let display = path
-        .strip_prefix(repo_root)
-        .unwrap_or(&path)
-        .display()
-        .to_string();
 
     if !force && path.exists() {
-        println!("  ~ {display} already exists (use --force to overwrite)");
-        return Ok(());
+        return Ok(InstallResult {
+            path,
+            label: agent.label().to_string(),
+            outcome: InstallOutcome::AlreadyExists,
+        });
     }
 
     if let Some(parent) = path.parent() {
@@ -113,8 +171,11 @@ fn install_agent_template(repo_root: &Path, agent: Agent, force: bool) -> Result
     }
     std::fs::write(&path, render_template(agent.template()))
         .with_context(|| format!("cannot write {}", path.display()))?;
-    println!("  ✓ Created {display} ({})", agent.label());
-    Ok(())
+    Ok(InstallResult {
+        path,
+        label: agent.label().to_string(),
+        outcome: InstallOutcome::Created,
+    })
 }
 
 #[cfg(test)]

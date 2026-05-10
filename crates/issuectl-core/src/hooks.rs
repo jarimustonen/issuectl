@@ -121,11 +121,45 @@ pub fn run(repo_root: &Path, uninstall: bool, force: bool) -> Result<()> {
     if uninstall {
         uninstall_hook(repo_root)
     } else {
-        install_hook(repo_root, force)
+        let outcome = install_hook(repo_root, force)?;
+        let hook_path = repo_root.join(".githooks/pre-commit");
+        match outcome {
+            InstallOutcome::Installed => {
+                println!(
+                    "Installed pre-commit hook at {} and set core.hooksPath = .githooks.",
+                    hook_path.display()
+                );
+                println!("Bypass with `git commit --no-verify`. Uninstall with `issuectl hooks install --uninstall`.");
+            }
+            InstallOutcome::AlreadyInstalled => {
+                println!(
+                    "Pre-commit hook already installed at {} (core.hooksPath = .githooks).",
+                    hook_path.display()
+                );
+            }
+        }
+        Ok(())
     }
 }
 
-fn install_hook(repo_root: &Path, force: bool) -> Result<()> {
+/// Outcome reporter for `install_hook` so orchestrators (e.g. `init`)
+/// can distinguish "newly installed" from "already installed" without
+/// re-checking filesystem state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallOutcome {
+    Installed,
+    AlreadyInstalled,
+}
+
+/// Install the pre-commit hook and configure `core.hooksPath`. Returns
+/// whether the hook block was newly added (or rewritten) or was already
+/// present and current. Idempotent — re-running with the hook already
+/// in place is a no-op aside from the `core.hooksPath` reassertion.
+pub fn install_quiet(repo_root: &Path, force: bool) -> Result<InstallOutcome> {
+    install_hook(repo_root, force)
+}
+
+fn install_hook(repo_root: &Path, force: bool) -> Result<InstallOutcome> {
     // Refuse to be in a non-git directory before touching the
     // filesystem — `git config --local` would fail later anyway, but
     // not before we'd already written `.githooks/pre-commit`.
@@ -159,15 +193,20 @@ fn install_hook(repo_root: &Path, force: bool) -> Result<()> {
     fs::create_dir_all(&hooks_dir)
         .with_context(|| format!("cannot create {}", hooks_dir.display()))?;
     let hook_path = hooks_dir.join("pre-commit");
-    let new_contents = compose_hook(&read_existing(&hook_path));
-    write_hook(&hook_path, &new_contents)?;
+    let existing = read_existing(&hook_path);
+    let new_contents = compose_hook(&existing);
+    let already_current = !existing.is_empty()
+        && existing == new_contents
+        && current.as_deref() == Some(".githooks");
+    if !already_current {
+        write_hook(&hook_path, &new_contents)?;
+    }
     set_git_config_key(repo_root, "core.hooksPath", ".githooks")?;
-    println!(
-        "Installed pre-commit hook at {} and set core.hooksPath = .githooks.",
-        hook_path.display()
-    );
-    println!("Bypass with `git commit --no-verify`. Uninstall with `issuectl hooks install --uninstall`.");
-    Ok(())
+    Ok(if already_current {
+        InstallOutcome::AlreadyInstalled
+    } else {
+        InstallOutcome::Installed
+    })
 }
 
 fn uninstall_hook(repo_root: &Path) -> Result<()> {
