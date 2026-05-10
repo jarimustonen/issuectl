@@ -7,6 +7,9 @@ status: in-progress
 priority: high
 epic: hugely-exciting-spiders
 labels: [from-3dbear-0.5.1-feedback]
+commits:
+- hash: a8dbdd4
+  summary: split critical_blockers into ExitCode/ApplyPreflight scopes; layout migration runs even when schema violations remain
 ---
 
 # doctor --fix is all-or-nothing: refuses to run while any schema violation exists

@@ -7,6 +7,9 @@ status: in-progress
 priority: high
 epic: hugely-exciting-spiders
 labels: [from-3dbear-0.5.1-feedback]
+commits:
+- hash: a8dbdd4
+  summary: schema bootstrap moved before preflight refusal in apply()
 ---
 
 # doctor --fix does not create .schema.yaml when other violations block migration (broken promise)

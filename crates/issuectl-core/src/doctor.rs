@@ -4,6 +4,7 @@
 //! Read-only by default; `--fix` applies migrations and fixes.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -531,8 +532,15 @@ impl ApplyOutcome {
     /// Debug-asserts the documented invariants:
     ///   - phase ∈ {Preflight, PostApply}
     ///   - blockers != []
-    ///   - Preflight ⇒ no prior writes
-    ///   - PostApply  ⇒ at least one prior write
+    ///   - Preflight ⇒ no prior writes BEYOND schema bootstrap. The
+    ///     bootstrap is intentionally hoisted above preflight (issue:
+    ///     `@unreasonably-attractive-star`) and is the only write the
+    ///     pipeline allows before the preflight gate. Any other field
+    ///     being non-default at this point indicates a phase ran out
+    ///     of order.
+    ///   - PostApply  ⇒ at least one phase BEYOND schema bootstrap
+    ///     ran (the post-flat-layout re-check fires only after phase
+    ///     5 writes land).
     fn stop_with_blockers(&mut self, phase: StopPhase, blockers: Vec<String>) {
         debug_assert!(
             matches!(phase, StopPhase::Preflight | StopPhase::PostApply),
@@ -544,17 +552,33 @@ impl ApplyOutcome {
         );
         match phase {
             StopPhase::Preflight => debug_assert!(
-                !self.fix_applied(),
-                "Preflight stop must precede any writes"
+                !self.fix_applied_beyond_schema_bootstrap(),
+                "Preflight stop must precede any write beyond schema bootstrap"
             ),
             StopPhase::PostApply => debug_assert!(
-                self.fix_applied(),
-                "PostApply stop must follow at least one write"
+                self.fix_applied_beyond_schema_bootstrap(),
+                "PostApply stop must follow at least one phase beyond schema bootstrap"
             ),
             StopPhase::Ok => unreachable!(),
         }
         self.blockers = blockers;
         self.stop_phase = phase;
+    }
+
+    /// True iff a phase beyond the unconditional schema bootstrap
+    /// ran. Used by `stop_with_blockers` to encode the new pipeline
+    /// invariant: schema bootstrap is the only write allowed before
+    /// preflight refusal; everything else must wait for a clean
+    /// preflight pass.
+    fn fix_applied_beyond_schema_bootstrap(&self) -> bool {
+        !self.legacy_dirs_migrated.is_empty()
+            || !self.flat_layout_migrated.is_empty()
+            || !self.notes_renamed.is_empty()
+            || !self.orphan_tempfiles_removed.is_empty()
+            || !self.status_reconciled.is_empty()
+            || self.files_rewritten > 0
+            || self.agents_md_regenerated
+            || self.issues_agents_md_rewritten
     }
 }
 
@@ -1640,19 +1664,14 @@ fn apply(
     if !actions.preflight_blockers.is_empty() {
         // Schema bootstrap above may have written `.schema.yaml`
         // before this preflight refusal — that's intentional and the
-        // documented behaviour. `stop_with_blockers` debug-asserts
-        // "Preflight stop must precede any writes" against
-        // `fix_applied()`, so we exclude `schema_bootstrapped` from
-        // that predicate at the assertion site by clearing it
-        // around the call. The bootstrap is restored immediately
-        // after so the outcome (and JSON envelope) accurately
-        // reports the write that landed.
-        let bootstrapped = std::mem::replace(&mut outcome.schema_bootstrapped, false);
+        // documented behaviour (issue: @unreasonably-attractive-star).
+        // The Preflight invariant in `stop_with_blockers` accepts
+        // `schema_bootstrapped` as the one allowed pre-preflight
+        // write; no state masking is needed.
         outcome.stop_with_blockers(
             StopPhase::Preflight,
             std::mem::take(&mut actions.preflight_blockers),
         );
-        outcome.schema_bootstrapped = bootstrapped;
         return Ok(outcome);
     }
 
@@ -2313,11 +2332,15 @@ fn planned_moves(report: &DoctorFindings) -> &[PlannedMove] {
 /// that a real-world legacy repo's 100+ entries collapse cleanly.
 const RENDER_FULL_LIST_LIMIT: usize = 10;
 
-/// Print a list section, collapsing to a one-liner when not
-/// `verbose` and the list exceeds `RENDER_FULL_LIST_LIMIT` entries.
-/// Caller passes the `verb_phrase` used in the collapsed line (e.g.
-/// "need layout migration"). Empty lists print nothing.
-fn print_section<T>(
+/// Render a list section to `out`, collapsing to a one-liner when
+/// not `verbose` and the list exceeds `RENDER_FULL_LIST_LIMIT`
+/// entries. Caller passes the `verb_phrase` used in the collapsed
+/// line (e.g. "need layout migration"). Empty lists render nothing.
+/// Writing through `&mut dyn fmt::Write` keeps the helper testable
+/// against an in-memory buffer (issue:
+/// `@ridiculously-outrageous-fold`).
+fn render_section<T>(
+    out: &mut dyn fmt::Write,
     title: &str,
     items: &[T],
     verbose: bool,
@@ -2328,19 +2351,33 @@ fn print_section<T>(
         return;
     }
     if !verbose && items.len() > RENDER_FULL_LIST_LIMIT {
-        println!(
+        let _ = writeln!(
+            out,
             "{} {} (re-run with --verbose to list).",
             items.len(),
             verb_phrase
         );
-        println!();
+        let _ = writeln!(out);
         return;
     }
-    println!("{title}");
+    let _ = writeln!(out, "{title}");
     for it in items {
-        println!("  {}", fmt_item(it));
+        let _ = writeln!(out, "  {}", fmt_item(it));
     }
-    println!();
+    let _ = writeln!(out);
+}
+
+/// `render_section` adapter that prints to stdout.
+fn print_section<T>(
+    title: &str,
+    items: &[T],
+    verbose: bool,
+    verb_phrase: &str,
+    fmt_item: impl Fn(&T) -> String,
+) {
+    let mut buf = String::new();
+    render_section(&mut buf, title, items, verbose, verb_phrase, fmt_item);
+    print!("{buf}");
 }
 
 fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: bool, verbose: bool) {
@@ -5009,28 +5046,200 @@ mod tests {
 
     /// Issue @ridiculously-outrageous-fold: long warning lists
     /// collapse to a one-liner when not `--verbose`. The 3DBear
-    /// migration printed 240 layout-migration entries every iteration
-    /// of "fix-something-rerun-doctor" loops; this verifies the
-    /// default-collapse threshold and that `--verbose` still prints
-    /// the full list.
+    /// migration printed 240 layout-migration entries every
+    /// iteration of "fix-something-rerun-doctor" loops; this
+    /// verifies the actual rendered text on both sides of the
+    /// threshold and the verbose escape hatch. Asserting against
+    /// the rendered string (rather than just pinning the constant)
+    /// catches regressions in wording, formatting, or wiring of the
+    /// `verbose` flag through `print_section`'s callers.
     #[test]
-    fn long_lists_collapse_unless_verbose() {
-        // Direct unit test of `print_section` collapse semantics —
-        // we don't need to spin up real fixtures to validate the
-        // rendering rule, only that the helper is wired correctly.
-        // The threshold is enforced through the public render path
-        // by Issue 3's text test fixture below.
-        let many: Vec<i32> = (0..(RENDER_FULL_LIST_LIMIT + 1) as i32).collect();
-        // With verbose=false this would collapse; with verbose=true
-        // it prints all. We can't easily capture stdout in unit
-        // tests, but we exercise the helper's branches via the
-        // public path: scan a repo with > LIMIT planned moves and
-        // run `render_text` indirectly through `run`. The
-        // higher-level test below covers behaviour end-to-end; this
-        // test pins the constant so a refactor that bumped it would
-        // need a deliberate update.
-        assert_eq!(RENDER_FULL_LIST_LIMIT, 10);
-        assert!(many.len() > RENDER_FULL_LIST_LIMIT);
+    fn render_section_collapses_long_lists_unless_verbose() {
+        let exactly_at_limit: Vec<i32> = (0..RENDER_FULL_LIST_LIMIT as i32).collect();
+        let one_over: Vec<i32> = (0..(RENDER_FULL_LIST_LIMIT + 1) as i32).collect();
+
+        // Empty: nothing rendered, no leading newline.
+        let mut buf = String::new();
+        render_section(
+            &mut buf,
+            "Title:",
+            &Vec::<i32>::new(),
+            false,
+            "thing(s)",
+            |i| i.to_string(),
+        );
+        assert!(buf.is_empty(), "empty list must render nothing, got {buf:?}");
+
+        // Exactly LIMIT entries: full list, not collapsed.
+        let mut buf = String::new();
+        render_section(
+            &mut buf,
+            "Title:",
+            &exactly_at_limit,
+            false,
+            "thing(s)",
+            |i| i.to_string(),
+        );
+        assert!(buf.contains("Title:"), "expected title, got {buf:?}");
+        for i in &exactly_at_limit {
+            assert!(buf.contains(&i.to_string()), "missing entry {i}: {buf:?}");
+        }
+        assert!(
+            !buf.contains("re-run with --verbose"),
+            "must not collapse at exactly LIMIT entries: {buf:?}"
+        );
+
+        // LIMIT+1 entries, non-verbose: collapsed to a one-liner
+        // with the count and the verb phrase.
+        let mut buf = String::new();
+        render_section(
+            &mut buf,
+            "Title:",
+            &one_over,
+            false,
+            "thing(s)",
+            |i| i.to_string(),
+        );
+        assert!(
+            buf.contains(&format!("{} thing(s)", one_over.len())),
+            "expected collapsed count line, got {buf:?}"
+        );
+        assert!(
+            buf.contains("re-run with --verbose to list"),
+            "expected verbose hint, got {buf:?}"
+        );
+        assert!(
+            !buf.contains("Title:"),
+            "collapsed render must omit the title, got {buf:?}"
+        );
+
+        // LIMIT+1 entries, verbose: full list, no collapse hint.
+        let mut buf = String::new();
+        render_section(
+            &mut buf,
+            "Title:",
+            &one_over,
+            true,
+            "thing(s)",
+            |i| i.to_string(),
+        );
+        assert!(buf.contains("Title:"), "verbose must print title: {buf:?}");
+        for i in &one_over {
+            assert!(buf.contains(&i.to_string()), "verbose missing {i}: {buf:?}");
+        }
+        assert!(
+            !buf.contains("re-run with --verbose"),
+            "verbose must not show the collapse hint: {buf:?}"
+        );
+    }
+
+    /// `apply_blockers` must always be a SUBSET of
+    /// `critical_blockers`. The two functions share a single
+    /// `blockers_for(scope)` core, but the manual `!layout_only`
+    /// guards on each schema-shape branch make it possible for a
+    /// future change to accidentally classify a finding as
+    /// preflight-only (would refuse `--fix` for something that
+    /// doesn't drive exit-1) or omit it from both. Pinning the
+    /// subset relation with a fixture that produces every
+    /// schema-shape finding catches the most likely regression
+    /// shape: a new finding category added to one branch of
+    /// `blockers_for` and forgotten in the other.
+    #[test]
+    fn apply_blockers_is_a_subset_of_critical_blockers() {
+        let tmp = fresh_repo();
+        // Issue with multiple schema-shape problems: missing
+        // required `priority`, broken `epic` cross-reference (a
+        // valid slug shape but no such issue), and timestamps that
+        // disagree with status (`closed:` set while `status: open`).
+        let dir = tmp.path().join("issues/quiet-brave-otter");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: open\nepic: alpha-bright-cat\nclosed: 2026-01-02\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n# T\n",
+        )
+        .unwrap();
+        let findings = scan(tmp.path()).unwrap();
+        // Sanity: at least one schema-shape finding fired.
+        assert!(
+            !findings.schema_violations.is_empty()
+                || !findings.broken_refs.is_empty()
+                || !findings.status_consistency.is_empty(),
+            "fixture must produce a schema-shape finding"
+        );
+
+        let crit: BTreeSet<String> = critical_blockers(&findings).into_iter().collect();
+        let pre: BTreeSet<String> = apply_blockers(&findings).into_iter().collect();
+        assert!(
+            pre.is_subset(&crit),
+            "apply_blockers must be a subset of critical_blockers.\n  pre: {pre:?}\n  crit: {crit:?}"
+        );
+        // The schema-shape findings must be in `critical_blockers`
+        // (drive exit-1) but NOT in `apply_blockers` (don't refuse
+        // `--fix`). At least one ExitCode-only finding must exist
+        // in this fixture.
+        assert!(
+            crit.len() > pre.len(),
+            "fixture must exercise an ExitCode-only finding (crit > pre): crit={crit:?} pre={pre:?}"
+        );
+    }
+
+    /// `--fix` must run the legacy NN-rename phase against a
+    /// post-flat-layout fresh scan even when the fresh scan
+    /// surfaces schema-shape findings (schema violations, broken
+    /// refs, status inconsistencies, timestamp issues). Before
+    /// this bundle, the post-apply re-check used
+    /// `critical_blockers` and would bail with `StopPhase::PostApply`
+    /// the moment any of those appeared on the post-migration
+    /// state. Now it uses `apply_blockers`, so NN-rename proceeds
+    /// — schema findings remain visible as forward work in the
+    /// final scan and drive exit-1, but they don't strand the
+    /// migration.
+    #[test]
+    fn nn_rename_runs_when_post_migration_scan_has_schema_findings() {
+        let tmp = fresh_repo();
+        // Numbered-legacy issue under `issues/closed/`. Body has no
+        // schema-required `priority`, so the post-migration rescan
+        // (after both flat-layout migration AND the NN-rename's
+        // `rewrite_item_frontmatter`) will surface a schema
+        // violation against the new canonical slug — proving the
+        // path completed end-to-end despite the schema-shape
+        // finding.
+        let old = tmp.path().join("issues/closed/3-old");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(
+            old.join("item.md"),
+            "---\nnumber: 3\ntype: bug\nstatus: open\n---\n# Old\n",
+        )
+        .unwrap();
+
+        let mut findings = scan(tmp.path()).unwrap();
+        let actions = DoctorActions::from_findings(&mut findings);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+
+        // Layout migration ran AND NN-rename ran (post-migration
+        // schema findings did not bail PostApply).
+        assert_eq!(outcome.stop_phase, StopPhase::Ok);
+        assert_eq!(outcome.flat_layout_migrated.len(), 1);
+        assert_eq!(
+            outcome.legacy_dirs_migrated.len(),
+            1,
+            "NN-rename must run despite post-migration schema findings: {outcome:?}"
+        );
+
+        // Post-fix scan still surfaces the unresolved schema
+        // violation against the new canonical slug — exit-1 still
+        // fires (caller asserts), but as forward work, not a
+        // pipeline bail.
+        let after = scan(tmp.path()).unwrap();
+        assert!(
+            !after.schema_violations.is_empty(),
+            "expected lingering schema violation against post-rename path"
+        );
     }
 
     /// Issue @unreasonably-attractive-star: schema bootstrap fires

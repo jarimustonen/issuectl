@@ -7,6 +7,9 @@ status: in-progress
 priority: normal
 epic: hugely-exciting-spiders
 labels: [from-3dbear-0.5.1-feedback]
+commits:
+- hash: a8dbdd4
+  summary: render_text long-list collapse via print_section helper; --verbose flag added
 ---
 
 # doctor: collapse repetitive 240-line layout warnings; add --verbose to expand

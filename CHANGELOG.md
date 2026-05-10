@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advertised auto-creation on first `--fix`; gating bootstrap on an
   empty blocker list broke that promise. The operation is
   idempotent. (issue: `@unreasonably-attractive-star`)
+- **JSON envelope:** `--json --fix` runs that hit a preflight
+  refusal can now report `apply_outcome.fix_applied: true` when only
+  the schema bootstrap landed. The `(stop_phase: "preflight",
+  fix_applied: true, schema_bootstrapped: true)` combination is
+  intentional and reflects the unconditional bootstrap behaviour.
+  Scripted callers that previously read `fix_applied` as "every
+  pending fix ran" should branch on `stop_phase` instead — `"ok"`
+  remains the only phase that means "no blockers, pipeline
+  completed".
 - `issuectl doctor` collapses long warning lists (more than ten
   entries) to a one-line count by default. Re-run with `--verbose`
   to print the full list. The previous behaviour filled the screen
