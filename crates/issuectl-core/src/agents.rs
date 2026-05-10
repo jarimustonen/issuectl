@@ -138,7 +138,11 @@ pub fn render_managed_body(schema: &Schema, rules: &TransitionRules) -> String {
     // Frontmatter fields.
     out.push_str("### Frontmatter fields\n\n");
     for (name, spec) in &schema.fields {
-        let req = if spec.required { "required" } else { "optional" };
+        let req = if spec.required {
+            "required"
+        } else {
+            "optional"
+        };
         let kind = if spec.list { "list" } else { "scalar" };
         let allowed = match spec.allowed.as_ref() {
             Some(vs) if !vs.is_empty() => format!(" — allowed: {}", vs.join(", ")),
@@ -157,8 +161,7 @@ pub fn render_managed_body(schema: &Schema, rules: &TransitionRules) -> String {
             if sections.is_empty() {
                 continue;
             }
-            let names: Vec<String> =
-                sections.iter().map(|s| format!("`## {s}`")).collect();
+            let names: Vec<String> = sections.iter().map(|s| format!("`## {s}`")).collect();
             out.push_str(&format!("- **{issue_type}**: {}\n", names.join(", ")));
         }
         out.push('\n');
@@ -175,9 +178,7 @@ pub fn render_managed_body(schema: &Schema, rules: &TransitionRules) -> String {
                 out.push_str("  - requires `assignee` (or `owner` on epics)\n");
             }
             if rule.requires_acceptance_criteria_checked {
-                out.push_str(
-                    "  - requires `## Acceptance Criteria` with all checkboxes ticked\n",
-                );
+                out.push_str("  - requires `## Acceptance Criteria` with all checkboxes ticked\n");
             }
             if rule.requires_commits {
                 out.push_str("  - requires at least one entry in `commits:`\n");
@@ -271,7 +272,11 @@ pub fn locate_managed_block(text: &str) -> BlockLocation {
         };
         let line = &text[line_start..line_end];
         // Bytes including the trailing newline if any.
-        let after = if line_end < bytes.len() { line_end + 1 } else { line_end };
+        let after = if line_end < bytes.len() {
+            line_end + 1
+        } else {
+            line_end
+        };
         let trimmed = line.trim();
 
         if fence_toggle(line) {
@@ -346,11 +351,7 @@ pub fn extract_managed_body(text: &str) -> Option<String> {
 /// silently compound the corruption, so doctor's `--fix` path checks
 /// `locate_managed_block` upstream and surfaces a malformed finding
 /// rather than calling here.
-pub fn regenerate_managed(
-    text: &str,
-    schema: &Schema,
-    rules: &TransitionRules,
-) -> Result<String> {
+pub fn regenerate_managed(text: &str, schema: &Schema, rules: &TransitionRules) -> Result<String> {
     let body = render_managed_body(schema, rules);
     let wrapped = wrap_managed(&body);
     match locate_managed_block(text) {
@@ -403,16 +404,14 @@ fn classify_target(path: &Path) -> Result<bool> {
                 );
             }
             if !ft.is_file() {
-                bail!(
-                    "{} exists but is not a regular file",
-                    path.display()
-                );
+                bail!("{} exists but is not a regular file", path.display());
             }
             Ok(true)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(anyhow::Error::from(e))
-            .with_context(|| format!("cannot stat {}", path.display())),
+        Err(e) => {
+            Err(anyhow::Error::from(e)).with_context(|| format!("cannot stat {}", path.display()))
+        }
     }
 }
 
@@ -428,8 +427,7 @@ pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("cannot create {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
     let mut tmp = tempfile::Builder::new()
         .prefix(".issuectl-agents-")
         .tempfile_in(parent)
@@ -534,7 +532,10 @@ mod tests {
         let mut s = schema::default_schema();
         s.body_sections.insert(
             "bug".to_string(),
-            vec!["Reproduction".to_string(), "Acceptance Criteria".to_string()],
+            vec![
+                "Reproduction".to_string(),
+                "Acceptance Criteria".to_string(),
+            ],
         );
         let out = render_full(&s, &TransitionRules::default());
         assert!(out.contains("**bug**"));
@@ -658,7 +659,10 @@ mod tests {
 
     #[test]
     fn locate_handles_unmanaged() {
-        assert_eq!(locate_managed_block("just prose\n"), BlockLocation::Unmanaged);
+        assert_eq!(
+            locate_managed_block("just prose\n"),
+            BlockLocation::Unmanaged
+        );
     }
 
     #[test]

@@ -133,11 +133,8 @@ pub fn parse_item_md_text_with_warnings(
                 match serde_yaml::from_value::<Frontmatter>(value) {
                     Ok(fm) => fm,
                     Err(e) => {
-                        let msg = format!(
-                            "invalid YAML frontmatter in {}: {}",
-                            source.display(),
-                            e
-                        );
+                        let msg =
+                            format!("invalid YAML frontmatter in {}: {}", source.display(), e);
                         fm_typed_error = Some(msg.clone());
                         warnings.push(msg);
                         Frontmatter::default()
@@ -230,9 +227,7 @@ pub fn parse_item_md_text_with_warnings(
 /// drop the offending entry. Recursive sort guarantees the output
 /// bytes are stable across processes regardless of insertion order
 /// (matches design doc §3.2's "sorted-key JSON" contract).
-pub(crate) fn yaml_to_canonical_json(
-    v: &serde_yaml::Value,
-) -> Result<serde_json::Value, String> {
+pub(crate) fn yaml_to_canonical_json(v: &serde_yaml::Value) -> Result<serde_json::Value, String> {
     use serde_json::Value as J;
     match v {
         serde_yaml::Value::Null => Ok(J::Null),

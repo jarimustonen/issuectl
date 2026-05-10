@@ -153,8 +153,8 @@ pub(crate) fn load_uncached(root: &Path) -> Result<TransitionRules> {
     }
     let text =
         fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-    let rules: TransitionRules = serde_yaml::from_str(&text)
-        .with_context(|| format!("cannot parse {}", path.display()))?;
+    let rules: TransitionRules =
+        serde_yaml::from_str(&text).with_context(|| format!("cannot parse {}", path.display()))?;
     if rules.version != SUPPORTED_VERSION {
         anyhow::bail!(
             "{}: unsupported version {} (this build supports {})",
@@ -184,9 +184,7 @@ pub fn validate_status_refs(
 ) -> Result<()> {
     for (target, rule) in &rules.status_rules {
         if !valid_statuses.contains(target) {
-            anyhow::bail!(
-                "status_rules.{target}: unknown status (not in schema's `status` enum)",
-            );
+            anyhow::bail!("status_rules.{target}: unknown status (not in schema's `status` enum)",);
         }
         for s in &rule.allowed_from {
             if !valid_statuses.contains(s) {
@@ -274,9 +272,7 @@ pub fn evaluate_transition(
         ));
     }
     if prev_status != new_status {
-        if !rule.allowed_from.is_empty()
-            && !rule.allowed_from.iter().any(|s| s == prev_status)
-        {
+        if !rule.allowed_from.is_empty() && !rule.allowed_from.iter().any(|s| s == prev_status) {
             out.push(format!(
                 "transition {prev_status:?} → {new_status:?} is not in `allowed_from` (allowed: [{}])",
                 rule.allowed_from.join(", ")
@@ -312,9 +308,7 @@ pub fn evaluate_existing(rules: &TransitionRules, issue: &Issue) -> Vec<String> 
             out.push(msg);
         }
     }
-    if rule.requires_commits
-        && issue.commits.as_ref().map(|c| c.is_empty()).unwrap_or(true)
-    {
+    if rule.requires_commits && issue.commits.as_ref().map(|c| c.is_empty()).unwrap_or(true) {
         out.push(format!(
             "status {:?} requires at least one entry in `commits:`",
             issue.status
@@ -486,7 +480,10 @@ mod tests {
             "status_rules:\n  done:\n    requires_assignee: true\n",
         )
         .unwrap();
-        assert!(load(tmp.path()).is_err(), "missing `version` must be rejected");
+        assert!(
+            load(tmp.path()).is_err(),
+            "missing `version` must be rejected"
+        );
     }
 
     #[test]
@@ -600,18 +597,13 @@ mod tests {
         let m_missing = acceptance_criteria_message("", "done").unwrap();
         assert!(m_missing.contains("missing"));
 
-        let m_no_items = acceptance_criteria_message(
-            "## Acceptance Criteria\n\nProse only.\n",
-            "done",
-        )
-        .unwrap();
+        let m_no_items =
+            acceptance_criteria_message("## Acceptance Criteria\n\nProse only.\n", "done").unwrap();
         assert!(m_no_items.contains("at least one task-list item"));
 
-        let m_unchecked = acceptance_criteria_message(
-            "## Acceptance Criteria\n\n- [x] one\n- [ ] two\n",
-            "done",
-        )
-        .unwrap();
+        let m_unchecked =
+            acceptance_criteria_message("## Acceptance Criteria\n\n- [x] one\n- [ ] two\n", "done")
+                .unwrap();
         assert!(m_unchecked.contains("1 of 2 unchecked"));
 
         // All checked ⇒ no message.

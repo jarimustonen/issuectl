@@ -537,7 +537,8 @@ fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
         }
     };
     if !parsed.warnings.is_empty() {
-        let derived_folder = crate::repo::folder_for_status(&schema, &parsed.issue.status).to_string();
+        let derived_folder =
+            crate::repo::folder_for_status(&schema, &parsed.issue.status).to_string();
         let warnings = parsed
             .warnings
             .into_iter()

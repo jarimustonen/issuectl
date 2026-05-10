@@ -817,11 +817,7 @@ fn mutate_error_to_response(err: MutateError) -> Response {
             // 500: `.schema.yaml` is malformed or otherwise rejected at
             // load. Not client-actionable — an operator must edit the
             // schema file.
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "schema_config",
-                &msg,
-            )
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "schema_config", &msg)
         }
         MutateError::TransitionConfig(msg) => {
             // 500: `.issuectl/transitions.yaml` is malformed or
@@ -829,11 +825,7 @@ fn mutate_error_to_response(err: MutateError) -> Response {
             // operator must fix the file. Distinct from
             // `schema_config` so the client can route the user to the
             // correct file.
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "transition_config",
-                &msg,
-            )
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "transition_config", &msg)
         }
         MutateError::TransitionViolation(msg) => {
             // 422: post-mutation issue violates the declarative

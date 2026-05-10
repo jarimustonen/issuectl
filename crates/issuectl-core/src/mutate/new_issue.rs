@@ -65,9 +65,9 @@ impl From<DoNewError> for anyhow::Error {
     fn from(e: DoNewError) -> Self {
         match e {
             DoNewError::Io(e) => e,
-            DoNewError::Validation(s)
-            | DoNewError::Conflict(s)
-            | DoNewError::SchemaConfig(s) => anyhow::Error::msg(s),
+            DoNewError::Validation(s) | DoNewError::Conflict(s) | DoNewError::SchemaConfig(s) => {
+                anyhow::Error::msg(s)
+            }
             DoNewError::TransitionConfig(s) => {
                 anyhow::Error::msg(format!("transition config: {s}"))
             }
@@ -456,7 +456,9 @@ mod tests {
         )
         .unwrap();
         let res = do_new(tmp.path(), new_args("bug", "Will fail"));
-        let err = res.err().expect("schema-required field missing should fail");
+        let err = res
+            .err()
+            .expect("schema-required field missing should fail");
         let msg = err.to_string();
         assert!(
             msg.contains("schema") && msg.contains("team"),
@@ -501,10 +503,7 @@ mod tests {
     fn new_rejects_duplicate_field_keys() {
         let tmp = fresh_repo();
         let mut args = new_args("bug", "Dup");
-        args.custom_fields = vec![
-            ("team".into(), "a".into()),
-            ("team".into(), "b".into()),
-        ];
+        args.custom_fields = vec![("team".into(), "a".into()), ("team".into(), "b".into())];
         let err = do_new(tmp.path(), args).err().unwrap();
         let msg = err.to_string();
         assert!(

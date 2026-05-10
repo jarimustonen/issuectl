@@ -362,9 +362,7 @@ pub fn render_markdown(b: &Bundle) -> String {
         }
         out.push('\n');
     } else if let Some(s) = &b.issue.epic {
-        out.push_str(&format!(
-            "## Parent Epic\n\n- slug: @{s} (not found)\n\n"
-        ));
+        out.push_str(&format!("## Parent Epic\n\n- slug: @{s} (not found)\n\n"));
     }
 
     if !b.related_issues.is_empty() {
@@ -488,19 +486,13 @@ pub fn cache_path(root: &Path, slug: &str, subpath: &[&str]) -> Result<PathBuf> 
     Ok(p)
 }
 
-pub fn write_artifact(
-    root: &Path,
-    slug: &str,
-    subpath: &[&str],
-    content: &str,
-) -> Result<PathBuf> {
+pub fn write_artifact(root: &Path, slug: &str, subpath: &[&str], content: &str) -> Result<PathBuf> {
     let path = cache_path(root, slug, subpath)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
-    fs::write(&path, content)
-        .with_context(|| format!("cannot write {}", path.display()))?;
+    fs::write(&path, content).with_context(|| format!("cannot write {}", path.display()))?;
     Ok(path)
 }
 
@@ -632,7 +624,10 @@ pub fn load_template(root: &Path, name: &str) -> Result<String> {
 /// `prompts/<safe-name>.md`. Validates the template name in the process,
 /// so `cmd_prompt` cannot escape the cache via a malicious name.
 pub fn prompt_cache_segments(template: &str) -> Result<Vec<String>> {
-    Ok(vec!["prompts".to_string(), safe_template_filename(template)?])
+    Ok(vec![
+        "prompts".to_string(),
+        safe_template_filename(template)?,
+    ])
 }
 
 #[cfg(test)]
@@ -884,15 +879,23 @@ mod tests {
         let err = build(tmp.path(), "amber-loud-fox").unwrap_err();
         let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
         assert!(
-            chain.iter().any(|m| m.contains("schema") || m.contains(".schema.yaml")),
+            chain
+                .iter()
+                .any(|m| m.contains("schema") || m.contains(".schema.yaml")),
             "expected schema error context, got chain {chain:?}"
         );
     }
 
     #[test]
     fn normalise_ref_rejects_garbage_slugs() {
-        assert_eq!(normalise_ref("@amber-loud-fox"), Some("amber-loud-fox".into()));
-        assert_eq!(normalise_ref("amber-loud-fox"), Some("amber-loud-fox".into()));
+        assert_eq!(
+            normalise_ref("@amber-loud-fox"),
+            Some("amber-loud-fox".into())
+        );
+        assert_eq!(
+            normalise_ref("amber-loud-fox"),
+            Some("amber-loud-fox".into())
+        );
         // Path-shaped, single-word, whitespace, and legacy `#NN` are all dropped.
         assert_eq!(normalise_ref("@../../etc/passwd"), None);
         assert_eq!(normalise_ref("hello world"), None);

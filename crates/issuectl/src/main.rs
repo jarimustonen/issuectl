@@ -6,9 +6,7 @@ use anyhow::{bail, Context, Result};
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 
-use issuectl_core::issue_fields::{
-    ISSUE_TYPES, PRIORITIES,
-};
+use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::{
     agents, body_sections, canonical, context, docs, doctor, fmt, hooks, merge_driver, models,
     mutate, query, repo, server, skill, slug,
@@ -864,7 +862,15 @@ fn main() -> Result<()> {
             clear,
             dry_run,
             expected_version,
-        } => cmd_set(json_output, &slug, &field, value, clear, dry_run, expected_version),
+        } => cmd_set(
+            json_output,
+            &slug,
+            &field,
+            value,
+            clear,
+            dry_run,
+            expected_version,
+        ),
         Command::Check {
             slug,
             task,
@@ -889,9 +895,7 @@ fn main() -> Result<()> {
         },
         Command::Doctor { fix } => doctor::run(&find_root(), fix, json_output),
         Command::Hooks { action } => match action {
-            HooksAction::Install { uninstall, force } => {
-                hooks::run(&find_root(), uninstall, force)
-            }
+            HooksAction::Install { uninstall, force } => hooks::run(&find_root(), uninstall, force),
         },
         Command::Agents { action } => match action {
             AgentsAction::Init { force } => agents::run_init(&find_root(), force, json_output),
@@ -1178,9 +1182,7 @@ fn cmd_list(
     // we don't re-sort here.
     let filtered: Vec<_> = issues
         .into_iter()
-        .filter(|i| {
-            folder_filter.map(|f| i.folder == f).unwrap_or(true) && query::matches(&q, i)
-        })
+        .filter(|i| folder_filter.map(|f| i.folder == f).unwrap_or(true) && query::matches(&q, i))
         .collect();
 
     if json {
@@ -1820,10 +1822,7 @@ fn render_unified_diff(before: &str, after: &str, issue_dir: &Path) -> String {
     let diff = similar::TextDiff::from_lines(before, after);
     let header_old = format!("--- a/{rel}\n");
     let header_new = format!("+++ b/{rel}\n");
-    let body = diff
-        .unified_diff()
-        .context_radius(3)
-        .to_string();
+    let body = diff.unified_diff().context_radius(3).to_string();
     format!("{header_old}{header_new}{body}")
 }
 
@@ -1868,7 +1867,6 @@ fn cmd_body_set(
     }
     Ok(())
 }
-
 
 fn cmd_skill_install(agent: &str, force: bool) -> Result<()> {
     let agents = match agent {
@@ -2311,11 +2309,7 @@ mod tests {
     fn write_raw_issue(root: &Path, slug: &str, fm: &str, body: &str) {
         let dir = root.join("issues").join(slug);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("item.md"),
-            format!("---\n{fm}---\n{body}"),
-        )
-        .unwrap();
+        fs::write(dir.join("item.md"), format!("---\n{fm}---\n{body}")).unwrap();
     }
 
     #[test]
@@ -2509,8 +2503,7 @@ mod tests {
 
     #[test]
     fn parse_apply_patch_accepts_well_formed_json_patch() {
-        let yaml =
-            "slug: well-formed-issue\nexpected_version: sha256:abc123\npriority: high\n";
+        let yaml = "slug: well-formed-issue\nexpected_version: sha256:abc123\npriority: high\n";
         let (slug, req) = parse_apply_patch(yaml, true).unwrap();
         assert_eq!(slug, "well-formed-issue");
         assert_eq!(req.expected_version.as_deref(), Some("sha256:abc123"));

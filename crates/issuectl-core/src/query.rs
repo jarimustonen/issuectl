@@ -90,7 +90,10 @@ pub enum FieldMatch {
     /// Relative-date comparison. Stored as a *days offset from today*
     /// rather than a frozen anchor so a parsed `Query` is portable
     /// across time (saved queries, reports).
-    DateRel { op: DateCmp, days: i64 },
+    DateRel {
+        op: DateCmp,
+        days: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,8 +340,8 @@ fn build_term(raw: RawToken) -> Result<Term> {
                 });
             }
 
-            let field = parse_field_name(&key_lc)
-                .map_err(|_| anyhow!("unknown query field: {key:?}"))?;
+            let field =
+                parse_field_name(&key_lc).map_err(|_| anyhow!("unknown query field: {key:?}"))?;
 
             if value.is_empty() {
                 bail!("empty value for {key}:");
@@ -439,9 +442,7 @@ fn parse_date_match(val: &str) -> Result<FieldMatch> {
         .parse()
         .map_err(|_| anyhow!("invalid relative date offset: {rest:?}"))?;
     if days.abs() > MAX_RELATIVE_DATE_DAYS {
-        bail!(
-            "relative date offset out of range: {days}d (max ±{MAX_RELATIVE_DATE_DAYS}d)"
-        );
+        bail!("relative date offset out of range: {days}d (max ±{MAX_RELATIVE_DATE_DAYS}d)");
     }
     Ok(FieldMatch::DateRel { op, days })
 }
@@ -876,11 +877,7 @@ mod tests {
         // R2-C1 regression: huge offsets must error at parse time
         // instead of panicking inside `Duration::days` at eval.
         assert!(parse("updated:<-9999999999999d").is_err());
-        assert!(parse(&format!(
-            "updated:<-{}d",
-            MAX_RELATIVE_DATE_DAYS + 1
-        ))
-        .is_err());
+        assert!(parse(&format!("updated:<-{}d", MAX_RELATIVE_DATE_DAYS + 1)).is_err());
         // Boundary value still parses.
         assert!(parse(&format!("updated:<-{MAX_RELATIVE_DATE_DAYS}d")).is_ok());
     }

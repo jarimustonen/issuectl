@@ -126,14 +126,16 @@ pub fn plan_migrate_layout(root: &Path) -> Result<MigrateLayoutPlan> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
                 return Err(e).with_context(|| {
-                    format!("cannot read legacy issue directory {}", legacy_dir.display())
+                    format!(
+                        "cannot read legacy issue directory {}",
+                        legacy_dir.display()
+                    )
                 });
             }
         };
         for entry in rd {
-            let entry = entry.with_context(|| {
-                format!("cannot read entry under {}", legacy_dir.display())
-            })?;
+            let entry = entry
+                .with_context(|| format!("cannot read entry under {}", legacy_dir.display()))?;
             if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
@@ -258,10 +260,7 @@ pub struct ExecuteOutcome {
 /// progress on a mid-loop failure. Use `outcome.into_result()` when
 /// "succeeded with N moves OR failed without losing what already
 /// completed" is enough.
-pub fn execute_migrate_layout_plan(
-    plan: MigrateLayoutPlan,
-    lock: &WriteLock,
-) -> ExecuteOutcome {
+pub fn execute_migrate_layout_plan(plan: MigrateLayoutPlan, lock: &WriteLock) -> ExecuteOutcome {
     if let Err(e) = check_lock_matches_plan(&plan, lock) {
         return ExecuteOutcome {
             migrated: Vec::new(),
@@ -304,9 +303,9 @@ pub fn execute_migrate_layout_plan(
             };
         }
 
-        if let Err(e) = fs::rename(&mv.from, &mv.to).with_context(|| {
-            format!("cannot rename {} → {}", mv.from.display(), mv.to.display())
-        }) {
+        if let Err(e) = fs::rename(&mv.from, &mv.to)
+            .with_context(|| format!("cannot rename {} → {}", mv.from.display(), mv.to.display()))
+        {
             return ExecuteOutcome {
                 migrated,
                 error: Some(e),
@@ -347,10 +346,11 @@ pub fn prune_empty_legacy_parents(issues_root: &Path) {
         }
         match fs::remove_dir(&p) {
             Ok(()) => {}
-            Err(e) if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-            ) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) => {}
             Err(_) => {
                 // Permission denied / other I/O — leave the directory
                 // in place; the next doctor run will retry.
@@ -518,7 +518,11 @@ mod tests {
 
         let lock = WriteLock::acquire(tmp.path()).unwrap();
         let outcome = execute_migrate_layout_plan(plan, &lock);
-        assert!(outcome.error.is_none(), "expected success: {:?}", outcome.error);
+        assert!(
+            outcome.error.is_none(),
+            "expected success: {:?}",
+            outcome.error
+        );
         assert_eq!(outcome.migrated.len(), 1);
         assert!(tmp.path().join("issues/india-juliet/item.md").exists());
         // Legacy parent pruning is `doctor::apply`'s responsibility
@@ -526,7 +530,10 @@ mod tests {
         // have completed), not the executor's. Verify the explicit
         // helper instead.
         prune_empty_legacy_parents(&tmp.path().join("issues"));
-        assert!(!tmp.path().join("issues/open").exists(), "legacy parent pruned");
+        assert!(
+            !tmp.path().join("issues/open").exists(),
+            "legacy parent pruned"
+        );
     }
 
     #[test]

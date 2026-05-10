@@ -88,10 +88,7 @@ fn install_hook(repo_root: &Path, force: bool) -> Result<()> {
         .output()
         .with_context(|| "running `git rev-parse`")?;
     if !st.status.success() {
-        bail!(
-            "{} is not inside a git repository",
-            repo_root.display()
-        );
+        bail!("{} is not inside a git repository", repo_root.display());
     }
 
     // Refuse to clobber a non-default `core.hooksPath` (Husky,
@@ -442,10 +439,6 @@ mod tests {
             .current_dir(tmp.path())
             .status()
             .unwrap();
-        assert!(
-            !st.success(),
-            "hook must fail when staged snapshot is bad"
-        );
+        assert!(!st.success(), "hook must fail when staged snapshot is bad");
     }
 }
-

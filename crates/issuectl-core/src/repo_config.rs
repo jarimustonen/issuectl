@@ -65,9 +65,7 @@ fn file_stamp(path: &Path) -> Result<FileStamp> {
             })
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FileStamp::Missing),
-        Err(e) => {
-            Err(anyhow::Error::new(e).context(format!("cannot stat {}", path.display())))
-        }
+        Err(e) => Err(anyhow::Error::new(e).context(format!("cannot stat {}", path.display()))),
     }
 }
 
@@ -446,7 +444,11 @@ mod tests {
 
         let cache = RepoConfigCache::new(root.to_path_buf());
         let _ = cache.schema().unwrap();
-        assert_eq!(cache.refresh_count(), 1, "absent file is one parse (default)");
+        assert_eq!(
+            cache.refresh_count(),
+            1,
+            "absent file is one parse (default)"
+        );
         let _ = cache.schema().unwrap();
         let _ = cache.schema().unwrap();
         assert_eq!(
@@ -456,11 +458,7 @@ mod tests {
         );
 
         // File appears: stamp transitions Missing → Present, refresh.
-        fs::write(
-            root.join("issues/.schema.yaml"),
-            "version: 1\nfields: {}\n",
-        )
-        .unwrap();
+        fs::write(root.join("issues/.schema.yaml"), "version: 1\nfields: {}\n").unwrap();
         let _ = cache.schema().unwrap();
         assert_eq!(
             cache.refresh_count(),
@@ -534,11 +532,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         fs::create_dir_all(root.join("issues")).unwrap();
-        fs::write(
-            root.join("issues/.schema.yaml"),
-            "version: 1\nfields: {}\n",
-        )
-        .unwrap();
+        fs::write(root.join("issues/.schema.yaml"), "version: 1\nfields: {}\n").unwrap();
 
         let cache = Arc::new(RepoConfigCache::new(root.to_path_buf()));
         // Barrier synchronises N threads to all call `schema()` as

@@ -34,14 +34,14 @@ struct ParseError {
 }
 
 use crate::agents;
-use crate::parser;
-use crate::schema;
-use crate::slug;
-use crate::write;
 use crate::migrate_layout::{
     execute_migrate_layout_plan, plan_migrate_layout, MigrateConflict, MigrateLayoutPlan,
     MigrateMove, PlannedMove,
 };
+use crate::parser;
+use crate::schema;
+use crate::slug;
+use crate::write;
 
 /// Single-pass scanner snapshot (D7). Doctor previously re-walked
 /// `issues/` once per check category (legacy detection, schema
@@ -183,7 +183,9 @@ fn collect_issue_dir(
             tempfiles.push(path);
             continue;
         }
-        let Ok(ftype) = entry.file_type() else { continue };
+        let Ok(ftype) = entry.file_type() else {
+            continue;
+        };
         if ftype.is_symlink() {
             symlinked_dirs.push(format!("{folder}/{name}"));
             continue;
@@ -398,12 +400,8 @@ impl DoctorActions {
             flat_layout_plan: findings.flat_layout_plan.take(),
             notes_to_rename: std::mem::take(&mut findings.notes_to_rename),
             orphan_tempfiles: std::mem::take(&mut findings.orphan_tempfiles),
-            closed_with_active_status: std::mem::take(
-                &mut findings.closed_with_active_status,
-            ),
-            open_with_closing_status: std::mem::take(
-                &mut findings.open_with_closing_status,
-            ),
+            closed_with_active_status: std::mem::take(&mut findings.closed_with_active_status),
+            open_with_closing_status: std::mem::take(&mut findings.open_with_closing_status),
             regenerate_agents_md: findings.agents_md_drift
                 && findings.agents_md_malformed.is_none()
                 && findings.agents_md_check_skipped.is_none(),
@@ -1176,10 +1174,9 @@ fn populate_extended_validation(
         }
         if let (Some(u), Some(x)) = (ud, xd) {
             if x > u {
-                report.timestamp_issues.push((
-                    slug.clone(),
-                    format!("closed ({x}) is after updated ({u})"),
-                ));
+                report
+                    .timestamp_issues
+                    .push((slug.clone(), format!("closed ({x}) is after updated ({u})")));
             }
         }
 
@@ -1231,8 +1228,7 @@ fn populate_extended_validation(
                                 .broken_refs
                                 .push((slug.clone(), key.to_string(), missing));
                         } else if key == "blocked_by" {
-                            let bare =
-                                s.trim().strip_prefix('@').unwrap_or(s.trim()).to_string();
+                            let bare = s.trim().strip_prefix('@').unwrap_or(s.trim()).to_string();
                             if existing_slugs.contains(&bare) {
                                 deps.push(bare);
                             }
@@ -1248,8 +1244,8 @@ fn populate_extended_validation(
         // Status/folder reconciliation (legacy folders only). Use each
         // hit's own cached mapping — a slug present in flat AND legacy
         // can have divergent status fields.
-        let in_both_legacy_folders = hits.iter().any(|h| h.folder == "open")
-            && hits.iter().any(|h| h.folder == "closed");
+        let in_both_legacy_folders =
+            hits.iter().any(|h| h.folder == "open") && hits.iter().any(|h| h.folder == "closed");
         if in_both_legacy_folders {
             continue;
         }
@@ -1376,7 +1372,14 @@ fn detect_cycles(graph: &BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
 
     for node in graph.keys() {
         if !visited.contains(node) {
-            dfs(node, graph, &mut stack, &mut on_stack, &mut visited, &mut found);
+            dfs(
+                node,
+                graph,
+                &mut stack,
+                &mut on_stack,
+                &mut visited,
+                &mut found,
+            );
         }
     }
     found.into_iter().collect()
@@ -1476,9 +1479,7 @@ fn populate_transition_warnings(
     report: &mut DoctorFindings,
 ) {
     let rules_active = rules.map(|r| !r.status_rules.is_empty()).unwrap_or(false);
-    let sections_active = schema
-        .map(|s| !s.body_sections.is_empty())
-        .unwrap_or(false);
+    let sections_active = schema.map(|s| !s.body_sections.is_empty()).unwrap_or(false);
     if !rules_active && !sections_active {
         return;
     }
@@ -1519,9 +1520,7 @@ fn populate_transition_warnings(
     }
 }
 
-fn essential_frontmatter_absent_from_mapping(
-    mapping: Option<&serde_yaml::Mapping>,
-) -> bool {
+fn essential_frontmatter_absent_from_mapping(mapping: Option<&serde_yaml::Mapping>) -> bool {
     let Some(m) = mapping else { return true };
     let has = |k: &str| {
         m.get(serde_yaml::Value::String(k.into()))
@@ -1716,7 +1715,6 @@ fn apply(
     Ok(outcome)
 }
 
-
 /// Apply the Notes → Comments rename to every slug in
 /// `actions.notes_to_rename`. Best-effort, sequential (per round-2
 /// decision: `O17` is intentionally not preflight-bail). Conflicts
@@ -1743,8 +1741,8 @@ fn regenerate_agents_md(
     if !path.is_file() {
         return Ok(());
     }
-    let original = fs::read_to_string(&path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
+    let original =
+        fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
     let schema = schema::load(repo_root)?;
     let rules = crate::transitions::load(repo_root)?;
     let new_text = agents::regenerate_managed(&original, &schema, &rules)?;
@@ -1789,10 +1787,7 @@ fn rename_notes_to_comments(
     Ok(())
 }
 
-fn apply_orphan_tempfiles(
-    actions: &mut DoctorActions,
-    outcome: &mut ApplyOutcome,
-) -> Result<()> {
+fn apply_orphan_tempfiles(actions: &mut DoctorActions, outcome: &mut ApplyOutcome) -> Result<()> {
     let planned = std::mem::take(&mut actions.orphan_tempfiles);
     let mut removed = Vec::new();
     for path in planned {
@@ -1990,9 +1985,7 @@ fn rewrite_item_frontmatter(
     // when unambiguous.
     for key in ["related", "blocked_by"] {
         let yaml_key = serde_yaml::Value::String(key.into());
-        if let Some(serde_yaml::Value::Sequence(seq)) =
-            item.frontmatter.get(&yaml_key).cloned()
-        {
+        if let Some(serde_yaml::Value::Sequence(seq)) = item.frontmatter.get(&yaml_key).cloned() {
             let mut new_seq: Vec<serde_yaml::Value> = Vec::with_capacity(seq.len());
             for v in seq {
                 let migrated = match v {
@@ -2430,7 +2423,9 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         println!();
     }
     if !report.both_open_and_closed.is_empty() {
-        println!("Slugs present in BOTH `issues/open/` and `issues/closed/` (manual fix required):");
+        println!(
+            "Slugs present in BOTH `issues/open/` and `issues/closed/` (manual fix required):"
+        );
         for s in &report.both_open_and_closed {
             println!("  {s}");
         }
@@ -2842,25 +2837,47 @@ mod tests {
         );
         let mut r = scan(tmp.path()).unwrap();
         let actions = DoctorActions::from_findings(&mut r);
-        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
         assert!(outcome.fix_applied());
-        assert!(outcome.blockers.is_empty(), "blockers={:?}", outcome.blockers);
+        assert!(
+            outcome.blockers.is_empty(),
+            "blockers={:?}",
+            outcome.blockers
+        );
         // Find the migrated 1-first directory.
-        let mig1 = outcome.legacy_dirs_migrated.iter().find(|m| m.old_number == 1).unwrap();
+        let mig1 = outcome
+            .legacy_dirs_migrated
+            .iter()
+            .find(|m| m.old_number == 1)
+            .unwrap();
         let item = mig1.new_path.join("item.md");
         let content = fs::read_to_string(&item).unwrap();
         assert!(content.contains(&format!("slug: {}", mig1.new_slug)));
         assert!(!content.contains("number:"));
         assert!(content.contains("# First"), "heading rewritten: {content}");
         // epic: 2 → epic: <slug-of-2>
-        let mig2 = outcome.legacy_dirs_migrated.iter().find(|m| m.old_number == 2).unwrap();
+        let mig2 = outcome
+            .legacy_dirs_migrated
+            .iter()
+            .find(|m| m.old_number == 2)
+            .unwrap();
         assert!(content.contains(&format!("epic: {}", mig2.new_slug)));
         // related: ['#3'] → ['@<slug-of-3>'], blocked_by: ['#3'] → ['@<slug-of-3>']
-        let mig3 = outcome.legacy_dirs_migrated.iter().find(|m| m.old_number == 3).unwrap();
+        let mig3 = outcome
+            .legacy_dirs_migrated
+            .iter()
+            .find(|m| m.old_number == 3)
+            .unwrap();
         let parsed = write::read_item(&item).unwrap();
-        let expected = serde_yaml::Value::Sequence(vec![serde_yaml::Value::String(
-            format!("@{}", mig3.new_slug),
-        )]);
+        let expected = serde_yaml::Value::Sequence(vec![serde_yaml::Value::String(format!(
+            "@{}",
+            mig3.new_slug
+        ))]);
         for key in ["related", "blocked_by"] {
             let got = parsed
                 .frontmatter
@@ -2920,7 +2937,8 @@ mod tests {
 
     #[test]
     fn migrate_notes_heading_renames_outside_fences() {
-        let body = "---\nstatus: open\n---\n\n# T\n\n## Notes\n\nfirst\n\n```\n## not a heading\n```\n";
+        let body =
+            "---\nstatus: open\n---\n\n# T\n\n## Notes\n\nfirst\n\n```\n## not a heading\n```\n";
         let (out, conflict) = migrate_notes_heading(body);
         assert!(!conflict);
         assert!(out.contains("## Comments"));
@@ -2992,7 +3010,12 @@ mod tests {
         .unwrap();
         let mut r = scan(tmp.path()).unwrap();
         let actions = DoctorActions::from_findings(&mut r);
-        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
         let after = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(after.contains("## Comments"));
         assert!(!after.contains("## Notes"));
@@ -3015,7 +3038,12 @@ mod tests {
         fs::write(&changelog, "# CHANGELOG\n\n- Fixed #1 regression\n").unwrap();
         let mut r = scan(tmp.path()).unwrap();
         let actions = DoctorActions::from_findings(&mut r);
-        apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
         let after = fs::read_to_string(&changelog).unwrap();
         assert!(
             after.contains("Fixed #1 regression"),
@@ -3078,7 +3106,12 @@ mod tests {
         let mut r = scan(tmp.path()).unwrap();
         assert!(r.schema_missing);
         let actions = DoctorActions::from_findings(&mut r);
-        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
         let path = tmp.path().join("issues/.schema.yaml");
         assert!(path.is_file(), "schema file should be auto-written");
         // Should contain the canonical built-in fields.
@@ -3128,9 +3161,9 @@ mod tests {
         fs::write(dir.join("item.md"), "---\nfoo: : :\n---\n# T\n").unwrap();
         let r = scan(tmp.path()).unwrap();
         assert!(
-            r.parse_errors
-                .iter()
-                .any(|e| e.message.contains("YAML") || e.message.contains("yaml") || e.message.contains("invalid")),
+            r.parse_errors.iter().any(|e| e.message.contains("YAML")
+                || e.message.contains("yaml")
+                || e.message.contains("invalid")),
             "expected parse error report, got {:?}",
             r.parse_errors
         );
@@ -3138,7 +3171,9 @@ mod tests {
         // substring matching. Re-wording the parser message no longer
         // reclassifies a hard fail as a soft warn.
         assert!(
-            r.parse_errors.iter().any(|e| e.severity == ParseSeverity::Hard),
+            r.parse_errors
+                .iter()
+                .any(|e| e.severity == ParseSeverity::Hard),
             "unparseable frontmatter must classify as Hard: {:?}",
             r.parse_errors
         );
@@ -3324,7 +3359,9 @@ mod tests {
         assert!(
             r.broken_refs
                 .iter()
-                .any(|(s, k, t)| s == "quiet-brave-otter" && k == "epic" && t == "nonexistent-ghost-fox"),
+                .any(|(s, k, t)| s == "quiet-brave-otter"
+                    && k == "epic"
+                    && t == "nonexistent-ghost-fox"),
             "broken_refs={:?}",
             r.broken_refs
         );
@@ -3357,7 +3394,11 @@ mod tests {
             "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n\n```\n<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> branch\n```\n",
         );
         let r = scan(tmp.path()).unwrap();
-        assert!(r.conflict_markers.is_empty(), "got {:?}", r.conflict_markers);
+        assert!(
+            r.conflict_markers.is_empty(),
+            "got {:?}",
+            r.conflict_markers
+        );
     }
 
     #[test]
@@ -3482,7 +3523,11 @@ mod tests {
             "---\ntype: bug\nstatus: done\npriority: normal\nclosed: 2026-01-01\n---\n# T\n",
         );
         let r = scan(tmp.path()).unwrap();
-        assert!(r.status_consistency.is_empty(), "{:?}", r.status_consistency);
+        assert!(
+            r.status_consistency.is_empty(),
+            "{:?}",
+            r.status_consistency
+        );
     }
 
     #[test]
@@ -3509,10 +3554,7 @@ mod tests {
             "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2999-01-01\n---\n# T\n",
         );
         let r = scan(tmp.path()).unwrap();
-        assert!(r
-            .timestamp_issues
-            .iter()
-            .any(|(_, m)| m.contains("future")));
+        assert!(r.timestamp_issues.iter().any(|(_, m)| m.contains("future")));
     }
 
     #[test]
@@ -3587,16 +3629,27 @@ mod tests {
         // Bug #1: preflight blockers MUST NOT bail — they ride on
         // ApplyOutcome.blockers so `--json --fix` consumers receive
         // structured output instead of an anyhow stderr blob.
-        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
         assert!(!outcome.blockers.is_empty(), "expected preflight blockers");
         let joined = outcome.blockers.join("\n");
-        assert!(joined.contains("BOTH"), "missing both-folders blocker: {joined}");
+        assert!(
+            joined.contains("BOTH"),
+            "missing both-folders blocker: {joined}"
+        );
         assert!(
             joined.contains("merge-conflict markers"),
             "missing conflict-marker blocker: {joined}"
         );
         // No writes happened.
-        assert!(!outcome.fix_applied(), "preflight-blocked apply must not write");
+        assert!(
+            !outcome.fix_applied(),
+            "preflight-blocked apply must not write"
+        );
     }
 
     #[test]
@@ -3616,8 +3669,17 @@ mod tests {
         // Pre-fix: there are likely parser warnings in `parse_errors`.
         // None of them should trip the hard-error preflight check.
         let actions = DoctorActions::from_findings(&mut r);
-        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).expect("--fix should not refuse on soft parse warnings");
-        assert!(outcome.blockers.is_empty(), "soft parse warnings must not block: {:?}", outcome.blockers);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .expect("--fix should not refuse on soft parse warnings");
+        assert!(
+            outcome.blockers.is_empty(),
+            "soft parse warnings must not block: {:?}",
+            outcome.blockers
+        );
     }
 
     #[test]
@@ -3630,24 +3692,28 @@ mod tests {
         );
         let mut r = scan(tmp.path()).unwrap();
         assert!(r.conflict_markers.iter().any(|s| s == "quiet-brave-otter"));
-        let before = fs::read_to_string(
-            tmp.path().join("issues/quiet-brave-otter/item.md"),
-        )
-        .unwrap();
+        let before =
+            fs::read_to_string(tmp.path().join("issues/quiet-brave-otter/item.md")).unwrap();
         // Preflight blocks before any mutation runs — but produces
         // a structured `ApplyOutcome.blockers` rather than an Err.
         let actions = DoctorActions::from_findings(&mut r);
-        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
         assert!(
-            outcome.blockers.iter().any(|b| b.contains("merge-conflict markers")),
+            outcome
+                .blockers
+                .iter()
+                .any(|b| b.contains("merge-conflict markers")),
             "got: {:?}",
             outcome.blockers
         );
         assert!(!outcome.fix_applied());
-        let after = fs::read_to_string(
-            tmp.path().join("issues/quiet-brave-otter/item.md"),
-        )
-        .unwrap();
+        let after =
+            fs::read_to_string(tmp.path().join("issues/quiet-brave-otter/item.md")).unwrap();
         assert_eq!(before, after, "conflict markers must not be auto-fixed");
     }
 
@@ -3679,9 +3745,17 @@ mod tests {
         assert!(r.orphan_tempfiles.iter().any(|p| p == &orphan));
         let mut r = scan(tmp.path()).unwrap();
         let actions = DoctorActions::from_findings(&mut r);
-        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
         assert!(!orphan.exists(), "tempfile should be removed by --fix");
-        assert!(outcome.orphan_tempfiles_removed.iter().any(|p| p == &orphan));
+        assert!(outcome
+            .orphan_tempfiles_removed
+            .iter()
+            .any(|p| p == &orphan));
     }
 
     #[test]
@@ -3717,7 +3791,12 @@ mod tests {
             .iter()
             .any(|(s, _, _)| s == "quiet-brave-otter"));
         let actions = DoctorActions::from_findings(&mut r);
-        apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
         // Flat-layout migration runs in the same apply pass and moves
         // the file from `issues/closed/<slug>/` to `issues/<slug>/`.
         let migrated = tmp.path().join("issues/quiet-brave-otter/item.md");
@@ -3738,11 +3817,19 @@ mod tests {
         .unwrap();
         let mut r = scan(tmp.path()).unwrap();
         let actions = DoctorActions::from_findings(&mut r);
-        apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
         let migrated = tmp.path().join("issues/quiet-brave-otter/item.md");
         let after = fs::read_to_string(&migrated).unwrap();
         assert!(after.contains("status: open"), "got: {after}");
-        assert!(!after.contains("closed:"), "closed should be dropped: {after}");
+        assert!(
+            !after.contains("closed:"),
+            "closed should be dropped: {after}"
+        );
     }
 
     #[test]
@@ -3820,7 +3907,8 @@ mod tests {
             "post-migration blockers should be populated, got empty"
         );
         assert_eq!(
-            outcome.stop_phase, StopPhase::PostApply,
+            outcome.stop_phase,
+            StopPhase::PostApply,
             "post-migration bail must set stop_phase = PostApply"
         );
         // `fix_applied: true` AND `blockers != []` is the documented
@@ -3843,7 +3931,10 @@ mod tests {
             serde_json::Value::Bool(true)
         );
         assert!(
-            outcome.blockers.iter().any(|b| b.contains("Notes") && b.contains("Comments")),
+            outcome
+                .blockers
+                .iter()
+                .any(|b| b.contains("Notes") && b.contains("Comments")),
             "expected notes/comments conflict blocker, got {:?}",
             outcome.blockers
         );
@@ -4034,7 +4125,10 @@ mod tests {
                 .map(|a| a.len()),
             Some(1),
         );
-        assert!(envelope.get("apply_error").map(|v| !v.is_null()).unwrap_or(false));
+        assert!(envelope
+            .get("apply_error")
+            .map(|v| !v.is_null())
+            .unwrap_or(false));
     }
 
     #[cfg(unix)]
@@ -4179,7 +4273,12 @@ mod tests {
         let mut report = scan(tmp.path()).unwrap();
         assert!(report.agents_md_drift);
         let actions = DoctorActions::from_findings(&mut report);
-        let outcome = apply(tmp.path(), actions, &crate::mutate::WriteLock::acquire(tmp.path()).unwrap()).unwrap();
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
         assert!(outcome.agents_md_regenerated);
 
         let after = fs::read_to_string(&path).unwrap();
@@ -4226,7 +4325,8 @@ mod tests {
             .unwrap();
         }
         fs::write(
-            tmp.path().join("issues/quiet-brave-otter/.issuectl-tmp-XYZ"),
+            tmp.path()
+                .join("issues/quiet-brave-otter/.issuectl-tmp-XYZ"),
             "leftover",
         )
         .unwrap();
@@ -4265,7 +4365,9 @@ mod tests {
         );
         #[cfg(unix)]
         assert!(
-            r.symlinked_dirs.iter().any(|s| s.contains("symlinked-thing")),
+            r.symlinked_dirs
+                .iter()
+                .any(|s| s.contains("symlinked-thing")),
             "symlinked_dirs={:?}",
             r.symlinked_dirs
         );
@@ -4308,10 +4410,7 @@ mod tests {
         let json = render_json(&report, None, false, tmp.path());
         let actual = serde_json::to_string_pretty(&json).unwrap();
         // Normalise the tempdir prefix so the snapshot is portable.
-        let actual = actual.replace(
-            tmp.path().to_str().unwrap(),
-            "<TMP>",
-        );
+        let actual = actual.replace(tmp.path().to_str().unwrap(), "<TMP>");
 
         let expected = r#"{
   "agents_md_check_skipped": null,
@@ -4422,7 +4521,10 @@ mod tests {
             .get("apply_outcome")
             .expect("apply_outcome must be present on --fix");
         assert_eq!(ao["fix_applied"], serde_json::Value::Bool(false));
-        assert_eq!(ao["stop_phase"], serde_json::Value::String("preflight".into()));
+        assert_eq!(
+            ao["stop_phase"],
+            serde_json::Value::String("preflight".into())
+        );
         let blockers = ao["blockers"].as_array().unwrap();
         assert!(!blockers.is_empty(), "blockers must surface in JSON");
         assert!(
@@ -4451,8 +4553,14 @@ mod tests {
         .unwrap();
         assert!(outcome.blockers.is_empty(), "clean repo: no blockers");
         assert_eq!(outcome.stop_phase, StopPhase::Ok);
-        assert!(outcome.schema_bootstrapped, "fresh repo: schema bootstrap landed");
-        assert!(outcome.fix_applied(), "schema_bootstrapped flips fix_applied");
+        assert!(
+            outcome.schema_bootstrapped,
+            "fresh repo: schema bootstrap landed"
+        );
+        assert!(
+            outcome.fix_applied(),
+            "schema_bootstrapped flips fix_applied"
+        );
 
         let scan_after = scan(tmp.path()).unwrap();
         let json = render_json(&scan_after, Some(&outcome), true, tmp.path());
@@ -4493,7 +4601,10 @@ mod tests {
         .unwrap();
         assert!(outcome.blockers.is_empty());
         assert_eq!(outcome.stop_phase, StopPhase::Ok);
-        assert!(!outcome.fix_applied(), "no-op apply must not flip fix_applied");
+        assert!(
+            !outcome.fix_applied(),
+            "no-op apply must not flip fix_applied"
+        );
 
         let scan_after = scan(tmp.path()).unwrap();
         let json = render_json(&scan_after, Some(&outcome), true, tmp.path());
@@ -4539,10 +4650,7 @@ mod tests {
         );
         let findings = scan(tmp.path()).unwrap();
         let blockers = critical_blockers(&findings);
-        assert!(
-            !blockers.is_empty(),
-            "conflict markers should be a blocker"
-        );
+        assert!(!blockers.is_empty(), "conflict markers should be a blocker");
 
         let mut findings_for_apply = scan(tmp.path()).unwrap();
         let actions = DoctorActions::from_findings(&mut findings_for_apply);
@@ -4642,7 +4750,9 @@ mod tests {
         // entry that would refuse `--fix`.
         let blockers = critical_blockers(&findings);
         assert!(
-            !blockers.iter().any(|b| b.contains("broken cross-references")),
+            !blockers
+                .iter()
+                .any(|b| b.contains("broken cross-references")),
             "legacy numeric refs must not block --fix: {:?}",
             blockers
         );
@@ -4708,7 +4818,9 @@ mod tests {
             .as_array()
             .expect("notes_conflicts_at_apply must be in apply_outcome envelope");
         assert!(
-            conflicts.iter().any(|v| v.as_str() == Some("legacy-notes-here")),
+            conflicts
+                .iter()
+                .any(|v| v.as_str() == Some("legacy-notes-here")),
             "JSON envelope must surface notes_conflicts_at_apply, got {conflicts:?}"
         );
     }
@@ -4737,7 +4849,9 @@ mod tests {
         );
         let blockers = critical_blockers(&r);
         assert!(
-            blockers.iter().any(|b| b.contains("unparseable issue file")),
+            blockers
+                .iter()
+                .any(|b| b.contains("unparseable issue file")),
             "Hard parse error must block --fix: {:?}",
             blockers
         );
@@ -4771,8 +4885,16 @@ mod tests {
             .parse_errors
             .iter()
             .any(|e| e.severity == ParseSeverity::Hard);
-        assert!(any_soft, "legacy numeric ref must be Soft: {:?}", r.parse_errors);
-        assert!(any_hard, "unparseable YAML must be Hard: {:?}", r.parse_errors);
+        assert!(
+            any_soft,
+            "legacy numeric ref must be Soft: {:?}",
+            r.parse_errors
+        );
+        assert!(
+            any_hard,
+            "unparseable YAML must be Hard: {:?}",
+            r.parse_errors
+        );
 
         // Soft alone does NOT block; only the Hard entries appear in
         // critical_blockers.

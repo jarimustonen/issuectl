@@ -391,10 +391,7 @@ mod tests {
             ("3.5", serde_json::json!(3.5)),
             ("~", serde_json::Value::Null),
             ("[a, b]", serde_json::json!(["a", "b"])),
-            (
-                "{a: 1, b: [c]}",
-                serde_json::json!({ "a": 1, "b": ["c"] }),
-            ),
+            ("{a: 1, b: [c]}", serde_json::json!({ "a": 1, "b": ["c"] })),
         ];
         for (yaml, expected) in cases {
             let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();

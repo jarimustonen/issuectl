@@ -398,7 +398,15 @@ pub fn load_issues_with_warnings(repo_root: &Path) -> (Vec<Issue>, Vec<LoadWarni
     for slug in discover_slugs(repo_root) {
         match resolve_layout(repo_root, &slug) {
             LayoutState::Flat { item_path } => {
-                push_issue_with_parse(&schema, &slug, &item_path, false, None, &mut issues, &mut warnings);
+                push_issue_with_parse(
+                    &schema,
+                    &slug,
+                    &item_path,
+                    false,
+                    None,
+                    &mut issues,
+                    &mut warnings,
+                );
             }
             LayoutState::Legacy { folder, item_path } => {
                 push_issue_with_parse(

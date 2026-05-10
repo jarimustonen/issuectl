@@ -239,8 +239,8 @@ pub(crate) fn load_uncached(root: &Path) -> Result<Schema> {
     }
     let text =
         fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-    let user: Schema = serde_yaml::from_str(&text)
-        .with_context(|| format!("cannot parse {}", path.display()))?;
+    let user: Schema =
+        serde_yaml::from_str(&text).with_context(|| format!("cannot parse {}", path.display()))?;
     if user.version != SUPPORTED_SCHEMA_VERSION {
         anyhow::bail!(
             "{}: unsupported schema version {} (this build supports {})",
@@ -281,19 +281,18 @@ fn validate_body_sections(sections: &BTreeMap<String, Vec<String>>) -> Result<()
         for name in names {
             let trimmed = name.trim();
             if trimmed.is_empty() {
-                anyhow::bail!(
-                    "body_sections.{issue_type}: section name cannot be empty",
-                );
+                anyhow::bail!("body_sections.{issue_type}: section name cannot be empty",);
             }
-            if name.chars().any(|c| c == '\n' || c == '\r' || c.is_control()) {
+            if name
+                .chars()
+                .any(|c| c == '\n' || c == '\r' || c.is_control())
+            {
                 anyhow::bail!(
                     "body_sections.{issue_type}: section name {name:?} contains a newline or control character",
                 );
             }
             if !seen.insert(name.clone()) {
-                anyhow::bail!(
-                    "body_sections.{issue_type}: section {name:?} declared twice",
-                );
+                anyhow::bail!("body_sections.{issue_type}: section {name:?} declared twice",);
             }
         }
     }
@@ -342,8 +341,7 @@ pub fn ensure_default_written(root: &Path) -> Result<bool> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("schema path has no parent: {}", path.display()))?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("cannot create {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
     if path.exists() {
         return Ok(false);
     }
@@ -538,7 +536,12 @@ pub fn status_universe(schema: &Schema) -> std::collections::BTreeSet<String> {
         .get("status")
         .and_then(|spec| spec.allowed.as_ref())
         .map(|allowed| allowed.iter().cloned().collect())
-        .unwrap_or_else(|| crate::issue_fields::all_statuses().iter().map(|s| s.to_string()).collect())
+        .unwrap_or_else(|| {
+            crate::issue_fields::all_statuses()
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        })
 }
 
 /// Required H2 section names for an issue type. Empty slice when
@@ -640,7 +643,8 @@ mod tests {
         let v = validate(&schema, &fm);
         // Missing `type` (required by default schema).
         assert!(matches!(
-            v.iter().find(|x| matches!(x, ViolationKind::MissingRequired { field } if field == "type")),
+            v.iter()
+                .find(|x| matches!(x, ViolationKind::MissingRequired { field } if field == "type")),
             Some(_)
         ));
     }
@@ -684,10 +688,9 @@ mod tests {
     #[test]
     fn validate_allows_unknown_fields() {
         let schema = default_schema();
-        let fm: Mapping = serde_yaml::from_str(
-            "type: bug\nstatus: open\npriority: normal\nteam: payments\n",
-        )
-        .unwrap();
+        let fm: Mapping =
+            serde_yaml::from_str("type: bug\nstatus: open\npriority: normal\nteam: payments\n")
+                .unwrap();
         let v = validate(&schema, &fm);
         assert!(v.is_empty());
     }
@@ -719,10 +722,12 @@ mod tests {
     #[test]
     fn validate_rejects_non_string_scalar_for_enum_field() {
         let schema = default_schema();
-        let fm: Mapping = serde_yaml::from_str("type: 42\nstatus: open\npriority: normal\n").unwrap();
+        let fm: Mapping =
+            serde_yaml::from_str("type: 42\nstatus: open\npriority: normal\n").unwrap();
         let v = validate(&schema, &fm);
         assert!(
-            v.iter().any(|x| matches!(x, ViolationKind::WrongType { field, .. } if field == "type")),
+            v.iter()
+                .any(|x| matches!(x, ViolationKind::WrongType { field, .. } if field == "type")),
             "expected WrongType for type: 42, got {v:?}"
         );
     }
@@ -734,7 +739,8 @@ mod tests {
         let fm: Mapping = serde_yaml::from_str("labels: not-a-list\n").unwrap();
         let v = validate(&schema, &fm);
         assert!(
-            v.iter().any(|x| matches!(x, ViolationKind::WrongType { field, .. } if field == "labels")),
+            v.iter()
+                .any(|x| matches!(x, ViolationKind::WrongType { field, .. } if field == "labels")),
             "expected WrongType for scalar in list field, got {v:?}"
         );
     }
@@ -762,10 +768,9 @@ mod tests {
         )
         .unwrap();
         let schema = load(tmp.path()).unwrap();
-        let fm: Mapping = serde_yaml::from_str(
-            "type: nonsense\nstatus: open\npriority: normal\nteam: infra\n",
-        )
-        .unwrap();
+        let fm: Mapping =
+            serde_yaml::from_str("type: nonsense\nstatus: open\npriority: normal\nteam: infra\n")
+                .unwrap();
         let v = validate(&schema, &fm);
         assert!(
             v.iter()
@@ -938,6 +943,9 @@ mod tests {
             "version: 1\nfields:\n  team:\n    requried: true\n",
         )
         .unwrap();
-        assert!(load(tmp.path()).is_err(), "typo'd `requried` must be rejected");
+        assert!(
+            load(tmp.path()).is_err(),
+            "typo'd `requried` must be rejected"
+        );
     }
 }

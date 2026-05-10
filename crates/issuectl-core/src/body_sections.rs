@@ -200,10 +200,7 @@ pub(crate) fn for_each_line_outside_fences<F: FnMut(usize, &str)>(body: &str, mu
 /// outside a fenced code block. Returns indices where `f` returned
 /// true. Single source of truth for fence-aware scanning — every
 /// other function in this module routes through here.
-fn scan_outside_fences<F: FnMut(usize, &str) -> bool>(
-    lines: &[&str],
-    mut f: F,
-) -> Vec<usize> {
+fn scan_outside_fences<F: FnMut(usize, &str) -> bool>(lines: &[&str], mut f: F) -> Vec<usize> {
     let mut hits = Vec::new();
     let mut fence: Option<Fence> = None;
     for (i, l) in lines.iter().enumerate() {
@@ -436,10 +433,7 @@ pub fn all_h2_sections(body: &str) -> std::collections::BTreeMap<String, String>
             Some(rest) => rest.trim_end().to_string(),
             None => continue,
         };
-        let next = h2_indices
-            .get(i + 1)
-            .copied()
-            .unwrap_or(lines.len());
+        let next = h2_indices.get(i + 1).copied().unwrap_or(lines.len());
         let body_lines = &lines[*idx + 1..next];
         let text = trim_blank_borders(body_lines);
         out.entry(name).or_insert(text);
@@ -487,7 +481,11 @@ mod tests {
     fn append_into_existing_section_keeps_prior_blocks() {
         let body = "\n# T\n\n## Comments\n\n\
             ### 2026-05-01T00:00:00Z · @bob\n\nfirst\n";
-        let out = append_block(body, COMMENTS, "### 2026-05-02T00:00:00Z · @alice\n\nsecond\n");
+        let out = append_block(
+            body,
+            COMMENTS,
+            "### 2026-05-02T00:00:00Z · @alice\n\nsecond\n",
+        );
         let i_first = out.find("first").unwrap();
         let i_second = out.find("second").unwrap();
         assert!(i_first < i_second, "newest must be appended after older");
@@ -506,7 +504,11 @@ mod tests {
             ## this is a bash comment\n\
             echo hi\n\
             ```\n";
-        let out = append_block(body, COMMENTS, "### 2026-05-02T00:00:00Z · @alice\n\nsecond\n");
+        let out = append_block(
+            body,
+            COMMENTS,
+            "### 2026-05-02T00:00:00Z · @alice\n\nsecond\n",
+        );
         // Code block stays intact and the new block is appended
         // *after* the bash fence, not inside it.
         let bash_line = out.find("## this is a bash comment").unwrap();
@@ -524,7 +526,11 @@ mod tests {
         let body = "\n# T\n\n## Description\n\nbody text\n\n## Comments\n\n\
             ### 2026-05-01T00:00:00Z · @bob\n\nfirst\n\n## Decisions\n\n\
             ### 2026-05-02T00:00:00Z · @cara\n\npicked X\n";
-        let out = append_block(body, COMMENTS, "### 2026-05-03T00:00:00Z · @alice\n\nsecond\n");
+        let out = append_block(
+            body,
+            COMMENTS,
+            "### 2026-05-03T00:00:00Z · @alice\n\nsecond\n",
+        );
         assert!(out.contains("body text"));
         assert!(out.contains("first"));
         assert!(out.contains("second"));
@@ -548,10 +554,8 @@ mod tests {
     fn append_idempotent_under_fmt() {
         let body = "\n# T\n\n## Description\n\nbody.\n";
         let appended = append_block(body, COMMENTS, "### 2026-05-07T12:00:00Z · @x\n\nhi\n");
-        let formatted = crate::fmt::format_text(&format!(
-            "---\nstatus: open\n---\n{appended}"
-        ))
-        .unwrap();
+        let formatted =
+            crate::fmt::format_text(&format!("---\nstatus: open\n---\n{appended}")).unwrap();
         let formatted_again = crate::fmt::format_text(&formatted).unwrap();
         assert_eq!(formatted, formatted_again, "fmt must be idempotent");
     }
