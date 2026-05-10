@@ -98,16 +98,23 @@ fn legacy_number_from_mapping(
     dir_name: &str,
 ) -> Option<u32> {
     if let Some(m) = mapping {
-        if let Some(v) = m.get(serde_yaml::Value::String("number".into())) {
-            if let Some(n) = v.as_u64().and_then(|u| u32::try_from(u).ok()) {
-                return Some(n);
-            }
-        }
+        // `slug:` short-circuits BEFORE `number:` so a modern issue
+        // that happens to carry a stray `number:` field (left over
+        // from a botched manual edit, a forward-compat field, ...)
+        // is not classified legacy and silently queued for NN-rename.
+        // `issuectl new` always writes `slug:` for new issues, so
+        // the presence of `slug:` is the typed signal that this is
+        // a modern issue regardless of any other frontmatter.
         if m.get(serde_yaml::Value::String("slug".into()))
             .and_then(|v| v.as_str())
             .is_some()
         {
             return None;
+        }
+        if let Some(v) = m.get(serde_yaml::Value::String("number".into())) {
+            if let Some(n) = v.as_u64().and_then(|u| u32::try_from(u).ok()) {
+                return Some(n);
+            }
         }
     }
     parser::parse_legacy_dir(dir_name).map(|(n, _)| n)
@@ -411,10 +418,23 @@ impl DoctorActions {
 /// can lie about it.
 #[derive(Debug, Default)]
 struct ApplyOutcome {
-    /// Preflight blockers — when non-empty, no writes were attempted.
-    /// `apply` returns `Ok(outcome)` (not `Err`) so callers in JSON
-    /// mode can still emit a structured envelope rather than an
-    /// anyhow-formatted stderr blob.
+    /// Critical blockers found during the apply pass. Populated in
+    /// two places:
+    ///   1. **Preflight** — set from `actions.preflight_blockers`
+    ///      before any write; coexists with all-zero/empty fields.
+    ///   2. **Post-flat-layout safety re-check** — set after phase 5
+    ///      when the post-migration scan surfaces a condition the
+    ///      pre-migration scan could not see (e.g. `## Notes` /
+    ///      `## Comments` ambiguity in a freshly-lifted dir). In
+    ///      this case `flat_layout_migrated` and other
+    ///      already-completed phase fields may be non-empty —
+    ///      `--fix` is forward-progress only and does not roll back.
+    /// `apply` returns `Ok(outcome)` (not `Err`) in both cases so
+    /// `--json` callers receive a structured envelope rather than an
+    /// anyhow-formatted stderr blob. JSON consumers should treat
+    /// `blockers != []` as "doctor refused to complete" rather than
+    /// "no writes happened" — pair with `fix_applied()` to detect
+    /// partial-progress runs.
     blockers: Vec<String>,
     legacy_dirs_migrated: Vec<LegacyMigration>,
     flat_layout_migrated: Vec<MigrateMove>,
@@ -1385,8 +1405,12 @@ fn populate_transition_warnings(
         if !s.item_present {
             continue;
         }
-        let in_legacy_folder = s.folder == "open" || s.folder == "closed";
-        if in_legacy_folder && parser::parse_legacy_dir(&s.dir_name).is_some() {
+        // Mirror the typed `legacy_number.is_some()` skip used by
+        // `populate_schema_violations` and `populate_extended_validation`
+        // — a numbered-legacy lifted to flat by phase 5 is the same
+        // issue pending NN-rename; transition warnings on it would
+        // refuse the very fix designed to heal it.
+        if s.legacy_number.is_some() {
             continue;
         }
         let Some(parsed) = s.parsed.as_ref() else {
@@ -1488,6 +1512,13 @@ fn apply(
             // "moved A, B before failing on C".
             let exec_outcome = execute_migrate_layout_plan(plan, lock);
             outcome.flat_layout_migrated = exec_outcome.migrated;
+            // Prune empty `issues/{open,closed}` parent dirs as soon
+            // as the moves land — every code path below this point
+            // can early-return (post-migration blocker bail, empty
+            // `legacy_dirs`, or successful NN-rename), and the prune
+            // is best-effort idempotent so calling it once here is
+            // simpler than gating it at every exit.
+            crate::migrate_layout::prune_empty_legacy_parents(&repo_root.join("issues"));
             if let Some(err) = exec_outcome.error {
                 return Err(err);
             }
@@ -1496,22 +1527,22 @@ fn apply(
             // that just moved into the flat layout.
             let fresh = scan(repo_root)?;
             // Re-check `critical_blockers` against the fresh scan
-            // before the NN-rename phase. Migration can surface a
-            // critical condition that was hidden by the legacy layout
-            // (e.g. a numbered-legacy `<NN>-<slug>/` whose schema
-            // violations were skipped under `issues/{open,closed}/`
-            // but become visible once the dir lives at the flat root).
-            // NN-rename builds `number_to_slug` against `legacy_dirs`
-            // and rewrites refs + renames dirs based on it; running
-            // that pass over a critically-unhealthy repo can rewrite
-            // refs to the wrong target or have `fs::rename` overwrite
-            // a sibling. Bail cleanly with the partial flat-layout
-            // migration intact: the user resolves the new blocker
-            // and re-runs `--fix`. We do not roll back the moves —
-            // the moves are forward-progress and rolling back N
-            // partial renames is itself a multi-step operation that
-            // can fail mid-rollback. (See AGENTS.md: doctor `--fix`
-            // is forward-progress only.)
+            // before the NN-rename phase. Phase 5 can surface a
+            // critical condition that was hidden by the pre-migration
+            // layout — `populate_notes_migration` walks only flat-folder
+            // dirs, so a `## Notes` / `## Comments` ambiguity in a body
+            // that was still under `issues/{open,closed}/` is invisible
+            // to the initial scan, and the planner's own
+            // `flat_layout_conflicts` could surface only on the post-move
+            // state in unusual layouts. NN-rename builds `number_to_slug`
+            // against `legacy_dirs` and rewrites refs + renames dirs
+            // based on it; running that pass over a critically-unhealthy
+            // repo can rewrite refs to the wrong target or have
+            // `fs::rename` overwrite a sibling. Bail cleanly with the
+            // partial flat-layout migration intact: the user resolves
+            // the new blocker and re-runs `--fix`. Forward-progress
+            // only — rolling back N partial renames is itself a
+            // multi-step operation that can fail mid-rollback.
             let post_blockers = critical_blockers(&fresh);
             if !post_blockers.is_empty() {
                 outcome.blockers = post_blockers;
@@ -1572,10 +1603,10 @@ fn apply(
     outcome.files_rewritten = files_rewritten;
     outcome.legacy_dirs_migrated = legacy_dirs;
 
-    // Prune now-empty `issues/{open,closed}` parent dirs after any
-    // kind of legacy migration. Lives here (not inside
-    // `execute_migrate_layout_plan`) so a numbered-legacy-only repo
-    // — which the flat-layout planner skips — still gets cleaned.
+    // Prune empty `issues/{open,closed}` parent dirs again — covers
+    // the numbered-legacy-only repo path where the flat-layout
+    // planner had no moves and the earlier in-pipeline prune did not
+    // run. Idempotent and best-effort.
     crate::migrate_layout::prune_empty_legacy_parents(&repo_root.join("issues"));
 
     Ok(outcome)
@@ -3016,11 +3047,73 @@ mod tests {
         .unwrap();
         let r = scan(tmp.path()).unwrap();
         assert!(
+            r.legacy_dirs.is_empty(),
+            "modern flat issue with `slug:` must not be queued for NN-rename, got {:?}",
+            r.legacy_dirs
+        );
+        assert!(
             r.schema_violations
                 .iter()
                 .any(|(_, msg)| msg.contains("priority")),
             "expected violation on flat NN-shaped slug, got {:?}",
             r.schema_violations
+        );
+    }
+
+    #[test]
+    fn flat_issue_with_legacy_shape_name_and_no_slug_field_is_legacy() {
+        // Mirror image of the test above: a flat-layout dir whose
+        // name matches `<NN>-<slug>` but whose frontmatter omits the
+        // `slug:` field is classified legacy and queued for NN-rename.
+        // This is the canonical "old hand-authored issue" case — the
+        // user's intended dir name is canonicalised by `--fix`.
+        // Lints (schema/refs/timestamps/...) are SUPPRESSED on this
+        // dir because `--fix` rewrites its frontmatter wholesale;
+        // surfacing them would refuse the very fix designed to heal
+        // them.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/12-things-to-do");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: open\n---\n# T\n",
+        )
+        .unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert_eq!(
+            r.legacy_dirs.len(),
+            1,
+            "flat NN-shape with no `slug:` must be classified legacy, got {:?}",
+            r.legacy_dirs
+        );
+        assert_eq!(r.legacy_dirs[0].old_number, 12);
+        assert!(
+            r.schema_violations.is_empty(),
+            "lints must be suppressed for legacy-classified dirs, got {:?}",
+            r.schema_violations
+        );
+    }
+
+    #[test]
+    fn stray_number_field_with_slug_does_not_classify_modern_issue_as_legacy() {
+        // Regression: a modern flat issue carrying `slug:` AND a stray
+        // `number:` field (left over from a botched manual edit) must
+        // NOT be classified legacy. `slug:` short-circuits before
+        // `number:` in `legacy_number_from_mapping`, so this dir keeps
+        // its name and gets full schema validation.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/quiet-brave-otter");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\nslug: quiet-brave-otter\nnumber: 7\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n",
+        )
+        .unwrap();
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.legacy_dirs.is_empty(),
+            "modern issue with stray `number:` must not be queued for NN-rename, got {:?}",
+            r.legacy_dirs
         );
     }
 
