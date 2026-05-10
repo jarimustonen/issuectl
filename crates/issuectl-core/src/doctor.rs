@@ -370,6 +370,13 @@ struct DoctorFindings {
     /// the missing-policy condition that drift detection alone would
     /// otherwise hide.
     agents_md_missing: bool,
+    /// Canonical issuectl-tracked files that `git check-ignore` says
+    /// would be ignored by `.gitignore`. Asymmetric footgun: the file
+    /// exists locally so doctor and the agents skill find it, but
+    /// teammates and CI never see it. Informational warning;
+    /// `--fix` does not edit `.gitignore`.
+    /// (#simply-workable-umbrella)
+    gitignored_paths: Vec<String>,
     /// True when `issues/AGENTS.md` exists with pre-v0.5.0 scaffold
     /// content (numbered layout, `open/`/`closed/` subdirs, sequential
     /// numbering section). `--fix` rewrites it with the current
@@ -930,6 +937,8 @@ fn scan(repo_root: &Path) -> Result<DoctorFindings> {
         }
     }
 
+    report.gitignored_paths = detect_gitignored_canonical_paths(repo_root);
+
     let plan = plan_migrate_layout(repo_root)?;
     report.flat_layout_conflicts = plan.conflicts().to_vec();
     report.flat_layout_plan = Some(plan);
@@ -1389,6 +1398,54 @@ fn populate_extended_validation(
     }
 
     report.blocked_by_cycles = detect_cycles(&graph);
+}
+
+/// Canonical issuectl-tracked files that should never be ignored by
+/// `.gitignore`. If any of these exist locally but `git check-ignore`
+/// says they're masked, teammates and CI won't see them — the local
+/// developer will believe `agents init` / schema setup worked.
+const GITIGNORE_CANONICAL_PATHS: &[&str] = &[".issuectl/AGENTS.md", "issues/.schema.yaml"];
+
+/// Run `git check-ignore -v -- <path>...` against the canonical paths
+/// that exist on disk and return those that git would ignore. Silent
+/// no-op when this is not a git repo or `git` is unavailable.
+fn detect_gitignored_canonical_paths(repo_root: &Path) -> Vec<String> {
+    let candidates: Vec<&str> = GITIGNORE_CANONICAL_PATHS
+        .iter()
+        .copied()
+        .filter(|rel| repo_root.join(rel).exists())
+        .collect();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("check-ignore")
+        .arg("--no-index")
+        .arg("--")
+        .args(&candidates)
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    // git check-ignore exit codes:
+    //   0 — at least one path is ignored
+    //   1 — no paths ignored
+    //   128 — fatal error (e.g. not a git repo)
+    if !matches!(output.status.code(), Some(0)) {
+        return Vec::new();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut hits: Vec<String> = stdout
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect();
+    hits.sort();
+    hits.dedup();
+    hits
 }
 
 fn has_conflict_markers(text: &str) -> bool {
@@ -2418,6 +2475,7 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         || oc.agents_md_regenerated
         || report.agents_md_missing
         || report.legacy_issues_agents_md
+        || !report.gitignored_paths.is_empty()
         || oc.issues_agents_md_rewritten
         || !oc.blockers.is_empty()
         || oc.apply_error.is_some();
@@ -2704,6 +2762,14 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         );
         println!();
     }
+    if !report.gitignored_paths.is_empty() {
+        for p in &report.gitignored_paths {
+            println!(
+                "{p} is gitignored — agents on other machines won't see it. Adjust .gitignore or move the file."
+            );
+        }
+        println!();
+    }
     if oc.issues_agents_md_rewritten {
         println!(
             "Rewrote stale issues/AGENTS.md (pre-v0.5.0 scaffold) with current pointer template."
@@ -2920,6 +2986,7 @@ fn render_json(
         "agents_md_missing": report.agents_md_missing,
         "legacy_issues_agents_md": report.legacy_issues_agents_md,
         "issues_agents_md_rewritten": oc.issues_agents_md_rewritten,
+        "gitignored_paths": report.gitignored_paths,
     });
     // `apply_outcome` is the new structured envelope: emitted only on
     // `--fix` runs so the read-only JSON shape (golden snapshot) stays
@@ -2989,6 +3056,61 @@ mod tests {
             .join(format!("{n}-{slug}"));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("item.md"), body).unwrap();
+    }
+
+    #[test]
+    fn detect_gitignored_canonical_paths_flags_ignored_agents_md() {
+        // Regression for #simply-workable-umbrella: a tempdir repo
+        // with `.gitignore` masking `.issuectl/` should surface
+        // `.issuectl/AGENTS.md` in gitignored_paths after `agents init`.
+        let tmp = fresh_repo();
+        // Bootstrap a real git repo so `git check-ignore` works.
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .arg("init")
+            .arg("--quiet")
+            .output()
+            .expect("git init");
+        // Mask the canonical issuectl files via .gitignore.
+        fs::write(
+            tmp.path().join(".gitignore"),
+            ".issuectl/\nissues/.schema.yaml\n",
+        )
+        .unwrap();
+        // Place the canonical files on disk.
+        fs::create_dir_all(tmp.path().join(".issuectl")).unwrap();
+        fs::write(tmp.path().join(".issuectl/AGENTS.md"), "# placeholder\n").unwrap();
+        fs::write(tmp.path().join("issues/.schema.yaml"), "fields: {}\n").unwrap();
+
+        let hits = detect_gitignored_canonical_paths(tmp.path());
+        let joined = hits.join("\n");
+        assert!(
+            joined.contains(".issuectl/AGENTS.md"),
+            "expected hit for .issuectl/AGENTS.md, got {hits:?}"
+        );
+        assert!(
+            joined.contains("issues/.schema.yaml"),
+            "expected hit for issues/.schema.yaml, got {hits:?}"
+        );
+
+        // Full doctor scan surfaces the warning in the report.
+        let report = scan(tmp.path()).unwrap();
+        assert!(
+            !report.gitignored_paths.is_empty(),
+            "expected gitignored_paths populated; got empty"
+        );
+    }
+
+    #[test]
+    fn detect_gitignored_canonical_paths_silent_when_not_a_git_repo() {
+        // Bare tempdir (no `git init`) — `git check-ignore` returns
+        // exit 128. Doctor must not crash and must report no hits.
+        let tmp = fresh_repo();
+        fs::create_dir_all(tmp.path().join(".issuectl")).unwrap();
+        fs::write(tmp.path().join(".issuectl/AGENTS.md"), "# x\n").unwrap();
+        let hits = detect_gitignored_canonical_paths(tmp.path());
+        assert!(hits.is_empty(), "got {hits:?}");
     }
 
     #[test]
@@ -4734,6 +4856,7 @@ mod tests {
   "flat_layout_conflicts": [],
   "flat_layout_migrated": [],
   "flat_layout_planned": [],
+  "gitignored_paths": [],
   "invalid_slugs": [],
   "issues_agents_md_rewritten": false,
   "legacy_issues_agents_md": false,

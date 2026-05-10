@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `issuectl doctor` warns when canonical issuectl-tracked files
+  (`.issuectl/AGENTS.md`, `issues/.schema.yaml`) match a `.gitignore`
+  pattern. Asymmetric footgun: works locally, fails for teammates and
+  CI. Surfaced in `--json` as `gitignored_paths: [...]`.
+  (#simply-workable-umbrella)
+
 ### Changed
 - `issuectl doctor --fix` no longer refuses the flat-layout migration
   when schema-shape findings (schema violations, broken cross-refs,
