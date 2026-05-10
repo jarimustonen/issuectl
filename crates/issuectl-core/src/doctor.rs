@@ -2751,14 +2751,17 @@ mod tests {
         assert!(content.contains(&format!("epic: {}", mig2.new_slug)));
         // related: ['#3'] → ['@<slug-of-3>'], blocked_by: ['#3'] → ['@<slug-of-3>']
         let mig3 = outcome.legacy_dirs_migrated.iter().find(|m| m.old_number == 3).unwrap();
-        let needle = format!("@{}", mig3.new_slug);
-        let occurrences = content.matches(&needle).count();
-        assert!(
-            occurrences >= 2,
-            "expected `{needle}` in both related and blocked_by; content={content}"
-        );
-        assert!(!content.contains("'#3'") && !content.contains("\"#3\""),
-            "legacy `#3` ref remained: {content}");
+        let parsed = write::read_item(&item).unwrap();
+        let expected = serde_yaml::Value::Sequence(vec![serde_yaml::Value::String(
+            format!("@{}", mig3.new_slug),
+        )]);
+        for key in ["related", "blocked_by"] {
+            let got = parsed
+                .frontmatter
+                .get(serde_yaml::Value::String(key.into()))
+                .unwrap_or_else(|| panic!("`{key}` missing after rewrite: {content}"));
+            assert_eq!(got, &expected, "`{key}` not migrated: {content}");
+        }
     }
 
     #[test]
