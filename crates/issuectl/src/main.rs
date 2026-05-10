@@ -2000,10 +2000,14 @@ fn print_issue_detail(issue: &models::Issue) {
 }
 
 fn truncate(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
+    let char_count = text.chars().count();
+    if char_count <= max_len {
         text.to_string()
     } else {
-        format!("{}…", &text[..max_len.saturating_sub(1)])
+        let take = max_len.saturating_sub(1);
+        let mut out: String = text.chars().take(take).collect();
+        out.push('…');
+        out
     }
 }
 
@@ -2070,6 +2074,28 @@ mod tests {
 
     fn read(path: &Path) -> String {
         fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn truncate_handles_non_ascii_at_boundary() {
+        // Regression: byte-index slicing panicked at non-char boundary
+        // for Finnish titles like "Käyttäjän kirjautuminen rikki".
+        let title = "Käyttäjän kirjautuminen rikki sisäänkirjautumisessa";
+        // Should not panic for any max_len <= char count.
+        for n in 1..=title.chars().count() {
+            let _ = truncate(title, n);
+        }
+        // Truncated output should be a valid string ending in ellipsis
+        // when truncation actually happens.
+        let out = truncate(title, 10);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), 10);
+    }
+
+    #[test]
+    fn truncate_keeps_short_text_unchanged() {
+        assert_eq!(truncate("ä", 5), "ä");
+        assert_eq!(truncate("hello", 5), "hello");
     }
 
     #[test]

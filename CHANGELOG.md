@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "fix-something-rerun-doctor" loops. (issue:
   `@ridiculously-outrageous-fold`)
 
+### Fixed
+- `issuectl list` no longer panics on non-ASCII titles. The table
+  truncation helper now operates on Unicode scalar values instead of
+  byte indices, so titles like `Käyttäjän kirjautuminen…` render
+  cleanly. Regression of the 0.3.1 byte-boundary issue that resurfaced
+  when the table renderer was refactored.
+  (#marginally-receptive-kettle)
+
 ## [0.5.1] - 2026-05-10
 
 Cleanup release for the `issues/AGENTS.md` scaffold and skill version
