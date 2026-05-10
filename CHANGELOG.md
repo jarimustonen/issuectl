@@ -7,33 +7,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- Shared query engine (`src/query.rs`) used by `issuectl ls`, `issuectl
-  search`, and the web `/api/issues?q=` endpoint. Syntax: `field:value`,
+## [0.5.0] - 2026-05-10
+
+The "writable, agent-safe kanban" release. The web board moves from
+read-only browser to a full editing surface; the CLI gains a
+mutation/validation toolkit (doctor, fmt, set/note/check/label/apply,
+transition rules, schema, AGENTS.md); query, search, and `?q=` share
+one language; and the file format is hardened so concurrent edits via
+web, CLI, `$EDITOR`, and `git pull` all converge.
+
+**Breaking change:** repos using the legacy `issues/{open,closed}/<slug>/`
+layout must run `issuectl doctor --fix` once. The new canonical layout
+is flat — `issues/<slug>/item.md` — with status carried only in
+frontmatter. `IssueSummary` (returned from `GET /api/issues` and
+embedded in SSE `IssueUpserted` events) gained a non-optional `version`
+field; consumers using `deny_unknown_fields` need to add it. The
+`renumber` flow and `<NN>-` prefixes are gone.
+
+### Added — Web edit/sync
+- **Writable web kanban.** Drag-and-drop between status columns
+  (closing-status picker on drop into Closed), inline frontmatter
+  edits, and a body editor (textarea + preview, localStorage drafts,
+  three-way merge UI on conflict). Optimistic UI with revert-on-failure
+  and toast notifications.
+- **Live updates.** Server-Sent Events (`/events`) push board mutations
+  to all open browsers. EventHub (parking_lot mutex over seq+ring),
+  notify-debouncer-full file watcher with consecutive-failure backoff,
+  Last-Event-ID resume with scan-on-lagged semantics, `--watch-poll-ms`
+  fallback, and a `Degraded` banner when the watcher gives up.
+- **Concurrency-safe writes.** Every mutation goes through one shared
+  `mutate.rs` (CLI and server), guarded by an `flock` on
+  `.issuectl/write.lock`, with `expected_version` optimistic
+  concurrency. CSRF + Host-header validation on the HTTP surface.
+
+### Added — Agent-safe CLI
+- **`issuectl doctor`.** Full validation suite (invalid slugs,
+  duplicates, missing item.md, orphan epic refs, frontmatter parse
+  errors, schema/transition violations) with `--fix` for the legacy
+  layout migration and installable git hooks. Single-pass scanner;
+  structural Findings → Actions → ApplyOutcome pipeline with
+  `stop_phase` discriminator and partial-outcome preservation on
+  mid-run failures. Non-zero exit on apply errors.
+- **Focused mutation verbs.** `set`, `note`, `check`, `label`, and
+  transactional `apply <patch.yaml>` (multi-field + body ops under one
+  flock with rollback). All support `--dry-run` (unified diff, no
+  write) and require `--expected-version` with `--json`. `note` writes
+  timestamped blocks into standardized body sections (Comments /
+  Decisions / Agent Runs / Reopen Notes); idempotent `set_checkbox`.
+- **`issuectl fmt`** — canonicalize frontmatter ordering and YAML
+  style. Optional YAML merge driver to make `git pull` collapse
+  reorder-only conflicts cleanly.
+- **Status transition rules.** `.issuectl/transitions.yaml` declares
+  legal status edges; `update`/`set`/web all enforce them. Per-type
+  body section linting rejects `--type` changes that leave required
+  sections missing, with a hint listing the headings to add. CLI
+  accepts custom statuses defined by `.schema.yaml`.
+
+### Added — Discoverability & agent integration
+- **Shared query engine** used by `issuectl ls`, `issuectl search`, and
+  the web `/api/issues?q=` endpoint. Syntax: `field:value`,
   `-field:value` (negation), `text:"phrase"`, bareword (treated as
   `text:`), `field:any`/`field:none`, and relative dates
   (`updated:<-14d` strict, `<=-14d` inclusive, anchor: today in local
   timezone). Backslash-escapes (`\:`, `\\`, `\ `, `\"`, `\-`) inside
   unquoted values. Multiple terms AND together; no OR/parens in v1.
   The HTTP `?q=` endpoint enforces a 4096-byte / 64-term cap and
-  surfaces parse errors as a JSON error envelope. Existing
-  flag-based `ls` invocations remain backwards-compatible — `ls -s
-  fixed` still implies open-only unless `--all`/`--closed` is
-  explicit; only a *positional* query opts out of the open default.
-- Web kanban: cards are draggable between status columns. Dropping on an
-  active column (Open / In progress / Testing) issues a status PATCH
-  immediately; dropping on Closed opens a small picker so the user
-  selects a closing status (`done`/`fixed`/`wontfix`/...). Optimistic
-  UI with revert-on-failure, version-aware concurrency, and toast
-  notifications.
+  surfaces parse errors as a JSON error envelope. Existing flag-based
+  `ls` invocations remain backwards-compatible — `ls -s fixed` still
+  implies open-only unless `--all`/`--closed` is explicit; only a
+  *positional* query opts out of the open default.
+- **`issuectl context <slug>`** — deterministic agent context bundle
+  (issue + parent epic + blockers + related + acceptance criteria +
+  recorded commits + schema rules) as markdown or JSON. JSON includes
+  the same `version` token as `show --json` for one-shot
+  `--expected-version` use. Cache to `.issuectl/cache/agent/<slug>/`
+  with `--write`. Read-only.
+- **`issuectl prompt <template> <slug>`** — repo-local prompt
+  templates at `.issuectl/prompts/<name>.md` with `{{key}}`
+  substitution against the context bundle. Any `## H2` heading in the
+  body is reachable via its snake-cased name.
+- **`.schema.yaml`** for declaring required/optional frontmatter
+  fields, custom field types, custom statuses, and per-type required
+  body sections. Lifecycle classification (open vs. closing status) is
+  derived from the schema, not hard-coded.
+- **`.issuectl/AGENTS.md`** — committed agent policy file.
 
 ### Changed
-- API: `IssueSummary` (returned from `GET /api/issues` and embedded in
-  SSE `IssueUpserted` events) gained a non-optional `version` field
-  carrying the issue's canonical content hash. The web client uses it as
+- **Repo layout is flat:** `issues/<slug>/item.md`. Status lives only
+  in frontmatter; the `open/` and `closed/` subdirs are gone. The
+  `folder` reported in `--json` is computed from status. `doctor --fix`
+  performs the migration and rewrites `epic:`, `related:`, and
+  `blocked_by:` legacy refs alongside `#NN` body refs to `@<slug>`.
+- **Workspace split** into `issuectl` (binary) and `issuectl-core`
+  (library) with constants relocation, centralized custom-field-key
+  validation, and `do_new_locked` extracted from `main.rs` into a
+  domain module. CLI golden-test harness for error output.
+- `IssueSummary` (HTTP + SSE) gained a non-optional `version` field
+  carrying the canonical content hash. The web client uses it as
   `expected_version` for drag-and-drop PATCHes without per-card GETs.
-  External consumers deserializing the response with `deny_unknown_fields`
-  will need to add the field; permissive deserializers are unaffected.
+- Server caches the schema and transitions config in serve mode.
+
+### Fixed
+- **Canonical hash now covers `title` and all unknown frontmatter
+  keys**, so reorder-only and unknown-key edits no longer produce
+  spurious "modified externally" conflicts and version tokens stay
+  stable across CLI, server, and watcher.
+- **`mutate::new_issue` publishes the upsert event before releasing
+  the flock**, closing a window where a subscriber could observe the
+  file before the event landed.
+- `issuectl ls` no longer drops the first character of the H1 title
+  in CLI display.
+- Reopening a closed issue auto-appends a `## Reopen Notes — <today>`
+  section in the same write.
+- `doctor` re-checks `critical_blockers` after the flat-layout
+  migration before any NN-rename, runs `rename_notes_to_comments`
+  after lifting legacy dirs (so freshly-flat dirs get the one-shot
+  rename), and preserves partial outcomes on mid-loop failure.
+- `legacy_number_from_mapping` data-loss when `number:` and `slug:`
+  coexisted in legacy frontmatter.
+
+### Removed
+- `issues/{open,closed}/` subdirectories (folded into the flat layout
+  by `doctor --fix`). The legacy migration path is preserved — repos
+  on 0.2.0/0.3.x just need to run `issuectl doctor --fix` once.
+
+### Internals
+- Refactor of the doctor apply pipeline into Findings/Actions/Outcome
+  with golden-JSON tests; lifecycle classification derived from
+  schema; multi-LLM review-driven hardening across roughly 30
+  spin-off issues. See `@exorbitantly-ill-apples` for the full
+  trail.
 
 ## [0.3.1] - 2026-05-06
 
@@ -222,6 +325,9 @@ Initial public release.
 - `issuectl dedup` stub — moved to a future release until properly
   implemented.
 
-[Unreleased]: https://github.com/jarimustonen/issuectl/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jarimustonen/issuectl/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jarimustonen/issuectl/compare/v0.3.1...v0.5.0
+[0.3.1]: https://github.com/jarimustonen/issuectl/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/jarimustonen/issuectl/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jarimustonen/issuectl/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jarimustonen/issuectl/releases/tag/v0.1.0
