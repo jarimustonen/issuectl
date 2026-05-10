@@ -8,6 +8,9 @@ reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
 labels: [automation, git-native]
+commits:
+- hash: d59c1e7
+  summary: 'feat(sync-commits): trailer-driven commit linking'
 ---
 
 # Git-native commit linking: trailers (Refs-Issue / Fixes-Issue) + sync-commits + branch-name detection
