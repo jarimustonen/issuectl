@@ -205,25 +205,12 @@ pub fn default_schema() -> Schema {
 /// constrain `labels.enum` without losing the rest of the defaults.
 /// Returns the default schema unchanged when the file is missing.
 ///
-/// Returns `Arc<Schema>` so server mode can share a single parsed
-/// snapshot across requests via `repo_config::RepoConfigCache`. CLI
-/// callers pay only an `Arc` allocation — the schema itself is parsed
-/// once per command. When a cache is active on the current thread, the
-/// cached `Arc` is returned without re-parsing.
+/// Always re-parses. Callers that want cross-request caching
+/// (server mode) construct a `repo_config::RepoConfigCache` and
+/// call its `schema()` method directly via the `ConfigSource`
+/// trait. Returns `Arc<Schema>` so the result is interchangeable
+/// with the cache's snapshot for downstream consumers.
 pub fn load(root: &Path) -> Result<Arc<Schema>> {
-    if let Some(cache) = crate::repo_config::current() {
-        // The cache is bound to the `AppState` root in server mode.
-        // `mutate::*` callers pass that same root, so the cache's
-        // bound root governs which file is read. `debug_assert`
-        // surfaces a future bug where a caller passes a different
-        // root while a cache is active.
-        debug_assert_eq!(
-            root,
-            cache.root(),
-            "schema::load called with root that disagrees with the active RepoConfigCache",
-        );
-        return cache.schema();
-    }
     Ok(Arc::new(load_uncached(root)?))
 }
 

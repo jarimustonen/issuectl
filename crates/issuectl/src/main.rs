@@ -7,6 +7,7 @@ use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
+use issuectl_core::repo_config::UncachedConfig;
 use issuectl_core::{
     agents, body_sections, canonical, context, docs, doctor, fmt, hooks, init as init_cmd,
     merge_driver, models, mutate, query, repo, server, skill, slug, sync_commits,
@@ -1419,7 +1420,7 @@ use mutate::new_issue::{do_new, NewArgs};
 
 fn cmd_new(json: bool, args: NewArgs) -> Result<()> {
     let root = find_root();
-    let out = do_new(&root, args)?;
+    let out = do_new(&root, args, &UncachedConfig)?;
     if json {
         let report = serde_json::json!({
             "slug": out.slug,
@@ -1563,7 +1564,7 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
     }
 
     let outcome =
-        mutate::update_issue(root, &args.slug, req, None).map_err(|e| anyhow::anyhow!("{e}"))?;
+        mutate::update_issue(root, &args.slug, req, None, &UncachedConfig).map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(UpdateOutcome {
         final_dir: outcome.issue_dir,
         moved_to_closed: outcome.moved_to_closed,
@@ -1620,7 +1621,7 @@ pub(crate) fn do_close(
             Ok::<_, anyhow::Error>(mutate::CommitSpec { hash, summary })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let outcome = mutate::close_issue(root, slug, status, commit_specs, expected_version, None)
+    let outcome = mutate::close_issue(root, slug, status, commit_specs, expected_version, None, &UncachedConfig)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(UpdateOutcome {
         final_dir: outcome.issue_dir,
@@ -1788,6 +1789,7 @@ fn cmd_note(
         expected_version,
         None,
         dry_run,
+        &UncachedConfig,
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     finish_mutation(json, slug, &outcome, dry_run, "Appended note to")
@@ -1836,7 +1838,7 @@ fn cmd_set(
     }
     let root = find_root();
     let outcome =
-        mutate::update_issue(&root, slug, req, None).map_err(|e| anyhow::anyhow!("{e}"))?;
+        mutate::update_issue(&root, slug, req, None, &UncachedConfig).map_err(|e| anyhow::anyhow!("{e}"))?;
     finish_mutation(json, slug, &outcome, dry_run, "Updated")
 }
 
@@ -1853,7 +1855,7 @@ fn cmd_check(
         );
     }
     let root = find_root();
-    let outcome = mutate::toggle_checkbox(&root, slug, task, expected_version, None, dry_run)
+    let outcome = mutate::toggle_checkbox(&root, slug, task, expected_version, None, dry_run, &UncachedConfig)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     finish_mutation(json, slug, &outcome, dry_run, "Toggled checkbox in")
 }
@@ -1882,7 +1884,7 @@ fn cmd_label(
     }
     let root = find_root();
     let outcome =
-        mutate::update_issue(&root, slug, req, None).map_err(|e| anyhow::anyhow!("{e}"))?;
+        mutate::update_issue(&root, slug, req, None, &UncachedConfig).map_err(|e| anyhow::anyhow!("{e}"))?;
     finish_mutation(json, slug, &outcome, dry_run, "Updated labels for")
 }
 
@@ -1894,7 +1896,7 @@ fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
     req.dry_run = dry_run;
     let root = find_root();
     let outcome =
-        mutate::update_issue(&root, &slug, req, None).map_err(|e| anyhow::anyhow!("{e}"))?;
+        mutate::update_issue(&root, &slug, req, None, &UncachedConfig).map_err(|e| anyhow::anyhow!("{e}"))?;
     finish_mutation(json, &slug, &outcome, dry_run, "Applied patch to")
 }
 
@@ -2059,7 +2061,7 @@ fn cmd_body_set(
         buf
     };
     let root = find_root();
-    let outcome = mutate::update_body(&root, slug, expected_version, body, None, false)
+    let outcome = mutate::update_body(&root, slug, expected_version, body, None, false, &UncachedConfig)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     if json {
         let report = serde_json::json!({
@@ -2321,7 +2323,7 @@ mod tests {
         a.slug = Some("my-test-slug".into());
         a.reporter = Some("rep".into());
         a.assignee = Some("ass".into());
-        let n = do_new(tmp.path(), a).unwrap();
+        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
         do_update(
             tmp.path(),
             UpdateArgs {
@@ -2342,7 +2344,7 @@ mod tests {
         a.slug = Some("close-me".into());
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
-        let n = do_new(tmp.path(), a).unwrap();
+        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
         let outcome = do_update(
             tmp.path(),
             UpdateArgs {
@@ -2366,7 +2368,7 @@ mod tests {
         let mut a = new_args("task", "T");
         a.slug = Some("task-x".into());
         a.epic = Some("api-v2".into());
-        let n = do_new(tmp.path(), a).unwrap();
+        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
         do_update(
             tmp.path(),
             UpdateArgs {
@@ -2386,7 +2388,7 @@ mod tests {
         let mut a = new_args("task", "T");
         a.slug = Some("task-y".into());
         a.epic = Some("api-v2".into());
-        let n = do_new(tmp.path(), a).unwrap();
+        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
         do_update(
             tmp.path(),
             UpdateArgs {
@@ -2407,7 +2409,7 @@ mod tests {
         a.slug = Some("bug-slug".into());
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
-        let n = do_new(tmp.path(), a).unwrap();
+        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
         let outcome = do_close(tmp.path(), &n.slug, None, vec![], None).unwrap();
         assert!(outcome.moved_to_closed);
         let content = read(&outcome.final_dir.join("item.md"));
@@ -2421,7 +2423,7 @@ mod tests {
         a.slug = Some("task-slug".into());
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
-        let n = do_new(tmp.path(), a).unwrap();
+        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
         let outcome = do_close(tmp.path(), &n.slug, None, vec![], None).unwrap();
         let content = read(&outcome.final_dir.join("item.md"));
         assert!(content.contains("status: done"));
@@ -2434,7 +2436,7 @@ mod tests {
         a.slug = Some("once-only".into());
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
-        let n = do_new(tmp.path(), a).unwrap();
+        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
         do_close(tmp.path(), &n.slug, None, vec![], None).unwrap();
         assert!(do_close(tmp.path(), &n.slug, None, vec![], None).is_err());
     }

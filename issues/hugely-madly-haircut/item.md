@@ -8,6 +8,7 @@ priority: normal
 epic: hugely-exciting-spiders
 related: ['@deeply-wistful-beam']
 labels: [release-v0.6.0, backlog]
+commit: '4669088'
 ---
 
 # Replace thread-local schema/transitions cache activation with explicit injection
@@ -75,3 +76,9 @@ Touches the four `mutate::*` public functions
 through (or a default impl). Likely conflicts with sister-worktree
 changes that touch `mutate.rs`, so worth coordinating with whatever
 lands in v0.5.0 first.
+
+## Decisions
+
+### 2026-05-10T18:22:17Z · @jari
+
+Foundation landed (ConfigSource trait + UncachedConfig + blanket impl on RepoConfigCache + trait-level tests, commit 4669088). Activation-mechanism removal deferred: scope is ~100 call sites across mutate, server, agents, doctor, repo, context, watcher, and main, plus tests. Trait is ready for incremental adoption as new mutate frontends or read paths land.

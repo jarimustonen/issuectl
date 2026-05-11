@@ -539,8 +539,7 @@ pub async fn patch_issue(
     let cache = state.config.clone();
     let slug_owned = slug_param.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let _g = crate::repo_config::enter(cache);
-        mutate::update_issue(root.as_path(), &slug_owned, req, Some(&hub))
+        mutate::update_issue(root.as_path(), &slug_owned, req, Some(&hub), &*cache)
     })
     .await;
     match result {
@@ -580,8 +579,7 @@ pub async fn create_issue(
     let hub = state.event_hub.clone();
     let cache = state.config.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let _g = crate::repo_config::enter(cache);
-        mutate::new_issue(root.as_path(), req, Some(&hub))
+        mutate::new_issue(root.as_path(), req, Some(&hub), &*cache)
     })
     .await;
     match result {
@@ -639,7 +637,6 @@ pub async fn put_body(
     let cache = state.config.clone();
     let slug_owned = slug_param.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let _g = crate::repo_config::enter(cache);
         mutate::update_body(
             root.as_path(),
             &slug_owned,
@@ -647,6 +644,7 @@ pub async fn put_body(
             req.body,
             Some(&hub),
             false,
+            &*cache,
         )
     })
     .await;

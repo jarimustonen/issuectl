@@ -131,21 +131,14 @@ pub fn rules_path(root: &Path) -> PathBuf {
 /// future v2 cannot silently rebind today's untagged files. Likewise,
 /// each loaded rule is validated for empty/duplicated values.
 pub fn load(root: &Path) -> Result<Arc<TransitionRules>> {
-    if let Some(cache) = crate::repo_config::current() {
-        debug_assert_eq!(
-            root,
-            cache.root(),
-            "transitions::load called with root that disagrees with the active RepoConfigCache",
-        );
-        return cache.rules();
-    }
     Ok(Arc::new(load_uncached(root)?))
 }
 
 /// Direct, unconditional parse. Used by `repo_config::RepoConfigCache`
 /// to populate cache entries — calling `load` from inside the cache
-/// would re-enter the thread-local and defeat the point. Also the
-/// fallback `load` uses when no cache is active.
+/// would re-enter the cache lookup and defeat the point. Also the
+/// path `load` takes for every read now that the activation
+/// thread-local has been removed.
 pub(crate) fn load_uncached(root: &Path) -> Result<TransitionRules> {
     let path = rules_path(root);
     if !path.is_file() {

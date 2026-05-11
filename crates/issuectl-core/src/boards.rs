@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::query;
-use crate::schema;
 
 /// Built-in scalar fields a board may group on. Multi-valued fields
 /// (`labels`, `related`) are intentionally absent — see the design
@@ -184,7 +183,11 @@ pub fn list(root: &Path) -> Vec<String> {
     names
 }
 
-pub fn load(root: &Path, name: &str) -> Result<Board, BoardError> {
+pub fn load(
+    root: &Path,
+    name: &str,
+    config: &dyn crate::repo_config::ConfigSource,
+) -> Result<Board, BoardError> {
     if !is_valid_board_name(name) {
         return Err(BoardError::NotFound);
     }
@@ -253,8 +256,9 @@ pub fn load(root: &Path, name: &str) -> Result<Board, BoardError> {
             file.group_by
         )));
     }
-    let schema_arc =
-        schema::load(root).map_err(|e| BoardError::Io(anyhow::anyhow!("load schema: {e}")))?;
+    let schema_arc = config
+        .schema(root)
+        .map_err(|e| BoardError::Io(anyhow::anyhow!("load schema: {e}")))?;
     if schema_arc
         .fields
         .get(&file.group_by)
@@ -429,7 +433,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: epic\ncolumns:\n  - value: \"\"\n    label: Unscoped\n  - value: foo\n    label: Foo\n",
         );
-        let b = load(d.path(), "triage").unwrap();
+        let b = load(d.path(), "triage", &crate::repo_config::UncachedConfig).unwrap();
         assert_eq!(b.group_by, "epic");
         assert_eq!(b.columns.len(), 2);
         assert!(b.soft_errors.is_empty());
@@ -456,7 +460,7 @@ mod tests {
     #[test]
     fn load_missing_board_is_not_found() {
         let d = tmp();
-        match load(d.path(), "nope") {
+        match load(d.path(), "nope", &crate::repo_config::UncachedConfig) {
             Err(BoardError::NotFound) => {}
             other => panic!("expected NotFound, got {other:?}"),
         }
@@ -465,7 +469,7 @@ mod tests {
     #[test]
     fn load_rejects_invalid_name() {
         let d = tmp();
-        match load(d.path(), "../etc") {
+        match load(d.path(), "../etc", &crate::repo_config::UncachedConfig) {
             Err(BoardError::NotFound) => {}
             other => panic!("expected NotFound, got {other:?}"),
         }
@@ -479,7 +483,7 @@ mod tests {
             "triage",
             "name: other\ngroup_by: epic\ncolumns: [{value: '', label: U}]\n",
         );
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(_)) => {}
             other => panic!("expected Validation, got {other:?}"),
         }
@@ -493,7 +497,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: epic\ncolumns: []\n",
         );
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(_)) => {}
             other => panic!("expected Validation, got {other:?}"),
         }
@@ -507,7 +511,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: epic\ncolumns:\n  - {value: a, label: A1}\n  - {value: a, label: A2}\n",
         );
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(s)) => assert!(s.contains("duplicate")),
             other => panic!("expected Validation, got {other:?}"),
         }
@@ -521,7 +525,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: labels\ncolumns: [{value: '', label: U}]\n",
         );
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(s)) => assert!(s.contains("list")),
             other => panic!("expected Validation, got {other:?}"),
         }
@@ -547,7 +551,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: labels\ncolumns: [{value: '', label: U}]\n",
         );
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(s)) => assert!(s.contains("list-typed")),
             other => panic!("expected Validation, got {other:?}"),
         }
@@ -561,7 +565,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: nonexistent_field\ncolumns: [{value: '', label: U}]\n",
         );
-        let b = load(d.path(), "triage").unwrap();
+        let b = load(d.path(), "triage", &crate::repo_config::UncachedConfig).unwrap();
         assert_eq!(b.soft_errors.len(), 1);
         match &b.soft_errors[0] {
             SoftError::UnknownGroupBy(f) => assert_eq!(f, "nonexistent_field"),
@@ -576,7 +580,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: epic\ncolumns: [{value: '', label: U}]\nfilter: \"bogus:value\"\n",
         );
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(s)) => assert!(s.contains("filter")),
             other => panic!("expected Validation, got {other:?}"),
         }
@@ -590,7 +594,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: priority\ncolumns:\n  - {value: '', label: Unscoped}\n  - {value: high, label: High}\n",
         );
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(s)) => assert!(s.contains("required")),
             other => panic!("expected Validation, got {other:?}"),
         }
@@ -604,7 +608,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: priority\ncolumns:\n  - {value: medium, label: Medium}\n  - {value: high, label: High}\n",
         );
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(s)) => {
                 assert!(s.contains("medium"), "msg: {s}");
                 assert!(s.contains("enum"), "msg: {s}");
@@ -621,7 +625,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: priority\ncolumns:\n  - {value: normal, label: Normal}\n  - {value: high, label: High}\n",
         );
-        let b = load(d.path(), "triage").unwrap();
+        let b = load(d.path(), "triage", &crate::repo_config::UncachedConfig).unwrap();
         assert_eq!(b.columns.len(), 2);
     }
 
@@ -633,7 +637,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: \"epic \"\ncolumns: [{value: '', label: U}]\n",
         );
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(s)) => assert!(s.contains("whitespace")),
             other => panic!("expected Validation, got {other:?}"),
         }
@@ -647,7 +651,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: epic\ncolumns: [{value: 'foo ', label: F}]\n",
         );
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(s)) => assert!(s.contains("whitespace")),
             other => panic!("expected Validation, got {other:?}"),
         }
@@ -661,7 +665,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: epic\ncolumns: [{value: '', label: U}]\nbogus: 1\n",
         );
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(_)) => {}
             other => panic!("expected Validation, got {other:?}"),
         }
@@ -675,7 +679,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: epic\ncolumns: [{value: '', label: U}]\nfilters: [search, type]\n",
         );
-        let b = load(d.path(), "triage").unwrap();
+        let b = load(d.path(), "triage", &crate::repo_config::UncachedConfig).unwrap();
         assert_eq!(b.filters, vec!["search".to_string(), "type".to_string()]);
     }
 
@@ -687,7 +691,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: epic\ncolumns: [{value: '', label: U}]\nfilters: [bogus]\n",
         );
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(s)) => assert!(s.contains("bogus")),
             other => panic!("expected Validation, got {other:?}"),
         }
@@ -701,7 +705,7 @@ mod tests {
             "triage",
             "name: triage\ngroup_by: epic\ncolumns: [{value: '', label: U}]\nfilters: [search, search]\n",
         );
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(s)) => assert!(s.contains("twice")),
             other => panic!("expected Validation, got {other:?}"),
         }
@@ -715,7 +719,7 @@ mod tests {
             "bugs",
             "name: bugs\ngroup_by: epic\ncolumns: [{value: '', label: U}]\nfilter: \"type:bug\"\n",
         );
-        let b = load(d.path(), "bugs").unwrap();
+        let b = load(d.path(), "bugs", &crate::repo_config::UncachedConfig).unwrap();
         assert!(b.parsed_filter.is_some());
         assert_eq!(b.filter_src.as_deref(), Some("type:bug"));
     }
@@ -724,7 +728,7 @@ mod tests {
     fn validation_error_does_not_leak_filesystem_path() {
         let d = tmp();
         write_board(d.path(), "triage", "this is not yaml: : :\n: : :");
-        match load(d.path(), "triage") {
+        match load(d.path(), "triage", &crate::repo_config::UncachedConfig) {
             Err(BoardError::Validation(s)) => {
                 assert!(!s.contains(d.path().to_str().unwrap()), "leaked path: {s}");
             }

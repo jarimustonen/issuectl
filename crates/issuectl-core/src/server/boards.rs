@@ -87,8 +87,7 @@ pub async fn get_board_api(State(state): State<AppState>, Path(name): Path<Strin
     let instance_id = state.event_hub.instance_id();
 
     let result = tokio::task::spawn_blocking(move || {
-        let _g = crate::repo_config::enter(cache);
-        let board = boards::load(root.as_path(), &board_name)?;
+        let board = boards::load(root.as_path(), &board_name, &*cache)?;
 
         // `parsed_filter` is populated at load time; no string-matching
         // dance, no late re-parse, no fail-open on bad filter (those
@@ -180,8 +179,7 @@ pub async fn board_view_html(
     let cache = state.config.clone();
     let board_name = name.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let _g = crate::repo_config::enter(cache);
-        boards::load(root.as_path(), &board_name)
+        boards::load(root.as_path(), &board_name, &*cache)
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

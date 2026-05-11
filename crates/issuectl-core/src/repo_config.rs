@@ -4,12 +4,13 @@
 //! In server mode the same process serves many PATCH/POST requests,
 //! and re-parsing both YAMLs on every request is pure overhead. The
 //! CLI parses them once per command, so the cost is only visible on
-//! the server. This cache is therefore opt-in: callers activate it
-//! via a thread-local guard around the request handler. When active,
-//! `schema::load` and `transitions::load` consult the cache, comparing
-//! the file's freshness key against the cached value. If the file
-//! looks unchanged, the cached `Arc` is reused; otherwise the cache
-//! re-parses, swaps, and returns the fresh value.
+//! the server. Activation is now explicit: every mutate (and read)
+//! entry point that consults config takes a `&dyn ConfigSource`
+//! parameter. The CLI passes `&UncachedConfig`; the server passes
+//! its `Arc<RepoConfigCache>` directly. The previous thread-local
+//! activation (`enter` / `current` / `ActiveGuard`) is gone —
+//! removed by `@hugely-madly-haircut` so the cache reaches the load
+//! site through the type signature rather than ambient state.
 //!
 //! Invalidation is best-effort, not strict coherency. The freshness
 //! key is `(mtime, len)`: cheap to compute, catches any edit that
@@ -245,54 +246,6 @@ impl RepoConfigCache {
     }
 }
 
-thread_local! {
-    static ACTIVE: std::cell::RefCell<Option<Arc<RepoConfigCache>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// RAII guard for the thread-local `ACTIVE` cache slot. The guard is
-/// `!Send` and `!Sync` by construction so it cannot cross an `.await`
-/// in an `async fn`: the future containing it would be `!Send` and
-/// fail to compile with `tokio::spawn`. That's deliberate — the
-/// thread-local belongs to the worker thread that installed it, and
-/// migrating across threads would either lose the cache or leak it
-/// onto a different worker.
-///
-/// **Do not remove the `_not_send_sync` field.** `Rc<()>` is the
-/// idiomatic Rust marker for "stays on its thread"; replacing it with
-/// `()` would silently make the guard `Send` and reintroduce the leak
-/// described above.
-pub struct ActiveGuard {
-    prev: Option<Arc<RepoConfigCache>>,
-    _not_send_sync: std::marker::PhantomData<std::rc::Rc<()>>,
-}
-
-impl Drop for ActiveGuard {
-    fn drop(&mut self) {
-        let prev = self.prev.take();
-        ACTIVE.with(|slot| *slot.borrow_mut() = prev);
-    }
-}
-
-/// Install `cache` as the active cache for the current thread. The
-/// returned guard restores the previous slot on drop — including
-/// across panics, since `Drop` runs during unwind.
-pub fn enter(cache: Arc<RepoConfigCache>) -> ActiveGuard {
-    let prev = ACTIVE.with(|slot| slot.borrow_mut().replace(cache));
-    ActiveGuard {
-        prev,
-        _not_send_sync: std::marker::PhantomData,
-    }
-}
-
-/// Active cache for the current thread, if any. `schema::load` and
-/// `transitions::load` consult this so that callers (CLI vs. server)
-/// don't need different signatures — the server installs a guard
-/// before delegating to `mutate::*`, the CLI never does.
-pub fn current() -> Option<Arc<RepoConfigCache>> {
-    ACTIVE.with(|slot| slot.borrow().clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,100 +354,7 @@ mod tests {
         );
     }
 
-    /// `enter` activates the thread-local cache so `schema::load` and
-    /// `transitions::load` route through it, and the guard clears the
-    /// slot on drop.
-    #[test]
-    fn enter_guard_routes_load_through_cache_and_clears_on_drop() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().to_path_buf();
-        fs::create_dir_all(root.join("issues")).unwrap();
-
-        let cache = Arc::new(RepoConfigCache::new(root.clone()));
-
-        {
-            let _g = enter(cache.clone());
-            // Default-on-missing path still warms the cache.
-            crate::schema::load(&root).unwrap();
-            crate::schema::load(&root).unwrap();
-            crate::transitions::load(&root).unwrap();
-            crate::transitions::load(&root).unwrap();
-        }
-        assert!(
-            current().is_none(),
-            "active cache must be cleared when the guard drops",
-        );
-        assert_eq!(
-            cache.refresh_count(),
-            2,
-            "two schema + two transitions loads should yield one parse each",
-        );
-    }
-
-    /// `std::thread::spawn` proves OS-level thread-local isolation,
-    /// which is guaranteed by the platform — keep it as a smoke test
-    /// against `static` accidentally being introduced in place of
-    /// `thread_local!`.
-    #[test]
-    fn active_slot_is_per_thread() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache = Arc::new(RepoConfigCache::new(tmp.path().to_path_buf()));
-        let _g = enter(cache);
-        let saw_active = thread::spawn(|| current().is_some()).join().unwrap();
-        assert!(!saw_active);
-    }
-
-    /// The real risk for the thread-local design is `tokio::task::
-    /// spawn_blocking` worker reuse: the same OS thread serves multiple
-    /// blocking tasks in succession. This test pins both halves of the
-    /// claim:
-    /// - the second task runs on the same OS thread as the first
-    ///   (otherwise the test would pass for the wrong reason);
-    /// - the slot is empty when that thread is reused, even though
-    ///   the first task panicked before its scope ended.
-    #[test]
-    fn guard_clears_after_panic_on_reused_blocking_worker() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().to_path_buf();
-        let cache = Arc::new(RepoConfigCache::new(root));
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .max_blocking_threads(1)
-            .build()
-            .unwrap();
-
-        rt.block_on(async {
-            let first_tid = Arc::new(parking_lot::Mutex::new(None::<thread::ThreadId>));
-            let first_tid_w = first_tid.clone();
-            let c = cache.clone();
-            let first = tokio::task::spawn_blocking(move || {
-                *first_tid_w.lock() = Some(thread::current().id());
-                let _g = enter(c);
-                assert!(current().is_some());
-                panic!("force unwind to exercise Drop on panic");
-            })
-            .await;
-            assert!(first.is_err(), "first task must surface the panic");
-
-            let (saw_leaked, second_tid) =
-                tokio::task::spawn_blocking(|| (current().is_some(), thread::current().id()))
-                    .await
-                    .unwrap();
-            assert_eq!(
-                Some(second_tid),
-                *first_tid.lock(),
-                "second blocking task must run on the same OS thread as the first; otherwise this test \
-                 proves nothing about Drop on a reused worker",
-            );
-            assert!(
-                !saw_leaked,
-                "a reused blocking worker must not see a leaked active cache",
-            );
-        });
-    }
-
-    /// `schema::load` falls back to the built-in default when the file
+/// `schema::load` falls back to the built-in default when the file
     /// is absent. The cache must memoize that absence — repeated calls
     /// against a still-missing file should not re-parse the embedded
     /// default.

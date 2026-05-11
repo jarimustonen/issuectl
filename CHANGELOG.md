@@ -127,17 +127,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#thoroughly-kaput-pocket)
 
 ### Internals
-- New `ConfigSource` trait + `UncachedConfig` zero-sized impl in
-  `repo_config`, with a blanket impl on the existing
-  `RepoConfigCache`. Provides explicit dependency injection for the
-  schema + transitions parses so future code paths can take
-  `&dyn ConfigSource` instead of consulting the thread-local
-  activation slot. The thread-local activation (`enter` / `current`
-  / `ActiveGuard`) is intentionally retained for now: removing it
-  is a separate, coordinated migration of the four `mutate::*`
-  public functions plus their ~100 call sites and is tracked
-  under `@hugely-madly-haircut` follow-up. The trait is the
-  foundation that migration will build on.
+- Replaced the thread-local `RepoConfigCache` activation slot
+  (`repo_config::enter` / `current` / `ActiveGuard`) with explicit
+  dependency injection: every mutate entry point
+  (`update_issue`, `new_issue`, `update_body`, `close_issue`,
+  `note_issue`, `toggle_checkbox`, `do_new`, `boards::load`) now
+  takes a `&dyn ConfigSource` parameter. The CLI passes
+  `&UncachedConfig`; the server passes its `Arc<RepoConfigCache>`
+  directly into `spawn_blocking`. Removes the `!Send` ambient
+  guard, the spawn-blocking worker-reuse footgun, and the
+  thread-local-vs-static accident risk; the cache now reaches the
+  load site through the type signature so the failure mode for
+  "forgot to install" is a compile error rather than a silent
+  fallback to uncached parsing. `schema::load` and
+  `transitions::load` no longer consult any cache and always
+  re-parse — callers that want caching go through the explicit
+  `ConfigSource` impl on `RepoConfigCache`. (#hugely-madly-haircut)
 - `body_sections::parse_section` now returns a structured
   `ParsedSection { found, blocks, warnings, duplicate_sections }`
   instead of a bare `Vec<Block>`. The previous shape collapsed five
