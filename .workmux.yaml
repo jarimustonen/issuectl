@@ -55,7 +55,7 @@
 
 # Prefix for tmux window names.
 # Default: "wm-"
-# window_prefix: "wm-"
+window_prefix: "📋 "
 
 #-------------------------------------------------------------------------------
 # Tmux
