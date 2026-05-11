@@ -47,19 +47,31 @@ fn deser_epic<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Erro
     match val {
         serde_yaml::Value::Null => Ok(None),
         serde_yaml::Value::String(s) => {
-            if s.is_empty() {
+            if s.trim().is_empty() {
                 Err(D::Error::custom(
-                    "epic: empty string is not a valid slug — \
+                    "epic: blank string is not a valid slug; \
                      omit the field or use `epic: ~` to clear",
                 ))
             } else {
                 Ok(Some(s))
             }
         }
-        // Legacy numeric refs (pre-slug repos) are still accepted so
+        // Legacy *integer* refs (pre-slug repos) are still accepted so
         // `issuectl doctor --fix` can read them; a warning is emitted
-        // downstream in `parse_item_md_text_with_warnings`.
-        serde_yaml::Value::Number(n) => Ok(Some(n.to_string())),
+        // downstream in `parse_item_md_text_with_warnings`. Floats
+        // (`epic: 3.14`) are rejected — there is no legacy in which an
+        // issue ID is a float.
+        serde_yaml::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Some(i.to_string()))
+            } else if let Some(u) = n.as_u64() {
+                Ok(Some(u.to_string()))
+            } else {
+                Err(D::Error::custom(
+                    "epic: legacy numeric refs must be integers; floats are not valid",
+                ))
+            }
+        }
         serde_yaml::Value::Bool(_)
         | serde_yaml::Value::Sequence(_)
         | serde_yaml::Value::Mapping(_)
@@ -524,7 +536,8 @@ mod tests {
             "type: bug\nstatus: open\npriority: normal\n",
         ] {
             let text = format!("---\n{fm}---\n\nbody\n");
-            let parsed = parse_item_md_text_with_warnings(&text, "s", "flat", Path::new("/tmp/x.md"));
+            let parsed =
+                parse_item_md_text_with_warnings(&text, "s", "flat", Path::new("/tmp/x.md"));
             assert_eq!(parsed.fm_typed_error, None, "fm={fm}");
             assert_eq!(parsed.issue.epic, None, "fm={fm}");
         }
@@ -539,7 +552,40 @@ mod tests {
             .as_deref()
             .expect("empty-string epic must fail typed parse");
         assert!(err.contains("epic"), "err={err}");
-        assert!(err.contains("empty"), "err={err}");
+        assert!(err.contains("blank"), "err={err}");
+    }
+
+    #[test]
+    fn deser_epic_rejects_whitespace_only_string() {
+        // Same class as empty — `s.is_empty()` was the only previous
+        // guard, leaving `epic: "   "` to be accepted as a real epic
+        // string and contaminate canonical hashes.
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\nepic: \"   \"\n---\n\nbody\n";
+        let parsed = parse_item_md_text_with_warnings(text, "s", "flat", Path::new("/tmp/x.md"));
+        let err = parsed
+            .fm_typed_error
+            .as_deref()
+            .expect("whitespace-only epic must fail typed parse");
+        assert!(err.contains("epic"), "err={err}");
+        assert!(err.contains("blank"), "err={err}");
+    }
+
+    #[test]
+    fn deser_epic_rejects_float() {
+        // The legacy-numeric escape hatch is for integer issue IDs
+        // (`epic: 42`) so `doctor --fix` can read pre-slug repos. A
+        // float-shaped epic is a YAML accident, not a legacy ref, and
+        // `n.to_string()` would otherwise produce nonsense slugs like
+        // `"3.14"` that fail downstream slug validation with a
+        // confusing error.
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\nepic: 3.14\n---\n\nbody\n";
+        let parsed = parse_item_md_text_with_warnings(text, "s", "flat", Path::new("/tmp/x.md"));
+        let err = parsed
+            .fm_typed_error
+            .as_deref()
+            .expect("float epic must fail typed parse");
+        assert!(err.contains("epic"), "err={err}");
+        assert!(err.contains("integer"), "err={err}");
     }
 
     #[test]
@@ -556,8 +602,7 @@ mod tests {
 
     #[test]
     fn deser_epic_rejects_mapping() {
-        let text =
-            "---\ntype: bug\nstatus: open\npriority: normal\nepic: {a: 1}\n---\n\nbody\n";
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\nepic: {a: 1}\n---\n\nbody\n";
         let parsed = parse_item_md_text_with_warnings(text, "s", "flat", Path::new("/tmp/x.md"));
         let err = parsed
             .fm_typed_error

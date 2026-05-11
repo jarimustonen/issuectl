@@ -94,7 +94,7 @@ pub async fn get_board_api(State(state): State<AppState>, Path(name): Path<Strin
         // are now hard errors at load time per AGENTS-AI-FIRST-CLI).
         let parsed_filter = board.parsed_filter.clone();
 
-        let (full_issues, warnings) = repo::load_issues_with_warnings(root.as_path());
+        let (full_issues, warnings) = repo::load_issues_with_warnings_via(root.as_path(), &*cache);
         let issues: Vec<BoardIssueDto> = full_issues
             .into_iter()
             .filter(|i| match &parsed_filter {
@@ -178,11 +178,10 @@ pub async fn board_view_html(
     let root = state.root.clone();
     let cache = state.config.clone();
     let board_name = name.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        boards::load(root.as_path(), &board_name, &*cache)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let result =
+        tokio::task::spawn_blocking(move || boards::load(root.as_path(), &board_name, &*cache))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     match result {
         Ok(_) => Ok(Html(super::render::render_custom_board_shell(&name))),
         // Soft errors (UnknownGroupBy) still produce a `Board`; that's

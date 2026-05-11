@@ -801,8 +801,9 @@ pub fn update_issue(
             });
         }
         let mut issue = parsed.issue;
-        let schema =
-            config.schema(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+        let schema = config
+            .schema(root)
+            .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
         issue.folder = folder_for_status(&schema, &issue.status).to_string();
         let version = canonical_hash(&issue);
         if let Some(ref expected) = req.expected_version {
@@ -844,8 +845,9 @@ pub fn update_issue(
     // attempted; those two paths produce typed errors
     // (`SchemaConfig` / `TransitionConfig`) and never write to disk.
     let item_path = locate_for_dry_run(root, slug)?;
-    let schema =
-        config.schema(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let schema = config
+        .schema(root)
+        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let rules = load_validated_rules(root, &schema, config)?;
     update_issue_under_lock(root, slug, item_path, req, hub, &schema, &rules)
 }
@@ -1276,8 +1278,9 @@ pub fn close_issue(
     // failure (already-closing issue) leaves no repo side effects.
     let item_path = locate_for_dry_run(root, slug)?;
     let item = write::read_item(&item_path).map_err(MutateError::Io)?;
-    let schema =
-        config.schema(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let schema = config
+        .schema(root)
+        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let current_status = item
         .frontmatter
         .get(serde_yaml::Value::String("status".into()))
@@ -1356,8 +1359,9 @@ pub fn update_body(
     // migration and `.schema.yaml` bootstrap fire only after every
     // validation step has passed (parity with `update_issue`).
     let item_path = locate_for_dry_run(root, slug)?;
-    let schema =
-        config.schema(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let schema = config
+        .schema(root)
+        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
 
     let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
     if !parsed.warnings.is_empty() {
@@ -1514,8 +1518,9 @@ pub fn note_issue(
     // bootstrap deferred to just before atomic write so that any
     // validation failure below leaves no repo side effects.
     let item_path = locate_for_dry_run(root, slug)?;
-    let schema =
-        config.schema(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let schema = config
+        .schema(root)
+        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
 
     let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
     if !parsed.warnings.is_empty() {
@@ -1657,8 +1662,9 @@ pub fn toggle_checkbox(
     // Locate read-only regardless of `dry_run`. Migration / schema
     // bootstrap deferred to just before atomic write.
     let item_path = locate_for_dry_run(root, slug)?;
-    let schema =
-        config.schema(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let schema = config
+        .schema(root)
+        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let parsed = crate::parser::parse_item_md_with_warnings(&item_path, slug, "open");
     if !parsed.warnings.is_empty() {
         return Err(MutateError::Corrupt {
@@ -2093,8 +2099,9 @@ fn validate_against_schema(
     frontmatter: &serde_yaml::Mapping,
     config: &dyn ConfigSource,
 ) -> Result<(), MutateError> {
-    let schema =
-        config.schema(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let schema = config
+        .schema(root)
+        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let violations = crate::schema::validate(&schema, frontmatter);
     if !violations.is_empty() {
         let msg = violations
@@ -2447,8 +2454,9 @@ pub fn new_issue(
     let parsed =
         crate::parser::parse_item_md_with_warnings(&outcome.item_path, &outcome.slug, "open");
     let mut issue = parsed.issue;
-    let schema =
-        config.schema(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let schema = config
+        .schema(root)
+        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     issue.folder = folder_for_status(&schema, &issue.status).to_string();
     let version = canonical_hash(&issue);
 
@@ -2541,7 +2549,8 @@ mod tests {
             status: Patch::Set("done".into()),
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "done-active-target", req, None, &UncachedConfig).unwrap();
+        let out =
+            update_issue(tmp.path(), "done-active-target", req, None, &UncachedConfig).unwrap();
         // Now `done` is active, so the lifecycle treats this as
         // active→active → no moved_to_closed, and `closed:` should be
         // dropped because the new status is classified Active.
@@ -2573,7 +2582,8 @@ mod tests {
             status: Patch::Set("pizza".into()),
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "no-enum-target", req, None, &UncachedConfig).unwrap_err();
+        let err =
+            update_issue(tmp.path(), "no-enum-target", req, None, &UncachedConfig).unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => {
                 assert!(
@@ -2627,7 +2637,8 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "test-slug-two", req, None, &UncachedConfig).unwrap_err();
+        let err =
+            update_issue(tmp.path(), "test-slug-two", req, None, &UncachedConfig).unwrap_err();
         match err {
             MutateError::VersionMismatch { current, version } => {
                 assert_eq!(current.slug, "test-slug-two");
@@ -2744,7 +2755,14 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "concurrent-distinct", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(
+            tmp.path(),
+            "concurrent-distinct",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
         assert_eq!(out.issue.priority, "high");
         // Both unknown keys must survive the mutation round-trip.
         let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
@@ -2791,7 +2809,14 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "concurrent-same-key", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(
+            tmp.path(),
+            "concurrent-same-key",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap_err();
         match err {
             MutateError::VersionMismatch { current, .. } => {
                 assert_eq!(current.slug, "concurrent-same-key");
@@ -2839,7 +2864,14 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "concurrent-delete-key", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(
+            tmp.path(),
+            "concurrent-delete-key",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, MutateError::VersionMismatch { .. }),
             "expected VersionMismatch on stale view after unknown-key delete, got {err:?}"
@@ -2870,7 +2902,8 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "bad-nested-key", req, None, &UncachedConfig).unwrap_err();
+        let err =
+            update_issue(tmp.path(), "bad-nested-key", req, None, &UncachedConfig).unwrap_err();
         match err {
             MutateError::Corrupt { warnings } => {
                 assert!(
@@ -2997,7 +3030,8 @@ mod tests {
         let before = fs::read_to_string(legacy.join("item.md")).unwrap();
 
         let req = UpdateIssueRequest::default();
-        let out = update_issue(tmp.path(), "empty-patch-legacy", req, None, &UncachedConfig).unwrap();
+        let out =
+            update_issue(tmp.path(), "empty-patch-legacy", req, None, &UncachedConfig).unwrap();
 
         // Legacy directory is preserved (no migration on a no-op).
         assert!(legacy.is_dir(), "legacy dir must remain untouched");
@@ -3022,7 +3056,14 @@ mod tests {
             status: Patch::Set("wontfix".into()),
             ..Default::default()
         };
-        let _ = update_issue(tmp.path(), "preserve-closed-date", req, None, &UncachedConfig).unwrap();
+        let _ = update_issue(
+            tmp.path(),
+            "preserve-closed-date",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
         let after = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(after.contains("closed: 2026-01-15"), "got:\n{after}");
         assert!(after.contains("status: wontfix"));
@@ -3105,7 +3146,8 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "dual-path-here", req, None, &UncachedConfig).unwrap_err();
+        let err =
+            update_issue(tmp.path(), "dual-path-here", req, None, &UncachedConfig).unwrap_err();
         assert!(matches!(err, MutateError::AmbiguousSlug { .. }));
     }
 
@@ -3354,8 +3396,8 @@ mod tests {
                 ..Default::default()
             },
             None,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap_err();
         assert!(
             matches!(err, MutateError::SchemaViolation(_)),
@@ -3366,7 +3408,8 @@ mod tests {
         let mut req = UpdateIssueRequest::default();
         req.custom_fields
             .insert("team".into(), Patch::Set("payments".into()));
-        let out = update_issue(tmp.path(), "cf-required-repair", req, None, &UncachedConfig).unwrap();
+        let out =
+            update_issue(tmp.path(), "cf-required-repair", req, None, &UncachedConfig).unwrap();
         assert_eq!(
             out.issue.extra.get("team"),
             Some(&serde_json::Value::String("payments".into()))
@@ -3553,8 +3596,8 @@ mod tests {
             "# rewrite\n\nnew body".into(),
             None,
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap();
         assert!(out.version.starts_with("sha256:"));
         assert_ne!(out.version, v0);
@@ -3573,8 +3616,8 @@ mod tests {
             "x".into(),
             None,
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap_err();
         assert!(matches!(err, MutateError::VersionMismatch { .. }));
     }
@@ -3622,8 +3665,8 @@ mod tests {
             None,
             None,
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap();
         let after1 = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(after1.contains("## Comments"));
@@ -3638,8 +3681,8 @@ mod tests {
             None,
             None,
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap();
         let after2 = fs::read_to_string(dir.join("item.md")).unwrap();
         assert_eq!(after2.matches("## Comments").count(), 1);
@@ -3665,8 +3708,8 @@ mod tests {
             Some("sha256:deadbeef".into()),
             None,
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap_err();
         assert!(matches!(err, MutateError::VersionMismatch { .. }));
     }
@@ -3734,7 +3777,8 @@ mod tests {
             add_labels: vec!["bogus".into()],
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "label-enum-target", req, None, &UncachedConfig).unwrap_err();
+        let err =
+            update_issue(tmp.path(), "label-enum-target", req, None, &UncachedConfig).unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => assert!(
                 msg.contains("labels") && msg.contains("bogus"),
@@ -3762,8 +3806,8 @@ mod tests {
             "# new body\n".into(),
             None,
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => assert!(msg.contains("team"), "got {msg:?}"),
@@ -4129,7 +4173,14 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        update_issue(tmp.path(), "patch-publish-flock", req, Some(&hub), &UncachedConfig).unwrap();
+        update_issue(
+            tmp.path(),
+            "patch-publish-flock",
+            req,
+            Some(&hub),
+            &UncachedConfig,
+        )
+        .unwrap();
 
         assert_probe_saw_held(&observed, "update_issue");
     }
@@ -4148,8 +4199,8 @@ mod tests {
             Vec::new(),
             Some(v0),
             Some(&hub),
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap();
 
         assert_probe_saw_held(&observed, "close_issue");
@@ -4169,8 +4220,8 @@ mod tests {
             "# Replaced body\n".into(),
             Some(&hub),
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap();
 
         assert_probe_saw_held(&observed, "update_body");
@@ -4192,8 +4243,8 @@ mod tests {
             Some(v0),
             Some(&hub),
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap();
 
         assert_probe_saw_held(&observed, "note_issue");
@@ -4249,8 +4300,8 @@ mod tests {
                 ..Default::default()
             },
             None,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap_err();
         assert!(matches!(err, MutateError::SchemaConfig(_)), "got {err:?}");
     }
@@ -4274,7 +4325,8 @@ mod tests {
             issue_type: Patch::Set("feature".into()),
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "type-reject-target", req, None, &UncachedConfig).unwrap_err();
+        let err =
+            update_issue(tmp.path(), "type-reject-target", req, None, &UncachedConfig).unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => {
                 assert!(
@@ -4349,7 +4401,14 @@ mod tests {
             issue_type: Patch::Set("bug".into()),
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "type-overlap-target", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(
+            tmp.path(),
+            "type-overlap-target",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => {
                 assert!(msg.contains("Repro Steps"), "got {msg}");
@@ -4445,7 +4504,8 @@ mod tests {
             issue_type: Patch::Set("feature".into()),
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "type-reopen-target", req, None, &UncachedConfig).unwrap_err();
+        let err =
+            update_issue(tmp.path(), "type-reopen-target", req, None, &UncachedConfig).unwrap_err();
         match err {
             MutateError::Validation(msg) => {
                 assert!(msg.contains("reopen"), "got {msg}");
@@ -4474,7 +4534,8 @@ mod tests {
             issue_type: Patch::Set("epic".into()),
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "type-d1-target", req, None, &UncachedConfig).unwrap_err();
+        let err =
+            update_issue(tmp.path(), "type-d1-target", req, None, &UncachedConfig).unwrap_err();
         match err {
             MutateError::Validation(msg) => {
                 assert!(
@@ -4501,7 +4562,14 @@ mod tests {
             issue_type: Patch::Set("task".into()),
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "type-d1-epic-target", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(
+            tmp.path(),
+            "type-d1-epic-target",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap_err();
         match err {
             MutateError::Validation(msg) => {
                 assert!(msg.contains("owner"), "got {msg}");
@@ -4576,7 +4644,14 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "custom-required-target", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(
+            tmp.path(),
+            "custom-required-target",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => assert!(
                 msg.contains("team"),
@@ -4628,8 +4703,16 @@ mod tests {
         let tmp = fresh_repo();
         let body = "# T\n\n## Tasks\n\n- [ ] write the parser\n- [ ] deploy script wiring\n- [x] tests passing\n";
         let _v0 = seed_with_body(tmp.path(), "checkbox-target-y", body);
-        let out =
-            toggle_checkbox(tmp.path(), "checkbox-target-y", "deploy", None, None, false, &UncachedConfig).unwrap();
+        let out = toggle_checkbox(
+            tmp.path(),
+            "checkbox-target-y",
+            "deploy",
+            None,
+            None,
+            false,
+            &UncachedConfig,
+        )
+        .unwrap();
         assert!(out.pending_serialized.is_none());
         let after =
             fs::read_to_string(tmp.path().join("issues/checkbox-target-y/item.md")).unwrap();
@@ -4642,11 +4725,27 @@ mod tests {
         let tmp = fresh_repo();
         let body = "# T\n\n- [ ] alpha task\n- [ ] beta task\n";
         let _ = seed_with_body(tmp.path(), "checkbox-amb-z", body);
-        let zero = toggle_checkbox(tmp.path(), "checkbox-amb-z", "missing", None, None, false, &UncachedConfig)
-            .unwrap_err();
+        let zero = toggle_checkbox(
+            tmp.path(),
+            "checkbox-amb-z",
+            "missing",
+            None,
+            None,
+            false,
+            &UncachedConfig,
+        )
+        .unwrap_err();
         assert!(matches!(zero, MutateError::Validation(s) if s.contains("no checkbox")));
-        let many =
-            toggle_checkbox(tmp.path(), "checkbox-amb-z", "task", None, None, false, &UncachedConfig).unwrap_err();
+        let many = toggle_checkbox(
+            tmp.path(),
+            "checkbox-amb-z",
+            "task",
+            None,
+            None,
+            false,
+            &UncachedConfig,
+        )
+        .unwrap_err();
         assert!(matches!(many, MutateError::Validation(s) if s.contains("matched")));
     }
 
@@ -4656,8 +4755,16 @@ mod tests {
         let body = "# T\n\n- [ ] only one\n";
         let _ = seed_with_body(tmp.path(), "checkbox-dry-q", body);
         let before = fs::read_to_string(tmp.path().join("issues/checkbox-dry-q/item.md")).unwrap();
-        let out =
-            toggle_checkbox(tmp.path(), "checkbox-dry-q", "only one", None, None, true, &UncachedConfig).unwrap();
+        let out = toggle_checkbox(
+            tmp.path(),
+            "checkbox-dry-q",
+            "only one",
+            None,
+            None,
+            true,
+            &UncachedConfig,
+        )
+        .unwrap();
         assert!(out.pending_serialized.is_some());
         assert!(out.pending_serialized.unwrap().contains("- [x] only one"));
         let after = fs::read_to_string(tmp.path().join("issues/checkbox-dry-q/item.md")).unwrap();
@@ -4697,7 +4804,8 @@ mod tests {
             add_labels: vec!["backend".into()],
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "apply-rollback-q", req, None, &UncachedConfig).unwrap_err();
+        let err =
+            update_issue(tmp.path(), "apply-rollback-q", req, None, &UncachedConfig).unwrap_err();
         assert!(matches!(err, MutateError::SchemaViolation(_)));
         let after = fs::read_to_string(tmp.path().join("issues/apply-rollback-q/item.md")).unwrap();
         assert_eq!(
@@ -4783,7 +4891,8 @@ mod tests {
             })],
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "body-ops-rollback", req, None, &UncachedConfig).unwrap_err();
+        let err =
+            update_issue(tmp.path(), "body-ops-rollback", req, None, &UncachedConfig).unwrap_err();
         assert!(
             matches!(&err, MutateError::Validation(s) if s.contains("body_ops[0]") && s.contains("no checkbox")),
             "got {err:?}"
@@ -4922,7 +5031,8 @@ body_ops:
             body_ops: huge,
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "body-ops-too-many", req, None, &UncachedConfig).unwrap_err();
+        let err =
+            update_issue(tmp.path(), "body-ops-too-many", req, None, &UncachedConfig).unwrap_err();
         assert!(
             matches!(&err, MutateError::Validation(s) if s.contains("body_ops length") && s.contains("exceeds")),
             "got {err:?}"
@@ -4946,7 +5056,14 @@ body_ops:
             })],
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "body-ops-no-schema-bootstrap", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(
+            tmp.path(),
+            "body-ops-no-schema-bootstrap",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap_err();
         assert!(matches!(err, MutateError::Validation(_)));
         assert!(
             !schema_path.exists(),
@@ -4972,7 +5089,14 @@ body_ops:
             })],
             ..Default::default()
         };
-        let _ = update_issue(tmp.path(), "body-ops-no-migrate", req, None, &UncachedConfig).unwrap_err();
+        let _ = update_issue(
+            tmp.path(),
+            "body-ops-no-migrate",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap_err();
         assert!(
             legacy_dir.join("item.md").exists(),
             "failed body op must leave legacy directory in place"
@@ -5020,8 +5144,8 @@ body_ops:
             None,
             None,
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap_err();
         assert!(matches!(err, MutateError::SchemaViolation(_)));
         assert!(
@@ -5051,8 +5175,8 @@ body_ops:
             None,
             None,
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap_err();
         assert!(matches!(err, MutateError::Validation(_)));
         assert!(
@@ -5077,9 +5201,15 @@ body_ops:
         let _ = seed_with_body(tmp.path(), "set-cbx-version-stable", body);
         let v0 = {
             let req = UpdateIssueRequest::default();
-            update_issue(tmp.path(), "set-cbx-version-stable", req, None, &UncachedConfig)
-                .unwrap()
-                .version
+            update_issue(
+                tmp.path(),
+                "set-cbx-version-stable",
+                req,
+                None,
+                &UncachedConfig,
+            )
+            .unwrap()
+            .version
         };
         let req = UpdateIssueRequest {
             body_ops: vec![BodyOp::SetCheckbox(SetCheckboxOp {
@@ -5088,9 +5218,15 @@ body_ops:
             })],
             ..Default::default()
         };
-        let v1 = update_issue(tmp.path(), "set-cbx-version-stable", req, None, &UncachedConfig)
-            .unwrap()
-            .version;
+        let v1 = update_issue(
+            tmp.path(),
+            "set-cbx-version-stable",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap()
+        .version;
         assert_eq!(
             v0, v1,
             "no-op set_checkbox must not bump the canonical version (retry-safety contract)"
@@ -5111,7 +5247,14 @@ body_ops:
             })],
             ..Default::default()
         };
-        update_issue(tmp.path(), "set-cbx-uncheck-idem", req, None, &UncachedConfig).unwrap();
+        update_issue(
+            tmp.path(),
+            "set-cbx-uncheck-idem",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
         let after =
             fs::read_to_string(tmp.path().join("issues/set-cbx-uncheck-idem/item.md")).unwrap();
         assert!(after.contains("- [ ] already off"));
@@ -5154,8 +5297,8 @@ body_ops:
             None,
             None,
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap();
         assert!(
             out.warnings.iter().any(|w| w.contains("rules engine")),
@@ -5189,7 +5332,16 @@ body_ops:
             "---\ntype: task\ncreated: 2026-05-06\nstatus: done\npriority: normal\n---\n\n# T\n\n- [ ] flip me\n",
         )
         .unwrap();
-        let out = toggle_checkbox(tmp.path(), "warn-cbx", "flip me", None, None, false, &UncachedConfig).unwrap();
+        let out = toggle_checkbox(
+            tmp.path(),
+            "warn-cbx",
+            "flip me",
+            None,
+            None,
+            false,
+            &UncachedConfig,
+        )
+        .unwrap();
         assert!(
             !out.warnings.is_empty(),
             "expected at least one warning for the rule violation"
@@ -5239,7 +5391,14 @@ body_ops:
             })],
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "body-ops-bad-author", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(
+            tmp.path(),
+            "body-ops-bad-author",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap_err();
         assert!(matches!(err, MutateError::Validation(s) if s.contains("body_ops[0].author")));
     }
 
@@ -5284,7 +5443,14 @@ body_ops:
             dry_run: true,
             ..Default::default()
         };
-        let _ = update_issue(tmp.path(), "dryrun-no-migrate-y", req, None, &UncachedConfig).unwrap();
+        let _ = update_issue(
+            tmp.path(),
+            "dryrun-no-migrate-y",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
         assert!(legacy_dir.exists(), "dry-run must not move the legacy dir");
         assert!(
             !flat_dir.exists(),
@@ -5336,11 +5502,28 @@ body_ops:
         let _ = seed_with_body(tmp.path(), "fence-target-z", body);
         // The "example" substring is only inside the code fence —
         // the fence-aware scanner should report no match.
-        let err = toggle_checkbox(tmp.path(), "fence-target-z", "example", None, None, false, &UncachedConfig)
-            .unwrap_err();
+        let err = toggle_checkbox(
+            tmp.path(),
+            "fence-target-z",
+            "example",
+            None,
+            None,
+            false,
+            &UncachedConfig,
+        )
+        .unwrap_err();
         assert!(matches!(err, MutateError::Validation(s) if s.contains("no checkbox")));
         // The real task should still toggle cleanly.
-        toggle_checkbox(tmp.path(), "fence-target-z", "real", None, None, false, &UncachedConfig).unwrap();
+        toggle_checkbox(
+            tmp.path(),
+            "fence-target-z",
+            "real",
+            None,
+            None,
+            false,
+            &UncachedConfig,
+        )
+        .unwrap();
         let after = fs::read_to_string(tmp.path().join("issues/fence-target-z/item.md")).unwrap();
         assert!(after.contains("- [x] real task"));
         assert!(after.contains("- [ ] only example here"));
@@ -5367,8 +5550,8 @@ body_ops:
             None,
             None,
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => assert!(msg.contains("team"), "got {msg:?}"),
@@ -5394,8 +5577,8 @@ body_ops:
             None,
             None,
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => assert!(msg.contains("team"), "got {msg:?}"),
@@ -5485,7 +5668,14 @@ body_ops:
             status: Patch::Clear,
             ..Default::default()
         };
-        let err = update_issue(tmp.path(), "status-clear-legacy", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(
+            tmp.path(),
+            "status-clear-legacy",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap_err();
         assert!(matches!(err, MutateError::Validation(_)));
 
         assert!(
@@ -5581,8 +5771,8 @@ body_ops:
             None,
             None,
             false,
-        
-        &UncachedConfig,)
+            &UncachedConfig,
+        )
         .unwrap();
         let after = fs::read_to_string(tmp.path().join("issues/note-decision-p/item.md")).unwrap();
         assert!(after.contains("## Decisions"));

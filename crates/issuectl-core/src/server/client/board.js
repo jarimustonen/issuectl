@@ -644,6 +644,17 @@
 
     beginPendingWrite(drag.slug);
     var abort = newWriteAbort();
+    // The fetch chain must call finishPendingWrite *exactly once* even
+    // when a `.then` handler later throws — otherwise the catch handler
+    // would drain the pending-write counter a second time and corrupt
+    // SSE deferral. `.finally()` for abort.finalize() (idempotent) and a
+    // one-shot guard for finishPendingWrite (not idempotent).
+    var finished = false;
+    function finishOnce(slug, version) {
+      if (finished) return;
+      finished = true;
+      finishPendingWrite(slug, version);
+    }
     fetch('/api/issues/' + encodeURIComponent(drag.slug), {
       method: 'PATCH',
       headers: csrfJson(),
@@ -657,9 +668,8 @@
         );
       })
       .then(function (res) {
-        abort.finalize();
         var responseVersion = res.body && res.body.version;
-        finishPendingWrite(drag.slug, responseVersion);
+        finishOnce(drag.slug, responseVersion);
         if (state.dragging === drag) state.dragging = null;
 
         if (res.status >= 200 && res.status < 300) {
@@ -690,8 +700,7 @@
         }
       })
       .catch(function (err) {
-        abort.finalize();
-        finishPendingWrite(drag.slug, null);
+        finishOnce(drag.slug, null);
         if (state.dragging === drag) state.dragging = null;
         if (state.optimistic_tags[drag.slug] === opId) {
           delete state.optimistic_tags[drag.slug];
@@ -705,7 +714,8 @@
         } else {
           showToast('Move failed: ' + err, 'error');
         }
-      });
+      })
+      .finally(function () { abort.finalize(); });
   }
 
   // Status-board mode descriptor.
@@ -1420,6 +1430,16 @@
     setSaveBusy(true);
     setSaveStatus('Saving…');
     var abort = newWriteAbort();
+    // Same one-shot pattern as the PATCH path: `.finally()` cleans up
+    // the abort timer, `finishOnce` guards finishPendingWrite so any
+    // exception in a `.then` body that falls through to `.catch`
+    // cannot double-drain the pending-write counter.
+    var finished = false;
+    function finishOnce(slug, version) {
+      if (finished) return;
+      finished = true;
+      finishPendingWrite(slug, version);
+    }
     fetch('/api/issues/' + encodeURIComponent(editor.slug) + '/body', {
       method: 'PUT',
       headers: csrfJson(),
@@ -1433,13 +1453,12 @@
           function () { return { status: r.status, body: {} }; });
       })
       .then(function (res) {
-        abort.finalize();
         // Editor may have been torn down (Cancel, dialog close) while
         // the request was in flight. If so, we still need to drain the
         // pending-write counter so SSE echoes don't queue forever.
         var slug = state.lastDetailSlug;
         var responseVersion = res.body && res.body.version;
-        finishPendingWrite(slug, responseVersion);
+        finishOnce(slug, responseVersion);
         if (!editor) return;
 
         editor.saving = false;
@@ -1496,8 +1515,7 @@
         }
       })
       .catch(function (e) {
-        abort.finalize();
-        finishPendingWrite(state.lastDetailSlug, null);
+        finishOnce(state.lastDetailSlug, null);
         if (!editor) return;
         editor.saving = false;
         setSaveBusy(false);
@@ -1508,7 +1526,8 @@
         } else {
           setSaveStatus('Save failed: ' + e);
         }
-      });
+      })
+      .finally(function () { abort.finalize(); });
   }
 
   function setSaveBusy(busy) {

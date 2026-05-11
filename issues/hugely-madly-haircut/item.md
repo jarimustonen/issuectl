@@ -1,14 +1,15 @@
 ---
 created: 2026-05-09
-updated: 2026-05-10
+updated: 2026-05-11
 type: improvement
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 epic: hugely-exciting-spiders
 related: ['@deeply-wistful-beam']
 labels: [release-v0.6.0, backlog]
-commit: '4669088'
+commit: c6f5415
+closed: 2026-05-11
 ---
 
 # Replace thread-local schema/transitions cache activation with explicit injection

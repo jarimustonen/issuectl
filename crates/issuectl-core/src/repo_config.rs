@@ -38,22 +38,16 @@ use crate::transitions::{self, TransitionRules};
 
 /// Read-side abstraction over "where do `schema` and `transitions`
 /// come from for this call?". The two implementations are
-/// [`UncachedConfig`] (re-parse on every call — what the CLI wants:
-/// each command parses both YAMLs at most once) and
-/// [`RepoConfigCache`] (re-parse only on freshness-stamp change —
-/// what the long-running server wants).
+/// [`UncachedConfig`] (re-parse on every call — fine for short-lived
+/// CLI commands) and [`RepoConfigCache`] (re-parse only on
+/// freshness-stamp change — what the long-running server wants).
 ///
-/// The trait exists so future mutate-side / read-side APIs can grow
-/// an explicit `&dyn ConfigSource` parameter and stop relying on
-/// the thread-local [`enter`] / [`current`] activation. The
-/// activation mechanism is documented at length below; its removal
-/// is tracked under `@hugely-madly-haircut` follow-up work — the
-/// type-level migration plan is to take `&dyn ConfigSource` on
-/// every mutate entry point so the server's cache reaches the load
-/// site through the type signature instead of through a
-/// thread-local slot. Until that lands, the trait is callable
-/// directly by any new code path that wants explicit injection
-/// without participating in the thread-local dance.
+/// The trait is the type-level activation mechanism: every mutate
+/// entry point and the server-mode read paths take a
+/// `&dyn ConfigSource` parameter, so the cache reaches the load site
+/// through the function signature instead of via ambient state. The
+/// previous thread-local-based activation was removed by
+/// `@hugely-madly-haircut`.
 pub trait ConfigSource: Send + Sync {
     /// Return a snapshot of the parsed schema for `root`. Implementations
     /// may cache (`RepoConfigCache`) or always re-parse (`UncachedConfig`).
@@ -62,12 +56,21 @@ pub trait ConfigSource: Send + Sync {
     fn rules(&self, root: &Path) -> Result<Arc<TransitionRules>>;
 }
 
-/// Always-re-parse implementation of [`ConfigSource`]. The CLI's
-/// natural fit: each command runs once, so parsing the YAMLs once
-/// is fine and a cache would just be dead code.
+/// Always-re-parse implementation of [`ConfigSource`]. Each method
+/// call hits disk and parses the YAML; there is no memoization
+/// within a single `UncachedConfig` instance.
 ///
-/// Zero-sized — construct via `UncachedConfig` directly. Cheap to
-/// pass by reference; safe to share.
+/// Intended for short-lived CLI commands where total YAML parse cost
+/// is negligible. CLI handlers do occasionally call `schema()` or
+/// `rules()` more than once per command (`note_issue` and similar
+/// route through `validate_against_schema` and `transition_warnings`
+/// helpers that each take their own load); the cost is acceptable
+/// because the schema YAML is small (~2 KB) and the CLI process
+/// exits immediately after. If a code path ever wants memoization
+/// within one command, build a dedicated `MemoizingConfig` rather
+/// than mutating this one — the name is load-bearing.
+///
+/// Zero-sized; construct as `UncachedConfig` directly.
 pub struct UncachedConfig;
 
 impl ConfigSource for UncachedConfig {
@@ -354,7 +357,7 @@ mod tests {
         );
     }
 
-/// `schema::load` falls back to the built-in default when the file
+    /// `schema::load` falls back to the built-in default when the file
     /// is absent. The cache must memoize that absence — repeated calls
     /// against a still-missing file should not re-parse the embedded
     /// default.
@@ -522,8 +525,7 @@ mod tests {
         )
         .unwrap();
 
-        let cache: Arc<dyn ConfigSource> =
-            Arc::new(RepoConfigCache::new(root.to_path_buf()));
+        let cache: Arc<dyn ConfigSource> = Arc::new(RepoConfigCache::new(root.to_path_buf()));
         let a = cache.schema(root).unwrap();
         let b = cache.schema(root).unwrap();
         // Same Arc reused → cache is doing its job through the trait.

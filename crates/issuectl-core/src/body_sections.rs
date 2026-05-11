@@ -364,14 +364,25 @@ pub struct Block {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseWarning {
     /// An `###` line inside the section did not match
-    /// `### <ts> · @<author>`. The line is folded into the previous
-    /// block's body (preserving content) but flagged so callers can
-    /// surface it as a soft-corruption warning.
+    /// `### <ts> · @<author>`. The line content is never lost — if a
+    /// valid block precedes it, the line and any following content
+    /// fold into that block's body; otherwise the line orphans
+    /// (sister-ticket consumers may want to surface preamble content
+    /// out-of-band). `folded_into_previous_block` distinguishes the
+    /// two cases so a consumer can decide whether the warning is
+    /// "informational, content was preserved" or "content may be
+    /// inaccessible without re-parsing the section raw text".
     MalformedBlockHeading {
         /// 0-based line index inside the body.
         line_no: usize,
         /// Raw line text, trimmed of trailing whitespace.
         line: String,
+        /// `true` when the line falls under an earlier valid block
+        /// heading and its content is preserved in that block's body.
+        /// `false` when the malformed line appears before any valid
+        /// `### <ts> · @<author>` heading and so its content is not
+        /// represented in `ParsedSection.blocks`.
+        folded_into_previous_block: bool,
     },
     /// A code fence opened inside the section but never closed before
     /// EOF. Anything after the opener is consumed as fence content,
@@ -393,13 +404,14 @@ pub enum ParseWarning {
 /// Result of [`parse_section`]. Disambiguates the cases that used to
 /// collapse into "empty `Vec<Block>`":
 ///
-/// | case                                  | `found` | `blocks` | `warnings` | `duplicate_sections` |
-/// |---------------------------------------|---------|----------|------------|----------------------|
-/// | section absent                        | `false` | empty    | empty      | 0                    |
-/// | section present, no blocks            | `true`  | empty    | empty      | 0                    |
-/// | section present, all H3 malformed     | `true`  | empty    | non-empty  | 0                    |
-/// | section swallowed by unclosed fence   | `true`  | empty    | non-empty  | 0                    |
-/// | duplicate `## <section>` headings     | `true`  | (first)  | non-empty  | ≥ 1                  |
+/// | case                                  | `found` | `blocks` | `warnings`                          |
+/// |---------------------------------------|---------|----------|-------------------------------------|
+/// | section absent                        | `false` | empty    | empty                               |
+/// | section present, no blocks            | `true`  | empty    | empty                               |
+/// | section present, all H3 malformed     | `true`  | empty    | `MalformedBlockHeading` × N         |
+/// | section swallowed by unclosed fence   | `true`  | empty    | `UnclosedFence`                     |
+/// | duplicate `## <section>` headings     | `true`  | (first)  | `DuplicateSection` × N — also       |
+/// |                                       |         |          | exposed via `duplicate_section_count`|
 #[allow(dead_code)] // sister tickets (`decide`, `agent-run`) consume this
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParsedSection {
@@ -410,10 +422,19 @@ pub struct ParsedSection {
     /// Soft-failure diagnostics — see [`ParseWarning`]. An empty list
     /// means the section was either absent or cleanly parsed.
     pub warnings: Vec<ParseWarning>,
+}
+
+impl ParsedSection {
     /// Count of duplicate `## <section>` headings beyond the first.
-    /// A non-zero value implies at least that many
-    /// `ParseWarning::DuplicateSection` entries in `warnings`.
-    pub duplicate_sections: usize,
+    /// Derived from `warnings` so the two cannot drift; prefer this
+    /// over filtering `warnings` at the call site.
+    #[allow(dead_code)]
+    pub fn duplicate_section_count(&self) -> usize {
+        self.warnings
+            .iter()
+            .filter(|w| matches!(w, ParseWarning::DuplicateSection { .. }))
+            .count()
+    }
 }
 
 /// Parse all blocks under the H2 section named `section`. Headings
@@ -439,7 +460,6 @@ pub fn parse_section(body: &str, section: &str) -> ParsedSection {
     };
 
     let mut warnings = Vec::new();
-    let duplicate_sections = section_starts.len().saturating_sub(1);
     for &dup in section_starts.iter().skip(1) {
         warnings.push(ParseWarning::DuplicateSection { line_no: dup });
     }
@@ -468,12 +488,17 @@ pub fn parse_section(body: &str, section: &str) -> ParsedSection {
     // surface them; the body content remains visible to the user.
     let h3_indices = scan_outside_fences(span, |_, l| is_h3(l));
     let mut valid_block_starts: Vec<(usize, (String, String))> = Vec::new();
+    let mut seen_valid = false;
     for i in &h3_indices {
         match parse_block_heading(span[*i]) {
-            Some(parsed) => valid_block_starts.push((*i, parsed)),
+            Some(parsed) => {
+                seen_valid = true;
+                valid_block_starts.push((*i, parsed));
+            }
             None => warnings.push(ParseWarning::MalformedBlockHeading {
                 line_no: start + 1 + *i,
                 line: span[*i].trim_end().to_string(),
+                folded_into_previous_block: seen_valid,
             }),
         }
     }
@@ -497,7 +522,6 @@ pub fn parse_section(body: &str, section: &str) -> ParsedSection {
         found: true,
         blocks,
         warnings,
-        duplicate_sections,
     }
 }
 
@@ -522,7 +546,11 @@ fn unclosed_fence_index(lines: &[&str]) -> Option<usize> {
             }
         }
     }
-    if fence.is_some() { open_at } else { None }
+    if fence.is_some() {
+        open_at
+    } else {
+        None
+    }
 }
 
 /// Extract the raw text between `## <section>` and the next H2 (or EOF),
@@ -773,7 +801,7 @@ mod tests {
         assert!(!parsed.found);
         assert!(parsed.blocks.is_empty());
         assert!(parsed.warnings.is_empty());
-        assert_eq!(parsed.duplicate_sections, 0);
+        assert_eq!(parsed.duplicate_section_count(), 0);
     }
 
     #[test]
@@ -809,7 +837,11 @@ mod tests {
         let coms = parse_section(body, COMMENTS);
         let decs = parse_section(body, DECISIONS);
         assert_eq!(coms.blocks.len(), 1, "Comments section parsed correctly");
-        assert_eq!(decs.blocks.len(), 1, "Decisions parsed after longer close fence");
+        assert_eq!(
+            decs.blocks.len(),
+            1,
+            "Decisions parsed after longer close fence"
+        );
         assert_eq!(decs.blocks[0].author, "cara");
     }
 
@@ -912,7 +944,7 @@ mod tests {
         assert!(parsed.found);
         assert_eq!(parsed.blocks.len(), 1);
         assert_eq!(parsed.blocks[0].author, "bob");
-        assert_eq!(parsed.duplicate_sections, 1);
+        assert_eq!(parsed.duplicate_section_count(), 1);
         assert!(
             parsed
                 .warnings

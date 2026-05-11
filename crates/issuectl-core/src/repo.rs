@@ -48,8 +48,9 @@ pub enum LoadWarningCode {
 fn load_schema_or_warn(
     repo_root: &Path,
     warnings: Option<&mut Vec<LoadWarning>>,
+    config: &dyn crate::repo_config::ConfigSource,
 ) -> std::sync::Arc<crate::schema::Schema> {
-    match crate::schema::load(repo_root) {
+    match config.schema(repo_root) {
         Ok(s) => s,
         Err(e) => {
             let msg = format!(
@@ -353,8 +354,17 @@ fn check_dir(dir: &Path, canon_root: Option<&Path>) -> Option<ItemCheck> {
 
 /// Load all issues from the flat layout (and legacy compat paths).
 pub fn load_issues(repo_root: &Path) -> Vec<Issue> {
+    load_issues_with_config(repo_root, &crate::repo_config::UncachedConfig)
+}
+
+/// Same as `load_issues` but with explicit config source. Server paths
+/// pass their `Arc<RepoConfigCache>`; the CLI passes `&UncachedConfig`.
+pub fn load_issues_with_config(
+    repo_root: &Path,
+    config: &dyn crate::repo_config::ConfigSource,
+) -> Vec<Issue> {
     let mut result = Vec::new();
-    let schema = load_schema_or_warn(repo_root, None);
+    let schema = load_schema_or_warn(repo_root, None, config);
     for slug in discover_slugs(repo_root) {
         match resolve_layout(repo_root, &slug) {
             LayoutState::Flat { item_path } => {
@@ -389,11 +399,25 @@ pub fn load_issues(repo_root: &Path) -> Vec<Issue> {
     result
 }
 
-/// Load all issues plus per-file parse warnings.
+/// Load all issues plus per-file parse warnings. Re-parses schema each
+/// call (CLI default). Server callers should use
+/// [`load_issues_with_warnings_via`] and pass their `RepoConfigCache`
+/// to get cross-request reuse.
 pub fn load_issues_with_warnings(repo_root: &Path) -> (Vec<Issue>, Vec<LoadWarning>) {
+    load_issues_with_warnings_via(repo_root, &crate::repo_config::UncachedConfig)
+}
+
+/// Same as `load_issues_with_warnings` but uses the supplied
+/// `ConfigSource` for the schema parse. Server endpoints route their
+/// `Arc<RepoConfigCache>` through this so the per-request schema reuse
+/// the cache enforces.
+pub fn load_issues_with_warnings_via(
+    repo_root: &Path,
+    config: &dyn crate::repo_config::ConfigSource,
+) -> (Vec<Issue>, Vec<LoadWarning>) {
     let mut issues = Vec::new();
     let mut warnings = Vec::new();
-    let schema = load_schema_or_warn(repo_root, Some(&mut warnings));
+    let schema = load_schema_or_warn(repo_root, Some(&mut warnings), config);
 
     for slug in discover_slugs(repo_root) {
         match resolve_layout(repo_root, &slug) {
@@ -546,7 +570,7 @@ pub fn locate_issue(repo_root: &Path, slug: &str) -> Result<(String, PathBuf)> {
     // on-disk folder name. A `status: fixed` issue at `issues/open/foo/`
     // surfaces as folder = "closed".
     let issue = parser::parse_item_md(&located.item_path, slug, "open");
-    let schema = load_schema_or_warn(repo_root, None);
+    let schema = load_schema_or_warn(repo_root, None, &crate::repo_config::UncachedConfig);
     let folder = folder_for_status(&schema, &issue.status).to_string();
     Ok((folder, located.item_path))
 }
@@ -555,7 +579,7 @@ pub fn locate_issue(repo_root: &Path, slug: &str) -> Result<(String, PathBuf)> {
 pub fn load_issue(repo_root: &Path, slug: &str) -> Result<Issue> {
     let located = locate_issue_full(repo_root, slug)?;
     let mut issue = parser::parse_item_md(&located.item_path, slug, "open");
-    let schema = load_schema_or_warn(repo_root, None);
+    let schema = load_schema_or_warn(repo_root, None, &crate::repo_config::UncachedConfig);
     issue.folder = folder_for_status(&schema, &issue.status).to_string();
     Ok(issue)
 }

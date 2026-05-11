@@ -129,39 +129,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Internals
 - Replaced the thread-local `RepoConfigCache` activation slot
   (`repo_config::enter` / `current` / `ActiveGuard`) with explicit
-  dependency injection: every mutate entry point
+  dependency injection. Every mutate entry point
   (`update_issue`, `new_issue`, `update_body`, `close_issue`,
-  `note_issue`, `toggle_checkbox`, `do_new`, `boards::load`) now
-  takes a `&dyn ConfigSource` parameter. The CLI passes
-  `&UncachedConfig`; the server passes its `Arc<RepoConfigCache>`
-  directly into `spawn_blocking`. Removes the `!Send` ambient
-  guard, the spawn-blocking worker-reuse footgun, and the
+  `note_issue`, `toggle_checkbox`, `do_new`, `boards::load`) and
+  the per-request server read path
+  (`repo::load_issues_with_warnings_via`) now takes a
+  `&dyn ConfigSource` parameter. The CLI passes `&UncachedConfig`;
+  the server passes its `Arc<RepoConfigCache>` directly into
+  `spawn_blocking`. Removes the `!Send` ambient guard, the
+  spawn-blocking worker-reuse footgun, and the
   thread-local-vs-static accident risk; the cache now reaches the
   load site through the type signature so the failure mode for
   "forgot to install" is a compile error rather than a silent
   fallback to uncached parsing. `schema::load` and
   `transitions::load` no longer consult any cache and always
-  re-parse — callers that want caching go through the explicit
-  `ConfigSource` impl on `RepoConfigCache`. (#hugely-madly-haircut)
+  re-parse — they remain as the CLI default; callers that want
+  caching go through `ConfigSource::schema` / `::rules`.
+  (#hugely-madly-haircut)
 - `body_sections::parse_section` now returns a structured
-  `ParsedSection { found, blocks, warnings, duplicate_sections }`
-  instead of a bare `Vec<Block>`. The previous shape collapsed five
-  distinct outcomes — section absent, present-but-empty, all-headings-
-  malformed, swallowed-by-unclosed-fence, duplicate sections — into a
-  single empty vec, which sister tickets (`decide`, `agent-run`)
-  cannot tell apart. `ParseWarning::{MalformedBlockHeading,
-  UnclosedFence, DuplicateSection}` carries the diagnostics. Success-
-  case behaviour is unchanged: `.blocks` matches the prior return
-  value byte-for-byte and a missing section still produces no
-  warnings. (#totally-placid-push)
+  `ParsedSection { found, blocks, warnings }` (with a
+  `duplicate_section_count()` accessor) instead of a bare
+  `Vec<Block>`. The previous shape collapsed five distinct outcomes —
+  section absent, present-but-empty, all-headings-malformed,
+  swallowed-by-unclosed-fence, duplicate sections — into a single
+  empty vec, which sister tickets (`decide`, `agent-run`) cannot
+  tell apart. `ParseWarning::{MalformedBlockHeading, UnclosedFence,
+  DuplicateSection}` carries the diagnostics. `MalformedBlockHeading`
+  also carries `folded_into_previous_block: bool` so consumers can
+  distinguish "content was preserved in the prior block's body" from
+  "content orphaned before the first valid block." Success-case
+  behaviour is unchanged: `.blocks` matches the prior return value
+  byte-for-byte and a missing section still produces no warnings.
+  (#totally-placid-push)
 - Web client (`board.js`): PATCH and PUT write requests now run with
   an `AbortController` and a 30 s timeout each. A hung server
   previously left `pending_writes[slug] > 0` forever and queued every
   same-slug SSE event in `deferred_events` until the user reloaded;
   on timeout the request now aborts, the queue drains, and the user
   gets a "timed out" toast / save-status. A `pagehide` listener
-  aborts every outstanding write so a navigation/close cannot land
-  a write the user has already moved on from. (#absolutely-aberrant-caption)
+  also aborts every outstanding fetch so a tab close stops the client
+  from waiting on a response it can't act on. **Note:** aborting the
+  client fetch does not stop the server: if the axum handler already
+  received the request body and started a `spawn_blocking` mutation,
+  that write will still land on disk. The aborted client just stops
+  waiting and drains its pending-write state. (#absolutely-aberrant-caption)
 - `parser::deser_epic` now strict-errors on malformed `epic:` shapes
   (sequence, mapping, bool, tagged value, empty string) instead of
   silently coercing them to `None`. The malformed value previously
@@ -174,20 +185,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#especially-bumpy-way)
 - Documented the watcher stale-snapshot race in
   `parse_slug_state` (concurrent PATCH bursts can publish V1 after
-  V2 at a higher seq, producing a transient UI flip-back). Decision
-  is to monitor rather than fix preemptively — the window is narrow
-  and local-loopback single-user usage rarely tickles it. Mitigations
-  (hub-level version dedup, client-side recent-version cache,
-  read-flock around parse) are catalogued in the doc comment.
-  (#incredibly-real-hour)
+  V2 at a higher seq). Recovery is not spontaneous: the cached
+  client state sticks at V1 until the user's next mutation hits a
+  409 carrying the server's current state (which the SPA's
+  conflict-recovery path re-syncs), or another filesystem event
+  re-publishes. Decision is to monitor rather than fix preemptively
+  — the window is narrow and local-loopback single-user usage rarely
+  tickles it. Mitigations (hub-level version dedup, client-side
+  recent-version cache, read-flock around parse) are catalogued in
+  the doc comment. (#incredibly-real-hour)
 - Canonical version tokens now carry a scheme marker:
-  `sha256:v1:<64hex>` instead of `sha256:<64hex>`. Old tokens
-  presented to a new binary mismatch as before; the marker exists so
-  the *next* canonical-projection break can bump `v1`→`v2` and
-  reject stale tokens with a recognisable shape rather than as an
-  opaque content-conflict 409. Wire format is otherwise unchanged
-  and the token is still compared as an opaque string on the hot
-  path. (#singularly-melodic-haircut)
+  `sha256:v1:<64hex>` instead of `sha256:<64hex>`. Tokens are still
+  compared as opaque strings on the hot path; the marker exists for
+  forensics (logs and bug reports can distinguish schemes at a
+  glance) and as the foundation for a later `classify(token)` helper
+  if/when a v2 transition needs a typed "old-scheme" error path.
+  **Deploy note:** existing browser sessions hold pre-upgrade tokens
+  of the form `sha256:<hex>`; the first write attempt after upgrade
+  will see a 409 `VersionMismatch`. The SPA's existing conflict
+  handler refreshes from the server's `current` payload, so users
+  experience this as a one-time "this issue changed externally"
+  toast on their first save, not as lost work. Operators rolling
+  out the new binary during active sessions should expect this
+  one-shot 409. (#singularly-melodic-haircut)
 
 ## [0.5.1] - 2026-05-10
 

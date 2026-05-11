@@ -440,14 +440,26 @@ const MAX_ITEM_MD_BYTES: u64 = 16 * 1024 * 1024;
 /// This function does *not* take the repo's write flock, so a parse
 /// scheduled after PATCH 1 but pre-empted by PATCH 2 can read the V1
 /// bytes after PATCH 2 already published V2 — emitting V1 at a
-/// later seq than V2 (transient UI flip-back, recovers on next
-/// trigger). Mitigations considered: per-slug version dedup at the
-/// hub (cheap, fixes the symptom), client-side recent-version cache
+/// later seq than V2. Recovery is not spontaneous: there is no
+/// automatic re-publish that would converge the UI. The cached client
+/// state sticks at V1 until either (a) the user's next mutation
+/// attempt sends `expected_version = V1` and receives a 409 carrying
+/// the server's `current` payload (the SPA's conflict-recovery path
+/// then re-syncs), or (b) any later filesystem mutation produces
+/// another watcher event. In an idle tab no such event arrives, so
+/// the stale display persists until the next user action or page
+/// reload.
+///
+/// Mitigations considered: per-slug version dedup at the hub
+/// (cheap, fixes the symptom), client-side recent-version cache
 /// (cheap, no server change), shared flock for parse (heavy —
 /// serialises watcher reads against PATCH bursts). Decision: do not
 /// fix preemptively; window is narrow (two PATCHes < ~150 ms apart)
-/// and local-loopback single-user usage rarely tickles it. Reopen
-/// `@incredibly-real-hour` if it surfaces in real use.
+/// and local-loopback single-user usage rarely tickles it. The
+/// follow-up issue `@incredibly-real-hour` tracks adding hub-level
+/// observability so we can tell whether this fires in real use
+/// rather than relying on user reports — see that issue's notes
+/// for the planned per-slug last-version log.
 fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
     if !slug::is_valid(slug) {
         return ParseOutcome::Vanished;

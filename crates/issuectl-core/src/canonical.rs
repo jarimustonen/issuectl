@@ -9,12 +9,14 @@
 //!
 //! Tokens are emitted as `sha256:v1:<64hex>`. The `v1` segment is a
 //! scheme version: when the canonical projection changes in a way
-//! that invalidates outstanding tokens, bump it (`v2`, `v3`, ...) so a
-//! stale token presented to a new binary mismatches with a recognisable
-//! shape rather than silently looking like a content-conflict 409.
-//! Tokens are still compared as opaque strings on the hot path; the
-//! prefix exists for forensics and for future explicit rejection of
-//! old-scheme tokens.
+//! that invalidates outstanding tokens, bump it (`v2`, `v3`, ...).
+//! Tokens are compared as opaque strings on the hot path — a stale
+//! `v1` token presented to a future `v2` binary still surfaces as
+//! a plain `VersionMismatch`, not as a typed "old-scheme" error.
+//! The marker exists for forensics today (logs and bug reports can
+//! distinguish schemes at a glance) and as the foundation for a
+//! later `classify(token)` helper if/when the v2 transition needs
+//! to reject old-scheme tokens with a distinct error path.
 //!
 //! Post-flat-layout (issue `awfully-faint-sound`): status is taken
 //! directly from frontmatter — the on-disk path no longer participates

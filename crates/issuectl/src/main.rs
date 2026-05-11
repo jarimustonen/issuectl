@@ -1563,8 +1563,8 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
         req.custom_fields.insert(k, mutate::Patch::Clear);
     }
 
-    let outcome =
-        mutate::update_issue(root, &args.slug, req, None, &UncachedConfig).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let outcome = mutate::update_issue(root, &args.slug, req, None, &UncachedConfig)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(UpdateOutcome {
         final_dir: outcome.issue_dir,
         moved_to_closed: outcome.moved_to_closed,
@@ -1621,8 +1621,16 @@ pub(crate) fn do_close(
             Ok::<_, anyhow::Error>(mutate::CommitSpec { hash, summary })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let outcome = mutate::close_issue(root, slug, status, commit_specs, expected_version, None, &UncachedConfig)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let outcome = mutate::close_issue(
+        root,
+        slug,
+        status,
+        commit_specs,
+        expected_version,
+        None,
+        &UncachedConfig,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(UpdateOutcome {
         final_dir: outcome.issue_dir,
         moved_to_closed: outcome.moved_to_closed,
@@ -1837,8 +1845,8 @@ fn cmd_set(
         }
     }
     let root = find_root();
-    let outcome =
-        mutate::update_issue(&root, slug, req, None, &UncachedConfig).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let outcome = mutate::update_issue(&root, slug, req, None, &UncachedConfig)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     finish_mutation(json, slug, &outcome, dry_run, "Updated")
 }
 
@@ -1855,8 +1863,16 @@ fn cmd_check(
         );
     }
     let root = find_root();
-    let outcome = mutate::toggle_checkbox(&root, slug, task, expected_version, None, dry_run, &UncachedConfig)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let outcome = mutate::toggle_checkbox(
+        &root,
+        slug,
+        task,
+        expected_version,
+        None,
+        dry_run,
+        &UncachedConfig,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     finish_mutation(json, slug, &outcome, dry_run, "Toggled checkbox in")
 }
 
@@ -1883,8 +1899,8 @@ fn cmd_label(
         LabelOp::Remove => req.remove_labels.push(label.to_string()),
     }
     let root = find_root();
-    let outcome =
-        mutate::update_issue(&root, slug, req, None, &UncachedConfig).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let outcome = mutate::update_issue(&root, slug, req, None, &UncachedConfig)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     finish_mutation(json, slug, &outcome, dry_run, "Updated labels for")
 }
 
@@ -1895,8 +1911,8 @@ fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
         .with_context(|| format!("cannot parse patch fields in {}", patch_path.display()))?;
     req.dry_run = dry_run;
     let root = find_root();
-    let outcome =
-        mutate::update_issue(&root, &slug, req, None, &UncachedConfig).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let outcome = mutate::update_issue(&root, &slug, req, None, &UncachedConfig)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     finish_mutation(json, &slug, &outcome, dry_run, "Applied patch to")
 }
 
@@ -2061,8 +2077,16 @@ fn cmd_body_set(
         buf
     };
     let root = find_root();
-    let outcome = mutate::update_body(&root, slug, expected_version, body, None, false, &UncachedConfig)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let outcome = mutate::update_body(
+        &root,
+        slug,
+        expected_version,
+        body,
+        None,
+        false,
+        &UncachedConfig,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     if json {
         let report = serde_json::json!({
             "slug": slug,

@@ -1632,16 +1632,31 @@ mod tests {
             js.contains("new AbortController"),
             "board.js missing AbortController"
         );
-        assert!(js.contains("WRITE_TIMEOUT_MS"), "board.js missing write timeout");
+        assert!(
+            js.contains("WRITE_TIMEOUT_MS"),
+            "board.js missing write timeout"
+        );
         assert!(
             js.contains("'pagehide'"),
             "board.js missing pagehide listener for in-flight aborts"
         );
-        // Both write paths must pass `signal:` to `fetch`. The
-        // simplest pin is that a `signal:` field appears in the
-        // bundle at all — without it, the AbortController is dead
-        // wiring.
-        assert!(js.contains("signal:"), "board.js fetch calls missing signal:");
+        // Both write paths (PATCH and PUT) must pass `signal: abort.signal`
+        // to `fetch`. Counting occurrences pins both — a regression that
+        // removes the signal from just one path no longer slips through
+        // the previous "any-occurrence" check.
+        let signal_count = js.matches("signal: abort.signal").count();
+        assert_eq!(
+            signal_count, 2,
+            "expected `signal: abort.signal` on both write paths, got {signal_count}",
+        );
+        // Both write paths must also clean up via `.finally(...)` so an
+        // exception in a `.then` body cannot leak the abort registry or
+        // double-drain `pending_writes` via `.catch`.
+        let finally_count = js.matches(".finally(").count();
+        assert!(
+            finally_count >= 2,
+            "expected `.finally(` on both write paths, got {finally_count}",
+        );
     }
 
     // ── M2: body + preview + rate limit ────────────────────────────
