@@ -112,6 +112,21 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
     resolves the blockers and re-runs `--fix`.
   Scripted callers should branch on `stop_phase` rather than infer
   from `blockers` + `fix_applied`.
+- **Config reads go through `ConfigSource`, not bare `schema::load`.**
+  Every mutate entry point (`update_issue`, `new_issue`, `update_body`,
+  `close_issue`, `note_issue`, `toggle_checkbox`, `do_new`) and every
+  server-side read path (`repo::load_issues_with_warnings_via`,
+  `boards::load`) takes a `&dyn ConfigSource` parameter. CLI callers
+  pass `&UncachedConfig`; server handlers pass `&*state.config` (their
+  `Arc<RepoConfigCache>`) into `spawn_blocking`. `schema::load(root)`
+  and `transitions::load(root)` are the CLI-uncached fallback — do
+  **not** call them from a new server hot path or a new mutate
+  helper, or you'll silently bypass the per-request cache (this is
+  exactly the regression `@hugely-madly-haircut` was meant to
+  eliminate). For new read helpers, follow the
+  `load_issues_with_warnings_via(root, config)` pattern: optional
+  `_via` variant takes the config; the no-config alias delegates to
+  `UncachedConfig` for CLI ergonomics.
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, repo layout,
   PR process, and commit-message conventions.
 - See [issues/AGENTS.md](issues/AGENTS.md) for how this project's own
