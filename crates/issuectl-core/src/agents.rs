@@ -497,11 +497,14 @@ pub fn ensure_default_written(root: &Path, force: bool) -> Result<EnsureDefaultO
         // file is malformed we fall through to a full rewrite as a
         // last resort, which is the same behavior `agents init --force`
         // has had since the feature shipped.
-        let current = fs::read_to_string(&path)
-            .with_context(|| format!("cannot read {}", path.display()))?;
+        let current =
+            fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
         match regenerate_managed(&current, &schema, &rules) {
             Ok(updated) => (updated, EnsureOutcome::ManagedRefreshed),
-            Err(_) => (render_full(&schema, &rules), EnsureOutcome::ManagedRefreshed),
+            Err(_) => (
+                render_full(&schema, &rules),
+                EnsureOutcome::ManagedRefreshed,
+            ),
         }
     } else {
         (render_full(&schema, &rules), EnsureOutcome::Created)

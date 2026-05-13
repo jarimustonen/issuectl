@@ -1736,14 +1736,10 @@ fn cmd_sync_commits(
             println!("No new commits to add (all already present).");
         }
         for slug in &report.fixes_hints {
-            eprintln!(
-                "Hint: @{slug} has Fixes-Issue trailer — consider `issuectl close {slug}`",
-            );
+            eprintln!("Hint: @{slug} has Fixes-Issue trailer — consider `issuectl close {slug}`",);
         }
         for slug in &report.unknown_slugs {
-            eprintln!(
-                "Warning: trailer references unknown slug @{slug} (no issue with that slug)",
-            );
+            eprintln!("Warning: trailer references unknown slug @{slug} (no issue with that slug)",);
         }
         for w in &report.load_warnings {
             eprintln!("Warning: {w}");

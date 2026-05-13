@@ -193,9 +193,8 @@ pub fn install_hook(repo_root: &Path, force: bool) -> Result<InstallOutcome> {
     let hook_path = hooks_dir.join("pre-commit");
     let existing = read_existing(&hook_path);
     let new_contents = compose_hook(&existing);
-    let already_current = !existing.is_empty()
-        && existing == new_contents
-        && current.as_deref() == Some(".githooks");
+    let already_current =
+        !existing.is_empty() && existing == new_contents && current.as_deref() == Some(".githooks");
     if !already_current {
         write_hook(&hook_path, &new_contents)?;
     }

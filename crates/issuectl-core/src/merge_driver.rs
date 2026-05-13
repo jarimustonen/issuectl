@@ -659,11 +659,7 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-fn apply_driver_config(
-    root: &Path,
-    driver_value: &str,
-    force: bool,
-) -> Result<InstallOutcome> {
+fn apply_driver_config(root: &Path, driver_value: &str, force: bool) -> Result<InstallOutcome> {
     let existing = Command::new("git")
         .current_dir(root)
         .args(["config", "--local", "--get", "merge.issuectl-yaml.driver"])

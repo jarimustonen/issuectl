@@ -143,7 +143,10 @@ pub fn parse_trailers(body: &str) -> (Vec<String>, Vec<String>) {
             continue;
         };
         let raw = value.trim();
-        let stripped = raw.strip_prefix('@').or_else(|| raw.strip_prefix('#')).unwrap_or(raw);
+        let stripped = raw
+            .strip_prefix('@')
+            .or_else(|| raw.strip_prefix('#'))
+            .unwrap_or(raw);
         // Reject anything that isn't a valid slug — protects against
         // accidental garbage like `Refs-Issue: TBD` or `Refs-Issue:
         // <fill in>`.
@@ -174,10 +177,7 @@ fn split_trailer(line: &str) -> Option<(&str, &str)> {
     if token.is_empty() {
         return None;
     }
-    if !token
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
+    if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return None;
     }
     Some((token, &line[colon + 1..]))

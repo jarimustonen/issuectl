@@ -142,8 +142,8 @@ pub fn run(root: &Path, opts: InitOptions, json: bool) -> Result<()> {
     // malformed scaffold; without `--force` it's a noop on existing.
     let schema_path = schema::schema_path(root);
     let existed_before = schema_path.exists();
-    let wrote = schema::write_default(root, opts.force)
-        .context("initializing issues/.schema.yaml")?;
+    let wrote =
+        schema::write_default(root, opts.force).context("initializing issues/.schema.yaml")?;
     let schema_status = if wrote && existed_before {
         ArtifactStatus::Overwritten
     } else if wrote {
@@ -168,9 +168,8 @@ pub fn run(root: &Path, opts: InitOptions, json: bool) -> Result<()> {
     // malformed `issues/.schema.yaml` fails fast with a clear error
     // instead of bombing in step 2 after we've already mutated the
     // filesystem.
-    let _schema = schema::load(root).context(
-        "loading issues/.schema.yaml — fix or remove the malformed schema and re-run",
-    )?;
+    let _schema = schema::load(root)
+        .context("loading issues/.schema.yaml — fix or remove the malformed schema and re-run")?;
 
     // 2. .issuectl/AGENTS.md.
     let agents_outcome = agents::ensure_default_written(root, opts.force)
@@ -223,8 +222,8 @@ pub fn run(root: &Path, opts: InitOptions, json: bool) -> Result<()> {
 
     // 4. Hooks (opt-in).
     if opts.with_hooks {
-        let outcome = hooks::install_hook(root, opts.force)
-            .context("installing pre-commit hook")?;
+        let outcome =
+            hooks::install_hook(root, opts.force).context("installing pre-commit hook")?;
         let hook_path = root.join(".githooks/pre-commit");
         let status = match outcome {
             hooks::InstallOutcome::Installed => ArtifactStatus::Created,
@@ -244,8 +243,7 @@ pub fn run(root: &Path, opts: InitOptions, json: bool) -> Result<()> {
             }],
             next_steps: vec![],
             message: Some(
-                "Bypass with `git commit --no-verify` or `ISSUECTL_SKIP_DOCTOR=1`."
-                    .to_string(),
+                "Bypass with `git commit --no-verify` or `ISSUECTL_SKIP_DOCTOR=1`.".to_string(),
             ),
             details: None,
         });
@@ -318,7 +316,9 @@ fn aggregate(per_artifact: &[ArtifactStatus]) -> StepStatus {
     let any_created = per_artifact.iter().any(|s| {
         matches!(
             s,
-            ArtifactStatus::Created | ArtifactStatus::Overwritten | ArtifactStatus::ManagedRefreshed
+            ArtifactStatus::Created
+                | ArtifactStatus::Overwritten
+                | ArtifactStatus::ManagedRefreshed
         )
     });
     let any_existing = per_artifact
@@ -466,11 +466,8 @@ mod tests {
         // Hand-edit the prose preamble (above the managed block).
         let agents_path = tmp.path().join(".issuectl/AGENTS.md");
         let original = std::fs::read_to_string(&agents_path).unwrap();
-        let edited = original.replacen(
-            "# Agents policy",
-            "# Agents policy — TEAM-CUSTOM HEADER",
-            1,
-        );
+        let edited =
+            original.replacen("# Agents policy", "# Agents policy — TEAM-CUSTOM HEADER", 1);
         assert_ne!(edited, original);
         std::fs::write(&agents_path, &edited).unwrap();
 

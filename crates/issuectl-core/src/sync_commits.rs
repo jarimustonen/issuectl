@@ -89,8 +89,7 @@ pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
     let commits = git_trailers::parse_log(repo_root, &range)?;
 
     let (summaries, warnings) = repo::load_issue_summaries(repo_root);
-    let known_slugs: BTreeSet<String> =
-        summaries.iter().map(|s| s.slug.clone()).collect();
+    let known_slugs: BTreeSet<String> = summaries.iter().map(|s| s.slug.clone()).collect();
     let load_warnings: Vec<String> = warnings.into_iter().map(|w| w.message).collect();
     let mut commit_index: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for s in &summaries {
@@ -107,9 +106,9 @@ pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
     } else {
         git_trailers::current_branch(repo_root)?
     };
-    let branch_slug = branch.as_deref().and_then(|b| {
-        git_trailers::branch_slug(b, known_slugs.iter().map(|s| s.as_str()))
-    });
+    let branch_slug = branch
+        .as_deref()
+        .and_then(|b| git_trailers::branch_slug(b, known_slugs.iter().map(|s| s.as_str())));
 
     let mut planned: Vec<PlannedAdd> = Vec::new();
     let mut fixes_hints: BTreeSet<String> = BTreeSet::new();
@@ -193,13 +192,10 @@ pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
         if p.already_present {
             continue;
         }
-        by_slug
-            .entry(p.slug.clone())
-            .or_default()
-            .push(CommitSpec {
-                hash: p.hash.clone(),
-                summary: p.summary.clone(),
-            });
+        by_slug.entry(p.slug.clone()).or_default().push(CommitSpec {
+            hash: p.hash.clone(),
+            summary: p.summary.clone(),
+        });
     }
 
     for (slug, specs) in by_slug {
@@ -318,10 +314,7 @@ mod tests {
             root,
             "feat: do thing\n\nlonger desc\n\nRefs-Issue: @foo-bar-baz\n",
         );
-        commit(
-            root,
-            "fix: another\n\nFixes-Issue: foo-bar-baz\n",
-        );
+        commit(root, "fix: another\n\nFixes-Issue: foo-bar-baz\n");
 
         let report = run(
             root,
