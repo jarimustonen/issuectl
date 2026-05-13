@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-05-13
+
+Bug-fix and quality-of-life release driven by the 3DBear monorepo
+adoption feedback plus an internals cleanup wave. No breaking changes.
+Highlights:
+
+- One-command bootstrap: `issuectl init`.
+- Git-native commit linking: `Refs-Issue:` / `Fixes-Issue:` trailers
+  + `issuectl sync-commits`.
+- `doctor --fix` no longer all-or-nothing — flat-layout migration
+  runs regardless of unrelated schema findings, and
+  `issues/.schema.yaml` bootstrap is unconditional.
+- Frontmatter parsing hardened against fenced YAML in bodies; short
+  hashes (`315194e2`) are always quoted; UTF-8 titles render cleanly
+  in `issuectl list`; `agents init` logs which schema it used; doctor
+  flags gitignored canonical files.
+- Internals: thread-local config cache replaced with explicit
+  injection; `parse_section` returns structured diagnostics; PATCH/PUT
+  writes get `AbortController`/timeout; canonical version tokens carry
+  a `sha256:v1:` scheme marker.
+
 ### Added
 - `issuectl init` — one-command bootstrap for a fresh repo. Runs the
   schema scaffold, `.issuectl/AGENTS.md`, and the `/issue` skill
@@ -561,7 +582,8 @@ Initial public release.
 - `issuectl dedup` stub — moved to a future release until properly
   implemented.
 
-[Unreleased]: https://github.com/jarimustonen/issuectl/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/jarimustonen/issuectl/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/jarimustonen/issuectl/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/jarimustonen/issuectl/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jarimustonen/issuectl/compare/v0.3.1...v0.5.0
 [0.3.1]: https://github.com/jarimustonen/issuectl/compare/v0.3.0...v0.3.1
