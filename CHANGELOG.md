@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `issuectl bulk '<query>'` applies one mutation to every issue matching a
+  query (same syntax as `ls`/`search`), in a single batch the user commits
+  together. Supports `--set key=value` / `--clear key` (built-in fields route
+  through their typed slots, anything else is a custom field) plus
+  `--add-label` / `--remove-label` / `--add-related` / `--remove-related`.
+  `--dry-run` prints the affected slugs and a per-issue unified diff without
+  writing. Real runs first validate every target as a dry-run, so a bad value
+  aborts the whole batch before any file is written.
+
 ### Changed
 - `issuectl new --slug <existing>` now fails with an actionable error that
   names the colliding slug and path and suggests retrying with a different

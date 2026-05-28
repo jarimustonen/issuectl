@@ -23,6 +23,7 @@ Examples:
   issuectl new --type bug --title \"...\"    Create a new issue (random slug)
   issuectl update <slug> --status testing  Change status
   issuectl close <slug> --status fixed     Set a closing status (fixed/done/...)
+  issuectl bulk \"label:stale\" --set status=wontfix  Mutate every matched issue
   issuectl init                            Bootstrap a new repo (schema, agents, skill)
   issuectl doctor                          Health-check the repo
   issuectl doctor --fix                    Migrate legacy numbered issues
@@ -101,6 +102,58 @@ fn parse_custom_field_key(s: &str) -> std::result::Result<String, String> {
         ));
     }
     mutate::validate_custom_field_key(s)?;
+    Ok(s.to_string())
+}
+
+/// Clap value parser for `bulk --set <key=value>`. Unlike
+/// `parse_custom_field`, this accepts built-in keys (`status`, `type`,
+/// ...) so a bulk caller can set them through one uniform flag —
+/// `cmd_bulk` routes built-ins to their typed slots and everything else
+/// to the schema-validated custom-field slot. Shape and whitespace rules
+/// match `parse_custom_field`; reserved-vs-custom semantics are enforced
+/// downstream by the routing + `UpdateIssueRequest::validate`.
+fn parse_bulk_set(s: &str) -> std::result::Result<(String, String), String> {
+    let (key, value) = s
+        .split_once('=')
+        .ok_or_else(|| format!("--set expects key=value, got {s:?}"))?;
+    if key.is_empty() {
+        return Err(format!("--set key cannot be empty: {s:?}"));
+    }
+    if value.is_empty() {
+        return Err(format!(
+            "--set {key:?}: value cannot be empty (use --clear to remove the field)"
+        ));
+    }
+    if key.trim() != key || value.trim() != value {
+        return Err(format!(
+            "--set {s:?} has leading or trailing whitespace; remove it"
+        ));
+    }
+    if !mutate::is_valid_custom_field_key(key) {
+        return Err(format!(
+            "--set key {key:?} must be alphanumeric / underscore / hyphen"
+        ));
+    }
+    Ok((key.to_string(), value.to_string()))
+}
+
+/// Clap value parser for `bulk --clear <key>`. Bare-key counterpart of
+/// [`parse_bulk_set`]; accepts built-in keys (routing rejects the ones
+/// that can't be cleared, e.g. `status`/`type`).
+fn parse_bulk_clear_key(s: &str) -> std::result::Result<String, String> {
+    if s.is_empty() {
+        return Err("--clear key cannot be empty".to_string());
+    }
+    if s.trim() != s {
+        return Err(format!(
+            "--clear key {s:?} has leading or trailing whitespace; remove it"
+        ));
+    }
+    if !mutate::is_valid_custom_field_key(s) {
+        return Err(format!(
+            "--clear key {s:?} must be alphanumeric / underscore / hyphen"
+        ));
+    }
     Ok(s.to_string())
 }
 
@@ -480,6 +533,58 @@ enum Command {
         patch: PathBuf,
 
         /// Plan only: print a unified diff and exit 0 without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Apply one mutation to every issue matching a query, in a single
+    /// batch. The query uses the same syntax as `ls`/`search`/`?q=`
+    /// (e.g. `status:open label:wontfix`). Every matched issue is
+    /// rewritten through the same validated path as `update`, so the
+    /// result is one set of file changes the user commits together.
+    /// `--dry-run` prints the affected slugs plus a per-issue diff and
+    /// writes nothing.
+    Bulk {
+        /// Query selecting the issues to mutate. Same syntax as `ls`.
+        /// No implicit open-only default — the query is authoritative,
+        /// so an unqualified query can match closed issues too. Pass
+        /// leading-hyphen negations as a single quoted argument:
+        /// `bulk "-label:wontfix" --add-label triaged`.
+        #[arg(value_parser = parse_non_empty, allow_hyphen_values = true)]
+        query: String,
+
+        /// Set a field to a value (repeatable). Format `key=value`.
+        /// Built-in fields (`status`, `type`, `priority`, `assignee`,
+        /// `owner`, `epic`) route through their typed slots; any other
+        /// key is a schema-validated custom field. Use `--clear` to
+        /// remove a field instead.
+        #[arg(long = "set", value_parser = parse_bulk_set)]
+        set: Vec<(String, String)>,
+
+        /// Remove a field (repeatable). Built-in fields route through
+        /// their typed slots (e.g. `--clear epic`); `status`/`type`
+        /// cannot be cleared. Any other key clears a custom field.
+        #[arg(long = "clear", value_parser = parse_bulk_clear_key)]
+        clear: Vec<String>,
+
+        /// Add a label to every matched issue (repeatable)
+        #[arg(long = "add-label", value_parser = parse_non_empty)]
+        add_labels: Vec<String>,
+
+        /// Remove a label from every matched issue (repeatable)
+        #[arg(long = "remove-label", value_parser = parse_non_empty)]
+        remove_labels: Vec<String>,
+
+        /// Add a related reference to every matched issue (repeatable)
+        #[arg(long = "add-related", value_parser = parse_non_empty)]
+        add_related: Vec<String>,
+
+        /// Remove a related reference from every matched issue (repeatable)
+        #[arg(long = "remove-related", value_parser = parse_non_empty)]
+        remove_related: Vec<String>,
+
+        /// Plan only: print affected slugs and a per-issue unified diff,
+        /// writing nothing.
         #[arg(long)]
         dry_run: bool,
     },
@@ -967,6 +1072,28 @@ fn main() -> Result<()> {
             expected_version,
         } => cmd_label(json_output, &slug, op, &label, dry_run, expected_version),
         Command::Apply { patch, dry_run } => cmd_apply(json_output, &patch, dry_run),
+        Command::Bulk {
+            query,
+            set,
+            clear,
+            add_labels,
+            remove_labels,
+            add_related,
+            remove_related,
+            dry_run,
+        } => cmd_bulk(
+            json_output,
+            &query,
+            BulkSpec {
+                set,
+                clear,
+                add_labels,
+                remove_labels,
+                add_related,
+                remove_related,
+            },
+            dry_run,
+        ),
         Command::Body { action } => match action {
             BodyAction::Set {
                 slug,
@@ -1912,6 +2039,218 @@ fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
     finish_mutation(json, &slug, &outcome, dry_run, "Applied patch to")
 }
 
+/// Mutation to apply to every issue a `bulk` query matches. Mirrors the
+/// subset of `UpdateArgs` that makes sense across many issues at once:
+/// per-field set/clear and the label/related list ops. Per-issue
+/// concerns (`expected_version`, commits) are intentionally absent —
+/// bulk can't carry a distinct version per target.
+#[derive(Default)]
+pub(crate) struct BulkSpec {
+    pub set: Vec<(String, String)>,
+    pub clear: Vec<String>,
+    pub add_labels: Vec<String>,
+    pub remove_labels: Vec<String>,
+    pub add_related: Vec<String>,
+    pub remove_related: Vec<String>,
+}
+
+impl BulkSpec {
+    fn is_empty(&self) -> bool {
+        self.set.is_empty()
+            && self.clear.is_empty()
+            && self.add_labels.is_empty()
+            && self.remove_labels.is_empty()
+            && self.add_related.is_empty()
+            && self.remove_related.is_empty()
+    }
+}
+
+/// One issue's outcome from a `bulk` run. `diff` is `Some` only in
+/// dry-run mode (the bytes the write would have produced).
+#[derive(Debug)]
+pub(crate) struct BulkResult {
+    pub slug: String,
+    pub version: String,
+    pub final_dir: PathBuf,
+    pub diff: Option<String>,
+}
+
+/// Route a single field patch onto an `UpdateIssueRequest`. Built-in
+/// single-value fields go to their typed slots (so e.g. a `status` set
+/// gets the closed-date handling and a `status`/`type` clear hits the
+/// canonical "cannot be cleared" error); everything else lands in the
+/// schema-validated custom-field slot. Mirrors `cmd_set`'s routing,
+/// extended with `type`.
+fn route_bulk_field(req: &mut mutate::UpdateIssueRequest, key: &str, patch: mutate::Patch<String>) {
+    match key {
+        "status" => req.status = patch,
+        "type" => req.issue_type = patch,
+        "priority" => req.priority = patch,
+        "assignee" => req.assignee = patch,
+        "owner" => req.owner = patch,
+        "epic" => req.epic = patch,
+        other => {
+            req.custom_fields.insert(other.to_string(), patch);
+        }
+    }
+}
+
+/// Build a fresh request for one target. Called once per matched issue
+/// because `UpdateIssueRequest` is not `Clone` and each write consumes
+/// its own request.
+fn build_bulk_request(spec: &BulkSpec, dry_run: bool) -> mutate::UpdateIssueRequest {
+    use mutate::Patch;
+    let mut req = mutate::UpdateIssueRequest {
+        dry_run,
+        ..Default::default()
+    };
+    for (k, v) in &spec.set {
+        route_bulk_field(&mut req, k, Patch::Set(v.clone()));
+    }
+    for k in &spec.clear {
+        route_bulk_field(&mut req, k, Patch::Clear);
+    }
+    req.add_labels = spec.add_labels.clone();
+    req.remove_labels = spec.remove_labels.clone();
+    req.add_related = spec.add_related.clone();
+    req.remove_related = spec.remove_related.clone();
+    req
+}
+
+/// CLI-side spec checks that don't need disk access: at least one
+/// mutation, and no key named twice or in both `--set` and `--clear`
+/// (a `BTreeMap` would silently keep the last write otherwise). Mirrors
+/// the `--field`/`--clear-field` dedup rules in `do_update`.
+fn validate_bulk_spec(spec: &BulkSpec) -> Result<()> {
+    if spec.is_empty() {
+        bail!("bulk requires at least one mutation (--set/--clear/--add-label/--remove-label/--add-related/--remove-related)");
+    }
+    let mut seen_set: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for (k, _) in &spec.set {
+        if !seen_set.insert(k.as_str()) {
+            bail!("--set {k:?} given more than once");
+        }
+    }
+    let mut seen_clear: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for k in &spec.clear {
+        if !seen_clear.insert(k.as_str()) {
+            bail!("--clear {k:?} given more than once");
+        }
+    }
+    if let Some(overlap) = seen_set.intersection(&seen_clear).next() {
+        bail!("field {overlap:?} appears in both --set and --clear");
+    }
+    Ok(())
+}
+
+/// Apply `spec` to every issue matching `q`. For real writes a dry-run
+/// pre-flight pass runs first: every target is validated before any file
+/// is touched, so a validation error on issue N doesn't leave issues
+/// 1..N-1 already rewritten. This is the "one commit" intent — all
+/// targets succeed or none are written. There is still a small TOCTOU
+/// window between the two passes (a concurrent writer could change a
+/// target's state); the repo-wide flock makes each individual write
+/// safe, but bulk is not a single cross-issue transaction.
+pub(crate) fn bulk_apply(
+    root: &Path,
+    q: &query::Query,
+    spec: &BulkSpec,
+    dry_run: bool,
+) -> Result<Vec<BulkResult>> {
+    let matched: Vec<_> = repo::load_issues(root)
+        .into_iter()
+        .filter(|i| query::matches(q, i))
+        .collect();
+    if matched.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if !dry_run {
+        for i in &matched {
+            let req = build_bulk_request(spec, true);
+            mutate::update_issue(root, &i.slug, req, None, &UncachedConfig)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", i.slug))?;
+        }
+    }
+
+    let mut results = Vec::with_capacity(matched.len());
+    for i in &matched {
+        let req = build_bulk_request(spec, dry_run);
+        let outcome = mutate::update_issue(root, &i.slug, req, None, &UncachedConfig)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", i.slug))?;
+        let diff = if dry_run {
+            let before = outcome.before_serialized.as_deref().unwrap_or("");
+            let after = outcome.pending_serialized.as_deref().unwrap_or(before);
+            Some(render_unified_diff(before, after, &outcome.issue_dir))
+        } else {
+            None
+        };
+        results.push(BulkResult {
+            slug: i.slug.clone(),
+            version: outcome.version,
+            final_dir: outcome.issue_dir,
+            diff,
+        });
+    }
+    Ok(results)
+}
+
+fn cmd_bulk(json: bool, query_str: &str, spec: BulkSpec, dry_run: bool) -> Result<()> {
+    validate_bulk_spec(&spec)?;
+    let q = query::parse(query_str).context("parsing bulk query")?;
+    let root = find_root();
+    let results = bulk_apply(&root, &q, &spec, dry_run)?;
+
+    if json {
+        let arr: Vec<_> = results
+            .iter()
+            .map(|r| {
+                let mut o = serde_json::json!({
+                    "slug": r.slug,
+                    "version": r.version,
+                    "final_dir": r.final_dir.to_string_lossy(),
+                });
+                if let Some(d) = &r.diff {
+                    o["diff"] = serde_json::Value::String(d.clone());
+                }
+                o
+            })
+            .collect();
+        let report = serde_json::json!({
+            "dry_run": dry_run,
+            "count": results.len(),
+            "results": arr,
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    if results.is_empty() {
+        println!("No issues match the query.");
+        return Ok(());
+    }
+    if dry_run {
+        println!("{} issue(s) would be updated:", results.len());
+        for r in &results {
+            println!("  {}", r.slug);
+        }
+        println!();
+        for r in &results {
+            if let Some(d) = &r.diff {
+                if !d.is_empty() {
+                    print!("{d}");
+                }
+            }
+        }
+    } else {
+        println!("Updated {} issue(s):", results.len());
+        for r in &results {
+            println!("  {}", r.slug);
+        }
+    }
+    Ok(())
+}
+
 /// Parse the YAML patch text into `(slug, UpdateIssueRequest)`,
 /// applying every CLI-side rule that doesn't require disk access.
 /// Extracted so tests can pin the `--json` `expected_version`
@@ -2788,5 +3127,219 @@ mod tests {
         let (slug, req) = parse_apply_patch(yaml, false).unwrap();
         assert_eq!(slug, "some-issue");
         assert!(req.expected_version.is_none());
+    }
+
+    // ── bulk ──────────────────────────────────────────────────────
+
+    fn bulk_spec(set: &[(&str, &str)], add_labels: &[&str]) -> BulkSpec {
+        BulkSpec {
+            set: set
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            add_labels: add_labels.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn status_of(root: &Path, slug: &str) -> String {
+        repo::load_issues(root)
+            .into_iter()
+            .find(|i| i.slug == slug)
+            .unwrap_or_else(|| panic!("issue {slug} not found"))
+            .status
+    }
+
+    #[test]
+    fn parse_bulk_set_accepts_built_ins_and_custom() {
+        assert_eq!(
+            parse_bulk_set("status=done").unwrap(),
+            ("status".to_string(), "done".to_string())
+        );
+        assert_eq!(
+            parse_bulk_set("team=payments").unwrap(),
+            ("team".to_string(), "payments".to_string())
+        );
+        assert!(parse_bulk_set("status").is_err());
+        assert!(parse_bulk_set("status=").is_err());
+        assert!(parse_bulk_set("=done").is_err());
+        assert!(parse_bulk_set(" status=done").is_err());
+        assert!(parse_bulk_set("status =done").is_err());
+        assert!(parse_bulk_set("bad key=done").is_err());
+    }
+
+    #[test]
+    fn validate_bulk_spec_rejects_empty_and_dups() {
+        assert!(validate_bulk_spec(&BulkSpec::default()).is_err());
+        let dup_set = BulkSpec {
+            set: vec![
+                ("priority".into(), "high".into()),
+                ("priority".into(), "low".into()),
+            ],
+            ..Default::default()
+        };
+        assert!(validate_bulk_spec(&dup_set).is_err());
+        let overlap = BulkSpec {
+            set: vec![("epic".into(), "some-epic".into())],
+            clear: vec!["epic".into()],
+            ..Default::default()
+        };
+        assert!(validate_bulk_spec(&overlap).is_err());
+        assert!(validate_bulk_spec(&bulk_spec(&[("priority", "high")], &[])).is_ok());
+    }
+
+    #[test]
+    fn bulk_applies_set_to_every_match() {
+        let tmp = fresh_repo();
+        write_raw_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: normal\nassignee: alice\n",
+            "# One\n",
+        );
+        write_raw_issue(
+            tmp.path(),
+            "calm-bright-newt",
+            "type: bug\nstatus: open\npriority: normal\nassignee: alice\n",
+            "# Two\n",
+        );
+        write_raw_issue(
+            tmp.path(),
+            "eager-silent-mole",
+            "type: feature\nstatus: open\npriority: normal\nassignee: bob\n",
+            "# Three\n",
+        );
+
+        let q = query::parse("assignee:alice").unwrap();
+        let spec = bulk_spec(&[("priority", "high")], &[]);
+        let results = bulk_apply(tmp.path(), &q, &spec, false).unwrap();
+
+        let mut slugs: Vec<_> = results.iter().map(|r| r.slug.clone()).collect();
+        slugs.sort();
+        assert_eq!(slugs, vec!["amber-loud-fox", "calm-bright-newt"]);
+
+        let issues = repo::load_issues(tmp.path());
+        let by = |s: &str| {
+            issues
+                .iter()
+                .find(|i| i.slug == s)
+                .unwrap()
+                .priority
+                .clone()
+        };
+        assert_eq!(by("amber-loud-fox"), "high");
+        assert_eq!(by("calm-bright-newt"), "high");
+        // The non-matching issue is untouched.
+        assert_eq!(by("eager-silent-mole"), "normal");
+    }
+
+    #[test]
+    fn bulk_set_status_routes_through_typed_slot() {
+        let tmp = fresh_repo();
+        write_raw_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: normal\nassignee: alice\n",
+            "# One\n",
+        );
+        let q = query::parse("status:open").unwrap();
+        let spec = bulk_spec(&[("status", "done")], &[]);
+        bulk_apply(tmp.path(), &q, &spec, false).unwrap();
+        assert_eq!(status_of(tmp.path(), "amber-loud-fox"), "done");
+        // A closing status routes through the typed slot, so `closed:`
+        // is stamped (and the issue lands in the closed folder).
+        let issue = repo::load_issues(tmp.path())
+            .into_iter()
+            .find(|i| i.slug == "amber-loud-fox")
+            .unwrap();
+        assert_eq!(issue.folder, "closed");
+        assert!(issue.closed.is_some());
+    }
+
+    #[test]
+    fn bulk_dry_run_writes_nothing_and_returns_diffs() {
+        let tmp = fresh_repo();
+        write_raw_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: normal\n",
+            "# One\n",
+        );
+        let q = query::parse("status:open").unwrap();
+        let spec = bulk_spec(&[("priority", "high")], &[]);
+        let results = bulk_apply(tmp.path(), &q, &spec, true).unwrap();
+        assert_eq!(results.len(), 1);
+        let diff = results[0].diff.as_deref().unwrap();
+        assert!(diff.contains("priority"), "diff should mention the change");
+        // Nothing written: on-disk priority is unchanged.
+        let issues = repo::load_issues(tmp.path());
+        assert_eq!(issues[0].priority, "normal");
+    }
+
+    #[test]
+    fn bulk_no_match_is_empty_not_error() {
+        let tmp = fresh_repo();
+        write_raw_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\n",
+            "# One\n",
+        );
+        let q = query::parse("assignee:nobody").unwrap();
+        let spec = bulk_spec(&[("priority", "high")], &[]);
+        let results = bulk_apply(tmp.path(), &q, &spec, false).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn bulk_preflight_aborts_all_on_one_invalid_target() {
+        // Two issues match; the priority value is invalid, so the
+        // dry-run pre-flight must reject before any write lands.
+        let tmp = fresh_repo();
+        write_raw_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: normal\n",
+            "# One\n",
+        );
+        write_raw_issue(
+            tmp.path(),
+            "calm-bright-newt",
+            "type: bug\nstatus: open\npriority: normal\n",
+            "# Two\n",
+        );
+        let q = query::parse("status:open").unwrap();
+        let spec = bulk_spec(&[("priority", "bogus")], &[]);
+        let err = bulk_apply(tmp.path(), &q, &spec, false).unwrap_err();
+        assert!(
+            err.to_string().contains("priority"),
+            "expected a priority validation error, got {err}"
+        );
+        // No file was rewritten — both keep their original priority.
+        let issues = repo::load_issues(tmp.path());
+        for i in &issues {
+            assert_eq!(i.priority, "normal", "{} must be untouched", i.slug);
+        }
+    }
+
+    #[test]
+    fn bulk_adds_label_to_matches() {
+        let tmp = fresh_repo();
+        write_raw_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: normal\nlabels: [frontend]\n",
+            "# One\n",
+        );
+        let q = query::parse("status:open").unwrap();
+        let spec = bulk_spec(&[], &["triaged"]);
+        bulk_apply(tmp.path(), &q, &spec, false).unwrap();
+        let issue = repo::load_issues(tmp.path())
+            .into_iter()
+            .find(|i| i.slug == "amber-loud-fox")
+            .unwrap();
+        let labels = issue.labels.unwrap_or_default();
+        assert!(labels.contains(&"triaged".to_string()));
+        assert!(labels.contains(&"frontend".to_string()));
     }
 }
