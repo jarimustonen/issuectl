@@ -39,7 +39,9 @@ The two template files:
 Both are dogfooded into this repo as `.claude/skills/issue/SKILL.md`
 and `.codex/prompts/issue.md` via `issuectl skill install --agent all
 --force`. After editing either template, run that command (or
-equivalent) so the local copies don't drift from `templates/`.
+equivalent) so the local copies don't drift from `templates/`. The
+`skill::tests::dogfooded_copies_match_templates` test enforces this — it
+fails if a committed copy no longer matches its rendered template.
 
 If the two variants would otherwise drift, regenerate the Codex one
 from the Claude one with:

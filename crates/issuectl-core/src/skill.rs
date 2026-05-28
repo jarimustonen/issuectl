@@ -237,6 +237,45 @@ mod tests {
         assert!(!installed.contains("{{ISSUECTL_VERSION}}"));
     }
 
+    /// The repo dogfoods both skill templates into `.claude/` and
+    /// `.codex/`. They are the contract consumer-side agents read, so they
+    /// must never drift from `templates/`. This test renders each template
+    /// and compares it to the committed copy, tolerating only the pinned
+    /// `{{ISSUECTL_VERSION}}` (the copy records the release that wrote it,
+    /// which lags the in-development version). If it fails, regenerate with
+    /// `issuectl skill install --agent all --force`.
+    #[test]
+    fn dogfooded_copies_match_templates() {
+        fn pinned_version(copy: &str) -> &str {
+            let marker = "This skill was installed for `issuectl ";
+            let start = copy.find(marker).expect("version marker present") + marker.len();
+            let rest = &copy[start..];
+            let end = rest.find('`').expect("closing backtick after version");
+            &rest[..end]
+        }
+
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for agent in [Agent::Claude, Agent::Codex] {
+            let copy_path = agent.install_path(&repo_root);
+            // Dev-only guard: a packaged/standalone crate won't have the
+            // repo-root copies. Skip rather than fail outside the workspace.
+            if !copy_path.exists() {
+                continue;
+            }
+            let copy = std::fs::read_to_string(&copy_path).unwrap();
+            let expected = agent
+                .template()
+                .replace("{{ISSUECTL_VERSION}}", pinned_version(&copy));
+            assert_eq!(
+                copy,
+                expected,
+                "{} has drifted from its template; run \
+                 `issuectl skill install --agent all --force` to regenerate",
+                copy_path.display()
+            );
+        }
+    }
+
     #[test]
     fn templates_differ_between_agents() {
         let claude = Agent::Claude.template();
