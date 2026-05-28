@@ -36,6 +36,13 @@ pub struct Frontmatter {
     /// version, and a writer that doesn't touch it could silently
     /// overwrite a concurrent edit. BTreeMap keeps the projection
     /// stable across processes.
+    ///
+    /// WARNING: `context.rs::read_blocked_by` reads `blocked_by` out of
+    /// the `Issue.extra` map that this field feeds. Promoting
+    /// `blocked_by` to a typed field above would make serde consume it
+    /// here before `extra` is built, silently dropping it from the
+    /// context bundle. If you add it, update `read_blocked_by` to read
+    /// the typed field instead.
     #[serde(flatten)]
     pub unknown: BTreeMap<String, serde_yaml::Value>,
 }

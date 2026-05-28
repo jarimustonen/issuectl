@@ -218,8 +218,10 @@ fn normalise_ref(raw: &str) -> Option<String> {
     }
 }
 
-fn related_slugs(issue: &Issue) -> Vec<String> {
-    let raw = issue.related.clone().unwrap_or_default();
+/// Normalise, deduplicate and sort a list of raw cross-reference
+/// strings. Shared by `related` and `blocked_by` so the two cannot
+/// drift apart on `@`-sigil handling, slug validation, or ordering.
+fn normalise_refs<I: IntoIterator<Item = String>>(raw: I) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for r in raw {
@@ -233,13 +235,23 @@ fn related_slugs(issue: &Issue) -> Vec<String> {
     out
 }
 
+fn related_slugs(issue: &Issue) -> Vec<String> {
+    normalise_refs(issue.related.clone().unwrap_or_default())
+}
+
 /// `blocked_by` is not part of the typed `Frontmatter` struct (it's a
 /// schema-extensible custom field), so it arrives via `Issue.extra`,
 /// which the parser populates from the same single read that produced
 /// the rest of the issue. Reading it here — rather than re-opening
-/// `item.md` — keeps the bundle a consistent snapshot and closes the
-/// TOCTOU window against concurrent edits. Accepts a list of strings or
-/// a single string; any other shape yields no blockers.
+/// `item.md` — closes the TOCTOU window between that load and a second
+/// read, so `blocked_by` reflects the same on-disk state as the rest of
+/// the issue. Accepts a list of strings or a single string; any other
+/// shape yields no blockers.
+///
+/// NOTE: this deliberately depends on `blocked_by` staying *out* of the
+/// typed `parser::Frontmatter`. If it is ever promoted to a typed field,
+/// serde will consume it before `unknown`/`extra` is built and it will
+/// silently vanish here — see the matching warning in `parser.rs`.
 fn read_blocked_by(issue: &Issue) -> Vec<String> {
     use serde_json::Value;
     let raw: Vec<String> = match issue.extra.get("blocked_by") {
@@ -250,17 +262,7 @@ fn read_blocked_by(issue: &Issue) -> Vec<String> {
         Some(Value::String(s)) => vec![s.clone()],
         _ => Vec::new(),
     };
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for r in raw {
-        if let Some(s) = normalise_ref(&r) {
-            if seen.insert(s.clone()) {
-                out.push(s);
-            }
-        }
-    }
-    out.sort();
-    out
+    normalise_refs(raw)
 }
 
 fn resolve_refs(slugs: &[String], all: &[Issue]) -> Vec<RelatedRef> {
@@ -744,6 +746,42 @@ mod tests {
         let b = build(tmp.path(), "amber-loud-fox").unwrap();
         assert_eq!(b.issue.blocked_by, vec!["blocker-quiet-newt".to_string()]);
         assert_eq!(b.blocking_issues.len(), 1);
+    }
+
+    #[test]
+    fn build_filters_dedupes_and_sorts_blocked_by() {
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            // Mixed shapes: duplicates (with/without sigil), an invalid
+            // single-word slug, a number, and a null must all be filtered
+            // down to the two distinct valid slugs in sorted order.
+            "type: bug\nstatus: open\nblocked_by: [\"@zeta-quiet-newt\", \"zeta-quiet-newt\", \"@alpha-bright-toad\", \"nope\", 42, null]\n",
+            "\n# x\n",
+        );
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        assert_eq!(
+            b.issue.blocked_by,
+            vec![
+                "alpha-bright-toad".to_string(),
+                "zeta-quiet-newt".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn build_treats_null_blocked_by_as_empty() {
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\nblocked_by: ~\n",
+            "\n# x\n",
+        );
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        assert!(b.issue.blocked_by.is_empty());
+        assert!(b.blocking_issues.is_empty());
     }
 
     #[test]
