@@ -1,10 +1,14 @@
 ---
 created: 2026-05-08
-updated: 2026-05-08
+updated: 2026-05-28
 type: task
-status: open
+status: done
 priority: normal
 labels: [refactor, v0.6]
+closed: 2026-05-28
+commits:
+- hash: d99a489
+  summary: route blocked_by through Issue.extra, drop redundant read in context.rs
 ---
 
 # Preserve unknown frontmatter fields on Issue (custom-field plumbing)
