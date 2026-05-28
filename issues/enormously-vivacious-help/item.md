@@ -2,8 +2,9 @@
 created: 2026-05-28
 updated: 2026-05-28
 type: improvement
-status: open
+status: done
 priority: normal
+closed: 2026-05-28
 ---
 
 # Add validation.md and breakdown.md to planning-document template
