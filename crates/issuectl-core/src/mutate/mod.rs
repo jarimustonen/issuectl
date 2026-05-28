@@ -1334,6 +1334,125 @@ pub fn close_issue(
     update_issue_under_lock(root, slug, item_path, req_normalized, hub, &schema, &rules)
 }
 
+/// Apply the *same* mutation to many issues under a single repo-wide
+/// flock. Powers `issuectl bulk`.
+///
+/// `make_req(dry_run)` must return a fresh, content-identical request
+/// each time it is called. The mutation is the same for every target,
+/// but [`UpdateIssueRequest`] is not `Clone` (it owns `Vec`s and a map)
+/// and each write consumes its own request — hence the factory rather
+/// than one shared value.
+///
+/// Semantics, in order:
+/// 1. Acquire the repo-wide write lock **once** for the whole batch.
+/// 2. Load schema + transition rules **once**.
+/// 3. Phase 1 — validate and plan every target as an in-memory dry-run.
+///    No file is written. Any validation failure aborts here with the
+///    offending slug, so a bad value on the last target writes nothing.
+/// 4. Phase 2 (skipped when `dry_run`) — write every target for real.
+///
+/// Holding one lock across both phases closes the time-of-check /
+/// time-of-use window a per-call-locking loop would open: no concurrent
+/// writer can slip between a target's validation and its write, and the
+/// whole batch is serialized against other writers. This is the "one
+/// commit" guarantee `bulk` advertises. The only residual non-atomicity
+/// is a mid-phase-2 I/O error (disk full, EIO): earlier targets are
+/// already on disk. That case returns an `Io` error naming how many
+/// landed so the caller can surface the partial set.
+pub fn bulk_update(
+    root: &Path,
+    slugs: &[String],
+    mut make_req: impl FnMut(bool) -> UpdateIssueRequest,
+    dry_run: bool,
+    hub: Option<&Arc<EventHub>>,
+    config: &dyn ConfigSource,
+) -> Result<Vec<UpdateOutcome>, MutateError> {
+    for slug in slugs {
+        if !crate::slug::is_valid(slug) {
+            return Err(MutateError::Validation(format!(
+                "invalid slug shape: {slug:?}"
+            )));
+        }
+    }
+
+    let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
+    let schema = config
+        .schema(root)
+        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let rules = load_validated_rules(root, &schema, config)?;
+
+    // Phase 1: validate + plan every target with a dry-run request, so
+    // nothing is written until all targets are known-good. Dry-run mode
+    // returns these planned outcomes directly (they carry the diff bytes).
+    let mut planned = Vec::with_capacity(slugs.len());
+    for slug in slugs {
+        let req = prepare_bulk_req(make_req(true))?;
+        let item_path = locate_for_dry_run(root, slug)?;
+        let outcome = update_issue_under_lock(root, slug, item_path, req, hub, &schema, &rules)
+            .map_err(|e| with_slug_context(slug, e))?;
+        planned.push(outcome);
+    }
+    if dry_run {
+        return Ok(planned);
+    }
+
+    // Phase 2: real writes. Every target already validated under this
+    // same lock, so only I/O failures are expected from here on.
+    let mut outcomes = Vec::with_capacity(slugs.len());
+    for (i, slug) in slugs.iter().enumerate() {
+        let req = prepare_bulk_req(make_req(false))?;
+        let item_path = locate_for_dry_run(root, slug)?;
+        match update_issue_under_lock(root, slug, item_path, req, hub, &schema, &rules) {
+            Ok(o) => outcomes.push(o),
+            Err(e) => {
+                let written = slugs[..i]
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(MutateError::Io(anyhow!(
+                    "bulk write failed on {slug} after writing {} issue(s) [{written}]: {}",
+                    i,
+                    e
+                )));
+            }
+        }
+    }
+    Ok(outcomes)
+}
+
+/// Normalize related-ref shapes and run request validation — the part
+/// of `update_issue` that runs before the lock. Shared by every
+/// `bulk_update` target so a bulk write enforces the exact same
+/// per-request contract as a single `update`.
+fn prepare_bulk_req(req: UpdateIssueRequest) -> Result<UpdateIssueRequest, MutateError> {
+    let add = crate::refs::normalize_related_refs(&req.add_related)
+        .map_err(|e| MutateError::Validation(e.to_string()))?;
+    let remove = crate::refs::normalize_related_refs(&req.remove_related)
+        .map_err(|e| MutateError::Validation(e.to_string()))?;
+    let mut req = req;
+    req.add_related = add;
+    req.remove_related = remove;
+    req.validate()?;
+    Ok(req)
+}
+
+/// Prefix a per-target error with its slug while preserving the error
+/// variant (so the server/CLI keep their status mapping). Bulk writes
+/// fail one slug at a time; naming it is the difference between an
+/// actionable error and a mystery.
+fn with_slug_context(slug: &str, e: MutateError) -> MutateError {
+    use MutateError::*;
+    match e {
+        Validation(s) => Validation(format!("{slug}: {s}")),
+        ConflictingIntent(s) => ConflictingIntent(format!("{slug}: {s}")),
+        SchemaViolation(s) => SchemaViolation(format!("{slug}: {s}")),
+        TransitionViolation(s) => TransitionViolation(format!("{slug}: {s}")),
+        NotFound => Validation(format!("{slug}: issue not found")),
+        other => other,
+    }
+}
+
 /// PUT-style replacement of an issue's body markdown. Same lock and
 /// optimistic-concurrency contract as `update_issue`, but only the body
 /// (and `updated:`) change. Status/folder are untouched, so this never

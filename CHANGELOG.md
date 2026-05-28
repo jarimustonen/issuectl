@@ -14,8 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through their typed slots, anything else is a custom field) plus
   `--add-label` / `--remove-label` / `--add-related` / `--remove-related`.
   `--dry-run` prints the affected slugs and a per-issue unified diff without
-  writing. Real runs first validate every target as a dry-run, so a bad value
-  aborts the whole batch before any file is written.
+  writing. The whole batch runs under a single repo-wide lock
+  (`mutate::bulk_update`): every target is validated before any write lands,
+  so a bad value writes nothing and no concurrent writer can race between a
+  target's validation and its write.
 
 ### Changed
 - `issuectl new --slug <existing>` now fails with an actionable error that

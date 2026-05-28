@@ -134,7 +134,42 @@ fn parse_bulk_set(s: &str) -> std::result::Result<(String, String), String> {
             "--set key {key:?} must be alphanumeric / underscore / hyphen"
         ));
     }
+    reject_unroutable_reserved_key("--set", key)?;
     Ok((key.to_string(), value.to_string()))
+}
+
+/// Built-in single-value fields `bulk` routes through their typed slots
+/// (so `--set status=done` gets closed-date handling, etc.). Any other
+/// key is treated as a custom field.
+fn is_bulk_routable_builtin(key: &str) -> bool {
+    matches!(
+        key,
+        "status" | "type" | "priority" | "assignee" | "owner" | "epic"
+    )
+}
+
+/// Reject reserved keys that `bulk --set`/`--clear` can't route, with a
+/// hint pointing at the right flag. Routable built-ins (status, type,
+/// priority, assignee, owner, epic) pass through; list-shaped built-ins
+/// (`labels`/`related`) and auto-managed keys (`title`, `commits`,
+/// dates, ...) are rejected here rather than silently landing in the
+/// custom-field slot and erroring late with a vaguer message.
+fn reject_unroutable_reserved_key(flag: &str, key: &str) -> std::result::Result<String, String> {
+    if is_bulk_routable_builtin(key) {
+        return Ok(key.to_string());
+    }
+    match key {
+        "labels" => Err(format!(
+            "{flag} {key:?} is built-in: use bulk --add-label / --remove-label"
+        )),
+        "related" => Err(format!(
+            "{flag} {key:?} is built-in: use bulk --add-related / --remove-related"
+        )),
+        other => match mutate::reserved_custom_field_hint(other) {
+            Some(hint) => Err(format!("{flag} {key:?} is built-in: {hint}")),
+            None => Ok(key.to_string()),
+        },
+    }
 }
 
 /// Clap value parser for `bulk --clear <key>`. Bare-key counterpart of
@@ -154,6 +189,7 @@ fn parse_bulk_clear_key(s: &str) -> std::result::Result<String, String> {
             "--clear key {s:?} must be alphanumeric / underscore / hyphen"
         ));
     }
+    reject_unroutable_reserved_key("--clear", s)?;
     Ok(s.to_string())
 }
 
@@ -2095,9 +2131,10 @@ fn route_bulk_field(req: &mut mutate::UpdateIssueRequest, key: &str, patch: muta
     }
 }
 
-/// Build a fresh request for one target. Called once per matched issue
-/// because `UpdateIssueRequest` is not `Clone` and each write consumes
-/// its own request.
+/// Build a fresh request from the spec. `mutate::bulk_update` calls this
+/// factory once per target per phase (validate, then write) because
+/// `UpdateIssueRequest` is not `Clone` and each write consumes its own
+/// request; the mutation content is identical every time.
 fn build_bulk_request(spec: &BulkSpec, dry_run: bool) -> mutate::UpdateIssueRequest {
     use mutate::Patch;
     let mut req = mutate::UpdateIssueRequest {
@@ -2143,55 +2180,52 @@ fn validate_bulk_spec(spec: &BulkSpec) -> Result<()> {
     Ok(())
 }
 
-/// Apply `spec` to every issue matching `q`. For real writes a dry-run
-/// pre-flight pass runs first: every target is validated before any file
-/// is touched, so a validation error on issue N doesn't leave issues
-/// 1..N-1 already rewritten. This is the "one commit" intent — all
-/// targets succeed or none are written. There is still a small TOCTOU
-/// window between the two passes (a concurrent writer could change a
-/// target's state); the repo-wide flock makes each individual write
-/// safe, but bulk is not a single cross-issue transaction.
+/// Apply `spec` to every issue matching `q`, as one batch under a single
+/// repo-wide flock (see [`mutate::bulk_update`]). Every target is
+/// validated before any write lands, so a bad value writes nothing, and
+/// there is no concurrent-writer race between validation and write.
 pub(crate) fn bulk_apply(
     root: &Path,
     q: &query::Query,
     spec: &BulkSpec,
     dry_run: bool,
 ) -> Result<Vec<BulkResult>> {
-    let matched: Vec<_> = repo::load_issues(root)
+    let slugs: Vec<String> = repo::load_issues(root)
         .into_iter()
         .filter(|i| query::matches(q, i))
+        .map(|i| i.slug)
         .collect();
-    if matched.is_empty() {
+    if slugs.is_empty() {
         return Ok(Vec::new());
     }
 
-    if !dry_run {
-        for i in &matched {
-            let req = build_bulk_request(spec, true);
-            mutate::update_issue(root, &i.slug, req, None, &UncachedConfig)
-                .map_err(|e| anyhow::anyhow!("{}: {e}", i.slug))?;
-        }
-    }
+    let outcomes = mutate::bulk_update(
+        root,
+        &slugs,
+        |dr| build_bulk_request(spec, dr),
+        dry_run,
+        None,
+        &UncachedConfig,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let mut results = Vec::with_capacity(matched.len());
-    for i in &matched {
-        let req = build_bulk_request(spec, dry_run);
-        let outcome = mutate::update_issue(root, &i.slug, req, None, &UncachedConfig)
-            .map_err(|e| anyhow::anyhow!("{}: {e}", i.slug))?;
-        let diff = if dry_run {
-            let before = outcome.before_serialized.as_deref().unwrap_or("");
-            let after = outcome.pending_serialized.as_deref().unwrap_or(before);
-            Some(render_unified_diff(before, after, &outcome.issue_dir))
-        } else {
-            None
-        };
-        results.push(BulkResult {
-            slug: i.slug.clone(),
-            version: outcome.version,
-            final_dir: outcome.issue_dir,
-            diff,
-        });
-    }
+    let results = slugs
+        .into_iter()
+        .zip(outcomes)
+        .map(|(slug, outcome)| {
+            let diff = dry_run.then(|| {
+                let before = outcome.before_serialized.as_deref().unwrap_or("");
+                let after = outcome.pending_serialized.as_deref().unwrap_or(before);
+                render_unified_diff(before, after, &outcome.issue_dir)
+            });
+            BulkResult {
+                slug,
+                version: outcome.version,
+                final_dir: outcome.issue_dir,
+                diff,
+            }
+        })
+        .collect();
     Ok(results)
 }
 
@@ -3169,6 +3203,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_bulk_set_rejects_unroutable_built_ins_with_hint() {
+        // List-shaped and auto-managed built-ins can't go through --set;
+        // the error points at the right flag instead of landing in the
+        // custom-field slot and erroring late.
+        let err = parse_bulk_set("labels=foo").unwrap_err();
+        assert!(err.contains("--add-label"), "got {err:?}");
+        let err = parse_bulk_set("related=foo").unwrap_err();
+        assert!(err.contains("--add-related"), "got {err:?}");
+        for k in ["title", "slug", "commits", "closed", "created"] {
+            assert!(
+                parse_bulk_set(&format!("{k}=foo")).is_err(),
+                "{k} must be rejected"
+            );
+        }
+        // Routable built-ins and genuine custom fields still pass.
+        assert!(parse_bulk_set("priority=high").is_ok());
+        assert!(parse_bulk_set("team=payments").is_ok());
+    }
+
+    #[test]
+    fn parse_bulk_clear_rejects_unroutable_built_ins() {
+        assert!(parse_bulk_clear_key("labels").is_err());
+        assert!(parse_bulk_clear_key("title").is_err());
+        assert!(parse_bulk_clear_key("epic").is_ok());
+        assert!(parse_bulk_clear_key("team").is_ok());
+    }
+
+    #[test]
     fn validate_bulk_spec_rejects_empty_and_dups() {
         assert!(validate_bulk_spec(&BulkSpec::default()).is_err());
         let dup_set = BulkSpec {
@@ -3274,6 +3336,34 @@ mod tests {
         // Nothing written: on-disk priority is unchanged.
         let issues = repo::load_issues(tmp.path());
         assert_eq!(issues[0].priority, "normal");
+    }
+
+    #[test]
+    fn bulk_dry_run_status_change_writes_nothing_but_shows_diff() {
+        // Flat layout: the directory is `issues/<slug>/` regardless of
+        // status, so a status change shows up in the diff (frontmatter +
+        // a stamped `closed:`), not as a directory move. Dry-run must
+        // write nothing.
+        let tmp = fresh_repo();
+        write_raw_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: normal\nassignee: alice\n",
+            "# One\n",
+        );
+        let q = query::parse("status:open").unwrap();
+        let spec = bulk_spec(&[("status", "done")], &[]);
+        let results = bulk_apply(tmp.path(), &q, &spec, true).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0]
+            .final_dir
+            .to_string_lossy()
+            .ends_with("issues/amber-loud-fox"));
+        let diff = results[0].diff.as_deref().unwrap();
+        assert!(diff.contains("status: done"), "diff: {diff}");
+        assert!(diff.contains("closed:"), "diff should stamp closed: {diff}");
+        // Still a dry run: on-disk status is unchanged.
+        assert_eq!(status_of(tmp.path(), "amber-loud-fox"), "open");
     }
 
     #[test]
