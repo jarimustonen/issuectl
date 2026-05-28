@@ -1546,12 +1546,15 @@ fn cmd_show(json: bool, slug: &str) -> Result<()> {
 /// an interactive editor, so spawning one would only hang them.
 fn cmd_open(json: bool, slug: &str, dir: bool, editor: Option<String>) -> Result<()> {
     let root = find_root();
+    // `locate_issue` returns (folder, item.md path) where `folder` is a
+    // bare name like "open"/"closed", not a path — so the issue
+    // directory is the parent of item.md.
     let (_, item_md) = locate_issue(&root, slug)?;
     let target = if dir {
         item_md
             .parent()
             .map(Path::to_path_buf)
-            .unwrap_or(item_md)
+            .ok_or_else(|| anyhow::anyhow!("cannot determine issue directory for {slug}"))?
     } else {
         item_md
     };
@@ -1575,17 +1578,23 @@ fn cmd_open(json: bool, slug: &str, dir: bool, editor: Option<String>) -> Result
             )
         })?;
 
-    let mut parts = editor.split_whitespace();
-    let program = parts
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("editor command is empty"))?;
-    let status = std::process::Command::new(program)
-        .args(parts)
+    // Hand the editor string to `sh -c` so shell quoting works the way
+    // it does for git's `GIT_EDITOR` — `--editor "code -w"` or an editor
+    // path containing spaces (quoted by the user) both behave correctly,
+    // rather than the naive whitespace split that mangles them. The
+    // target path is passed as a positional arg, not interpolated, so a
+    // path with spaces or shell metacharacters is never re-parsed.
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$@\""))
+        .arg("sh")
         .arg(&target)
         .status()
         .with_context(|| format!("failed to launch editor {editor:?}"))?;
     if !status.success() {
-        bail!("editor {editor:?} exited with {status}");
+        // Propagate the editor's own exit code so callers can tell, e.g.,
+        // a vim `:cq` abort from a crash.
+        std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
 }
@@ -2014,12 +2023,13 @@ fn parse_commit_spec(spec: &str) -> Result<(String, String)> {
     Ok((hash.to_string(), summary.to_string()))
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Resolve the note text from exactly one of: a positional `message`,
 /// `--stdin`, or `--from-file PATH`. clap's `conflicts_with` guards
 /// against more than one being set; this enforces that at least one is
 /// present and that the resulting text is non-empty (a blank note is a
-/// no-op that would only clutter the issue body).
+/// no-op that would only clutter the issue body). Returns the text with
+/// surrounding whitespace trimmed so a stray trailing newline (e.g. from
+/// `echo … | issuectl note --stdin`) doesn't bloat the issue body.
 fn read_message_arg(
     message: Option<String>,
     stdin: bool,
@@ -2031,7 +2041,10 @@ fn read_message_arg(
         fs::read_to_string(&path)
             .with_context(|| format!("cannot read note from {}", path.display()))?
     } else if stdin {
-        use std::io::Read;
+        use std::io::{IsTerminal, Read};
+        if std::io::stdin().is_terminal() {
+            bail!("--stdin given but stdin is a terminal; pipe the note text in or use --from-file");
+        }
         let mut buf = String::new();
         std::io::stdin()
             .read_to_string(&mut buf)
@@ -2040,10 +2053,11 @@ fn read_message_arg(
     } else {
         bail!("provide the note text as an argument, or use --stdin / --from-file PATH");
     };
-    if text.trim().is_empty() {
+    let text = text.trim();
+    if text.is_empty() {
         bail!("note text is empty");
     }
-    Ok(text)
+    Ok(text.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3572,7 +3586,7 @@ mod tests {
         let path = tmp.path().join("note.md");
         fs::write(&path, "from a file\n").unwrap();
         let got = read_message_arg(None, false, Some(path)).unwrap();
-        assert_eq!(got, "from a file\n");
+        assert_eq!(got, "from a file");
     }
 
     #[test]
