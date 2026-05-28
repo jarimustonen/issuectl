@@ -93,6 +93,12 @@ Use the CLI rather than greppa hakemistoa. The CLI knows the frontmatter schema.
 - Search (same query syntax; bareword shorthand): `issuectl --json search KEYWORD [--all]`
   - Also: `issuectl --json search "deadlock text:flock"`
 - Stats: `issuectl --json stats`
+- Find likely duplicates (local heuristics — title/label/body-token overlap, no remote AI):
+  - All open pairs: `issuectl --json duplicates` (alias `dups`)
+  - Against one issue: `issuectl --json duplicates <slug>`
+  - `--threshold 0.0..1.0` tunes sensitivity (default `0.30`); `--all` includes closed.
+  - JSON (all-pairs): `[{a_slug,a_title,b_slug,b_title,score,title_overlap,body_overlap,label_overlap}]`, highest score first.
+  - JSON (single `<slug>`): `[{slug,title,score,title_overlap,body_overlap,label_overlap}]`.
 
 **Default scope**: `ls` (without a positional query) and `search` cover open
 issues only. Add `--all` when the user asks for "all issues", "closed
@@ -340,7 +346,7 @@ The CLI:
 - Writes `issues/open/<slug>/item.md` with the right frontmatter
 - Returns the slug and path in `--json` (parse `.slug`)
 
-Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slug>"` (repeatable), `--field key=value` (repeatable; for custom frontmatter fields declared in `issues/.schema.yaml`, e.g. `--field team=payments`).
+Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slug>"` (repeatable), `--field key=value` (repeatable; for custom frontmatter fields declared in `issues/.schema.yaml`, e.g. `--field team=payments`), `--check-duplicates` (refuse to create and exit non-zero — printing a JSON `{error:"duplicate-precheck",matches:[...]}` on stderr — when a strong duplicate already exists; re-run without the flag to create anyway).
 
 #### 3. Flesh out the body
 
