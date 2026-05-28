@@ -4,8 +4,9 @@ updated: 2026-05-28
 type: improvement
 reporter: jari
 assignee: jari
-status: open
+status: done
 priority: normal
+closed: 2026-05-28
 ---
 
 # Prefer descriptive title-derived slugs on issue creation
