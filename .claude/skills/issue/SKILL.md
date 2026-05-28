@@ -299,10 +299,20 @@ suggest creating an epic instead.
 
 #### 2. Create with the CLI
 
+**Prefer a descriptive slug.** Derive a short, human-readable 2-3 word
+kebab-case slug from the title and pass it via `--slug` (e.g. "Login
+redirect loops on safari" → `--slug login-redirect-loops`). Pick the words
+that make the issue recognizable at a glance; drop filler. When no obvious
+short slug exists (vague title, mostly stopwords), **omit `--slug`** and let
+the CLI generate a random `intensifier-adjective-noun` slug. If `--slug`
+collides with an existing issue, the CLI errors — retry with a different
+descriptive slug or omit it for a random one.
+
 ```
 issuectl --json new \
     --type bug \
     --title "Login redirect loops on safari" \
+    --slug login-redirect-loops \
     --reporter alice \
     --assignee bob \
     --priority normal \
@@ -326,10 +336,10 @@ Output shape:
 ```
 
 The CLI:
-- Generates a random `intensifier-adjective-noun` slug automatically
+- Uses `--slug <kebab>` when given (validated: ≥2 lowercase ASCII kebab segments)
+- Falls back to a random `intensifier-adjective-noun` slug when `--slug` is omitted
 - Writes `issues/open/<slug>/item.md` with the right frontmatter
 - Returns the slug and path in `--json` (parse `.slug`)
-- Optionally accepts `--slug <kebab>` to override the auto-generated value
 
 Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slug>"` (repeatable), `--field key=value` (repeatable; for custom frontmatter fields declared in `issues/.schema.yaml`, e.g. `--field team=payments`).
 
@@ -427,7 +437,7 @@ On `--fix`, the JSON envelope carries an `apply_outcome` object with a
 
 - **Today's date** is set automatically by the CLI for `created`/`updated`
 - Write issue content in English; Finnish text is fine in the body
-- Slugs are random `intensifier-adjective-noun`; override via `--slug` only when there's a strong reason
+- Prefer a descriptive 2-3 word `--slug` derived from the title (see Create → step 2); fall back to the random `intensifier-adjective-noun` slug only when no obvious short slug exists
 - Default priority is `normal`; default status is `open`
 - There is no default type — always pass `--type`
 - All images must be AVIF — convert PNG/JPG/WebP first

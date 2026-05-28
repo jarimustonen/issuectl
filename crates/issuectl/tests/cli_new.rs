@@ -149,7 +149,8 @@ fn new_conflict_slug_already_taken_fails() {
         ],
     );
     let expected = format!(
-        "Error: target directory already exists: {}\n",
+        "Error: slug \"taken-slug\" already exists at {}; retry with a different --slug \
+         or omit --slug to get a random auto-generated one\n",
         taken.display()
     );
     assert_failure(&out, &expected);

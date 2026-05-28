@@ -251,7 +251,9 @@ pub(crate) fn do_new_locked(
                 Ok(()) => (normalized, dir),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     return Err(DoNewError::Conflict(format!(
-                        "target directory already exists: {}",
+                        "slug {:?} already exists at {}; retry with a different --slug \
+                         or omit --slug to get a random auto-generated one",
+                        normalized,
                         dir.display()
                     )));
                 }
@@ -533,8 +535,13 @@ mod tests {
                 "--owner is only valid with --type epic",
             ),
             (
-                DoNewError::Conflict("target directory already exists: /x".into()),
-                "target directory already exists: /x",
+                DoNewError::Conflict(
+                    "slug \"foo\" already exists at /x; retry with a different --slug \
+                     or omit --slug to get a random auto-generated one"
+                        .into(),
+                ),
+                "slug \"foo\" already exists at /x; retry with a different --slug \
+                 or omit --slug to get a random auto-generated one",
             ),
             (
                 DoNewError::SchemaViolation("missing required field \"team\"".into()),

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `issuectl new --slug <existing>` now fails with an actionable error that
+  names the colliding slug and path and suggests retrying with a different
+  `--slug` or omitting it for a random auto-generated one (was a terse
+  `target directory already exists: <path>`).
+- `/issue` skill now derives a descriptive 2-3 word `--slug` from the issue
+  title on create, falling back to the random `intensifier-adjective-noun`
+  slug only when no obvious short slug exists. The CLI default (random slug
+  when `--slug` is omitted) is unchanged.
+
 ## [0.5.2] - 2026-05-13
 
 Bug-fix and quality-of-life release driven by the 3DBear monorepo
