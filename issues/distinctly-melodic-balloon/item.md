@@ -1,13 +1,14 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-28
 type: feature
-status: open
+status: done
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
 labels: [maintenance, v0.6.0-candidate]
+closed: 2026-05-28
 ---
 
 # Duplicate detection (heuristic, local-only)
