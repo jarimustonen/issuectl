@@ -9,8 +9,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::repo_config::UncachedConfig;
 use issuectl_core::{
-    agents, body_sections, canonical, context, docs, doctor, fmt, hooks, init as init_cmd,
-    merge_driver, models, mutate, query, repo, server, skill, slug, sync_commits,
+    agents, body_sections, canonical, context, docs, doctor, duplicates, fmt, hooks,
+    init as init_cmd, merge_driver, models, mutate, query, repo, server, skill, slug, sync_commits,
 };
 
 const TOP_LEVEL_HELP: &str = "\
@@ -21,6 +21,7 @@ Examples:
   issuectl show extremely-quiet-otter          Full details by slug
   issuectl open extremely-quiet-otter          Edit item.md in $EDITOR
   issuectl search redirect                 Keyword search
+  issuectl duplicates                      Flag likely-duplicate issue pairs
   issuectl new --type bug --title \"...\"    Create a new issue (random slug)
   issuectl update <slug> --status testing  Change status
   issuectl close <slug> --status fixed     Set a closing status (fixed/done/...)
@@ -70,6 +71,16 @@ fn parse_non_empty(s: &str) -> std::result::Result<String, String> {
     } else {
         Ok(s.to_string())
     }
+}
+
+fn parse_threshold(s: &str) -> std::result::Result<f64, String> {
+    let v: f64 = s
+        .parse()
+        .map_err(|_| format!("threshold must be a number, got {s:?}"))?;
+    if !(0.0..=1.0).contains(&v) {
+        return Err(format!("threshold must be between 0.0 and 1.0, got {v}"));
+    }
+    Ok(v)
 }
 
 fn parse_custom_field(s: &str) -> std::result::Result<(String, String), String> {
@@ -297,6 +308,25 @@ enum Command {
     /// Show summary statistics
     Stats,
 
+    /// Flag likely-duplicate issues using local heuristics (title,
+    /// label, and body-token overlap — no remote AI). With a SLUG,
+    /// reports issues similar to that one; without, scans all pairs.
+    #[command(alias = "dups")]
+    Duplicates {
+        /// Score candidates against this issue only. Omit to scan every
+        /// pair of issues.
+        #[arg(value_parser = parse_slug_arg)]
+        slug: Option<String>,
+
+        /// Minimum similarity score to report, 0.0–1.0 (default 0.30).
+        #[arg(long, value_parser = parse_threshold)]
+        threshold: Option<f64>,
+
+        /// Include closed issues in the candidate pool (default: open only).
+        #[arg(long)]
+        all: bool,
+    },
+
     /// Create a new issue or epic (random slug auto-generated)
     New {
         /// Item type
@@ -353,6 +383,13 @@ enum Command {
         /// their dedicated flags (`--type`, `--priority`, ...).
         #[arg(long = "field", value_parser = parse_custom_field)]
         custom_fields: Vec<(String, String)>,
+
+        /// Before creating, scan existing issues for a strong duplicate
+        /// (same heuristics as `duplicates`). If one is found, abort
+        /// without creating and print the matches; re-run without this
+        /// flag to create anyway.
+        #[arg(long = "check-duplicates")]
+        check_duplicates: bool,
     },
 
     /// Update fields of an existing issue or epic
@@ -1020,6 +1057,11 @@ fn main() -> Result<()> {
         } => cmd_open(json_output, &slug, dir, editor),
         Command::Search { query, all } => cmd_search(json_output, &query, all),
         Command::Stats => cmd_stats(json_output),
+        Command::Duplicates {
+            slug,
+            threshold,
+            all,
+        } => cmd_duplicates(json_output, slug.as_deref(), threshold, all),
         Command::New {
             issue_type,
             title,
@@ -1034,6 +1076,7 @@ fn main() -> Result<()> {
             source,
             description,
             custom_fields,
+            check_duplicates,
         } => cmd_new(
             json_output,
             NewArgs {
@@ -1051,6 +1094,7 @@ fn main() -> Result<()> {
                 description,
                 custom_fields,
             },
+            check_duplicates,
         ),
         Command::Update {
             slug,
@@ -1679,10 +1723,175 @@ fn cmd_stats(json: bool) -> Result<()> {
     Ok(())
 }
 
+fn cmd_duplicates(
+    json: bool,
+    slug: Option<&str>,
+    threshold: Option<f64>,
+    all: bool,
+) -> Result<()> {
+    let threshold = threshold.unwrap_or(duplicates::DEFAULT_THRESHOLD);
+    let issues = load();
+
+    match slug {
+        Some(slug) => {
+            let target = match issues.iter().find(|i| i.slug == slug) {
+                Some(t) => t,
+                None => {
+                    eprintln!("Error: issue {slug} not found");
+                    std::process::exit(1);
+                }
+            };
+            // The target is always a valid candidate scope; `--all`
+            // only controls whether *closed* issues are compared
+            // against it.
+            let pool = issues
+                .iter()
+                .filter(|c| all || c.folder == "open" || c.slug == slug);
+            let matches = duplicates::find_duplicates(target, pool, threshold);
+
+            if json {
+                let out: Vec<_> = matches
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "slug": m.slug,
+                            "title": m.title,
+                            "score": m.score,
+                            "title_overlap": m.title_overlap,
+                            "body_overlap": m.body_overlap,
+                            "label_overlap": m.label_overlap,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else if matches.is_empty() {
+                println!("No likely duplicates of {slug} (threshold {threshold:.2}).");
+            } else {
+                println!("Likely duplicates of {slug} (threshold {threshold:.2}):");
+                for m in &matches {
+                    println!("  {:.2}  {}  {}", m.score, m.slug, m.title);
+                }
+            }
+        }
+        None => {
+            let pool: Vec<_> = if all {
+                issues
+            } else {
+                issues.into_iter().filter(|i| i.folder == "open").collect()
+            };
+            let pairs = duplicates::find_all_pairs(&pool, threshold);
+
+            if json {
+                let out: Vec<_> = pairs
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "a_slug": p.a_slug,
+                            "a_title": p.a_title,
+                            "b_slug": p.b_slug,
+                            "b_title": p.b_title,
+                            "score": p.score,
+                            "title_overlap": p.title_overlap,
+                            "body_overlap": p.body_overlap,
+                            "label_overlap": p.label_overlap,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else if pairs.is_empty() {
+                println!("No likely duplicate pairs (threshold {threshold:.2}).");
+            } else {
+                println!("Likely duplicate pairs (threshold {threshold:.2}):");
+                for p in &pairs {
+                    println!(
+                        "  {:.2}  {} <-> {}\n        {}\n        {}",
+                        p.score, p.a_slug, p.b_slug, p.a_title, p.b_title
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 use mutate::new_issue::{do_new, NewArgs};
 
-fn cmd_new(json: bool, args: NewArgs) -> Result<()> {
+/// Pre-creation duplicate check for `new --check-duplicates`. Builds a
+/// synthetic issue from the prospective fields, scores it against the
+/// existing open issues, and prints any strong matches. Returns `true`
+/// when at least one strong match was found (the caller then refuses to
+/// create).
+fn duplicate_precheck(json: bool, args: &NewArgs) -> bool {
+    let candidate = models::Issue {
+        slug: String::new(),
+        folder: "open".to_string(),
+        created: None,
+        status: "open".to_string(),
+        updated: None,
+        priority: args.priority.clone(),
+        issue_type: args.issue_type.clone(),
+        reporter: None,
+        assignee: None,
+        owner: None,
+        epic: None,
+        related: None,
+        labels: if args.labels.is_empty() {
+            None
+        } else {
+            Some(args.labels.clone())
+        },
+        closed: None,
+        commits: None,
+        title: args.title.clone(),
+        body: args.description.clone().unwrap_or_default(),
+        extra: BTreeMap::new(),
+    };
+
+    let existing = load();
+    let open = existing.iter().filter(|i| i.folder == "open");
+    let matches = duplicates::find_duplicates(&candidate, open, duplicates::STRONG_THRESHOLD);
+
+    if matches.is_empty() {
+        return false;
+    }
+
+    if json {
+        let out: Vec<_> = matches
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "slug": m.slug,
+                    "title": m.title,
+                    "score": m.score,
+                })
+            })
+            .collect();
+        let report = serde_json::json!({
+            "error": "duplicate-precheck",
+            "message": "strong duplicate(s) found; not created (re-run without --check-duplicates to create anyway)",
+            "matches": out,
+        });
+        eprintln!(
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap_or_default()
+        );
+    } else {
+        eprintln!("Refusing to create: strong duplicate(s) found:");
+        for m in &matches {
+            eprintln!("  {:.2}  {}  {}", m.score, m.slug, m.title);
+        }
+        eprintln!("Re-run without --check-duplicates to create anyway.");
+    }
+    true
+}
+
+fn cmd_new(json: bool, args: NewArgs, check_duplicates: bool) -> Result<()> {
     let root = find_root();
+    if check_duplicates && duplicate_precheck(json, &args) {
+        // A strong match was found and printed; refuse to create.
+        std::process::exit(2);
+    }
     let out = do_new(&root, args, &UncachedConfig)?;
     if json {
         let report = serde_json::json!({
