@@ -96,6 +96,11 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
   (see its `lib.rs` doc comment) — `pub` items there are *not* a
   semver contract. The semver contract lives in the `issuectl`
   binary's CLI surface.
+- **Descriptive slugs are derived in the `/issue` skill; the CLI
+  default is random.** `issuectl new` emits a random
+  `intensifier-adjective-noun` slug when `--slug` is omitted. The
+  `--slug` collision error lives only in the explicit-`--slug` arm of
+  `do_new`; the random path retries internally in `claim_random_slug`.
 - **Doctor `--fix` is forward-progress only.** When the apply
   pipeline mutates the repo (flat-layout migration, status
   reconciliation, notes rename, ...) and a *later* phase finds a new
