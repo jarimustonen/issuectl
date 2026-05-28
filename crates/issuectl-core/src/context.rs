@@ -131,7 +131,7 @@ pub fn build(root: &Path, slug: &str) -> Result<Bundle> {
         .with_context(|| format!("issue {slug} not found"))?
         .clone();
 
-    let blocked_by = read_blocked_by(root, slug)?;
+    let blocked_by = read_blocked_by(&issue);
     let related_slugs = related_slugs(&issue);
     let related_issues = resolve_refs(&related_slugs, &all);
     let blocking_issues = resolve_refs(&blocked_by, &all);
@@ -234,28 +234,20 @@ fn related_slugs(issue: &Issue) -> Vec<String> {
 }
 
 /// `blocked_by` is not part of the typed `Frontmatter` struct (it's a
-/// schema-extensible custom field), so we re-read the YAML mapping to
-/// pull it out. Accepts a list of strings or a single string.
-fn read_blocked_by(root: &Path, slug: &str) -> Result<Vec<String>> {
-    let located = repo::locate_issue_full(root, slug)?;
-    let text = fs::read_to_string(&located.item_path)
-        .with_context(|| format!("cannot read {}", located.item_path.display()))?;
-    let (fm, _body) = crate::parser::split_frontmatter(&text);
-    let Some(yaml_text) = fm else {
-        return Ok(Vec::new());
-    };
-    let Ok(map) = serde_yaml::from_str::<serde_yaml::Mapping>(yaml_text) else {
-        return Ok(Vec::new());
-    };
-    let Some(v) = map.get(serde_yaml::Value::String("blocked_by".into())) else {
-        return Ok(Vec::new());
-    };
-    let raw: Vec<String> = match v {
-        serde_yaml::Value::Sequence(seq) => seq
+/// schema-extensible custom field), so it arrives via `Issue.extra`,
+/// which the parser populates from the same single read that produced
+/// the rest of the issue. Reading it here — rather than re-opening
+/// `item.md` — keeps the bundle a consistent snapshot and closes the
+/// TOCTOU window against concurrent edits. Accepts a list of strings or
+/// a single string; any other shape yields no blockers.
+fn read_blocked_by(issue: &Issue) -> Vec<String> {
+    use serde_json::Value;
+    let raw: Vec<String> = match issue.extra.get("blocked_by") {
+        Some(Value::Array(seq)) => seq
             .iter()
             .filter_map(|x| x.as_str().map(|s| s.to_string()))
             .collect(),
-        serde_yaml::Value::String(s) => vec![s.clone()],
+        Some(Value::String(s)) => vec![s.clone()],
         _ => Vec::new(),
     };
     let mut seen = BTreeSet::new();
@@ -268,7 +260,7 @@ fn read_blocked_by(root: &Path, slug: &str) -> Result<Vec<String>> {
         }
     }
     out.sort();
-    Ok(out)
+    out
 }
 
 fn resolve_refs(slugs: &[String], all: &[Issue]) -> Vec<RelatedRef> {
@@ -732,6 +724,26 @@ mod tests {
         assert_eq!(b.issue.blocked_by, vec!["blocker-quiet-newt".to_string()]);
         assert_eq!(b.blocking_issues.len(), 1);
         assert_eq!(b.blocking_issues[0].title.as_deref(), Some("Blocker"));
+    }
+
+    #[test]
+    fn build_accepts_blocked_by_as_single_string() {
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "blocker-quiet-newt",
+            "type: task\nstatus: open\n",
+            "\n# Blocker\n",
+        );
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\nblocked_by: \"@blocker-quiet-newt\"\n",
+            "\n# x\n",
+        );
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        assert_eq!(b.issue.blocked_by, vec!["blocker-quiet-newt".to_string()]);
+        assert_eq!(b.blocking_issues.len(), 1);
     }
 
     #[test]
