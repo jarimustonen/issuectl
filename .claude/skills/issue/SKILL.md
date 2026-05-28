@@ -303,8 +303,11 @@ suggest creating an epic instead.
 kebab-case slug from the title and pass it via `--slug` (e.g. "Login
 redirect loops on safari" → `--slug login-redirect-loops`). Pick the words
 that make the issue recognizable at a glance; drop filler. When no obvious
-short slug exists (vague title, mostly stopwords), **omit `--slug`** and let
-the CLI generate a random `intensifier-adjective-noun` slug. If `--slug`
+short slug exists (vague title, mostly stopwords, or fewer than two
+meaningful words remain), **omit `--slug`** and let the CLI generate a
+random `intensifier-adjective-noun` slug. Never put sensitive data
+(customer names, emails, secrets) in the slug — it lands in the directory
+name and git history; omit `--slug` for a random one instead. If `--slug`
 collides with an existing issue, the CLI errors — retry with a different
 descriptive slug or omit it for a random one.
 
