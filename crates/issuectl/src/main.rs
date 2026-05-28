@@ -1864,6 +1864,9 @@ fn duplicate_precheck(json: bool, args: &NewArgs) -> bool {
                     "slug": m.slug,
                     "title": m.title,
                     "score": m.score,
+                    "title_overlap": m.title_overlap,
+                    "body_overlap": m.body_overlap,
+                    "label_overlap": m.label_overlap,
                 })
             })
             .collect();

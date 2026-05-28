@@ -39,13 +39,19 @@ pub const DEFAULT_THRESHOLD: f64 = 0.30;
 pub const STRONG_THRESHOLD: f64 = 0.50;
 
 /// Tokens shorter than this are dropped before scoring — single letters
-/// and most two-letter words are noise that inflates overlap.
-const MIN_TOKEN_LEN: usize = 3;
+/// are noise. Two-letter tokens are kept: software issues lean on
+/// acronyms (`ui`, `ux`, `db`, `ci`, `qa`, `pr`, `os`, `s3`) that carry
+/// real signal, so common two-letter function words are stop-listed
+/// individually instead.
+const MIN_TOKEN_LEN: usize = 2;
 
 /// A small, deliberately conservative English stop-word set. Kept short
 /// on purpose: aggressive stop-listing risks discarding the very domain
 /// words ("the login the user the redirect") that distinguish issues.
+/// Two-letter function words are listed here (rather than handled by a
+/// length cutoff) so meaningful acronyms survive tokenization.
 const STOPWORDS: &[&str] = &[
+    "is", "to", "of", "or", "an", "in", "on", "at", "be", "by", "as", "we", "it", "do", "no", "so",
     "the", "and", "for", "with", "that", "this", "from", "have", "has", "not", "but", "are", "was",
     "were", "will", "should", "would", "could", "can", "when", "then", "than", "into", "out", "via",
     "use", "uses", "using", "make", "made", "does", "did", "all", "any", "some", "its", "our",
@@ -113,8 +119,29 @@ fn score_tokens(a: &Tokens, b: &Tokens) -> Components {
     let title = jaccard(&a.title, &b.title);
     let body = jaccard(&a.body, &b.body);
     let label = jaccard(&a.labels, &b.labels);
+
+    // Renormalize over the dimensions that actually have content on at
+    // least one side. Without this, a body-less, label-less issue could
+    // never exceed W_TITLE (0.60) even against an exact title twin — the
+    // absent dimensions would silently cap the score. A dimension where
+    // both sides are empty carries no evidence either way, so it drops
+    // out of both numerator and denominator.
+    let mut total = 0.0;
+    let mut wsum = 0.0;
+    if !a.title.is_empty() || !b.title.is_empty() {
+        total += W_TITLE * title;
+        wsum += W_TITLE;
+    }
+    if !a.body.is_empty() || !b.body.is_empty() {
+        total += W_BODY * body;
+        wsum += W_BODY;
+    }
+    if !a.labels.is_empty() || !b.labels.is_empty() {
+        total += W_LABEL * label;
+        wsum += W_LABEL;
+    }
     Components {
-        score: W_TITLE * title + W_BODY * body + W_LABEL * label,
+        score: if wsum > 0.0 { total / wsum } else { 0.0 },
         title,
         body,
         label,
@@ -146,8 +173,7 @@ where
         .collect();
     matches.sort_by(|x, y| {
         y.score
-            .partial_cmp(&x.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&x.score)
             .then_with(|| x.slug.cmp(&y.slug))
     });
     matches
@@ -184,8 +210,7 @@ pub fn find_all_pairs(issues: &[Issue], threshold: f64) -> Vec<DuplicatePair> {
     }
     pairs.sort_by(|x, y| {
         y.score
-            .partial_cmp(&x.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&x.score)
             .then_with(|| x.a_slug.cmp(&y.a_slug))
             .then_with(|| x.b_slug.cmp(&y.b_slug))
     });
@@ -256,7 +281,20 @@ mod tests {
         let m = find_duplicates(&a, std::slice::from_ref(&b), DEFAULT_THRESHOLD);
         assert_eq!(m.len(), 1);
         assert!((m[0].title_overlap - 1.0).abs() < 1e-9);
-        assert!(m[0].score >= W_TITLE - 1e-9);
+        // Renormalization: with no body/labels on either side, a perfect
+        // title twin scores ~1.0, not the W_TITLE cap (0.60).
+        assert!((m[0].score - 1.0).abs() < 1e-9, "got {}", m[0].score);
+    }
+
+    #[test]
+    fn two_letter_acronyms_survive_tokenization() {
+        // `ui` / `db` must not be dropped as "too short" — they carry
+        // real signal in software issues.
+        let a = issue("a-a", "ui crash on resize", "", &[]);
+        let b = issue("b-b", "ui crash after resize", "", &[]);
+        let m = find_duplicates(&a, std::slice::from_ref(&b), DEFAULT_THRESHOLD);
+        assert_eq!(m.len(), 1, "shared 'ui'/'crash'/'resize' should match");
+        assert!(m[0].title_overlap > 0.4);
     }
 
     #[test]
