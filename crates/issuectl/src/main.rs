@@ -19,6 +19,7 @@ Examples:
   issuectl ls -t bug -p high               Filter by type and priority
   issuectl ls --closed --json              Closed issues as JSON
   issuectl show extremely-quiet-otter          Full details by slug
+  issuectl open extremely-quiet-otter          Edit item.md in $EDITOR
   issuectl search redirect                 Keyword search
   issuectl new --type bug --title \"...\"    Create a new issue (random slug)
   issuectl update <slug> --status testing  Change status
@@ -264,6 +265,24 @@ enum Command {
         slug: String,
     },
 
+    /// Open an issue's `item.md` in your editor (or its directory with
+    /// `--dir`). The editor is `--editor`, else `$VISUAL`, else `$EDITOR`.
+    Open {
+        /// Issue slug
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+
+        /// Open the issue directory instead of `item.md`
+        #[arg(long)]
+        dir: bool,
+
+        /// Editor command to launch (e.g. `code`, `zed`, `vim`).
+        /// Overrides `$VISUAL` / `$EDITOR`. May include arguments,
+        /// e.g. `--editor "code -w"`.
+        #[arg(long, value_parser = parse_non_empty)]
+        editor: Option<String>,
+    },
+
     /// Search issues by keyword in title, slug, and body
     Search {
         /// Search keyword
@@ -455,9 +474,21 @@ enum Command {
         #[arg(long = "as", value_parser = parse_non_empty)]
         author: String,
 
-        /// Note text (one positional argument; quote multi-word input)
-        #[arg(value_parser = parse_non_empty)]
-        message: String,
+        /// Note text (one positional argument; quote multi-word input).
+        /// Mutually exclusive with `--stdin` / `--from-file`.
+        #[arg(
+            value_parser = parse_non_empty,
+            conflicts_with_all = ["stdin", "from_file"]
+        )]
+        message: Option<String>,
+
+        /// Read the note text from stdin instead of a positional argument
+        #[arg(long, conflicts_with = "from_file")]
+        stdin: bool,
+
+        /// Read the note text from this file
+        #[arg(long = "from-file", value_name = "PATH", conflicts_with = "stdin")]
+        from_file: Option<PathBuf>,
 
         /// Append to the `## Decisions` section instead of `## Comments`.
         #[arg(long, conflicts_with = "agent_run")]
@@ -982,6 +1013,11 @@ fn main() -> Result<()> {
             closed,
         ),
         Command::Show { slug } => cmd_show(json_output, &slug),
+        Command::Open {
+            slug,
+            dir,
+            editor,
+        } => cmd_open(json_output, &slug, dir, editor),
         Command::Search { query, all } => cmd_search(json_output, &query, all),
         Command::Stats => cmd_stats(json_output),
         Command::New {
@@ -1064,6 +1100,8 @@ fn main() -> Result<()> {
             slug,
             author,
             message,
+            stdin,
+            from_file,
             decision,
             agent_run,
             dry_run,
@@ -1072,7 +1110,9 @@ fn main() -> Result<()> {
             json_output,
             &slug,
             &author,
-            &message,
+            message,
+            stdin,
+            from_file,
             decision,
             agent_run,
             dry_run,
@@ -1497,6 +1537,57 @@ fn cmd_show(json: bool, slug: &str) -> Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+/// Open an issue's `item.md` (or its directory with `--dir`) in an
+/// editor. The issue is a real file on disk, so we just resolve the
+/// path and hand it to the editor. With `--json` we print the resolved
+/// path instead of launching anything — agents and scripts cannot drive
+/// an interactive editor, so spawning one would only hang them.
+fn cmd_open(json: bool, slug: &str, dir: bool, editor: Option<String>) -> Result<()> {
+    let root = find_root();
+    let (_, item_md) = locate_issue(&root, slug)?;
+    let target = if dir {
+        item_md
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(item_md)
+    } else {
+        item_md
+    };
+
+    if json {
+        let report = serde_json::json!({
+            "slug": slug,
+            "path": target.to_string_lossy(),
+            "dir": dir,
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    let editor = editor
+        .or_else(|| std::env::var("VISUAL").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.trim().is_empty()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no editor configured; pass --editor <cmd> or set $VISUAL / $EDITOR"
+            )
+        })?;
+
+    let mut parts = editor.split_whitespace();
+    let program = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("editor command is empty"))?;
+    let status = std::process::Command::new(program)
+        .args(parts)
+        .arg(&target)
+        .status()
+        .with_context(|| format!("failed to launch editor {editor:?}"))?;
+    if !status.success() {
+        bail!("editor {editor:?} exited with {status}");
+    }
+    Ok(())
 }
 
 fn cmd_search(json: bool, query_str: &str, all: bool) -> Result<()> {
@@ -1924,11 +2015,45 @@ fn parse_commit_spec(spec: &str) -> Result<(String, String)> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Resolve the note text from exactly one of: a positional `message`,
+/// `--stdin`, or `--from-file PATH`. clap's `conflicts_with` guards
+/// against more than one being set; this enforces that at least one is
+/// present and that the resulting text is non-empty (a blank note is a
+/// no-op that would only clutter the issue body).
+fn read_message_arg(
+    message: Option<String>,
+    stdin: bool,
+    from_file: Option<PathBuf>,
+) -> Result<String> {
+    let text = if let Some(m) = message {
+        m
+    } else if let Some(path) = from_file {
+        fs::read_to_string(&path)
+            .with_context(|| format!("cannot read note from {}", path.display()))?
+    } else if stdin {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("cannot read note from stdin")?;
+        buf
+    } else {
+        bail!("provide the note text as an argument, or use --stdin / --from-file PATH");
+    };
+    if text.trim().is_empty() {
+        bail!("note text is empty");
+    }
+    Ok(text)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_note(
     json: bool,
     slug: &str,
     author: &str,
-    message: &str,
+    message: Option<String>,
+    stdin: bool,
+    from_file: Option<PathBuf>,
     decision: bool,
     agent_run: bool,
     dry_run: bool,
@@ -1939,6 +2064,8 @@ fn cmd_note(
             "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
         );
     }
+    let message = read_message_arg(message, stdin, from_file)?;
+    let message = message.as_str();
     let section = if decision {
         body_sections::DECISIONS
     } else if agent_run {
@@ -3431,5 +3558,34 @@ mod tests {
         let labels = issue.labels.unwrap_or_default();
         assert!(labels.contains(&"triaged".to_string()));
         assert!(labels.contains(&"frontend".to_string()));
+    }
+
+    #[test]
+    fn read_message_arg_prefers_positional() {
+        let got = read_message_arg(Some("hello".into()), false, None).unwrap();
+        assert_eq!(got, "hello");
+    }
+
+    #[test]
+    fn read_message_arg_reads_from_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("note.md");
+        fs::write(&path, "from a file\n").unwrap();
+        let got = read_message_arg(None, false, Some(path)).unwrap();
+        assert_eq!(got, "from a file\n");
+    }
+
+    #[test]
+    fn read_message_arg_requires_a_source() {
+        assert!(read_message_arg(None, false, None).is_err());
+    }
+
+    #[test]
+    fn read_message_arg_rejects_blank_text() {
+        assert!(read_message_arg(Some("   \n".into()), false, None).is_err());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("blank.md");
+        fs::write(&path, "\n\n").unwrap();
+        assert!(read_message_arg(None, false, Some(path)).is_err());
     }
 }

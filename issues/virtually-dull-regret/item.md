@@ -1,12 +1,13 @@
 ---
 created: 2026-05-08
-updated: 2026-05-08
+updated: 2026-05-28
 type: feature
 reporter: jari
-status: open
+status: done
 priority: normal
 epic: hugely-exciting-spiders
 labels: [agent-friendly, v0.6.0-candidate]
+closed: 2026-05-28
 ---
 
 # issuectl note: accept message via --stdin / --from-file
