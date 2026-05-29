@@ -538,8 +538,9 @@ enum Command {
     /// bump and no commit touching their `item.md` within the window.
     /// Long-running `in-progress` issues are flagged. Read-only.
     Stale {
-        /// Staleness threshold in days (default 30).
-        #[arg(long, default_value_t = issuectl_core::stale::DEFAULT_STALE_DAYS)]
+        /// Staleness threshold in days (default 30). Accepts a bare
+        /// number or a `<N>d` suffix.
+        #[arg(long, value_parser = parse_days, default_value = "30d")]
         days: i64,
     },
 
@@ -3619,6 +3620,16 @@ mod tests {
         assert!(item
             .to_string_lossy()
             .contains("issues/closed/old-fox-here"));
+    }
+
+    #[test]
+    fn parse_days_accepts_bare_and_suffix() {
+        assert_eq!(parse_days("90").unwrap(), 90);
+        assert_eq!(parse_days("90d").unwrap(), 90);
+        assert_eq!(parse_days("0").unwrap(), 0);
+        assert!(parse_days("-5").is_err());
+        assert!(parse_days("7days").is_err());
+        assert!(parse_days("d").is_err());
     }
 
     #[test]

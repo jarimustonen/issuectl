@@ -205,14 +205,15 @@ pub fn folder_for_status(schema: &crate::schema::Schema, status: &str) -> &'stat
     }
 }
 
-/// Discover every slug appearing under `issues/` — flat, legacy-open, or
-/// legacy-closed. Returns each slug exactly once; the resolver determines
-/// the slug's `LayoutState`.
+/// Discover every slug appearing under `issues/` — flat, legacy-open,
+/// legacy-closed, or archived (`archive/YYYY/MM/<slug>/`). Returns each
+/// slug exactly once; the resolver determines the slug's `LayoutState`.
 ///
-/// Reserved-subdir filter: `open` and `closed` are walked as legacy parents,
-/// not as slug directories. Anything else under `issues/` (including
-/// `.archive/`) is surfaced as a slug candidate — the resolver will
-/// reject leading-dot or otherwise invalid shapes via `slug::is_valid`.
+/// Reserved-subdir filter: `open`, `closed`, and `archive` are walked as
+/// parents, not as slug directories (`archive` fails `slug::is_valid`
+/// anyway, being a single segment). Anything else under `issues/` is
+/// surfaced as a slug candidate — the resolver rejects leading-dot or
+/// otherwise invalid shapes via `slug::is_valid`.
 fn discover_slugs(repo_root: &Path) -> std::collections::BTreeSet<String> {
     use std::collections::BTreeSet;
     let mut slugs = BTreeSet::new();
@@ -293,6 +294,24 @@ fn archive_slug_dirs(issues_dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Slug → archive directories map, built by a single walk of the archive
+/// tree. Callers that resolve many slugs in a loop (`load_issues`,
+/// `rename_issue`, `archive`) build this once and pass it to
+/// [`resolve_layout_in`], avoiding an O(N·archive) re-walk per slug.
+pub type ArchiveIndex = std::collections::BTreeMap<String, Vec<PathBuf>>;
+
+/// Build the [`ArchiveIndex`] for a repo with one archive-tree walk.
+pub fn archive_index(repo_root: &Path) -> ArchiveIndex {
+    let issues_dir = repo_root.join(ISSUES_DIR);
+    let mut idx: ArchiveIndex = ArchiveIndex::new();
+    for dir in archive_slug_dirs(&issues_dir) {
+        if let Some(name) = dir.file_name().map(|n| n.to_string_lossy().to_string()) {
+            idx.entry(name).or_default().push(dir);
+        }
+    }
+    idx
+}
+
 /// All on-disk `issues/archive/*/*/<slug>/` directories for one slug.
 /// Normally at most one; more than one means the slug was archived into
 /// two month buckets, which `resolve_layout` surfaces as `Ambiguous`.
@@ -323,6 +342,24 @@ pub fn archive_relpath(slug: &str, date: &str) -> PathBuf {
 /// content. The caller does that after `LayoutState::Flat` /
 /// `LayoutState::Legacy`.
 pub fn resolve_layout(repo_root: &Path, slug: &str) -> LayoutState {
+    let archive_dirs = archive_dirs_for(&repo_root.join(ISSUES_DIR), slug);
+    resolve_layout_with_archive(repo_root, slug, &archive_dirs)
+}
+
+/// Like [`resolve_layout`] but reuses a prebuilt [`ArchiveIndex`] instead
+/// of walking the archive tree. Use this in loops that resolve many
+/// slugs — build the index once with [`archive_index`].
+pub fn resolve_layout_in(repo_root: &Path, slug: &str, index: &ArchiveIndex) -> LayoutState {
+    let empty: Vec<PathBuf> = Vec::new();
+    let archive_dirs = index.get(slug).unwrap_or(&empty);
+    resolve_layout_with_archive(repo_root, slug, archive_dirs)
+}
+
+fn resolve_layout_with_archive(
+    repo_root: &Path,
+    slug: &str,
+    archive_dirs: &[PathBuf],
+) -> LayoutState {
     let issues_root = repo_root.join(ISSUES_DIR);
     let canon_root = match std::fs::canonicalize(&issues_root) {
         Ok(p) => Some(p),
@@ -339,8 +376,8 @@ pub fn resolve_layout(repo_root: &Path, slug: &str) -> LayoutState {
         (issues_root.join("open").join(slug), Some("open")),
         (issues_root.join("closed").join(slug), Some("closed")),
     ];
-    for dir in archive_dirs_for(&issues_root, slug) {
-        candidates.push((dir, None));
+    for dir in archive_dirs {
+        candidates.push((dir.clone(), None));
     }
 
     let mut hits: Vec<(PathBuf, Option<&'static str>, ItemCheck)> = Vec::new();
@@ -438,8 +475,9 @@ pub fn load_issues_with_config(
 ) -> Vec<Issue> {
     let mut result = Vec::new();
     let schema = load_schema_or_warn(repo_root, None, config);
+    let archive = archive_index(repo_root);
     for slug in discover_slugs(repo_root) {
-        match resolve_layout(repo_root, &slug) {
+        match resolve_layout_in(repo_root, &slug, &archive) {
             LayoutState::Flat { item_path } => {
                 let mut issue = parser::parse_item_md(&item_path, &slug, "open");
                 issue.folder = folder_for_status(&schema, &issue.status).to_string();
@@ -491,9 +529,10 @@ pub fn load_issues_with_warnings_via(
     let mut issues = Vec::new();
     let mut warnings = Vec::new();
     let schema = load_schema_or_warn(repo_root, Some(&mut warnings), config);
+    let archive = archive_index(repo_root);
 
     for slug in discover_slugs(repo_root) {
-        match resolve_layout(repo_root, &slug) {
+        match resolve_layout_in(repo_root, &slug, &archive) {
             LayoutState::Flat { item_path } => {
                 push_issue_with_parse(
                     &schema,
@@ -780,14 +819,17 @@ pub fn rename_issue(
     }
 
     let _lock = crate::mutate::WriteLock::acquire(repo_root)?;
+    let archive = archive_index(repo_root);
 
     // Source must exist and be loadable (not ambiguous / invalid). Capture
-    // its on-disk dir now so we can move it last.
-    let src_dir = match resolve_layout(repo_root, old) {
-        LayoutState::Flat { item_path } | LayoutState::Legacy { item_path, .. } => item_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("source item.md has no parent"))?
-            .to_path_buf(),
+    // its on-disk dir now so we can move it last. `src_is_legacy` selects
+    // the destination: a legacy source migrates to the active flat root,
+    // while a flat source (active OR archived) keeps its current parent —
+    // so renaming an archived issue stays inside its archive bucket
+    // rather than silently un-archiving it.
+    let (src_dir, src_is_legacy) = match resolve_layout_in(repo_root, old, &archive) {
+        LayoutState::Flat { item_path } => (parent_dir(&item_path)?, false),
+        LayoutState::Legacy { item_path, .. } => (parent_dir(&item_path)?, true),
         LayoutState::Absent => bail!(
             "issue {old} not found under {}",
             repo_root.join(ISSUES_DIR).display()
@@ -804,17 +846,24 @@ pub fn rename_issue(
     };
     // Target slug must be free at every candidate path. `Absent` already
     // implies no `issues/<new>/` dir exists, so no separate dir check.
-    if !matches!(resolve_layout(repo_root, new), LayoutState::Absent) {
+    if !matches!(resolve_layout_in(repo_root, new, &archive), LayoutState::Absent) {
         bail!("target slug {new} already exists");
     }
-    let new_dir = repo_root.join(ISSUES_DIR).join(new);
+    let new_dir = if src_is_legacy {
+        repo_root.join(ISSUES_DIR).join(new)
+    } else {
+        src_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("source dir has no parent"))?
+            .join(new)
+    };
 
     // Rewrite references in every issue file (including the renamed issue
     // itself, still at its old path). The directory move happens last.
     let mut changes = Vec::new();
     let mut skipped = Vec::new();
     for slug in discover_slugs(repo_root) {
-        let item_path = match resolve_layout(repo_root, &slug) {
+        let item_path = match resolve_layout_in(repo_root, &slug, &archive) {
             LayoutState::Flat { item_path } | LayoutState::Legacy { item_path, .. } => item_path,
             LayoutState::Absent => continue,
             LayoutState::Ambiguous { .. } => {
@@ -897,6 +946,15 @@ pub fn rename_issue(
 /// mapping. Returns `(field, occurrences)` for each field that changed.
 /// `related` / `blocked_by` are handled whether written as a YAML
 /// sequence or as a bare scalar (`related: @old`).
+/// The directory containing an `item.md`, or an error if it has no
+/// parent (should never happen for a resolved layout path).
+fn parent_dir(item_path: &Path) -> Result<PathBuf> {
+    item_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("item.md has no parent: {}", item_path.display()))
+        .map(Path::to_path_buf)
+}
+
 fn rewrite_frontmatter_refs(
     fm: &mut serde_yaml::Mapping,
     old: &str,
@@ -1177,6 +1235,21 @@ mod tests {
         let located = locate_issue_full(tmp.path(), "old-done-fox").unwrap();
         assert!(located.item_path.ends_with("archive/2026/05/old-done-fox/item.md"));
         assert!(located.legacy_folder.is_none());
+    }
+
+    #[test]
+    fn rename_keeps_archived_issue_in_its_bucket() {
+        let tmp = fresh_repo();
+        seed_archive(&tmp, "2026", "05", "old-done-fox", "fixed");
+        let out = rename_issue(tmp.path(), "old-done-fox", "new-done-stag", false).unwrap();
+        // stays in the same archive month bucket, not pulled to active root
+        assert!(out.new_dir.ends_with("archive/2026/05/new-done-stag"));
+        assert!(tmp
+            .path()
+            .join("issues/archive/2026/05/new-done-stag/item.md")
+            .is_file());
+        assert!(!tmp.path().join("issues/new-done-stag").exists());
+        assert!(!tmp.path().join("issues/archive/2026/05/old-done-fox").exists());
     }
 
     #[test]

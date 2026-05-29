@@ -60,6 +60,10 @@ pub fn archive_closed(
         .schema(repo_root)
         .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let today = Local::now().date_naive();
+    // One archive-tree walk shared across every per-slug layout resolve
+    // below, keeping the batch O(N) rather than O(N·archive).
+    let archive_root = repo_root.join("issues").join(repo::ARCHIVE_DIR);
+    let index = repo::archive_index(repo_root);
 
     let mut archived = Vec::new();
     let mut skipped = Vec::new();
@@ -68,9 +72,6 @@ pub fn archive_closed(
     for issue in repo::load_issues(repo_root) {
         if !crate::schema::is_closing(&schema, &issue.status) {
             continue;
-        }
-        if is_archived(repo_root, &issue.slug) {
-            continue; // already in cold storage
         }
         let Some(dated) = issue
             .closed
@@ -87,8 +88,9 @@ pub fn archive_closed(
         if (today - dated).num_days() < older_than_days {
             continue;
         }
-        match plan_move(repo_root, &issue.slug, dated) {
-            Ok(mv) => {
+        match plan_move(repo_root, &issue.slug, dated, &index, &archive_root) {
+            Ok(None) => continue, // already in cold storage
+            Ok(Some(mv)) => {
                 if !dry_run {
                     if let Err(e) = perform_move(&mv) {
                         skipped.push(ArchiveSkip {
@@ -117,25 +119,28 @@ pub fn archive_closed(
     })
 }
 
-/// `true` when the slug's resolved path already lives under the archive
-/// root.
-fn is_archived(repo_root: &Path, slug: &str) -> bool {
-    let archive_root = repo_root.join("issues").join(repo::ARCHIVE_DIR);
-    matches!(
-        repo::resolve_layout(repo_root, slug),
-        repo::LayoutState::Flat { item_path } if item_path.starts_with(&archive_root)
-    )
-}
-
-/// Compute the source/destination dirs for a slug. Returns `Err(reason)`
-/// for any state that blocks a clean move (ambiguous, missing, already a
-/// destination collision). Does not touch disk.
-fn plan_move(repo_root: &Path, slug: &str, dated: NaiveDate) -> Result<ArchiveMove, String> {
-    let from = match repo::resolve_layout(repo_root, slug) {
-        repo::LayoutState::Flat { item_path } => item_path
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| "item.md has no parent".to_string())?,
+/// Compute the source/destination dirs for a slug. `Ok(None)` means the
+/// issue is already in cold storage (nothing to do). `Err(reason)` flags
+/// a state that blocks a clean move (ambiguous, missing, destination
+/// collision). Reuses the prebuilt archive index; does not touch disk.
+fn plan_move(
+    repo_root: &Path,
+    slug: &str,
+    dated: NaiveDate,
+    index: &repo::ArchiveIndex,
+    archive_root: &Path,
+) -> Result<Option<ArchiveMove>, String> {
+    let from = match repo::resolve_layout_in(repo_root, slug, index) {
+        repo::LayoutState::Flat { item_path } => {
+            let dir = item_path
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| "item.md has no parent".to_string())?;
+            if dir.starts_with(archive_root) {
+                return Ok(None); // already archived
+            }
+            dir
+        }
         repo::LayoutState::Legacy { .. } => {
             return Err("issue is at a legacy path — run `issuectl doctor --fix` first".to_string())
         }
@@ -151,12 +156,12 @@ fn plan_move(repo_root: &Path, slug: &str, dated: NaiveDate) -> Result<ArchiveMo
             to.display()
         ));
     }
-    Ok(ArchiveMove {
+    Ok(Some(ArchiveMove {
         slug: slug.to_string(),
         from,
         to,
         dated: dated.format("%Y-%m-%d").to_string(),
-    })
+    }))
 }
 
 fn perform_move(mv: &ArchiveMove) -> std::io::Result<()> {
