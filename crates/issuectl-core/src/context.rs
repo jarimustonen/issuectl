@@ -109,6 +109,15 @@ pub struct RelatedRef {
 pub struct SchemaSummary {
     pub version: u32,
     pub fields: Vec<SchemaFieldSummary>,
+    /// Schema constraints rephrased as imperative rules for the agent
+    /// editing this issue (enum membership, required fields, conditional
+    /// requirements). Derived from `fields`; rendered as a dedicated
+    /// `## Agent Instructions` block and reachable via `{{instructions}}`
+    /// so an LLM follows the project's frontmatter rules without the user
+    /// restating them in every prompt. Empty when the schema declares no
+    /// enforceable constraint.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub instructions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,6 +127,18 @@ pub struct SchemaFieldSummary {
     pub list: bool,
     #[serde(skip_serializing_if = "Option::is_none", rename = "enum")]
     pub allowed: Option<Vec<String>>,
+    /// Conditional-requirement summary (e.g. `closed` required when the
+    /// status is closing). Present only when the field declares
+    /// `required_when` and is not already statically required.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_when: Option<RequiredWhenSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RequiredWhenSummary {
+    /// Lifecycle class (`active` / `closing`) the owning field is
+    /// required for.
+    pub status_class: String,
 }
 
 /// Build the bundle for `slug`. Loads all issues to resolve references
@@ -299,12 +320,99 @@ fn load_schema_summary(root: &Path) -> Result<SchemaSummary> {
             required: spec.required,
             list: spec.list,
             allowed: spec.allowed.clone(),
+            required_when: required_when_summary(spec),
         })
         .collect();
+    let instructions = build_instructions(&s);
     Ok(SchemaSummary {
         version: s.version,
         fields,
+        instructions,
     })
+}
+
+fn class_label(class: schema::StatusClass) -> &'static str {
+    match class {
+        schema::StatusClass::Active => "active",
+        schema::StatusClass::Closing => "closing",
+    }
+}
+
+/// Summarise a field's `required_when` predicate, but only when it can
+/// actually change behaviour — a statically `required: true` field is
+/// unconditionally required, so its `required_when` is redundant and
+/// omitted (mirrors how `schema::validate` skips it in that case).
+fn required_when_summary(spec: &schema::FieldSpec) -> Option<RequiredWhenSummary> {
+    if spec.required {
+        return None;
+    }
+    spec.required_when
+        .as_ref()
+        .and_then(|rw| rw.status_class)
+        .map(|class| RequiredWhenSummary {
+            status_class: class_label(class).to_string(),
+        })
+}
+
+/// The declared `status` enum values that resolve to `class`, in schema
+/// order. Used to make a conditional-requirement instruction concrete
+/// ("required when status is closing (done, fixed, …)") rather than
+/// leaving the agent to guess which statuses count. Empty when the
+/// `status` field declares no enum.
+fn statuses_in_class(schema: &schema::Schema, class: schema::StatusClass) -> Vec<String> {
+    schema
+        .fields
+        .get("status")
+        .and_then(|spec| spec.allowed.as_ref())
+        .map(|all| {
+            all.iter()
+                .filter(|s| schema::status_class(schema, s) == class)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Turn the schema's enforceable constraints into imperative one-line
+/// rules for the editing agent. Walks fields in schema order (BTreeMap ⇒
+/// deterministic) and emits a rule for every field that carries an enum,
+/// a static requirement, or a conditional requirement. Fields with no
+/// constraint produce nothing.
+fn build_instructions(schema: &schema::Schema) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, spec) in &schema.fields {
+        let mut clauses: Vec<String> = Vec::new();
+        if spec.required {
+            clauses.push("is required".to_string());
+        } else if let Some(rw) = &spec.required_when {
+            if let Some(class) = rw.status_class {
+                let examples = statuses_in_class(schema, class);
+                let suffix = if examples.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", examples.join(", "))
+                };
+                clauses.push(format!(
+                    "is required when the issue's status is {}{suffix}",
+                    class_label(class)
+                ));
+            }
+        }
+        if let Some(allowed) = &spec.allowed {
+            let joined = allowed.join(", ");
+            if spec.list {
+                clauses.push(format!("each value must be one of: {joined}"));
+            } else {
+                clauses.push(format!("must be one of: {joined}"));
+            }
+        }
+        if clauses.is_empty() {
+            continue;
+        }
+        let list_note = if spec.list { " (a list)" } else { "" };
+        out.push(format!("`{name}`{list_note} {}.", clauses.join(", and ")));
+    }
+    out
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────
@@ -390,6 +498,17 @@ pub fn render_markdown(b: &Bundle) -> String {
         out.push_str("## Commits\n\n");
         for c in &b.issue.commits {
             out.push_str(&format!("- {}: {}\n", c.hash, c.summary));
+        }
+        out.push('\n');
+    }
+
+    if !b.schema.instructions.is_empty() {
+        out.push_str("## Agent Instructions\n\n");
+        out.push_str(
+            "When creating or editing this issue's frontmatter, follow the schema rules below:\n\n",
+        );
+        for rule in &b.schema.instructions {
+            out.push_str(&format!("- {rule}\n"));
         }
         out.push('\n');
     }
@@ -588,6 +707,14 @@ fn resolve_var(key: &str, b: &Bundle) -> Option<String> {
                 .as_ref()
                 .and_then(|e| e.scope.clone())
                 .unwrap_or_default(),
+        ),
+        "instructions" => Some(
+            b.schema
+                .instructions
+                .iter()
+                .map(|r| format!("- {r}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
         ),
         "context" => Some(render_markdown(b)),
         _ => b
@@ -1021,6 +1148,110 @@ mod tests {
         assert!(j.contains("\"version\""));
         let p = render_prompt("v={{version}}", &b);
         assert_eq!(p, format!("v={}", b.issue.version));
+    }
+
+    #[test]
+    fn build_emits_agent_instructions_from_default_schema() {
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: normal\n",
+            "\n# X\n",
+        );
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        // Enum rule for `type` is rephrased imperatively.
+        assert!(
+            b.schema
+                .instructions
+                .iter()
+                .any(|r| r.starts_with("`type`") && r.contains("must be one of") && r.contains("bug")),
+            "expected an imperative enum rule for `type`, got {:?}",
+            b.schema.instructions
+        );
+        // Conditional `closed` rule names the closing statuses.
+        assert!(
+            b.schema.instructions.iter().any(|r| r.starts_with("`closed`")
+                && r.contains("closing")
+                && r.contains("done")),
+            "expected conditional `closed` rule listing closing statuses, got {:?}",
+            b.schema.instructions
+        );
+    }
+
+    #[test]
+    fn render_markdown_includes_agent_instructions_block() {
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: normal\n",
+            "\n# X\n",
+        );
+        let md = render_markdown(&build(tmp.path(), "amber-loud-fox").unwrap());
+        let i_instr = md.find("## Agent Instructions").expect("instructions block present");
+        let i_schema = md.find("## Schema").expect("schema block present");
+        assert!(i_instr < i_schema, "instructions must render before the schema dump");
+        assert!(md.contains("follow the schema rules"));
+    }
+
+    #[test]
+    fn instructions_template_var_renders_bullets() {
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: normal\n",
+            "\n# X\n",
+        );
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        let out = render_prompt("Rules:\n{{instructions}}", &b);
+        // Rendered as one `- ` bullet per rule, joined by newlines.
+        assert!(out.starts_with("Rules:\n- `"));
+        assert!(out.contains("- `type` is required, and must be one of: bug"));
+    }
+
+    #[test]
+    fn build_instructions_lists_each_value_for_list_enums() {
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  labels:\n    list: true\n    enum: [infra, frontend]\n",
+        )
+        .unwrap();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: normal\nlabels: [infra]\n",
+            "\n# X\n",
+        );
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        assert!(
+            b.schema.instructions.iter().any(|r| r.contains("`labels` (a list)")
+                && r.contains("each value must be one of: infra, frontend")),
+            "expected element-wise list-enum rule, got {:?}",
+            b.schema.instructions
+        );
+    }
+
+    #[test]
+    fn build_emits_no_instructions_when_schema_unconstrained() {
+        let tmp = fresh_repo();
+        // Relax every constrained built-in to drop enums and requirements.
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  type:\n    required: false\n  status:\n    required: false\n  priority:\n    required: false\n  closed:\n    required: false\n",
+        )
+        .unwrap();
+        write_issue(tmp.path(), "amber-loud-fox", "type: bug\n", "\n# X\n");
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        assert!(
+            b.schema.instructions.is_empty(),
+            "no constraints should yield no instructions, got {:?}",
+            b.schema.instructions
+        );
+        let md = render_markdown(&b);
+        assert!(!md.contains("## Agent Instructions"));
     }
 
     #[test]
