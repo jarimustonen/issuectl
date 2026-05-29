@@ -63,6 +63,19 @@ struct Cli {
 
 static ROOT_OVERRIDE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
+/// Parse a day count for `--older-than`: a bare integer (`90`) or a
+/// `<N>d` suffix form (`90d`). Must be non-negative.
+fn parse_days(s: &str) -> std::result::Result<i64, String> {
+    let digits = s.strip_suffix('d').unwrap_or(s);
+    let n: i64 = digits
+        .parse()
+        .map_err(|_| format!("expected a day count like `90` or `90d`, got {s:?}"))?;
+    if n < 0 {
+        return Err(format!("day count cannot be negative: {s:?}"));
+    }
+    Ok(n)
+}
+
 fn parse_non_empty(s: &str) -> std::result::Result<String, String> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -517,6 +530,29 @@ enum Command {
         new_slug: String,
 
         /// Report what would change without writing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// List active issues that have gone stale — no frontmatter `updated`
+    /// bump and no commit touching their `item.md` within the window.
+    /// Long-running `in-progress` issues are flagged. Read-only.
+    Stale {
+        /// Staleness threshold in days (default 30).
+        #[arg(long, default_value_t = issuectl_core::stale::DEFAULT_STALE_DAYS)]
+        days: i64,
+    },
+
+    /// Move old closed issues into cold storage at
+    /// `issues/archive/YYYY/MM/<slug>/`, keeping the active tree small.
+    /// Archived issues remain readable by `show`/`list`/queries.
+    Archive {
+        /// Only archive issues closed at least this many days ago
+        /// (default 90). Accepts a bare number or a `<N>d` suffix.
+        #[arg(long = "older-than", value_parser = parse_days, default_value = "90d")]
+        older_than: i64,
+
+        /// Report what would move without touching disk.
         #[arg(long)]
         dry_run: bool,
     },
@@ -1254,6 +1290,11 @@ fn main() -> Result<()> {
             new_slug,
             dry_run,
         } => cmd_rename(json_output, &old_slug, &new_slug, dry_run),
+        Command::Stale { days } => cmd_stale(json_output, days),
+        Command::Archive {
+            older_than,
+            dry_run,
+        } => cmd_archive(json_output, older_than, dry_run),
         Command::Note {
             slug,
             author,
@@ -2420,6 +2461,59 @@ fn cmd_rename(json: bool, old: &str, new: &str, dry_run: bool) -> Result<()> {
             "Renamed {old} → {new} ({}); rewrote {total} reference(s) across {files} file(s)",
             outcome.new_dir.display()
         );
+    }
+    Ok(())
+}
+
+fn cmd_stale(json: bool, days: i64) -> Result<()> {
+    let root = find_root();
+    let report = issuectl_core::stale::find_stale(&root, days);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if report.stale.is_empty() {
+        println!("No issues stale for {days}+ days.");
+        return Ok(());
+    }
+    println!(
+        "{} issue(s) with no activity in {days}+ days:",
+        report.stale.len()
+    );
+    for s in &report.stale {
+        let wip = if s.in_progress { " [in-progress]" } else { "" };
+        let who = s
+            .assignee
+            .as_deref()
+            .map(|a| format!(" — {a}"))
+            .unwrap_or_default();
+        println!(
+            "  {} ({}){wip}  {} days, last {} via {}{who}",
+            s.slug, s.status, s.days_inactive, s.last_activity, s.source
+        );
+    }
+    Ok(())
+}
+
+fn cmd_archive(json: bool, older_than: i64, dry_run: bool) -> Result<()> {
+    let root = find_root();
+    let report = mutate::archive::archive_closed(&root, older_than, dry_run, &UncachedConfig)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    let verb = if dry_run { "Would archive" } else { "Archived" };
+    if report.archived.is_empty() {
+        println!("Nothing to archive (closed {older_than}+ days ago).");
+    } else {
+        println!("{verb} {} issue(s):", report.archived.len());
+        for mv in &report.archived {
+            println!("  {} → {}", mv.slug, mv.to.display());
+        }
+    }
+    for sk in &report.skipped {
+        eprintln!("Warning: skipped {} ({})", sk.slug, sk.reason);
     }
     Ok(())
 }

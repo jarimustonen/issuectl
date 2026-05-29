@@ -73,6 +73,8 @@ pub mod skill;
 #[doc(hidden)]
 pub mod slug;
 #[doc(hidden)]
+pub mod stale;
+#[doc(hidden)]
 pub mod sync_commits;
 #[doc(hidden)]
 pub mod transfer;

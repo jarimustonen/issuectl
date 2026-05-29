@@ -8,9 +8,12 @@ use crate::parser;
 
 const ISSUES_DIR: &str = "issues";
 /// Legacy status-folder names walked separately as compat-read paths.
-/// Cold-storage convention is `.archive/<slug>/` (leading dot keeps it
-/// out of `slug::is_valid` shape, so no explicit reservation needed).
 const LEGACY_FOLDERS: &[&str] = &["open", "closed"];
+/// Cold-storage root under `issues/`. Closed issues are archived to
+/// `issues/archive/YYYY/MM/<slug>/`. The name fails `slug::is_valid`
+/// (single segment) so the flat-layout walk never mistakes it for an
+/// issue; the loader walks it explicitly as a second read root.
+pub const ARCHIVE_DIR: &str = "archive";
 
 /// Stable machine-readable warning codes surfaced via `LoadWarning.code`.
 /// The wire format serialises as snake_case strings — clients dispatch on
@@ -246,7 +249,69 @@ fn discover_slugs(repo_root: &Path) -> std::collections::BTreeSet<String> {
             slugs.insert(name);
         }
     }
+    for dir in archive_slug_dirs(&issues_dir) {
+        if let Some(name) = dir.file_name().map(|n| n.to_string_lossy().to_string()) {
+            if crate::slug::is_valid(&name) {
+                slugs.insert(name);
+            }
+        }
+    }
     slugs
+}
+
+/// Every `issues/archive/YYYY/MM/<slug>/` directory present on disk.
+/// Returns the slug-level directories (one level below `MM`). Tolerant of
+/// a missing archive root and of stray files at any level — non-dir
+/// entries are skipped. The slug shape itself is validated by the caller.
+fn archive_slug_dirs(issues_dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let archive_root = issues_dir.join(ARCHIVE_DIR);
+    let Ok(years) = std::fs::read_dir(&archive_root) else {
+        return out;
+    };
+    for year in years.flatten() {
+        if !year.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Ok(months) = std::fs::read_dir(year.path()) else {
+            continue;
+        };
+        for month in months.flatten() {
+            if !month.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let Ok(slug_dirs) = std::fs::read_dir(month.path()) else {
+                continue;
+            };
+            for entry in slug_dirs.flatten() {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    out.push(entry.path());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// All on-disk `issues/archive/*/*/<slug>/` directories for one slug.
+/// Normally at most one; more than one means the slug was archived into
+/// two month buckets, which `resolve_layout` surfaces as `Ambiguous`.
+fn archive_dirs_for(issues_dir: &Path, slug: &str) -> Vec<PathBuf> {
+    archive_slug_dirs(issues_dir)
+        .into_iter()
+        .filter(|d| d.file_name().map(|n| n == slug).unwrap_or(false))
+        .collect()
+}
+
+/// Relative archive path (`archive/YYYY/MM/<slug>`) for a slug filed
+/// under a given `YYYY-MM-DD` date. Falls back to `unknown/unknown`
+/// buckets when the date can't be split into year/month — keeps an
+/// undated issue archivable rather than refusing the move.
+pub fn archive_relpath(slug: &str, date: &str) -> PathBuf {
+    let mut parts = date.splitn(3, '-');
+    let year = parts.next().filter(|s| !s.is_empty()).unwrap_or("unknown");
+    let month = parts.next().filter(|s| !s.is_empty()).unwrap_or("unknown");
+    Path::new(ARCHIVE_DIR).join(year).join(month).join(slug)
 }
 
 /// Single source of truth for per-slug filesystem-state classification.
@@ -264,11 +329,19 @@ pub fn resolve_layout(repo_root: &Path, slug: &str) -> LayoutState {
         Err(_) => None,
     };
 
-    let candidates: [(PathBuf, Option<&'static str>); 3] = [
+    // Archived issues resolve as `Flat` at their cold-storage path: the
+    // on-disk depth differs but they behave like any other flat issue
+    // (status-derived folder, in-place edits). Treating them as a
+    // `legacy: None` candidate means a slug present both active and
+    // archived correctly surfaces as `Ambiguous`.
+    let mut candidates: Vec<(PathBuf, Option<&'static str>)> = vec![
         (issues_root.join(slug), None),
         (issues_root.join("open").join(slug), Some("open")),
         (issues_root.join("closed").join(slug), Some("closed")),
     ];
+    for dir in archive_dirs_for(&issues_root, slug) {
+        candidates.push((dir, None));
+    }
 
     let mut hits: Vec<(PathBuf, Option<&'static str>, ItemCheck)> = Vec::new();
     for (dir, legacy) in candidates {
@@ -1048,6 +1121,73 @@ mod tests {
         let out = rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", false).unwrap();
         assert!(out.new_dir.join("item.md").is_file());
         assert!(!tmp.path().join("issues/open/old-tame-fox").exists());
+    }
+
+    fn seed_archive(tmp: &TempDir, year: &str, month: &str, slug: &str, status: &str) {
+        let dir = tmp
+            .path()
+            .join("issues")
+            .join("archive")
+            .join(year)
+            .join(month)
+            .join(slug);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            format!("---\nstatus: {status}\n---\n\n# {slug}\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn archive_relpath_splits_date_into_year_month() {
+        assert_eq!(
+            archive_relpath("calm-wild-otter", "2026-05-06"),
+            Path::new("archive/2026/05/calm-wild-otter")
+        );
+        // missing/short date falls back to `unknown` buckets, never panics
+        assert_eq!(
+            archive_relpath("calm-wild-otter", ""),
+            Path::new("archive/unknown/unknown/calm-wild-otter")
+        );
+        assert_eq!(
+            archive_relpath("calm-wild-otter", "2026"),
+            Path::new("archive/2026/unknown/calm-wild-otter")
+        );
+    }
+
+    #[test]
+    fn load_issues_reads_archive_root() {
+        let tmp = fresh_repo();
+        seed_flat(&tmp, "active-quiet-otter", "open");
+        seed_archive(&tmp, "2026", "05", "old-done-fox", "fixed");
+        let issues = load_issues(tmp.path());
+        let slugs: Vec<&str> = issues.iter().map(|i| i.slug.as_str()).collect();
+        assert!(slugs.contains(&"active-quiet-otter"));
+        assert!(slugs.contains(&"old-done-fox"));
+        let archived = issues.iter().find(|i| i.slug == "old-done-fox").unwrap();
+        // status-derived folder still works for archived issues
+        assert_eq!(archived.folder, "closed");
+    }
+
+    #[test]
+    fn locate_issue_finds_archived_slug() {
+        let tmp = fresh_repo();
+        seed_archive(&tmp, "2026", "05", "old-done-fox", "fixed");
+        let located = locate_issue_full(tmp.path(), "old-done-fox").unwrap();
+        assert!(located.item_path.ends_with("archive/2026/05/old-done-fox/item.md"));
+        assert!(located.legacy_folder.is_none());
+    }
+
+    #[test]
+    fn active_plus_archived_slug_is_ambiguous() {
+        let tmp = fresh_repo();
+        seed_flat(&tmp, "dup-calm-owl", "open");
+        seed_archive(&tmp, "2026", "05", "dup-calm-owl", "fixed");
+        assert!(matches!(
+            resolve_layout(tmp.path(), "dup-calm-owl"),
+            LayoutState::Ambiguous { .. }
+        ));
     }
 
     #[test]

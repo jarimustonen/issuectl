@@ -18,6 +18,7 @@
 //! token, and c) the web server never has to fork a second process to
 //! mutate state.
 
+pub mod archive;
 pub mod new_issue;
 
 use std::fs::{self, File, OpenOptions};

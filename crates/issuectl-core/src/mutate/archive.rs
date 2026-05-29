@@ -1,0 +1,249 @@
+//! Cold-storage archival of closed issues. Moves
+//! `issues/<slug>/` → `issues/archive/YYYY/MM/<slug>/` to keep the
+//! active tree small. The move is a directory rename only — issue
+//! content is preserved byte-for-byte (no `updated` bump, no re-serialize).
+//! Archived issues stay fully readable: `repo::load_issues` /
+//! `locate_issue` walk the archive root, so `show`, `list`, and queries
+//! all still find them.
+
+use std::path::{Path, PathBuf};
+
+use chrono::{Local, NaiveDate};
+use serde::Serialize;
+
+use super::{MutateError, WriteLock};
+use crate::repo;
+use crate::repo_config::ConfigSource;
+
+/// Default `--older-than` window in days when the flag is omitted.
+pub const DEFAULT_ARCHIVE_DAYS: i64 = 90;
+
+/// One issue moved (or, under `--dry-run`, that *would* move) into the
+/// archive.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveMove {
+    pub slug: String,
+    pub from: PathBuf,
+    pub to: PathBuf,
+    /// Closing date used to bucket the archive path (`YYYY-MM-DD`).
+    pub dated: String,
+}
+
+/// A closed issue considered but not archived, with the reason.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveSkip {
+    pub slug: String,
+    pub reason: String,
+}
+
+/// Outcome of an `archive` run.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveReport {
+    pub older_than_days: i64,
+    pub dry_run: bool,
+    pub archived: Vec<ArchiveMove>,
+    pub skipped: Vec<ArchiveSkip>,
+}
+
+/// Archive every closed issue whose closing date is at least
+/// `older_than_days` in the past. Holds the repo write lock for the whole
+/// batch so the set is consistent. `dry_run` reports the planned moves
+/// without touching disk.
+pub fn archive_closed(
+    repo_root: &Path,
+    older_than_days: i64,
+    dry_run: bool,
+    config: &dyn ConfigSource,
+) -> Result<ArchiveReport, MutateError> {
+    let _lock = WriteLock::acquire(repo_root).map_err(MutateError::Io)?;
+    let schema = config
+        .schema(repo_root)
+        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let today = Local::now().date_naive();
+
+    let mut archived = Vec::new();
+    let mut skipped = Vec::new();
+
+    // Re-load under the lock so concurrent writers can't shift the set.
+    for issue in repo::load_issues(repo_root) {
+        if !crate::schema::is_closing(&schema, &issue.status) {
+            continue;
+        }
+        if is_archived(repo_root, &issue.slug) {
+            continue; // already in cold storage
+        }
+        let Some(dated) = issue
+            .closed
+            .as_deref()
+            .or(issue.updated.as_deref())
+            .and_then(crate::stale::parse_date)
+        else {
+            skipped.push(ArchiveSkip {
+                slug: issue.slug.clone(),
+                reason: "no parseable closed/updated date — cannot judge age".to_string(),
+            });
+            continue;
+        };
+        if (today - dated).num_days() < older_than_days {
+            continue;
+        }
+        match plan_move(repo_root, &issue.slug, dated) {
+            Ok(mv) => {
+                if !dry_run {
+                    if let Err(e) = perform_move(&mv) {
+                        skipped.push(ArchiveSkip {
+                            slug: issue.slug.clone(),
+                            reason: format!("move failed: {e:#}"),
+                        });
+                        continue;
+                    }
+                }
+                archived.push(mv);
+            }
+            Err(reason) => skipped.push(ArchiveSkip {
+                slug: issue.slug.clone(),
+                reason,
+            }),
+        }
+    }
+
+    archived.sort_by(|a, b| a.slug.cmp(&b.slug));
+    skipped.sort_by(|a, b| a.slug.cmp(&b.slug));
+    Ok(ArchiveReport {
+        older_than_days,
+        dry_run,
+        archived,
+        skipped,
+    })
+}
+
+/// `true` when the slug's resolved path already lives under the archive
+/// root.
+fn is_archived(repo_root: &Path, slug: &str) -> bool {
+    let archive_root = repo_root.join("issues").join(repo::ARCHIVE_DIR);
+    matches!(
+        repo::resolve_layout(repo_root, slug),
+        repo::LayoutState::Flat { item_path } if item_path.starts_with(&archive_root)
+    )
+}
+
+/// Compute the source/destination dirs for a slug. Returns `Err(reason)`
+/// for any state that blocks a clean move (ambiguous, missing, already a
+/// destination collision). Does not touch disk.
+fn plan_move(repo_root: &Path, slug: &str, dated: NaiveDate) -> Result<ArchiveMove, String> {
+    let from = match repo::resolve_layout(repo_root, slug) {
+        repo::LayoutState::Flat { item_path } => item_path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "item.md has no parent".to_string())?,
+        repo::LayoutState::Legacy { .. } => {
+            return Err("issue is at a legacy path — run `issuectl doctor --fix` first".to_string())
+        }
+        repo::LayoutState::Ambiguous { .. } => return Err("slug is ambiguous".to_string()),
+        repo::LayoutState::Absent => return Err("issue vanished mid-run".to_string()),
+        repo::LayoutState::Invalid { reason, .. } => return Err(reason),
+    };
+    let rel = repo::archive_relpath(slug, &dated.format("%Y-%m-%d").to_string());
+    let to = repo_root.join("issues").join(rel);
+    if to.exists() {
+        return Err(format!(
+            "destination already exists: {} — resolve manually",
+            to.display()
+        ));
+    }
+    Ok(ArchiveMove {
+        slug: slug.to_string(),
+        from,
+        to,
+        dated: dated.format("%Y-%m-%d").to_string(),
+    })
+}
+
+fn perform_move(mv: &ArchiveMove) -> std::io::Result<()> {
+    if let Some(parent) = mv.to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&mv.from, &mv.to)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repo_config::UncachedConfig;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn repo() -> TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        tmp
+    }
+
+    fn seed(tmp: &TempDir, slug: &str, status: &str, closed: Option<&str>) {
+        let dir = tmp.path().join("issues").join(slug);
+        fs::create_dir_all(&dir).unwrap();
+        let closed_line = closed.map(|c| format!("closed: {c}\n")).unwrap_or_default();
+        fs::write(
+            dir.join("item.md"),
+            format!("---\nstatus: {status}\n{closed_line}---\n\n# {slug}\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn archives_old_closed_issue() {
+        let tmp = repo();
+        seed(&tmp, "old-done-fox", "fixed", Some("2020-01-01"));
+        let report = archive_closed(tmp.path(), 90, false, &UncachedConfig).unwrap();
+        assert_eq!(report.archived.len(), 1);
+        assert!(!tmp.path().join("issues/old-done-fox").exists());
+        assert!(tmp
+            .path()
+            .join("issues/archive/2020/01/old-done-fox/item.md")
+            .is_file());
+    }
+
+    #[test]
+    fn skips_recently_closed_and_open_issues() {
+        let tmp = repo();
+        let recent = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+        seed(&tmp, "fresh-done-owl", "fixed", Some(&recent));
+        seed(&tmp, "active-open-elk", "open", None);
+        let report = archive_closed(tmp.path(), 90, false, &UncachedConfig).unwrap();
+        assert!(report.archived.is_empty());
+        assert!(tmp.path().join("issues/fresh-done-owl").exists());
+        assert!(tmp.path().join("issues/active-open-elk").exists());
+    }
+
+    #[test]
+    fn dry_run_moves_nothing() {
+        let tmp = repo();
+        seed(&tmp, "old-done-fox", "fixed", Some("2020-01-01"));
+        let report = archive_closed(tmp.path(), 90, true, &UncachedConfig).unwrap();
+        assert_eq!(report.archived.len(), 1);
+        assert!(report.dry_run);
+        assert!(tmp.path().join("issues/old-done-fox").exists());
+        assert!(!tmp.path().join("issues/archive/2020/01/old-done-fox").exists());
+    }
+
+    #[test]
+    fn already_archived_is_left_alone() {
+        let tmp = repo();
+        let dir = tmp.path().join("issues/archive/2020/01/old-done-fox");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("item.md"), "---\nstatus: fixed\nclosed: 2020-01-01\n---\n# x\n").unwrap();
+        let report = archive_closed(tmp.path(), 90, false, &UncachedConfig).unwrap();
+        assert!(report.archived.is_empty());
+        assert!(report.skipped.is_empty());
+    }
+
+    #[test]
+    fn missing_date_is_skipped_with_reason() {
+        let tmp = repo();
+        seed(&tmp, "dateless-done-newt", "fixed", None);
+        let report = archive_closed(tmp.path(), 90, false, &UncachedConfig).unwrap();
+        assert!(report.archived.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].slug, "dateless-done-newt");
+    }
+}
