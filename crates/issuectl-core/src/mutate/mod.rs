@@ -970,7 +970,9 @@ fn update_issue_under_lock(
     // `hard_schema_failure` so a `RequiredWhen` produced by this very
     // write (e.g. clearing `closed:` on a closing-status issue) is
     // rejected, while a pre-existing inconsistency on an untouched field
-    // stays exempt (doctor heals those).
+    // stays exempt (doctor heals those). NOTE: any new frontmatter write
+    // added below must record its key here, or a violation it introduces
+    // will be silently dropped.
     let mut written: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     // Status change is a pure frontmatter PATCH; no directory rename
@@ -2279,6 +2281,12 @@ fn hard_schema_failure(
     violations: &[crate::schema::ViolationKind],
     written: &std::collections::BTreeSet<String>,
 ) -> Option<String> {
+    // A `RequiredWhen` condition is gated solely on the issue's status
+    // class (`schema::RequiredWhen` only carries `status_class`), so
+    // `status` is the condition driver for *every* such violation. If
+    // the format ever grows non-status drivers, this check must learn
+    // the per-violation driver (see `ViolationKind::RequiredWhen`)
+    // instead of assuming `status`.
     let status_written = written.contains("status");
     let msgs: Vec<String> = violations
         .iter()
@@ -2295,6 +2303,12 @@ fn hard_schema_failure(
     (!msgs.is_empty()).then(|| msgs.join("; "))
 }
 
+/// Body-only schema gate. Callers here never mutate frontmatter, so the
+/// `written` set passed to `hard_schema_failure` is always empty and
+/// `RequiredWhen` violations stay lenient. A future frontmatter-mutating
+/// caller must NOT route through this helper — it would silently drop a
+/// `RequiredWhen` it introduced; use `hard_schema_failure` with a real
+/// `written` set instead (as `update_issue_under_lock` does).
 fn validate_against_schema(
     root: &Path,
     frontmatter: &serde_yaml::Mapping,
