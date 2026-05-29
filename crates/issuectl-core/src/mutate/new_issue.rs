@@ -18,6 +18,34 @@ use anyhow::{bail, Context, Result};
 use super::{MutateError, WriteLock};
 use crate::{refs, repo, schema, slug, write};
 
+/// Canonical name of the per-issue attachments directory
+/// (`issues/<slug>/attachments/`) — screenshots, logs, and other binary
+/// artifacts referenced from the body via relative paths.
+pub const ATTACHMENTS_DIRNAME: &str = "attachments";
+
+/// Canonical name of the per-issue fixtures directory
+/// (`issues/<slug>/fixtures/`) — reproduction inputs a bug-fixing agent
+/// can run against while working the issue.
+pub const FIXTURES_DIRNAME: &str = "fixtures";
+
+/// Create (idempotently) one of the canonical per-issue subdirectories
+/// under an existing issue directory and return its path. `name` must be
+/// [`ATTACHMENTS_DIRNAME`] or [`FIXTURES_DIRNAME`].
+///
+/// Deliberately NOT called from `issuectl new`: git does not track empty
+/// directories, so eagerly scaffolding `attachments/` + `fixtures/` into
+/// every new issue would litter the tree with dirs that vanish on clone.
+/// Instead a caller materialises the directory at the moment it writes
+/// the first file into it.
+pub fn ensure_issue_subdir(issue_dir: &Path, name: &str) -> Result<PathBuf> {
+    if name != ATTACHMENTS_DIRNAME && name != FIXTURES_DIRNAME {
+        bail!("unknown issue subdir {name:?} (expected {ATTACHMENTS_DIRNAME:?} or {FIXTURES_DIRNAME:?})");
+    }
+    let dir = issue_dir.join(name);
+    fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    Ok(dir)
+}
+
 pub struct NewArgs {
     pub issue_type: String,
     pub title: String,

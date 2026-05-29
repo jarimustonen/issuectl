@@ -3,7 +3,10 @@
 //! Used by `cmd_new` (CLI), `mutate::new_issue` (HTTP create), and
 //! `mutate::update_issue` (HTTP update + CLI update).
 
+use std::sync::OnceLock;
+
 use anyhow::{bail, Result};
+use regex::Regex;
 
 use crate::slug;
 
@@ -126,6 +129,78 @@ fn rewrite_line_refs(line: &str, old: &str, new: &str, out: &mut String) -> usiz
     count
 }
 
+/// Extract repo-relative file references from a markdown body — the
+/// targets of inline images (`![alt](path)`) and links (`[text](path)`)
+/// that point at the issue's own files (typically under `attachments/`
+/// or `fixtures/`). Used by `doctor` to flag references that no longer
+/// resolve to a file on disk.
+///
+/// Filtered OUT (not returned): absolute URLs (`https://`, `mailto:`,
+/// any `scheme://`), root-absolute paths (`/etc/...`), bare anchors
+/// (`#section`), and paths that escape the issue directory (`../`).
+/// A leading `./` is stripped. Targets are de-angle-bracketed
+/// (`<path>`) and any trailing `"title"` is dropped. Fenced code blocks
+/// are skipped so pasted command examples don't register as live
+/// references. Ordering and duplicates are preserved as they appear.
+pub fn extract_relative_body_refs(body: &str) -> Vec<String> {
+    use crate::body_sections::{closes_fence, opening_fence, Fence};
+
+    static RE: OnceLock<Regex> = OnceLock::new();
+    // `!?` — image or link; `\[[^\]]*\]` — the bracketed text;
+    // `\(\s*<?([^)>\s]+)>?` — the target, optionally angle-bracketed;
+    // `(?:\s+[^)]*)?\)` — an optional `"title"` then the close paren.
+    let re = RE.get_or_init(|| {
+        Regex::new(r#"!?\[[^\]]*\]\(\s*<?([^)>\s]+)>?(?:\s+[^)]*)?\)"#).unwrap()
+    });
+
+    let mut out = Vec::new();
+    let mut fence: Option<Fence> = None;
+    for line in body.lines() {
+        match fence {
+            Some(open) if closes_fence(line, open) => {
+                fence = None;
+                continue;
+            }
+            Some(_) => continue,
+            None => {
+                if let Some(o) = opening_fence(line) {
+                    fence = Some(o);
+                    continue;
+                }
+            }
+        }
+        for caps in re.captures_iter(line) {
+            let raw = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            if let Some(rel) = normalize_relative_ref(raw) {
+                out.push(rel);
+            }
+        }
+    }
+    out
+}
+
+/// Normalize a raw markdown link target to a repo-relative path, or
+/// `None` if it is not an intra-issue relative reference (URL, anchor,
+/// absolute path, or a `../` escape).
+fn normalize_relative_ref(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() || t.starts_with('#') || t.starts_with('/') {
+        return None;
+    }
+    // Any `scheme:` prefix (http:, https:, mailto:, tel:, data:, ...).
+    if t.contains("://") || t.starts_with("mailto:") || t.starts_with("tel:") {
+        return None;
+    }
+    let stripped = t.strip_prefix("./").unwrap_or(t);
+    if stripped.starts_with("../") || stripped.contains("/../") {
+        return None;
+    }
+    if stripped.is_empty() {
+        return None;
+    }
+    Some(stripped.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +287,43 @@ mod tests {
         assert_eq!(
             normalize_related_refs(&["#7".to_string()]).unwrap(),
             vec!["#7".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_relative_body_refs_picks_images_and_links() {
+        let body = "See ![shot](attachments/shot.avif) and [log](./fixtures/run.log).";
+        assert_eq!(
+            extract_relative_body_refs(body),
+            vec![
+                "attachments/shot.avif".to_string(),
+                "fixtures/run.log".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_relative_body_refs_skips_urls_anchors_and_escapes() {
+        let body = "[site](https://example.com) [a](#sec) [abs](/etc/x) \
+                    [mail](mailto:x@y.z) [up](../other/x.png)";
+        assert!(extract_relative_body_refs(body).is_empty());
+    }
+
+    #[test]
+    fn extract_relative_body_refs_strips_angle_brackets_and_titles() {
+        let body = "![s](<attachments/a.avif> \"a title\")";
+        assert_eq!(
+            extract_relative_body_refs(body),
+            vec!["attachments/a.avif".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_relative_body_refs_ignores_fenced_code() {
+        let body = "real ![x](attachments/x.avif)\n```\n![y](attachments/y.avif)\n```\n";
+        assert_eq!(
+            extract_relative_body_refs(body),
+            vec!["attachments/x.avif".to_string()]
         );
     }
 

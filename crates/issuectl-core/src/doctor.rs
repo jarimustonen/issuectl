@@ -389,6 +389,20 @@ struct DoctorFindings {
     /// minimal pointer template. Only flagged when legacy markers are
     /// present, so user-customized content is left alone.
     legacy_issues_agents_md: bool,
+    /// Large binary files under `issues/<slug>/` (including its
+    /// `attachments/` / `fixtures/` subdirs) exceeding
+    /// `LARGE_BINARY_BYTES`. Warning-only — committing big binaries
+    /// bloats git history; suggest external storage or `.gitignore`.
+    /// `(slug, repo_relative_path, bytes)`.
+    large_binaries: Vec<(String, String, u64)>,
+    /// Raster images under an issue dir that are not AVIF. The issue
+    /// convention prefers AVIF; warning-only nudge to convert.
+    /// `(slug, repo_relative_path)`.
+    non_avif_images: Vec<(String, String)>,
+    /// Relative-path references in an issue body that do not resolve to
+    /// a file inside that issue's directory (moved/renamed attachment or
+    /// a typo). Warning-only. `(slug, reference)`.
+    broken_attachment_refs: Vec<(String, String)>,
 }
 
 /// Stage 2: planned writes derived from `DoctorFindings`. Built by
@@ -970,6 +984,8 @@ fn scan(repo_root: &Path) -> Result<DoctorFindings> {
 
     populate_extended_validation(&scan, schema_value.as_deref(), &mut report);
 
+    populate_attachment_health(&scan, repo_root, &mut report);
+
     Ok(report)
 }
 
@@ -1070,6 +1086,87 @@ fn populate_orphan_epic_refs(scan: &ScanResult, report: &mut DoctorFindings) {
                     .orphan_epic_refs
                     .push((s.dir_name.clone(), epic.to_string()));
             }
+        }
+    }
+}
+
+/// Attachment / fixture health: large binaries, non-AVIF images, and
+/// relative body references that no longer resolve. All warning-only —
+/// these never enter `blockers_for`, so they cannot block `--fix` or
+/// flip the exit code. Walks each issue directory (item.md and atomic-
+/// write tempfiles excluded) plus its `attachments/` / `fixtures/`
+/// subdirs.
+fn populate_attachment_health(scan: &ScanResult, repo_root: &Path, report: &mut DoctorFindings) {
+    for s in &scan.issues {
+        let mut files = Vec::new();
+        collect_issue_files(&s.dir_path, &mut files);
+        for path in &files {
+            // The issue's own item.md is text we already lint elsewhere.
+            if path == &s.item_path {
+                continue;
+            }
+            if let Ok(meta) = fs::metadata(path) {
+                if meta.len() > LARGE_BINARY_BYTES {
+                    report.large_binaries.push((
+                        s.dir_name.clone(),
+                        rel(repo_root, path),
+                        meta.len(),
+                    ));
+                }
+            }
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if NON_AVIF_IMAGE_EXTS.contains(&ext.to_ascii_lowercase().as_str()) {
+                    report
+                        .non_avif_images
+                        .push((s.dir_name.clone(), rel(repo_root, path)));
+                }
+            }
+        }
+
+        // Relative body references pointing inside the issue dir that no
+        // longer resolve. Frontmatter is YAML and won't match the
+        // markdown link syntax, so scanning the whole item.md text is
+        // safe and avoids a second frontmatter split.
+        if let Some(text) = &s.text {
+            for r in crate::refs::extract_relative_body_refs(text) {
+                if !s.dir_path.join(&r).exists() {
+                    report
+                        .broken_attachment_refs
+                        .push((s.dir_name.clone(), r));
+                }
+            }
+        }
+    }
+    report.large_binaries.sort();
+    report.non_avif_images.sort();
+    report.broken_attachment_refs.sort();
+}
+
+/// Recursively collect regular files under `dir`, skipping symlinks and
+/// atomic-write tempfiles. Used by `populate_attachment_health`.
+fn collect_issue_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let Ok(ftype) = entry.file_type() else {
+            continue;
+        };
+        if ftype.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if ftype.is_dir() {
+            collect_issue_files(&path, out);
+        } else if ftype.is_file() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".issuectl-tmp-")
+            {
+                continue;
+            }
+            out.push(path);
         }
     }
 }
@@ -1442,6 +1539,18 @@ fn populate_extended_validation(
 /// says they're masked, teammates and CI won't see them — the local
 /// developer will believe `agents init` / schema setup worked.
 const GITIGNORE_CANONICAL_PATHS: &[&str] = &[".issuectl/AGENTS.md", "issues/.schema.yaml"];
+
+/// Files larger than this under an issue directory are flagged as large
+/// binaries (warning-only). 1 MiB: a git-tracked issue tracker shouldn't
+/// carry artifacts this size inline without a deliberate choice, because
+/// every revision is kept forever in history. The suggested remedies are
+/// external storage or a `.gitignore` entry.
+const LARGE_BINARY_BYTES: u64 = 1 << 20;
+
+/// Raster image extensions the AVIF convention asks contributors to
+/// convert. Flagged as warning-only nudges, independent of size.
+const NON_AVIF_IMAGE_EXTS: &[&str] =
+    &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tif"];
 
 /// Run `git check-ignore -- <path>...` against the canonical paths
 /// that exist on disk and return those that git would actually ignore.
@@ -2641,6 +2750,9 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         || report.legacy_issues_agents_md
         || !report.gitignored_paths.is_empty()
         || oc.issues_agents_md_rewritten
+        || !report.large_binaries.is_empty()
+        || !report.non_avif_images.is_empty()
+        || !report.broken_attachment_refs.is_empty()
         || !oc.blockers.is_empty()
         || oc.apply_error.is_some();
     if !oc.blockers.is_empty() {
@@ -2971,6 +3083,27 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         );
         println!();
     }
+    if !report.large_binaries.is_empty() {
+        println!("Large binaries under issue dirs (consider external storage or .gitignore):");
+        for (slug, path, bytes) in &report.large_binaries {
+            println!("  {slug}: {path} ({} KiB)", bytes / 1024);
+        }
+        println!();
+    }
+    if !report.non_avif_images.is_empty() {
+        println!("Non-AVIF images (convert to AVIF per the issue convention):");
+        for (slug, path) in &report.non_avif_images {
+            println!("  {slug}: {path}");
+        }
+        println!();
+    }
+    if !report.broken_attachment_refs.is_empty() {
+        println!("Body references to missing files (relative paths that don't resolve):");
+        for (slug, r) in &report.broken_attachment_refs {
+            println!("  {slug}: {r}");
+        }
+        println!();
+    }
     if fix {
         let prefix = if oc.apply_error.is_some() {
             "Aborted mid-pipeline."
@@ -3122,6 +3255,22 @@ fn render_json(
         .map(|(s, st, _)| serde_json::json!({"slug": s, "status": st}))
         .collect();
 
+    let large_binaries: Vec<serde_json::Value> = report
+        .large_binaries
+        .iter()
+        .map(|(slug, path, bytes)| serde_json::json!({"slug": slug, "path": path, "bytes": bytes}))
+        .collect();
+    let non_avif_images: Vec<serde_json::Value> = report
+        .non_avif_images
+        .iter()
+        .map(|(slug, path)| serde_json::json!({"slug": slug, "path": path}))
+        .collect();
+    let broken_attachment_refs: Vec<serde_json::Value> = report
+        .broken_attachment_refs
+        .iter()
+        .map(|(slug, r)| serde_json::json!({"slug": slug, "ref": r}))
+        .collect();
+
     let mut json_obj = serde_json::json!({
         "fix_applied": fix && oc.fix_applied(),
         "migrations": migrations,
@@ -3173,6 +3322,24 @@ fn render_json(
         "issues_agents_md_rewritten": oc.issues_agents_md_rewritten,
         "gitignored_paths": report.gitignored_paths,
     });
+    // Inserted post-construction rather than inline: the read-only object
+    // literal is already at the `serde_json::json!` macro recursion
+    // limit, so three more inline keys overflow it. Map is a sorted
+    // BTreeMap, so insertion order does not affect the rendered output.
+    if let serde_json::Value::Object(map) = &mut json_obj {
+        map.insert(
+            "large_binaries".to_string(),
+            serde_json::Value::Array(large_binaries),
+        );
+        map.insert(
+            "non_avif_images".to_string(),
+            serde_json::Value::Array(non_avif_images),
+        );
+        map.insert(
+            "broken_attachment_refs".to_string(),
+            serde_json::Value::Array(broken_attachment_refs),
+        );
+    }
     // `apply_outcome` is the new structured envelope: emitted only on
     // `--fix` runs so the read-only JSON shape (golden snapshot) stays
     // byte-identical. Carries `fix_applied` (computed from the outcome
@@ -5249,6 +5416,7 @@ mod tests {
   "alias_coercions": [],
   "blocked_by_cycles": [],
   "both_open_and_closed": [],
+  "broken_attachment_refs": [],
   "broken_refs": [
     {
       "kind": "epic",
@@ -5267,12 +5435,14 @@ mod tests {
   "gitignored_paths": [],
   "invalid_slugs": [],
   "issues_agents_md_rewritten": false,
+  "large_binaries": [],
   "legacy_issues_agents_md": false,
   "migrations": [],
   "missing_body_sections": [],
   "missing_item_md": [
     "flat/charlie-empty-dir"
   ],
+  "non_avif_images": [],
   "notes_conflicts": [],
   "notes_renamed": [],
   "notes_to_rename": [],
@@ -6057,5 +6227,68 @@ mod tests {
             "hard parse error must produce a blocker, got {:?}",
             blockers
         );
+    }
+
+    #[test]
+    fn flags_large_binaries_non_avif_and_broken_refs() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "noisy-bright-cat",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n\n\
+             ![shot](attachments/shot.png)\n\
+             [missing](attachments/gone.avif)\n",
+        );
+        let issue_dir = tmp.path().join("issues/noisy-bright-cat");
+        let att = issue_dir.join("attachments");
+        fs::create_dir_all(&att).unwrap();
+        // Non-AVIF image AND > 1 MiB → flagged by both checks.
+        fs::write(att.join("shot.png"), vec![0u8; (1 << 20) + 10]).unwrap();
+        // Small AVIF fixture that the body does NOT reference: clean.
+        fs::create_dir_all(issue_dir.join("fixtures")).unwrap();
+        fs::write(issue_dir.join("fixtures/ok.bin"), b"tiny").unwrap();
+
+        let r = scan(tmp.path()).unwrap();
+
+        assert_eq!(
+            r.non_avif_images,
+            vec![(
+                "noisy-bright-cat".to_string(),
+                "issues/noisy-bright-cat/attachments/shot.png".to_string()
+            )]
+        );
+        assert_eq!(r.large_binaries.len(), 1);
+        assert_eq!(r.large_binaries[0].0, "noisy-bright-cat");
+        assert!(r.large_binaries[0].2 > (1 << 20));
+        // `shot.png` resolves; `gone.avif` does not.
+        assert_eq!(
+            r.broken_attachment_refs,
+            vec![(
+                "noisy-bright-cat".to_string(),
+                "attachments/gone.avif".to_string()
+            )]
+        );
+
+        // Warning-only: none of these are critical blockers.
+        assert!(critical_blockers(&r).is_empty());
+    }
+
+    #[test]
+    fn clean_issue_with_avif_attachment_has_no_attachment_warnings() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "calm-quiet-otter",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n\n\
+             ![shot](attachments/shot.avif)\n",
+        );
+        let att = tmp.path().join("issues/calm-quiet-otter/attachments");
+        fs::create_dir_all(&att).unwrap();
+        fs::write(att.join("shot.avif"), b"small").unwrap();
+
+        let r = scan(tmp.path()).unwrap();
+        assert!(r.non_avif_images.is_empty());
+        assert!(r.large_binaries.is_empty());
+        assert!(r.broken_attachment_refs.is_empty());
     }
 }
