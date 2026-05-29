@@ -17,7 +17,8 @@
 //! Consumed by the CLI `duplicates` command and the opt-in `new
 //! --check-duplicates` pre-check.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 use crate::models::Issue;
 
@@ -58,6 +59,12 @@ const STOPWORDS: &[&str] = &[
     "your", "their",
 ];
 
+/// `STOPWORDS` as a hash set, built once. Tokenization checks membership
+/// for every token, so a linear scan over the slice would cost ~50 string
+/// comparisons per token; the set makes it O(1).
+static STOPWORD_SET: LazyLock<HashSet<&'static str>> =
+    LazyLock::new(|| STOPWORDS.iter().copied().collect());
+
 /// One scored match against a target issue.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DuplicateMatch {
@@ -95,12 +102,12 @@ struct Interner {
 }
 
 impl Interner {
-    fn intern(&mut self, s: &str) -> u32 {
-        if let Some(&id) = self.map.get(s) {
+    fn intern(&mut self, s: String) -> u32 {
+        if let Some(&id) = self.map.get(s.as_str()) {
             return id;
         }
-        let id = self.map.len() as u32;
-        self.map.insert(s.to_string(), id);
+        let id = u32::try_from(self.map.len()).expect("token interner exceeded u32::MAX entries");
+        self.map.insert(s, id);
         id
     }
 }
@@ -123,7 +130,7 @@ impl Tokens {
             .iter()
             .map(|l| l.trim().to_lowercase())
             .filter(|l| !l.is_empty())
-            .map(|l| interner.intern(&l))
+            .map(|l| interner.intern(l))
             .collect();
         labels.sort_unstable();
         labels.dedup();
@@ -257,8 +264,8 @@ fn tokenize(text: &str, interner: &mut Interner) -> Vec<u32> {
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
         .map(|t| t.to_lowercase())
-        .filter(|t| t.chars().count() >= MIN_TOKEN_LEN && !STOPWORDS.contains(&t.as_str()))
-        .map(|t| interner.intern(&t))
+        .filter(|t| t.chars().count() >= MIN_TOKEN_LEN && !STOPWORD_SET.contains(t.as_str()))
+        .map(|t| interner.intern(t))
         .collect();
     ids.sort_unstable();
     ids.dedup();
@@ -429,6 +436,29 @@ mod tests {
         let m = find_duplicates(&a, std::slice::from_ref(&b), DEFAULT_THRESHOLD);
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].label_overlap, 0.0, "two empty label sets → 0");
+    }
+
+    #[test]
+    fn unicode_tokens_are_lowercased_consistently() {
+        // Pins the `to_lowercase()` (Unicode, not ASCII) semantics so the
+        // interner can't silently diverge on non-ASCII titles.
+        let a = issue("a-a", "café résumé", "", &[]);
+        let b = issue("b-b", "CAFÉ Résumé", "", &[]);
+        let m = find_duplicates(&a, std::slice::from_ref(&b), DEFAULT_THRESHOLD);
+        assert_eq!(m.len(), 1);
+        assert!((m[0].title_overlap - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn repeated_tokens_within_issue_do_not_inflate_overlap() {
+        // Deduplication within a single issue must match set semantics:
+        // "bug" repeated three times is one token, so identical titles
+        // still score a perfect 1.0 (not >1, not diluted).
+        let a = issue("a-a", "bug bug bug crash", "", &[]);
+        let b = issue("b-b", "bug crash", "", &[]);
+        let m = find_duplicates(&a, std::slice::from_ref(&b), DEFAULT_THRESHOLD);
+        assert_eq!(m.len(), 1);
+        assert!((m[0].title_overlap - 1.0).abs() < 1e-9, "got {}", m[0].title_overlap);
     }
 
     #[test]
