@@ -1195,6 +1195,12 @@ fn update_issue_under_lock(
     //     `item.md` would be unchanged but `.schema.yaml` would be
     //     newly created and the legacy directory permanently moved.
     crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
+    // Reopening an archived issue (closing → active) must lift it out of
+    // cold storage: otherwise the frontmatter write below lands on the
+    // `issues/archive/YYYY/MM/<slug>/` path and the issue reads as active
+    // in `list`/`show` while physically still living in the archive. This
+    // is the inverse of the `archive` move and runs under the same flock.
+    let item_path = unarchive_if_reopened(root, slug, item_path, moved_to_open)?;
     let final_path = migrate_to_flat_if_legacy(root, slug, &item_path)?;
     write_item_atomic(&final_path, &item).map_err(MutateError::Io)?;
 
@@ -2333,6 +2339,52 @@ fn migrate_to_flat_if_legacy(
     }
 }
 
+/// Move a reopened issue out of cold storage. When a status mutation
+/// takes an issue from a closing status back to active (`moved_to_open`)
+/// and its `item.md` currently lives under `issues/archive/YYYY/MM/`,
+/// rename the issue directory back to the active root (`issues/<slug>/`)
+/// — the inverse of the `archive` move. Returns the new `item.md` path
+/// so the subsequent write lands on the active copy. No-op for issues
+/// that aren't archived or aren't being reopened.
+///
+/// Runs under the caller's held flock and only after validation passed,
+/// so it shares the archive move's all-or-nothing guarantee. Refuses
+/// (rather than clobbering) if an active directory for the slug already
+/// exists — that collision is `Ambiguous` and would have failed the
+/// read-time locate, but the check is kept as defence in depth.
+fn unarchive_if_reopened(
+    root: &Path,
+    slug: &str,
+    item_path: PathBuf,
+    moved_to_open: bool,
+) -> Result<PathBuf, MutateError> {
+    if !moved_to_open {
+        return Ok(item_path);
+    }
+    let archive_root = root.join("issues").join(repo::ARCHIVE_DIR);
+    let cur_dir = item_path
+        .parent()
+        .ok_or_else(|| MutateError::Io(anyhow!("item.md has no parent: {}", item_path.display())))?;
+    if !cur_dir.starts_with(&archive_root) {
+        return Ok(item_path); // not archived — nothing to lift
+    }
+    let dest_dir = root.join("issues").join(slug);
+    if dest_dir.exists() {
+        return Err(MutateError::Io(anyhow!(
+            "cannot unarchive {slug}: active destination already exists: {} — resolve manually",
+            dest_dir.display()
+        )));
+    }
+    fs::rename(cur_dir, &dest_dir).map_err(|e| {
+        MutateError::Io(anyhow!(
+            "cannot unarchive {slug}: rename {} -> {} failed: {e}",
+            cur_dir.display(),
+            dest_dir.display()
+        ))
+    })?;
+    Ok(dest_dir.join("item.md"))
+}
+
 /// Atomic write: stage as `.issuectl-tmp-…`, fsync, persist into
 /// place. On Unix, best-effort fsync the parent directory after
 /// rename. The tempfile prefix is the signal the watcher uses to
@@ -3104,6 +3156,150 @@ mod tests {
             !on_disk.contains("closed:"),
             "frontmatter must not retain closed: after reopen, got:\n{on_disk}"
         );
+    }
+
+    /// Seed an issue directly into cold storage at
+    /// `issues/archive/YYYY/MM/<slug>/item.md`, as the `archive` verb
+    /// would leave it.
+    fn seed_archived(root: &Path, year: &str, month: &str, slug: &str, body: &str) -> PathBuf {
+        let dir = root
+            .join("issues/archive")
+            .join(year)
+            .join(month)
+            .join(slug);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("item.md"), body).unwrap();
+        dir
+    }
+
+    #[test]
+    fn reopening_archived_issue_lifts_it_out_of_cold_storage() {
+        // The arch-stale-archive feature moves closed issues to
+        // issues/archive/YYYY/MM/<slug>/. Reopening one (closing→active)
+        // must move the directory back to the active root, else the issue
+        // reads as active in list/show while physically still archived.
+        let tmp = fresh_repo();
+        let archived_dir = seed_archived(
+            tmp.path(),
+            "2020",
+            "01",
+            "old-archived-fox",
+            "---\ntype: bug\ncreated: 2020-01-01\nstatus: fixed\n\
+             priority: normal\nclosed: 2020-01-01\n---\n\n# Title\n",
+        );
+
+        let req = UpdateIssueRequest {
+            status: Patch::Set("open".into()),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "old-archived-fox", req, None, &UncachedConfig).unwrap();
+
+        assert!(out.moved_to_open);
+        assert_eq!(out.issue.status, "open");
+        // Physically relocated to the active root.
+        let active_dir = tmp.path().join("issues/old-archived-fox");
+        assert_eq!(out.issue_dir, active_dir, "issue_dir must be active root");
+        assert!(active_dir.join("item.md").is_file(), "active copy must exist");
+        assert!(!archived_dir.exists(), "archive copy must be gone");
+        let on_disk = fs::read_to_string(active_dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("status: open"));
+        assert!(!on_disk.contains("closed:"), "closed: cleared on reopen");
+        // No leftover empty archive month/year/root tree is required, but
+        // the slug dir itself must not linger.
+        assert!(
+            !tmp.path()
+                .join("issues/archive/2020/01/old-archived-fox")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn reopening_archived_issue_via_close_status_change_stays_in_archive() {
+        // Changing one closing status to another (fixed→wontfix) is NOT a
+        // reopen: the issue stays closed and must remain in cold storage.
+        let tmp = fresh_repo();
+        let archived_dir = seed_archived(
+            tmp.path(),
+            "2020",
+            "01",
+            "still-closed-elk",
+            "---\ntype: bug\ncreated: 2020-01-01\nstatus: fixed\n\
+             priority: normal\nclosed: 2020-01-01\n---\n\n# Title\n",
+        );
+
+        let req = UpdateIssueRequest {
+            status: Patch::Set("wontfix".into()),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "still-closed-elk", req, None, &UncachedConfig).unwrap();
+
+        assert!(!out.moved_to_open);
+        assert!(archived_dir.join("item.md").is_file(), "stays archived");
+        assert!(
+            !tmp.path().join("issues/still-closed-elk").exists(),
+            "must not appear in active root"
+        );
+        // Historical close date preserved on closing→closing.
+        let on_disk = fs::read_to_string(archived_dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("status: wontfix"));
+        assert!(on_disk.contains("closed: 2020-01-01"));
+    }
+
+    #[test]
+    fn reopening_archived_issue_refuses_when_active_copy_exists() {
+        // Defence in depth: a slug present both active and archived is
+        // Ambiguous and fails the read-time locate, but if it somehow got
+        // past, the unarchive move must refuse rather than clobber.
+        let tmp = fresh_repo();
+        seed_archived(
+            tmp.path(),
+            "2020",
+            "01",
+            "dup-slug-newt",
+            "---\ntype: bug\ncreated: 2020-01-01\nstatus: fixed\n\
+             priority: normal\nclosed: 2020-01-01\n---\n\n# Title\n",
+        );
+        // Also seed an active copy so the locate is Ambiguous.
+        let active = tmp.path().join("issues/dup-slug-newt");
+        fs::create_dir_all(&active).unwrap();
+        fs::write(
+            active.join("item.md"),
+            "---\ntype: bug\ncreated: 2020-01-01\nstatus: open\npriority: normal\n---\n\n# T\n",
+        )
+        .unwrap();
+
+        let req = UpdateIssueRequest {
+            status: Patch::Set("open".into()),
+            ..Default::default()
+        };
+        let err =
+            update_issue(tmp.path(), "dup-slug-newt", req, None, &UncachedConfig).unwrap_err();
+        // Ambiguous locate fires before the write; either way both copies
+        // survive untouched.
+        assert!(matches!(err, MutateError::AmbiguousSlug { .. }));
+        assert!(tmp
+            .path()
+            .join("issues/archive/2020/01/dup-slug-newt/item.md")
+            .is_file());
+        assert!(active.join("item.md").is_file());
+    }
+
+    #[test]
+    fn unarchive_if_reopened_is_noop_when_not_reopening() {
+        // A non-reopen mutation (moved_to_open == false) on an archived
+        // issue must leave the path untouched.
+        let tmp = fresh_repo();
+        let item = tmp
+            .path()
+            .join("issues/archive/2020/01/keep-archived-owl/item.md");
+        let out = unarchive_if_reopened(
+            tmp.path(),
+            "keep-archived-owl",
+            item.clone(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(out, item, "non-reopen leaves the archived path unchanged");
     }
 
     #[test]
