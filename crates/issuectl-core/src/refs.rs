@@ -142,6 +142,12 @@ fn rewrite_line_refs(line: &str, old: &str, new: &str, out: &mut String) -> usiz
 /// (`<path>`) and any trailing `"title"` is dropped. Fenced code blocks
 /// are skipped so pasted command examples don't register as live
 /// references. Ordering and duplicates are preserved as they appear.
+///
+/// Known limitations (acceptable because the consumer only emits a
+/// non-blocking warning): targets are matched up to the first `)` or
+/// whitespace, so filenames containing literal parentheses or spaces
+/// are truncated; reference-style links (`[a]: target`) and indented
+/// (4-space) code blocks are not handled.
 pub fn extract_relative_body_refs(body: &str) -> Vec<String> {
     use crate::body_sections::{closes_fence, opening_fence, Fence};
 
@@ -191,11 +197,25 @@ fn normalize_relative_ref(raw: &str) -> Option<String> {
     if t.contains("://") || t.starts_with("mailto:") || t.starts_with("tel:") {
         return None;
     }
-    let stripped = t.strip_prefix("./").unwrap_or(t);
-    if stripped.starts_with("../") || stripped.contains("/../") {
+    // Reject Windows-style separators outright: on a Unix `Path` a
+    // backslash is an ordinary character, so `..\..\x` would slip past
+    // the component check below and let a body ref probe for files
+    // outside the issue directory (an existence-check info leak).
+    if t.contains('\\') {
         return None;
     }
+    let stripped = t.strip_prefix("./").unwrap_or(t);
     if stripped.is_empty() {
+        return None;
+    }
+    // Refuse any `..` segment so the reference cannot escape the issue
+    // directory once joined. `Path::components` normalises `a/../b`-style
+    // forms that a substring check would miss.
+    use std::path::{Component, Path};
+    if Path::new(stripped)
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+    {
         return None;
     }
     Some(stripped.to_string())
@@ -307,6 +327,18 @@ mod tests {
         let body = "[site](https://example.com) [a](#sec) [abs](/etc/x) \
                     [mail](mailto:x@y.z) [up](../other/x.png)";
         assert!(extract_relative_body_refs(body).is_empty());
+    }
+
+    #[test]
+    fn extract_relative_body_refs_rejects_backslash_and_normalised_escapes() {
+        // Windows-style separator and an embedded `a/../` escape must not
+        // slip through to a filesystem existence check.
+        let body = "[a](..\\..\\secret) [b](attachments/../../etc/passwd) \
+                    [c](attachments/./x.avif)";
+        assert_eq!(
+            extract_relative_body_refs(body),
+            vec!["attachments/./x.avif".to_string()]
+        );
     }
 
     #[test]

@@ -1093,9 +1093,10 @@ fn populate_orphan_epic_refs(scan: &ScanResult, report: &mut DoctorFindings) {
 /// Attachment / fixture health: large binaries, non-AVIF images, and
 /// relative body references that no longer resolve. All warning-only —
 /// these never enter `blockers_for`, so they cannot block `--fix` or
-/// flip the exit code. Walks each issue directory (item.md and atomic-
-/// write tempfiles excluded) plus its `attachments/` / `fixtures/`
-/// subdirs.
+/// flip the exit code. Walks the whole issue directory tree (item.md and
+/// atomic-write tempfiles excluded, symlinks not followed) — that
+/// naturally covers `attachments/` and `fixtures/` as well as any other
+/// files an issue carries.
 fn populate_attachment_health(scan: &ScanResult, repo_root: &Path, report: &mut DoctorFindings) {
     for s in &scan.issues {
         let mut files = Vec::new();
@@ -1115,7 +1116,10 @@ fn populate_attachment_health(scan: &ScanResult, repo_root: &Path, report: &mut 
                 }
             }
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if NON_AVIF_IMAGE_EXTS.contains(&ext.to_ascii_lowercase().as_str()) {
+                if NON_AVIF_IMAGE_EXTS
+                    .iter()
+                    .any(|e| e.eq_ignore_ascii_case(ext))
+                {
                     report
                         .non_avif_images
                         .push((s.dir_name.clone(), rel(repo_root, path)));
@@ -1124,11 +1128,12 @@ fn populate_attachment_health(scan: &ScanResult, repo_root: &Path, report: &mut 
         }
 
         // Relative body references pointing inside the issue dir that no
-        // longer resolve. Frontmatter is YAML and won't match the
-        // markdown link syntax, so scanning the whole item.md text is
-        // safe and avoids a second frontmatter split.
+        // longer resolve. Scan only the body — a YAML frontmatter value
+        // can legitimately contain `[text](paren)` syntax, which would
+        // otherwise register as a phantom broken reference.
         if let Some(text) = &s.text {
-            for r in crate::refs::extract_relative_body_refs(text) {
+            let body = crate::item_text::split(text).body;
+            for r in crate::refs::extract_relative_body_refs(body) {
                 if !s.dir_path.join(&r).exists() {
                     report
                         .broken_attachment_refs
@@ -1161,8 +1166,8 @@ fn collect_issue_files(dir: &Path, out: &mut Vec<PathBuf>) {
         } else if ftype.is_file() {
             if entry
                 .file_name()
-                .to_string_lossy()
-                .starts_with(".issuectl-tmp-")
+                .to_str()
+                .is_some_and(|n| n.starts_with(".issuectl-tmp-"))
             {
                 continue;
             }
