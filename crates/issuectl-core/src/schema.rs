@@ -396,6 +396,74 @@ fn validate_loadability(schema: &Schema) -> Result<()> {
             );
         }
     }
+    let builtin = default_schema();
+    validate_alias_map(
+        "status",
+        schema.fields.get("status").and_then(|s| s.allowed.as_ref()),
+        &schema.status_aliases,
+        &builtin.status_aliases,
+        "status_aliases",
+    )?;
+    validate_alias_map(
+        "type",
+        schema.fields.get("type").and_then(|s| s.allowed.as_ref()),
+        &schema.type_aliases,
+        &builtin.type_aliases,
+        "type_aliases",
+    )?;
+    Ok(())
+}
+
+/// Reject alias tables that can never produce a valid coercion. An alias
+/// `from → to` is consumed by `doctor --fix` (via [`would_coerce`]) to
+/// rewrite a legacy value to `to`. Two shapes are nonsensical:
+///
+/// - **Alias chain.** `to` must not itself be an alias key. `would_coerce`
+///   resolves a single hop, not transitively, so a chain `a → b → c` would
+///   leave `a` coerced to `b` — still an alias, never reaching `c`. Always
+///   rejected so the author points `a` directly at the canonical value.
+///   (This also rejects a degenerate self-alias `a → a`.)
+/// - **Target outside the field enum.** When `field` declares an `enum`,
+///   `to` must be a member of it; otherwise `doctor --fix` would rewrite a
+///   legacy value to something that immediately fails enum validation —
+///   trading one violation for another. A field with no `enum` accepts any
+///   value, so there is nothing to check.
+///
+/// The enum-membership check applies only to *user-authored* aliases. An
+/// inherited built-in alias (one whose `from → to` matches `builtin`
+/// unchanged) is exempt: the alias maps merge per-key with no removal
+/// semantics, so a user who narrows a field enum cannot delete the
+/// now-stale built-in alias — rejecting it would brick every command with
+/// no escape hatch. Built-in alias targets are validated independently by
+/// `default_schema_aliases_pass_validation`.
+fn validate_alias_map(
+    field: &str,
+    allowed: Option<&Vec<String>>,
+    aliases: &BTreeMap<String, String>,
+    builtin: &BTreeMap<String, String>,
+    map_name: &str,
+) -> Result<()> {
+    for (from, to) in aliases {
+        if aliases.contains_key(to) {
+            anyhow::bail!(
+                "{map_name}: alias {from:?} → {to:?} targets {to:?}, which is itself an alias key; \
+                 alias chains are not resolved — map {from:?} directly to a canonical value"
+            );
+        }
+        let inherited = builtin.get(from).map(|b| b == to).unwrap_or(false);
+        if inherited {
+            continue;
+        }
+        if let Some(allowed) = allowed {
+            if !allowed.iter().any(|a| a == to) {
+                anyhow::bail!(
+                    "{map_name}: alias {from:?} → {to:?} targets {to:?}, which is not in the `{field}` enum [{}]; \
+                     coercing to it would immediately fail validation",
+                    allowed.join(", ")
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1220,6 +1288,114 @@ mod tests {
         assert_eq!(status_alias_target(&schema, "resolved"), Some("fixed"));
         // type_aliases built-ins survive when only status_aliases edited.
         assert_eq!(type_alias_target(&schema, "refactor"), Some("chore"));
+    }
+
+    #[test]
+    fn default_schema_aliases_pass_validation() {
+        // The built-in alias tables must satisfy the loadability checks:
+        // every target is in its field enum and none is itself a key.
+        validate_loadability(&default_schema()).unwrap();
+    }
+
+    #[test]
+    fn load_rejects_status_alias_target_outside_enum() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        // `nope` is not a member of the built-in `status` enum.
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nstatus_aliases:\n  legacy: nope\n",
+        )
+        .unwrap();
+        let err = load(tmp.path()).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("status_aliases") && chain.contains("not in the `status` enum"),
+            "expected enum-membership rejection, got {chain}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_type_alias_target_outside_enum() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\ntype_aliases:\n  legacy: nonsense\n",
+        )
+        .unwrap();
+        let err = load(tmp.path()).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("type_aliases") && chain.contains("not in the `type` enum"),
+            "expected enum-membership rejection, got {chain}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_status_alias_chain() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        // `a → b` where `b` is itself an alias key (`b → done`).
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nstatus_aliases:\n  a: b\n  b: done\n",
+        )
+        .unwrap();
+        let err = load(tmp.path()).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("status_aliases") && chain.contains("alias chains are not resolved"),
+            "expected alias-chain rejection, got {chain}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_self_alias() {
+        // A degenerate self-alias `a → a` is a one-element chain and must
+        // be rejected by the same check.
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nstatus_aliases:\n  done: done\n",
+        )
+        .unwrap();
+        let err = load(tmp.path()).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("alias chains are not resolved"),
+            "expected self-alias rejection, got {chain}"
+        );
+    }
+
+    #[test]
+    fn alias_validation_skips_enum_check_when_field_has_no_enum() {
+        // If `status` is redeclared without an `enum`, any target is
+        // acceptable (nothing to fail validation against) — only the
+        // chain rule still applies.
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  status:\n    required: true\nstatus_aliases:\n  legacy: anything-goes\n",
+        )
+        .unwrap();
+        load(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn alias_chain_rejected_even_without_enum() {
+        // The chain rule is independent of enum presence.
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  status:\n    required: true\nstatus_aliases:\n  a: b\n  b: c\n",
+        )
+        .unwrap();
+        let err = load(tmp.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("alias chains are not resolved"));
     }
 
     #[test]
