@@ -1207,7 +1207,34 @@ fn fail(json: bool, code: i32, err_code: &str, message: &str, extra: serde_json:
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Parse manually instead of `Cli::parse()` so clap's own usage
+    // errors honour the `--json` contract too. By default clap prints
+    // free-form text to stderr and exits 2 — an agent that always passes
+    // `--json` would get un-parseable output and an exit code that
+    // collides with our "refused-but-actionable" 2. We prescan argv for
+    // `--json` (the flag itself can't have been parsed yet) and, when
+    // set, render usage errors as the shared error envelope with exit 1,
+    // reserving 2 for genuine refused-but-actionable outcomes. Help and
+    // version requests are not errors — let clap print them normally.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            use clap::error::ErrorKind;
+            let wants_json = std::env::args().skip(1).any(|a| a == "--json");
+            if wants_json
+                && !matches!(
+                    e.kind(),
+                    ErrorKind::DisplayHelp
+                        | ErrorKind::DisplayVersion
+                        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                )
+            {
+                emit_json_error("usage-error", e.to_string().trim_end(), serde_json::Value::Null);
+                std::process::exit(1);
+            }
+            e.exit();
+        }
+    };
     let json_output = cli.json;
     ROOT_OVERRIDE.set(cli.root).ok();
 

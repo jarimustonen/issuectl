@@ -139,6 +139,20 @@ fn json_error_contract_emits_structured_error() {
     );
 }
 
+/// A clap usage error (unknown flag) under `--json` is caught in `main`
+/// and re-emitted as the shared envelope with `code:"usage-error"` and
+/// exit 1 — not clap's plain-text stderr + exit 2.
+#[test]
+fn json_error_contract_wraps_clap_usage_errors() {
+    let tmp = fresh_repo();
+    let out = run(tmp.path(), &["--json", "show", "ab-cd", "--bogus-flag"]);
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    assert!(out.stdout.is_empty(), "{}", dump(&out));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("stderr should be JSON");
+    assert_eq!(v["error"]["code"], "usage-error", "{}", dump(&out));
+}
+
 /// A bubble-up anyhow error under `--json` is rendered with the shared
 /// envelope and the generic `command-failed` code.
 #[test]

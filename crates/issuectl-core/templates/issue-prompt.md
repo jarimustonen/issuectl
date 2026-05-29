@@ -29,14 +29,19 @@ same way:
   (`show`, `ls`, `search`) print the issue (object) or issues (array);
   action commands (`new`, `update`, `close`, `note`, `apply`, …) print a
   result object describing what changed.
-- **Failure (exit ≠ 0)** → a single object on **stderr**:
-  `{"error":{"code":"<stable-kebab-code>","message":"<human text>"}}`.
-  Some failures attach extra keys inside `error` (e.g. `matches` for a
-  duplicate precheck). stdout is empty on failure. Branch on the process
-  exit code, then parse stderr.
+- **Error (exit ≠ 0, nothing produced)** → a single object on
+  **stderr**: `{"error":{"code":"<stable-kebab-code>","message":"…"}}`,
+  sometimes with extra keys inside `error` (e.g. `matches` for a
+  duplicate precheck). stdout is empty. This covers validation errors,
+  not-found, conflicts, and even bad flags (`code:"usage-error"`).
+- **Partial success (exit ≠ 0, work landed)** → the command still prints
+  its normal **result object on stdout** (e.g. `import` with
+  `created`/`failed` counts), not the error envelope.
 - **Exit codes**: `0` success · `2` refused-but-actionable (duplicate
-  precheck strong match; partial import where some records landed) ·
-  `1` everything else (validation error, not-found, conflict).
+  precheck strong match → error envelope on stderr; partial import where
+  some records landed → result object on stdout) · `1` everything else
+  (validation error, not-found, bad flag, conflict). **Branch on the
+  exit code first**, then decide whether to read stdout or stderr.
 - **Shared field vocabulary** (same key, same meaning everywhere):
   `slug`, `title`, `version` (optimistic-concurrency token — pass back as
   `--expected-version`), `dir` (the issue's directory), `path` (a single
