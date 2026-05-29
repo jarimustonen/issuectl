@@ -333,6 +333,27 @@ pub(crate) fn load_uncached(root: &Path) -> Result<Schema> {
     for (from, to) in user.type_aliases {
         merged.type_aliases.insert(from, to);
     }
+    // Drop inherited built-in aliases whose target fell outside a
+    // user-narrowed field enum. The alias merge has no removal semantics,
+    // so a project that narrows `status`/`type` cannot delete a now-stale
+    // built-in alias; left live, `doctor --fix` would coerce a legacy
+    // value to a target that immediately fails enum validation. Pruning
+    // makes the stale built-in inert instead. User-authored aliases are
+    // never pruned — an out-of-enum target there is a mistake, surfaced as
+    // a hard error by `validate_loadability`.
+    let builtin = default_schema();
+    let status_allowed = merged.fields.get("status").and_then(|s| s.allowed.clone());
+    prune_stale_builtin_aliases(
+        &mut merged.status_aliases,
+        status_allowed.as_deref(),
+        &builtin.status_aliases,
+    );
+    let type_allowed = merged.fields.get("type").and_then(|s| s.allowed.clone());
+    prune_stale_builtin_aliases(
+        &mut merged.type_aliases,
+        type_allowed.as_deref(),
+        &builtin.type_aliases,
+    );
     validate_body_sections(&merged.body_sections).with_context(|| format!("{}", path.display()))?;
     validate_loadability(&merged).with_context(|| format!("{}", path.display()))?;
     Ok(merged)
@@ -396,22 +417,41 @@ fn validate_loadability(schema: &Schema) -> Result<()> {
             );
         }
     }
-    let builtin = default_schema();
     validate_alias_map(
         "status",
-        schema.fields.get("status").and_then(|s| s.allowed.as_ref()),
+        schema.fields.get("status").and_then(|s| s.allowed.as_deref()),
         &schema.status_aliases,
-        &builtin.status_aliases,
         "status_aliases",
     )?;
     validate_alias_map(
         "type",
-        schema.fields.get("type").and_then(|s| s.allowed.as_ref()),
+        schema.fields.get("type").and_then(|s| s.allowed.as_deref()),
         &schema.type_aliases,
-        &builtin.type_aliases,
         "type_aliases",
     )?;
     Ok(())
+}
+
+/// Remove inherited built-in aliases whose target is no longer a member of
+/// a (user-narrowed) field enum. An entry is removed only when it matches
+/// the built-in default unchanged (`builtin[from] == to`) *and* its target
+/// fell outside `allowed` — user-authored entries are left in place so
+/// [`validate_alias_map`] can reject their out-of-enum targets. A field
+/// with no enum (`allowed == None`) constrains nothing, so nothing is
+/// pruned.
+fn prune_stale_builtin_aliases(
+    aliases: &mut BTreeMap<String, String>,
+    allowed: Option<&[String]>,
+    builtin: &BTreeMap<String, String>,
+) {
+    let Some(allowed) = allowed else {
+        return;
+    };
+    aliases.retain(|from, to| {
+        let inherited = builtin.get(from).map(|b| b == to).unwrap_or(false);
+        let target_in_enum = allowed.iter().any(|a| a == to);
+        !(inherited && !target_in_enum)
+    });
 }
 
 /// Reject alias tables that can never produce a valid coercion. An alias
@@ -429,30 +469,22 @@ fn validate_loadability(schema: &Schema) -> Result<()> {
 ///   trading one violation for another. A field with no `enum` accepts any
 ///   value, so there is nothing to check.
 ///
-/// The enum-membership check applies only to *user-authored* aliases. An
-/// inherited built-in alias (one whose `from → to` matches `builtin`
-/// unchanged) is exempt: the alias maps merge per-key with no removal
-/// semantics, so a user who narrows a field enum cannot delete the
-/// now-stale built-in alias — rejecting it would brick every command with
-/// no escape hatch. Built-in alias targets are validated independently by
-/// `default_schema_aliases_pass_validation`.
+/// Stale inherited built-in aliases are pruned by
+/// [`prune_stale_builtin_aliases`] before this runs, so the enum-membership
+/// check here only ever fires on a user-authored (or user-overridden)
+/// target — exactly the mistake worth a hard error.
 fn validate_alias_map(
     field: &str,
-    allowed: Option<&Vec<String>>,
+    allowed: Option<&[String]>,
     aliases: &BTreeMap<String, String>,
-    builtin: &BTreeMap<String, String>,
     map_name: &str,
 ) -> Result<()> {
     for (from, to) in aliases {
-        if aliases.contains_key(to) {
+        if let Some(next) = aliases.get(to) {
             anyhow::bail!(
-                "{map_name}: alias {from:?} → {to:?} targets {to:?}, which is itself an alias key; \
-                 alias chains are not resolved — map {from:?} directly to a canonical value"
+                "{map_name}: alias {from:?} → {to:?} cannot be used — {to:?} is itself an alias key \
+                 (it maps to {next:?}); alias chains are not resolved, so map {from:?} directly to a canonical value"
             );
-        }
-        let inherited = builtin.get(from).map(|b| b == to).unwrap_or(false);
-        if inherited {
-            continue;
         }
         if let Some(allowed) = allowed {
             if !allowed.iter().any(|a| a == to) {
@@ -1382,6 +1414,27 @@ mod tests {
         )
         .unwrap();
         load(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn narrowing_enum_prunes_stale_builtin_alias_instead_of_bricking() {
+        // Narrowing `status` past a built-in alias target must NOT brick
+        // loading (the merge can't delete the inherited alias). The stale
+        // built-in is pruned so `doctor --fix` can't coerce to an
+        // out-of-enum value; a built-in whose target survives is kept.
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  status:\n    required: true\n    enum: [open, in-progress, archived]\n",
+        )
+        .unwrap();
+        let schema = load(tmp.path()).unwrap();
+        // `closed → done` is stale (done not in narrowed enum) → pruned.
+        assert_eq!(status_alias_target(&schema, "closed"), None);
+        assert_eq!(would_coerce(&schema, "status", "closed"), None);
+        // `in_progress → in-progress` survives (target still in enum).
+        assert_eq!(status_alias_target(&schema, "in_progress"), Some("in-progress"));
     }
 
     #[test]
