@@ -69,6 +69,19 @@ pub struct Schema {
     /// auto-stamped with `closed:`).
     #[serde(default)]
     pub status_classes: BTreeMap<String, StatusClass>,
+    /// Legacy → canonical value remaps for `status`, consumed by
+    /// `doctor --fix` to coerce pre-0.5.1 values during migration
+    /// (e.g. `closed` → `done`). Built-in defaults live in
+    /// `DEFAULT_SCHEMA_YAML`; a repo entry with the same key replaces
+    /// the built-in. Deliberately *not* applied by the normal mutation
+    /// commands — those still reject out-of-enum values so a typo can't
+    /// slip through silently; only `doctor --fix` rewrites via this map.
+    #[serde(default)]
+    pub status_aliases: BTreeMap<String, String>,
+    /// Legacy → canonical value remaps for `type`. Same semantics as
+    /// [`status_aliases`](Self::status_aliases).
+    #[serde(default)]
+    pub type_aliases: BTreeMap<String, String>,
 }
 
 /// Lifecycle classification for a status value.
@@ -100,6 +113,38 @@ pub struct FieldSpec {
     /// and how "missing/empty" is decided.
     #[serde(default)]
     pub list: bool,
+    /// Conditional requirement. The field may be optional by default
+    /// (`required: false`) yet become required when a condition on the
+    /// issue holds. v1 supports a single condition shape — the issue's
+    /// `status` resolving to a given lifecycle class — which expresses
+    /// the lifecycle rule "a closing status implies `closed:` is set"
+    /// declaratively rather than leaving it as implicit doctor logic.
+    #[serde(default)]
+    pub required_when: Option<RequiredWhen>,
+}
+
+/// A conditional-requirement predicate for a [`FieldSpec`]. v1 only
+/// supports gating on the issue's status lifecycle class; the struct
+/// shape leaves room to add further conditions without a format break.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredWhen {
+    /// The owning field is required when the issue's `status` resolves
+    /// (via [`status_class`]) to this lifecycle class.
+    #[serde(default)]
+    pub status_class: Option<StatusClass>,
+}
+
+impl RequiredWhen {
+    /// True when this condition is satisfied for an issue carrying
+    /// `status`. Resolves `status` through the schema's lifecycle
+    /// layering so a project override (`status_classes:`) is honoured.
+    pub fn matches(&self, schema: &Schema, status: &str) -> bool {
+        match self.status_class {
+            Some(class) => status_class(schema, status) == class,
+            None => false,
+        }
+    }
 }
 
 pub fn schema_path(root: &Path) -> PathBuf {
@@ -172,6 +217,12 @@ fields:
     # enum: [infra, frontend, backend]   # uncomment to constrain labels
   closed:
     required: false
+    # `closed:` is conditionally required: any issue whose status is
+    # classified `closing` (see `status_classes` below) must carry a
+    # `closed:` date. Declared here so schema validation and `doctor`
+    # enforce the same lifecycle rule instead of leaving it implicit.
+    required_when:
+      status_class: closing
   slug:
     required: false
   # `commits` is intentionally not declared: it is a list of mapping
@@ -192,6 +243,24 @@ fields:
 # status_classes:
 #   archived: closing
 #   verified: active
+
+# Legacy-value aliases for `doctor --fix` migration. When an issue's
+# `status` or `type` equals a key below, `doctor --fix` rewrites it to
+# the mapped canonical value (and, for a status that becomes a closing
+# status, stamps a `closed:` date if one is missing). Built-in defaults
+# cover the most common pre-0.5.1 values surfaced in migration feedback;
+# add your own to extend, or restate a key to override its target. Only
+# `doctor --fix` consumes this map — the regular mutation commands still
+# reject out-of-enum values, so an unaliased typo never slips through.
+status_aliases:
+  closed: done
+  resolved: fixed
+  in_progress: in-progress
+  paused: in-progress
+  blocked: in-progress
+type_aliases:
+  enhancement: improvement
+  refactor: chore
 "#;
 
 pub fn default_schema() -> Schema {
@@ -249,6 +318,15 @@ pub(crate) fn load_uncached(root: &Path) -> Result<Schema> {
     }
     for (status, class) in user.status_classes {
         merged.status_classes.insert(status, class);
+    }
+    // Alias maps merge per-key over the built-in defaults, so a repo
+    // can add a project-specific legacy value (or override a built-in
+    // target) without restating the whole table.
+    for (from, to) in user.status_aliases {
+        merged.status_aliases.insert(from, to);
+    }
+    for (from, to) in user.type_aliases {
+        merged.type_aliases.insert(from, to);
     }
     validate_body_sections(&merged.body_sections).with_context(|| format!("{}", path.display()))?;
     validate_loadability(&merged).with_context(|| format!("{}", path.display()))?;
@@ -383,6 +461,13 @@ pub enum ViolationKind {
         expected: &'static str,
         actual: &'static str,
     },
+    /// A field declared `required_when` was absent while its condition
+    /// held — e.g. `closed:` missing on an issue with a closing status.
+    RequiredWhen {
+        field: String,
+        status: String,
+        status_class: StatusClass,
+    },
 }
 
 impl ViolationKind {
@@ -407,6 +492,17 @@ impl ViolationKind {
                 actual,
             } => {
                 format!("field {field:?} expected {expected}, got {actual}")
+            }
+            ViolationKind::RequiredWhen {
+                field,
+                status,
+                status_class,
+            } => {
+                let class = match status_class {
+                    StatusClass::Active => "active",
+                    StatusClass::Closing => "closing",
+                };
+                format!("field {field:?} is required when status {status:?} is {class}")
             }
         }
     }
@@ -495,7 +591,66 @@ pub fn validate(schema: &Schema, fm: &Mapping) -> Vec<ViolationKind> {
             }
         }
     }
+    // Conditional requirements. Evaluated in a second pass so a field
+    // that is statically optional (`required: false`) but
+    // `required_when` a status condition holds is flagged. A field
+    // already flagged `MissingRequired` (static `required: true`) is
+    // not double-reported.
+    let status = fm
+        .get(Value::String("status".into()))
+        .and_then(|v| v.as_str());
+    if let Some(status) = status {
+        for (name, spec) in &schema.fields {
+            let Some(rw) = &spec.required_when else {
+                continue;
+            };
+            if spec.required {
+                continue;
+            }
+            let present = fm
+                .get(Value::String(name.clone()))
+                .map(|v| !is_yaml_empty(v, spec.list))
+                .unwrap_or(false);
+            if present {
+                continue;
+            }
+            if rw.matches(schema, status) {
+                out.push(ViolationKind::RequiredWhen {
+                    field: name.clone(),
+                    status: status.to_string(),
+                    status_class: status_class(schema, status),
+                });
+            }
+        }
+    }
     out
+}
+
+/// True when `field` is required for an issue whose `status` is the
+/// given value, per the field's `required_when` declaration. Lets
+/// callers (notably `doctor`) drive a consistency check off the schema
+/// declaration rather than a hardcoded rule, so relaxing or removing
+/// `required_when` in `.schema.yaml` also relaxes the check.
+pub fn field_required_for_status(schema: &Schema, field: &str, status: &str) -> bool {
+    schema
+        .fields
+        .get(field)
+        .and_then(|spec| spec.required_when.as_ref())
+        .map(|rw| rw.matches(schema, status))
+        .unwrap_or(false)
+}
+
+/// Resolve a legacy `status` value to its canonical replacement via
+/// the schema's `status_aliases`. `None` when the value is not an
+/// alias key (already canonical, or simply unknown).
+pub fn status_alias_target<'a>(schema: &'a Schema, value: &str) -> Option<&'a str> {
+    schema.status_aliases.get(value).map(String::as_str)
+}
+
+/// Resolve a legacy `type` value to its canonical replacement via the
+/// schema's `type_aliases`. See [`status_alias_target`].
+pub fn type_alias_target<'a>(schema: &'a Schema, value: &str) -> Option<&'a str> {
+    schema.type_aliases.get(value).map(String::as_str)
 }
 
 /// Lifecycle classification for a status value.
@@ -935,6 +1090,110 @@ mod tests {
         assert!(is_closing(&schema, "done"));
         // Built-in `open` stays active.
         assert!(!is_closing(&schema, "open"));
+    }
+
+    #[test]
+    fn validate_flags_required_when_closing_status_missing_closed() {
+        // Built-in default declares `closed: required_when status_class
+        // closing`. A `done` issue without `closed:` must be flagged.
+        let schema = default_schema();
+        let fm: Mapping =
+            serde_yaml::from_str("type: bug\nstatus: done\npriority: normal\n").unwrap();
+        let v = validate(&schema, &fm);
+        assert!(
+            v.iter()
+                .any(|x| matches!(x, ViolationKind::RequiredWhen { field, .. } if field == "closed")),
+            "expected RequiredWhen for closed on a closing status, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn validate_required_when_satisfied_by_present_closed() {
+        let schema = default_schema();
+        let fm: Mapping = serde_yaml::from_str(
+            "type: bug\nstatus: done\npriority: normal\nclosed: 2026-05-06\n",
+        )
+        .unwrap();
+        let v = validate(&schema, &fm);
+        assert!(
+            !v.iter().any(|x| matches!(x, ViolationKind::RequiredWhen { .. })),
+            "closed present must satisfy required_when, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn validate_required_when_inactive_for_active_status() {
+        let schema = default_schema();
+        let fm: Mapping =
+            serde_yaml::from_str("type: bug\nstatus: open\npriority: normal\n").unwrap();
+        let v = validate(&schema, &fm);
+        assert!(
+            !v.iter().any(|x| matches!(x, ViolationKind::RequiredWhen { .. })),
+            "active status must not trigger closed required_when, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn required_when_honours_schema_status_class_override() {
+        // A repo that reclassifies built-in `done` as active must NOT
+        // require `closed:` for a `done` issue — required_when resolves
+        // the class through the same layered lookup.
+        let yaml = "version: 1\nstatus_classes:\n  done: active\n";
+        let schema: Schema = serde_yaml::from_str(yaml).unwrap();
+        // The user schema above has no `fields`, so merge with defaults.
+        let mut merged = default_schema();
+        merged.status_classes.insert("done".into(), StatusClass::Active);
+        let fm: Mapping =
+            serde_yaml::from_str("type: bug\nstatus: done\npriority: normal\n").unwrap();
+        assert!(
+            !validate(&merged, &fm)
+                .iter()
+                .any(|x| matches!(x, ViolationKind::RequiredWhen { .. })),
+            "done reclassified active must not require closed:"
+        );
+        // Sanity: the standalone parse keeps the override too.
+        assert_eq!(status_class(&schema, "done"), StatusClass::Active);
+    }
+
+    #[test]
+    fn field_required_for_status_tracks_schema_declaration() {
+        let schema = default_schema();
+        assert!(field_required_for_status(&schema, "closed", "done"));
+        assert!(!field_required_for_status(&schema, "closed", "open"));
+        // A field with no required_when is never conditionally required.
+        assert!(!field_required_for_status(&schema, "type", "done"));
+    }
+
+    #[test]
+    fn default_schema_carries_built_in_aliases() {
+        let s = default_schema();
+        assert_eq!(status_alias_target(&s, "closed"), Some("done"));
+        assert_eq!(status_alias_target(&s, "resolved"), Some("fixed"));
+        assert_eq!(status_alias_target(&s, "in_progress"), Some("in-progress"));
+        assert_eq!(type_alias_target(&s, "enhancement"), Some("improvement"));
+        assert_eq!(type_alias_target(&s, "refactor"), Some("chore"));
+        // A canonical value is not an alias key.
+        assert_eq!(status_alias_target(&s, "done"), None);
+    }
+
+    #[test]
+    fn load_merges_user_aliases_over_built_ins() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nstatus_aliases:\n  closed: fixed\n  wip: in-progress\n",
+        )
+        .unwrap();
+        let schema = load(tmp.path()).unwrap();
+        // User override replaces the built-in target.
+        assert_eq!(status_alias_target(&schema, "closed"), Some("fixed"));
+        // User-added key is present.
+        assert_eq!(status_alias_target(&schema, "wip"), Some("in-progress"));
+        // Untouched built-in survives the merge.
+        assert_eq!(status_alias_target(&schema, "resolved"), Some("fixed"));
+        // type_aliases built-ins survive when only status_aliases edited.
+        assert_eq!(type_alias_target(&schema, "refactor"), Some("chore"));
     }
 
     #[test]

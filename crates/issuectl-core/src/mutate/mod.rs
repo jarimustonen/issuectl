@@ -1130,12 +1130,7 @@ fn update_issue_under_lock(
     //     the caller and threaded in so we don't re-read the file on
     //     each mutation.
     let violations = crate::schema::validate(schema, &item.frontmatter);
-    if !violations.is_empty() {
-        let msg = violations
-            .iter()
-            .map(|v| v.message())
-            .collect::<Vec<_>>()
-            .join("; ");
+    if let Some(msg) = hard_schema_failure(&violations) {
         return Err(MutateError::SchemaViolation(msg));
     }
     // Belt-and-braces status check. `schema::validate` only flags
@@ -1532,12 +1527,7 @@ pub fn update_body(
     // the schema may have tightened since the last write. Refusing here
     // matches the `update_issue` contract.
     let violations = crate::schema::validate(&schema, &item.frontmatter);
-    if !violations.is_empty() {
-        let msg = violations
-            .iter()
-            .map(|v| v.message())
-            .collect::<Vec<_>>()
-            .join("; ");
+    if let Some(msg) = hard_schema_failure(&violations) {
         return Err(MutateError::SchemaViolation(msg));
     }
 
@@ -2213,6 +2203,24 @@ fn set_line_checkbox(line: &str, checked: bool) -> Option<String> {
 /// (`update_issue_under_lock`, `update_body`, `note_issue`,
 /// `toggle_checkbox`) enforces the same contract — schema runs once
 /// per write, immediately before atomic write or dry-run return.
+/// Join schema violations into a hard-fail message, dropping
+/// `RequiredWhen` violations. A `required_when` constraint (today:
+/// closing status implies `closed:`) is a lifecycle-consistency rule
+/// that `doctor` owns and heals. The mutation paths always stamp
+/// `closed:` on the active→closing edge themselves, so they can never
+/// *introduce* such a violation — a `RequiredWhen` here only reflects a
+/// pre-existing inconsistency the user didn't touch, and blocking an
+/// unrelated edit (e.g. a checkbox toggle on an already-`done` issue)
+/// would be surprising. Returns `None` when nothing remains to fail on.
+fn hard_schema_failure(violations: &[crate::schema::ViolationKind]) -> Option<String> {
+    let msgs: Vec<String> = violations
+        .iter()
+        .filter(|v| !matches!(v, crate::schema::ViolationKind::RequiredWhen { .. }))
+        .map(|v| v.message())
+        .collect();
+    (!msgs.is_empty()).then(|| msgs.join("; "))
+}
+
 fn validate_against_schema(
     root: &Path,
     frontmatter: &serde_yaml::Mapping,
@@ -2222,12 +2230,7 @@ fn validate_against_schema(
         .schema(root)
         .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let violations = crate::schema::validate(&schema, frontmatter);
-    if !violations.is_empty() {
-        let msg = violations
-            .iter()
-            .map(|v| v.message())
-            .collect::<Vec<_>>()
-            .join("; ");
+    if let Some(msg) = hard_schema_failure(&violations) {
         return Err(MutateError::SchemaViolation(msg));
     }
     Ok(())

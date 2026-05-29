@@ -285,6 +285,12 @@ struct DoctorFindings {
     /// validating each issue's frontmatter against `issues/.schema.yaml`
     /// (or the built-in default if absent).
     schema_violations: Vec<(String, String)>,
+    /// Legacy `status` / `type` values that `doctor --fix` will coerce
+    /// to a canonical value via the schema's `status_aliases` /
+    /// `type_aliases`. `(slug, field, from, to, item_path)`. An issue
+    /// flagged here is intentionally NOT also listed under
+    /// `schema_violations` for the same field — the coercion is the fix.
+    alias_coercions: Vec<(String, String, String, String, PathBuf)>,
     /// True if the schema file was missing at scan time. `--fix` writes
     /// the default schema; without `--fix` this is reported as a hint.
     schema_missing: bool,
@@ -398,6 +404,9 @@ struct DoctorActions {
     orphan_tempfiles: Vec<PathBuf>,
     closed_with_active_status: Vec<(String, String, PathBuf)>,
     open_with_closing_status: Vec<(String, String, PathBuf)>,
+    /// Legacy status/type values to coerce via the schema alias tables.
+    /// `(slug, field, from, to, item_path)`.
+    alias_coercions: Vec<(String, String, String, String, PathBuf)>,
     /// True when scan flagged AGENTS.md drift AND the file is present
     /// AND drift is regeneratable (not malformed / not check-skipped).
     regenerate_agents_md: bool,
@@ -428,6 +437,7 @@ impl DoctorActions {
             orphan_tempfiles: std::mem::take(&mut findings.orphan_tempfiles),
             closed_with_active_status: std::mem::take(&mut findings.closed_with_active_status),
             open_with_closing_status: std::mem::take(&mut findings.open_with_closing_status),
+            alias_coercions: std::mem::take(&mut findings.alias_coercions),
             regenerate_agents_md: findings.agents_md_drift
                 && findings.agents_md_malformed.is_none()
                 && findings.agents_md_check_skipped.is_none(),
@@ -492,6 +502,9 @@ struct ApplyOutcome {
     notes_renamed: Vec<String>,
     orphan_tempfiles_removed: Vec<PathBuf>,
     status_reconciled: Vec<String>,
+    /// Legacy status/type values rewritten via the schema alias tables.
+    /// `(slug, field, from, to)`.
+    alias_coercions_applied: Vec<(String, String, String, String)>,
     files_rewritten: usize,
     agents_md_regenerated: bool,
     issues_agents_md_rewritten: bool,
@@ -526,6 +539,7 @@ impl ApplyOutcome {
             || !self.notes_renamed.is_empty()
             || !self.orphan_tempfiles_removed.is_empty()
             || !self.status_reconciled.is_empty()
+            || !self.alias_coercions_applied.is_empty()
             || self.files_rewritten > 0
             || self.agents_md_regenerated
             || self.issues_agents_md_rewritten
@@ -583,6 +597,7 @@ impl ApplyOutcome {
             || !self.notes_renamed.is_empty()
             || !self.orphan_tempfiles_removed.is_empty()
             || !self.status_reconciled.is_empty()
+            || !self.alias_coercions_applied.is_empty()
             || self.files_rewritten > 0
             || self.agents_md_regenerated
             || self.issues_agents_md_rewritten
@@ -847,6 +862,11 @@ fn scan(repo_root: &Path) -> Result<DoctorFindings> {
         }
     };
     if let Some(s) = schema_value.as_ref() {
+        // Coercion detection runs first so `populate_schema_violations`
+        // can suppress the enum violation for any value the coercion
+        // will rewrite (otherwise the user sees the same value flagged
+        // both as a violation and as a pending fix).
+        populate_alias_coercions(&scan, s, &mut report);
         populate_schema_violations(&scan, repo_root, s, &mut report);
     }
 
@@ -1243,7 +1263,16 @@ fn populate_extended_validation(
                 || crate::issue_fields::ACTIVE_STATUSES.contains(&s.as_str())
                 || crate::issue_fields::is_closing_status(s);
             match class {
-                schema::StatusClass::Closing if closed.is_none() => {
+                // Gate on the schema's `required_when` declaration so
+                // the closing-side rule is the SAME one `schema::validate`
+                // enforces (and so relaxing/removing `closed.required_when`
+                // in `.schema.yaml` relaxes this finding too). The
+                // built-in default declares it, so behaviour is unchanged
+                // for stock repos.
+                schema::StatusClass::Closing
+                    if closed.is_none()
+                        && schema::field_required_for_status(known_schema, "closed", s) =>
+                {
                     report.status_consistency.push((
                         slug.clone(),
                         format!("closing status {s:?} requires `closed:` date"),
@@ -1630,11 +1659,75 @@ fn populate_schema_violations(
             continue;
         };
         for v in schema::validate(schema, fm) {
+            // `RequiredWhen` (e.g. closing status missing `closed:`) is
+            // surfaced by the lifecycle-aware status/closed consistency
+            // check in `populate_extended_validation`; suppress it here
+            // so the same condition isn't reported twice.
+            if matches!(v, schema::ViolationKind::RequiredWhen { .. }) {
+                continue;
+            }
+            // An enum violation on `status` / `type` whose value has a
+            // declared alias is reported as a pending coercion instead
+            // — `doctor --fix` will rewrite it.
+            if let schema::ViolationKind::InvalidEnum { field, value, .. } = &v {
+                let aliased = match field.as_str() {
+                    "status" => schema::status_alias_target(schema, value).is_some(),
+                    "type" => schema::type_alias_target(schema, value).is_some(),
+                    _ => false,
+                };
+                if aliased {
+                    continue;
+                }
+            }
             report
                 .schema_violations
                 .push((location.clone(), v.message()));
         }
     }
+}
+
+/// Detect legacy `status` / `type` values that map to a canonical value
+/// via the schema's alias tables. Records them as pending coercions so
+/// the read-only report shows the planned rewrite and `--fix` applies
+/// it. Skips dirs queued for the NN-rename pipeline (same typed
+/// `legacy_number.is_some()` signal as `populate_schema_violations`).
+fn populate_alias_coercions(
+    scan: &ScanResult,
+    schema: &schema::Schema,
+    report: &mut DoctorFindings,
+) {
+    for s in &scan.issues {
+        if !s.item_present || s.legacy_number.is_some() {
+            continue;
+        }
+        let Some(fm) = s.parsed.as_ref().and_then(|p| p.mapping.as_ref()) else {
+            continue;
+        };
+        for field in ["status", "type"] {
+            let Some(value) = fm
+                .get(serde_yaml::Value::String(field.into()))
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+            else {
+                continue;
+            };
+            let target = match field {
+                "status" => schema::status_alias_target(schema, value),
+                "type" => schema::type_alias_target(schema, value),
+                _ => None,
+            };
+            if let Some(to) = target {
+                report.alias_coercions.push((
+                    s.dir_name.clone(),
+                    field.to_string(),
+                    value.to_string(),
+                    to.to_string(),
+                    s.item_path.clone(),
+                ));
+            }
+        }
+    }
+    report.alias_coercions.sort();
 }
 
 fn populate_transition_warnings(
@@ -1748,6 +1841,13 @@ fn apply(
     // migration so the rewrites land at the legacy path that scan()
     // recorded; the subsequent migration moves the corrected file.
     apply_status_reconciliation(&mut actions, &mut outcome)?;
+
+    // Alias coercion (legacy status/type values → canonical) also runs
+    // before the flat-layout migration, against the paths scan()
+    // recorded. Schema is loaded post-bootstrap so a repo with no prior
+    // `.schema.yaml` still gets the built-in alias table.
+    let apply_schema = schema::load(repo_root)?;
+    apply_alias_coercions(&mut actions, &mut outcome, &apply_schema)?;
 
     // Notes → Comments migration is independent of layout migration:
     // it touches body markdown of flat-layout dirs only, never moves
@@ -2043,6 +2143,50 @@ fn apply_status_reconciliation(
         write::remove_key(&mut item.frontmatter, "closed");
         write::write_item(&item_path, &item)?;
         outcome.status_reconciled.push(slug);
+    }
+    Ok(())
+}
+
+/// Rewrite legacy `status` / `type` values to their canonical form via
+/// the schema alias tables. Re-reads the on-disk value and only
+/// rewrites when it still equals the recorded `from` (TOCTOU guard
+/// against a concurrent edit between scan and apply). When a coerced
+/// status lands in a closing lifecycle class and no `closed:` date is
+/// present, a `closed:` date is stamped — mirroring the status command
+/// so the migrated issue doesn't immediately trip the `closed:`
+/// required-when rule.
+fn apply_alias_coercions(
+    actions: &mut DoctorActions,
+    outcome: &mut ApplyOutcome,
+    schema: &schema::Schema,
+) -> Result<()> {
+    let planned = std::mem::take(&mut actions.alias_coercions);
+    for (slug, field, from, to, item_path) in planned {
+        if !item_path.is_file() {
+            continue;
+        }
+        let mut item = write::read_item(&item_path)?;
+        let current = item
+            .frontmatter
+            .get(serde_yaml::Value::String(field.clone()))
+            .and_then(|v| v.as_str());
+        if current != Some(from.as_str()) {
+            continue;
+        }
+        write::set_string(&mut item.frontmatter, &field, &to);
+        if field == "status" && schema::is_closing(schema, &to) {
+            let has_closed = item
+                .frontmatter
+                .get(serde_yaml::Value::String("closed".into()))
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if !has_closed {
+                write::set_string(&mut item.frontmatter, "closed", &write::today());
+            }
+        }
+        write::write_item(&item_path, &item)?;
+        outcome.alias_coercions_applied.push((slug, field, from, to));
     }
     Ok(())
 }
@@ -2461,6 +2605,8 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         || !report.notes_to_rename.is_empty()
         || !report.notes_conflicts.is_empty()
         || !report.schema_violations.is_empty()
+        || !report.alias_coercions.is_empty()
+        || !oc.alias_coercions_applied.is_empty()
         || report.schema_parse_error.is_some()
         || !report.broken_refs.is_empty()
         || !report.blocked_by_cycles.is_empty()
@@ -2641,6 +2787,19 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         "schema violation(s)",
         |(loc, msg)| format!("{loc}: {msg}"),
     );
+    if !oc.alias_coercions_applied.is_empty() {
+        println!("Coerced legacy values via schema aliases:");
+        for (slug, field, from, to) in &oc.alias_coercions_applied {
+            println!("  {slug}: {field} {from} → {to}");
+        }
+        println!();
+    } else if !report.alias_coercions.is_empty() {
+        println!("Legacy values to coerce via schema aliases (re-run with --fix):");
+        for (slug, field, from, to, _) in &report.alias_coercions {
+            println!("  {slug}: {field} {from} → {to}");
+        }
+        println!();
+    }
     print_section(
         "Broken cross-references:",
         &report.broken_refs,
@@ -2902,6 +3061,13 @@ fn render_json(
         .iter()
         .map(|(loc, msg)| serde_json::json!({"location": loc, "message": msg}))
         .collect();
+    let alias_coercions: Vec<serde_json::Value> = report
+        .alias_coercions
+        .iter()
+        .map(|(slug, field, from, to, _)| {
+            serde_json::json!({"slug": slug, "field": field, "from": from, "to": to})
+        })
+        .collect();
 
     let broken_refs: Vec<serde_json::Value> = report
         .broken_refs
@@ -2960,6 +3126,7 @@ fn render_json(
         "schema_missing": report.schema_missing,
         "schema_parse_error": report.schema_parse_error,
         "schema_violations": schema_violations,
+        "alias_coercions": alias_coercions,
         "files_rewritten": oc.files_rewritten,
         "notes_to_rename": report.notes_to_rename,
         "notes_renamed": oc.notes_renamed,
@@ -3036,6 +3203,13 @@ fn render_json(
                         .map(|p| rel(repo_root, p))
                         .collect::<Vec<_>>(),
                     "status_reconciled": oc.status_reconciled,
+                    "alias_coercions_applied": oc
+                        .alias_coercions_applied
+                        .iter()
+                        .map(|(slug, field, from, to)| {
+                            serde_json::json!({"slug": slug, "field": field, "from": from, "to": to})
+                        })
+                        .collect::<Vec<_>>(),
                     "apply_error": oc.apply_error,
                 }),
             );
@@ -3768,6 +3942,106 @@ mod tests {
             "expected verified-with-closed flagged, got {:?}",
             r.status_consistency
         );
+    }
+
+    #[test]
+    fn read_only_detects_status_alias_and_suppresses_enum_violation() {
+        // A legacy `status: closed` value (built-in alias → done) must
+        // show up as a pending coercion, NOT as an enum schema
+        // violation (the coercion is the fix).
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "legacy-status-issue",
+            "---\ntype: bug\nstatus: closed\npriority: normal\n---\n# L\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.alias_coercions.iter().any(|(slug, field, from, to, _)| slug
+                == "legacy-status-issue"
+                && field == "status"
+                && from == "closed"
+                && to == "done"),
+            "expected status closed→done coercion, got {:?}",
+            r.alias_coercions
+        );
+        assert!(
+            !r.schema_violations
+                .iter()
+                .any(|(_, msg)| msg.contains("\"closed\"") && msg.contains("status")),
+            "aliasable status must not be reported as an enum violation, got {:?}",
+            r.schema_violations
+        );
+    }
+
+    #[test]
+    fn fix_coerces_status_alias_and_stamps_closed() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "legacy-status-issue",
+            "---\ntype: bug\nstatus: closed\npriority: normal\n---\n# L\n",
+        );
+        let mut r = scan(tmp.path()).unwrap();
+        let actions = DoctorActions::from_findings(&mut r);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            outcome
+                .alias_coercions_applied
+                .iter()
+                .any(|(slug, field, from, to)| slug == "legacy-status-issue"
+                    && field == "status"
+                    && from == "closed"
+                    && to == "done"),
+            "expected applied coercion, got {:?}",
+            outcome.alias_coercions_applied
+        );
+        let after =
+            fs::read_to_string(tmp.path().join("issues/legacy-status-issue/item.md")).unwrap();
+        assert!(after.contains("status: done"), "status not coerced:\n{after}");
+        // `done` is a closing status, so `closed:` must be backfilled.
+        assert!(
+            after.contains("closed:"),
+            "closed: not stamped on coerced closing status:\n{after}"
+        );
+    }
+
+    #[test]
+    fn fix_coerces_type_alias_without_touching_closed() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "legacy-type-issue",
+            "---\ntype: enhancement\nstatus: open\npriority: normal\n---\n# T\n",
+        );
+        let mut r = scan(tmp.path()).unwrap();
+        let actions = DoctorActions::from_findings(&mut r);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            outcome
+                .alias_coercions_applied
+                .iter()
+                .any(|(_, field, from, to)| field == "type"
+                    && from == "enhancement"
+                    && to == "improvement"),
+            "expected type coercion, got {:?}",
+            outcome.alias_coercions_applied
+        );
+        let after =
+            fs::read_to_string(tmp.path().join("issues/legacy-type-issue/item.md")).unwrap();
+        assert!(after.contains("type: improvement"), "type not coerced:\n{after}");
+        // Active status → no `closed:` stamped.
+        assert!(!after.contains("closed:"), "closed: must not appear:\n{after}");
     }
 
     #[test]
@@ -4903,6 +5177,7 @@ mod tests {
   "agents_md_malformed": null,
   "agents_md_missing": true,
   "agents_md_regenerated": false,
+  "alias_coercions": [],
   "blocked_by_cycles": [],
   "both_open_and_closed": [],
   "broken_refs": [
