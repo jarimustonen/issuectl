@@ -2248,31 +2248,38 @@ fn derive_closed_date(item_path: &Path) -> String {
         .unwrap_or_else(write::today)
 }
 
-/// `git log -1 --format=%aI` (strict ISO 8601 author date) of the last
-/// commit that touched `item_path`, projected to its `YYYY-MM-DD` head.
-/// `None` when git is unavailable, the path is not in a git repo, or the
-/// file is untracked (empty output).
+/// Author date (`%aI`, strict ISO 8601) of the last commit that touched
+/// `item_path`, converted to the machine's local timezone and projected
+/// to `YYYY-MM-DD`. Converting to local — rather than slicing the raw
+/// committer-TZ date — keeps this consistent with `write::today()` and
+/// `file_mtime_date`, which both use local time, so the three fallback
+/// tiers never disagree by a day. `--follow` lets it find the history of
+/// a file that was renamed (e.g. an earlier flat-layout move that was
+/// already committed). `None` when git is unavailable, the path is not
+/// in a git repo, or the file is untracked (empty output).
 fn git_last_commit_date(item_path: &Path) -> Option<String> {
     let dir = item_path.parent()?;
+    let name = item_path.file_name()?;
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
-        .arg("log")
-        .arg("-1")
-        .arg("--format=%aI")
-        .arg("--")
-        .arg(item_path)
+        .args(["log", "-1", "--follow", "--format=%aI", "--"])
+        .arg(name)
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let date = stdout.trim().get(..10)?.to_string();
-    // Validate before trusting it so a malformed line never lands in
-    // frontmatter (and so it stays consistent with `closed:`'s format).
-    chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()?;
-    Some(date)
+    // Parsing the full RFC 3339 line validates it end-to-end (a
+    // malformed `%aI` never lands in frontmatter) and carries the
+    // offset, so the local-time conversion below is correct.
+    let dt = chrono::DateTime::parse_from_rfc3339(stdout.trim()).ok()?;
+    Some(
+        dt.with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string(),
+    )
 }
 
 /// File mtime of `item_path` projected to a local-time `YYYY-MM-DD`.
@@ -2333,36 +2340,35 @@ fn apply_alias_coercions(
     schema: &schema::Schema,
 ) -> Result<()> {
     let planned = std::mem::take(&mut actions.alias_coercions);
-    // Group planned coercions by `item_path` so an issue carrying BOTH a
-    // status and a type coercion is read once and written once instead of
-    // read+written per field. `planned` is sorted by scan (slug first), so
-    // entries for one issue are already adjacent — `order` preserves that
-    // first-seen sequence, keeping `alias_coercions_applied` deterministic.
-    let mut order: Vec<PathBuf> = Vec::new();
-    let mut by_path: BTreeMap<PathBuf, Vec<(String, String, String, String)>> = BTreeMap::new();
+    // Group consecutive coercions that share an `item_path` so an issue
+    // carrying BOTH a status and a type coercion is read once and written
+    // once instead of read+written per field. `planned` is sorted by scan
+    // (slug first), so a given issue's entries are already adjacent; the
+    // run-length accumulator below relies on that for single-read grouping
+    // but stays correct (just less optimal) if the order ever changes, and
+    // preserves planned order so `alias_coercions_applied` is deterministic.
+    // `(slug, field, from, to)` — one applied/planned coercion sans path.
+    type Coercion = (String, String, String, String);
+    let mut groups: Vec<(PathBuf, Vec<Coercion>)> = Vec::new();
     for (slug, field, from, to, item_path) in planned {
-        if !by_path.contains_key(&item_path) {
-            order.push(item_path.clone());
+        match groups.last_mut() {
+            Some((p, v)) if *p == item_path => v.push((slug, field, from, to)),
+            _ => groups.push((item_path, vec![(slug, field, from, to)])),
         }
-        by_path
-            .entry(item_path)
-            .or_default()
-            .push((slug, field, from, to));
     }
 
-    for item_path in order {
-        let coercions = by_path.remove(&item_path).expect("path inserted above");
+    for (item_path, coercions) in groups {
         if !item_path.is_file() {
             continue;
         }
         let mut item = write::read_item(&item_path)?;
-        let mut applied: Vec<(String, String, String, String)> = Vec::new();
+        let mut applied: Vec<Coercion> = Vec::new();
         let mut coerced_to_closing = false;
         for (slug, field, from, to) in coercions {
-            // Re-read each field from the in-memory mapping (which may
-            // already reflect a sibling coercion on this same file) and
-            // only rewrite when the on-disk value still equals `from`.
-            // Guards against a stale plan clobbering a fresher value.
+            // Re-read the field from the in-memory mapping and only
+            // rewrite when it still equals the recorded `from`. Guards
+            // against a stale plan (external edit between scan and apply)
+            // clobbering a fresher value.
             let current = item
                 .frontmatter
                 .get(serde_yaml::Value::String(field.clone()))
@@ -4396,6 +4402,9 @@ mod tests {
             chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_ok(),
             "expected a valid YYYY-MM-DD, got {date:?}"
         );
+        // A file just created in this test has an mtime of ~now, so the
+        // mtime tier should resolve to today (both use local time).
+        assert_eq!(date, write::today(), "mtime fallback should be today");
     }
 
     #[test]
