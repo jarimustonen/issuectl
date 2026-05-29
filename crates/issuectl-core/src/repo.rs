@@ -637,6 +637,186 @@ pub fn migrate_to_flat_inplace(repo_root: &Path, slug: &str) -> Result<PathBuf> 
     }
 }
 
+/// One issue file whose references were (or would be) rewritten by a
+/// rename. `field` is `epic` / `related` / `blocked_by` / `body`;
+/// `occurrences` counts how many refs in that field were retargeted.
+#[derive(Debug, Clone, Serialize)]
+pub struct RefChange {
+    pub slug: String,
+    pub field: String,
+    pub occurrences: usize,
+}
+
+/// Outcome of `rename_issue`. In `dry_run` no files are touched and
+/// `changes` reports what *would* be rewritten.
+#[derive(Debug, Clone, Serialize)]
+pub struct RenameOutcome {
+    pub old_slug: String,
+    pub new_slug: String,
+    pub new_dir: PathBuf,
+    pub dry_run: bool,
+    pub changes: Vec<RefChange>,
+}
+
+/// Rename an issue's slug, rewriting every reference across the store:
+/// the on-disk directory, plus `epic:` / `related:` / `blocked_by:`
+/// frontmatter refs and `@slug` body mentions in all other issues
+/// (including the renamed issue itself, in case it self-referenced).
+///
+/// Holds the repo-wide `flock` for the whole operation so a concurrent
+/// writer can't observe the half-renamed state. A legacy-layout source
+/// is migrated to flat at the new path as a side effect of the move.
+/// `dry_run` performs no disk writes and only reports the would-be
+/// changes.
+pub fn rename_issue(
+    repo_root: &Path,
+    old: &str,
+    new: &str,
+    dry_run: bool,
+) -> Result<RenameOutcome> {
+    if !crate::slug::is_valid(old) {
+        bail!("invalid slug shape: {old:?}");
+    }
+    if !crate::slug::is_valid(new) {
+        bail!("invalid slug shape: {new:?}");
+    }
+    if old == new {
+        bail!("old and new slug are identical: {old:?}");
+    }
+
+    let _lock = crate::mutate::WriteLock::acquire(repo_root)?;
+
+    // Source must exist and be loadable (not ambiguous / invalid).
+    match resolve_layout(repo_root, old) {
+        LayoutState::Flat { .. } | LayoutState::Legacy { .. } => {}
+        LayoutState::Absent => bail!(
+            "issue {old} not found under {}",
+            repo_root.join(ISSUES_DIR).display()
+        ),
+        LayoutState::Ambiguous { paths } => bail!(
+            "issue {old} is ambiguous (present at: {})",
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        LayoutState::Invalid { reason, .. } => bail!("cannot rename {old}: {reason}"),
+    }
+    // Target slug must be free at every candidate path.
+    if !matches!(resolve_layout(repo_root, new), LayoutState::Absent) {
+        bail!("target slug {new} already exists");
+    }
+    let new_dir = repo_root.join(ISSUES_DIR).join(new);
+    if new_dir.exists() {
+        bail!("target directory already exists: {}", new_dir.display());
+    }
+
+    // Move the directory first (real run only) so the subsequent scan
+    // sees the renamed issue at its new path and rewrites any
+    // self-references there too.
+    if !dry_run {
+        let src_dir = repo_root.join(ISSUES_DIR).join(old);
+        let src_dir = if src_dir.is_dir() {
+            src_dir
+        } else {
+            // Legacy source — locate its real parent dir.
+            let located = locate_issue_full(repo_root, old)?;
+            located
+                .item_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("source item.md has no parent"))?
+                .to_path_buf()
+        };
+        std::fs::rename(&src_dir, &new_dir).with_context(|| {
+            format!(
+                "cannot rename {} → {}",
+                src_dir.display(),
+                new_dir.display()
+            )
+        })?;
+    }
+
+    // Rewrite references in every issue file.
+    let mut changes = Vec::new();
+    for slug in discover_slugs(repo_root) {
+        let item_path = match resolve_layout(repo_root, &slug) {
+            LayoutState::Flat { item_path } => item_path,
+            LayoutState::Legacy { item_path, .. } => item_path,
+            _ => continue,
+        };
+        let Ok(mut item) = crate::write::read_item(&item_path) else {
+            continue;
+        };
+        let fm_changes = rewrite_frontmatter_refs(&mut item.frontmatter, old, new);
+        let (new_body, body_n) = crate::refs::rewrite_body_refs(&item.body, old, new);
+        let touched = !fm_changes.is_empty() || body_n > 0;
+        if !touched {
+            continue;
+        }
+        item.body = new_body;
+        for (field, occurrences) in fm_changes {
+            changes.push(RefChange {
+                slug: slug.clone(),
+                field,
+                occurrences,
+            });
+        }
+        if body_n > 0 {
+            changes.push(RefChange {
+                slug: slug.clone(),
+                field: "body".to_string(),
+                occurrences: body_n,
+            });
+        }
+        if !dry_run {
+            crate::mutate::write_item_atomic(&item_path, &item)?;
+        }
+    }
+
+    Ok(RenameOutcome {
+        old_slug: old.to_string(),
+        new_slug: new.to_string(),
+        new_dir,
+        dry_run,
+        changes,
+    })
+}
+
+/// Rewrite `epic` / `related` / `blocked_by` slug refs in one frontmatter
+/// mapping. Returns `(field, occurrences)` for each field that changed.
+fn rewrite_frontmatter_refs(
+    fm: &mut serde_yaml::Mapping,
+    old: &str,
+    new: &str,
+) -> Vec<(String, usize)> {
+    use serde_yaml::Value;
+    let mut changes = Vec::new();
+    if let Some(Value::String(s)) = fm.get_mut(Value::String("epic".into())) {
+        if let Some(nv) = crate::refs::rewrite_slug_ref(s, old, new) {
+            *s = nv;
+            changes.push(("epic".to_string(), 1));
+        }
+    }
+    for key in ["related", "blocked_by"] {
+        if let Some(Value::Sequence(seq)) = fm.get_mut(Value::String(key.into())) {
+            let mut n = 0;
+            for item in seq.iter_mut() {
+                if let Value::String(s) = item {
+                    if let Some(nv) = crate::refs::rewrite_slug_ref(s, old, new) {
+                        *s = nv;
+                        n += 1;
+                    }
+                }
+            }
+            if n > 0 {
+                changes.push((key.to_string(), n));
+            }
+        }
+    }
+    changes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,6 +847,95 @@ mod tests {
             format!("---\nstatus: {status}\n---\n\n# {slug}\n"),
         )
         .unwrap();
+    }
+
+    fn seed_with(tmp: &TempDir, slug: &str, frontmatter: &str, body: &str) {
+        let dir = tmp.path().join("issues").join(slug);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            format!("---\nstatus: open\n{frontmatter}---\n\n{body}"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rename_moves_dir_and_rewrites_all_refs() {
+        let tmp = fresh_repo();
+        seed_flat(&tmp, "old-tame-fox", "open");
+        seed_with(
+            &tmp,
+            "child-calm-owl",
+            "epic: \"@old-tame-fox\"\n",
+            "# child\n\nblocks @old-tame-fox here\n",
+        );
+        seed_with(
+            &tmp,
+            "peer-bright-elk",
+            "related: [\"@old-tame-fox\", \"@other-quiet-newt\"]\nblocked_by: [\"old-tame-fox\"]\n",
+            "# peer\n",
+        );
+
+        let out = rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", false).unwrap();
+        assert!(out.new_dir.join("item.md").is_file());
+        assert!(!tmp.path().join("issues/old-tame-fox").exists());
+
+        let child = fs::read_to_string(tmp.path().join("issues/child-calm-owl/item.md")).unwrap();
+        assert!(child.contains("@new-wild-stag"));
+        assert!(!child.contains("old-tame-fox"));
+
+        let peer = fs::read_to_string(tmp.path().join("issues/peer-bright-elk/item.md")).unwrap();
+        assert!(peer.contains("@new-wild-stag"));
+        assert!(peer.contains("@other-quiet-newt"));
+        // bare blocked_by ref retargeted without gaining an @ prefix
+        assert!(peer.contains("new-wild-stag"));
+        assert!(!peer.contains("old-tame-fox"));
+
+        // doctor sees no dangling refs after a tool-driven rename
+        let fields: Vec<&str> = out.changes.iter().map(|c| c.field.as_str()).collect();
+        assert!(fields.contains(&"epic"));
+        assert!(fields.contains(&"related"));
+        assert!(fields.contains(&"blocked_by"));
+        assert!(fields.contains(&"body"));
+    }
+
+    #[test]
+    fn rename_dry_run_reports_without_writing() {
+        let tmp = fresh_repo();
+        seed_flat(&tmp, "old-tame-fox", "open");
+        seed_with(
+            &tmp,
+            "child-calm-owl",
+            "epic: \"@old-tame-fox\"\n",
+            "# child\n",
+        );
+        let out = rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", true).unwrap();
+        assert!(out.dry_run);
+        assert_eq!(out.changes.len(), 1);
+        // nothing moved or rewritten
+        assert!(tmp.path().join("issues/old-tame-fox").exists());
+        assert!(!tmp.path().join("issues/new-wild-stag").exists());
+        let child = fs::read_to_string(tmp.path().join("issues/child-calm-owl/item.md")).unwrap();
+        assert!(child.contains("@old-tame-fox"));
+    }
+
+    #[test]
+    fn rename_rejects_existing_target_and_missing_source() {
+        let tmp = fresh_repo();
+        seed_flat(&tmp, "old-tame-fox", "open");
+        seed_flat(&tmp, "taken-wild-stag", "open");
+        assert!(rename_issue(tmp.path(), "old-tame-fox", "taken-wild-stag", false).is_err());
+        assert!(rename_issue(tmp.path(), "ghost-quiet-newt", "new-wild-stag", false).is_err());
+        assert!(rename_issue(tmp.path(), "old-tame-fox", "old-tame-fox", false).is_err());
+    }
+
+    #[test]
+    fn rename_migrates_legacy_source_to_flat() {
+        let tmp = fresh_repo();
+        seed_legacy(&tmp, "open", "old-tame-fox", "open");
+        let out = rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", false).unwrap();
+        assert!(out.new_dir.join("item.md").is_file());
+        assert!(!tmp.path().join("issues/open/old-tame-fox").exists());
     }
 
     #[test]

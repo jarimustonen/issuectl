@@ -503,6 +503,24 @@ enum Command {
         expected_version: Option<String>,
     },
 
+    /// Rename an issue's slug, rewriting every reference across the repo:
+    /// the on-disk directory plus `epic:` / `related:` / `blocked_by:`
+    /// frontmatter refs and `@slug` body mentions in all other issues.
+    /// After a manual `mv`, `issuectl doctor` flags the now-dangling refs.
+    Rename {
+        /// Current slug
+        #[arg(value_parser = parse_slug_arg)]
+        old_slug: String,
+
+        /// New slug (must be free and a valid kebab-case slug)
+        #[arg(value_parser = parse_slug_arg)]
+        new_slug: String,
+
+        /// Report what would change without writing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Append a timestamped block to an issue's `## Comments` section
     /// (or `## Decisions` / `## Agent Runs` with `--decision` / `--agent-run`)
     Note {
@@ -1231,6 +1249,11 @@ fn main() -> Result<()> {
             commits,
             expected_version,
         } => cmd_close(json_output, &slug, status, commits, expected_version),
+        Command::Rename {
+            old_slug,
+            new_slug,
+            dry_run,
+        } => cmd_rename(json_output, &old_slug, &new_slug, dry_run),
         Command::Note {
             slug,
             author,
@@ -2363,6 +2386,31 @@ pub(crate) fn do_close(
         moved_to_open: outcome.moved_to_open,
         version: outcome.version,
     })
+}
+
+fn cmd_rename(json: bool, old: &str, new: &str, dry_run: bool) -> Result<()> {
+    let root = find_root();
+    let outcome = repo::rename_issue(&root, old, new, dry_run)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+        return Ok(());
+    }
+    let total: usize = outcome.changes.iter().map(|c| c.occurrences).sum();
+    let files = outcome.changes.len();
+    if dry_run {
+        println!(
+            "Would rename {old} → {new} and rewrite {total} reference(s) across {files} field(s)"
+        );
+        for c in &outcome.changes {
+            println!("  {} {} ({})", c.slug, c.field, c.occurrences);
+        }
+    } else {
+        println!(
+            "Renamed {old} → {new} ({}); rewrote {total} reference(s) across {files} field(s)",
+            outcome.new_dir.display()
+        );
+    }
+    Ok(())
 }
 
 /// Locate an issue by slug. Returns (folder, item.md path) where
