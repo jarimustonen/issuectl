@@ -1,12 +1,13 @@
 ---
 created: 2026-05-10
-updated: 2026-05-10
+updated: 2026-05-29
 type: feature
 reporter: jari
-status: open
+status: done
 priority: normal
 epic: hugely-exciting-spiders
 labels: [from-3dbear-0.5.1-feedback]
+closed: 2026-05-29
 ---
 
 # doctor: status_aliases and type_aliases for auto-coercing legacy values during migration
