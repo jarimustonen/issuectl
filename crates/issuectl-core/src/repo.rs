@@ -647,6 +647,16 @@ pub struct RefChange {
     pub occurrences: usize,
 }
 
+/// An issue dir that the rename scan could not read (parse error,
+/// ambiguous, or invalid layout). Its references — if any — were left
+/// untouched, so the user must inspect it manually; `doctor` will flag
+/// any dangling refs it still carries.
+#[derive(Debug, Clone, Serialize)]
+pub struct SkippedFile {
+    pub slug: String,
+    pub reason: String,
+}
+
 /// Outcome of `rename_issue`. In `dry_run` no files are touched and
 /// `changes` reports what *would* be rewritten.
 #[derive(Debug, Clone, Serialize)]
@@ -656,6 +666,9 @@ pub struct RenameOutcome {
     pub new_dir: PathBuf,
     pub dry_run: bool,
     pub changes: Vec<RefChange>,
+    /// Issue dirs skipped because they couldn't be read; their refs were
+    /// not rewritten. Empty on a clean repo.
+    pub skipped: Vec<SkippedFile>,
 }
 
 /// Rename an issue's slug, rewriting every reference across the store:
@@ -663,11 +676,20 @@ pub struct RenameOutcome {
 /// frontmatter refs and `@slug` body mentions in all other issues
 /// (including the renamed issue itself, in case it self-referenced).
 ///
+/// Only those three frontmatter fields are retargeted — the same set
+/// `doctor` validates. A project that stores slug refs in a custom field
+/// must fix those by hand; `doctor` will surface them as dangling.
+///
 /// Holds the repo-wide `flock` for the whole operation so a concurrent
-/// writer can't observe the half-renamed state. A legacy-layout source
-/// is migrated to flat at the new path as a side effect of the move.
+/// writer can't observe the half-renamed state. References are rewritten
+/// *before* the directory is moved, so a failure mid-rewrite leaves the
+/// source in place and the command is safe to re-run (already-rewritten
+/// files simply no longer match `old`). A legacy-layout source is
+/// migrated to flat at the new path as a side effect of the move.
 /// `dry_run` performs no disk writes and only reports the would-be
-/// changes.
+/// changes. Note: each touched file is re-serialized through the normal
+/// write path, so unrelated frontmatter is reformatted (comments/key
+/// order normalized) exactly as any other mutation would do.
 pub fn rename_issue(
     repo_root: &Path,
     old: &str,
@@ -686,9 +708,13 @@ pub fn rename_issue(
 
     let _lock = crate::mutate::WriteLock::acquire(repo_root)?;
 
-    // Source must exist and be loadable (not ambiguous / invalid).
-    match resolve_layout(repo_root, old) {
-        LayoutState::Flat { .. } | LayoutState::Legacy { .. } => {}
+    // Source must exist and be loadable (not ambiguous / invalid). Capture
+    // its on-disk dir now so we can move it last.
+    let src_dir = match resolve_layout(repo_root, old) {
+        LayoutState::Flat { item_path } | LayoutState::Legacy { item_path, .. } => item_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("source item.md has no parent"))?
+            .to_path_buf(),
         LayoutState::Absent => bail!(
             "issue {old} not found under {}",
             repo_root.join(ISSUES_DIR).display()
@@ -702,51 +728,46 @@ pub fn rename_issue(
                 .join(", ")
         ),
         LayoutState::Invalid { reason, .. } => bail!("cannot rename {old}: {reason}"),
-    }
-    // Target slug must be free at every candidate path.
+    };
+    // Target slug must be free at every candidate path. `Absent` already
+    // implies no `issues/<new>/` dir exists, so no separate dir check.
     if !matches!(resolve_layout(repo_root, new), LayoutState::Absent) {
         bail!("target slug {new} already exists");
     }
     let new_dir = repo_root.join(ISSUES_DIR).join(new);
-    if new_dir.exists() {
-        bail!("target directory already exists: {}", new_dir.display());
-    }
 
-    // Move the directory first (real run only) so the subsequent scan
-    // sees the renamed issue at its new path and rewrites any
-    // self-references there too.
-    if !dry_run {
-        let src_dir = repo_root.join(ISSUES_DIR).join(old);
-        let src_dir = if src_dir.is_dir() {
-            src_dir
-        } else {
-            // Legacy source — locate its real parent dir.
-            let located = locate_issue_full(repo_root, old)?;
-            located
-                .item_path
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("source item.md has no parent"))?
-                .to_path_buf()
-        };
-        std::fs::rename(&src_dir, &new_dir).with_context(|| {
-            format!(
-                "cannot rename {} → {}",
-                src_dir.display(),
-                new_dir.display()
-            )
-        })?;
-    }
-
-    // Rewrite references in every issue file.
+    // Rewrite references in every issue file (including the renamed issue
+    // itself, still at its old path). The directory move happens last.
     let mut changes = Vec::new();
+    let mut skipped = Vec::new();
     for slug in discover_slugs(repo_root) {
         let item_path = match resolve_layout(repo_root, &slug) {
-            LayoutState::Flat { item_path } => item_path,
-            LayoutState::Legacy { item_path, .. } => item_path,
-            _ => continue,
+            LayoutState::Flat { item_path } | LayoutState::Legacy { item_path, .. } => item_path,
+            LayoutState::Absent => continue,
+            LayoutState::Ambiguous { .. } => {
+                skipped.push(SkippedFile {
+                    slug: slug.clone(),
+                    reason: "ambiguous layout".to_string(),
+                });
+                continue;
+            }
+            LayoutState::Invalid { reason, .. } => {
+                skipped.push(SkippedFile {
+                    slug: slug.clone(),
+                    reason,
+                });
+                continue;
+            }
         };
-        let Ok(mut item) = crate::write::read_item(&item_path) else {
-            continue;
+        let mut item = match crate::write::read_item(&item_path) {
+            Ok(item) => item,
+            Err(e) => {
+                skipped.push(SkippedFile {
+                    slug: slug.clone(),
+                    reason: format!("unreadable: {e:#}"),
+                });
+                continue;
+            }
         };
         let fm_changes = rewrite_frontmatter_refs(&mut item.frontmatter, old, new);
         let (new_body, body_n) = crate::refs::rewrite_body_refs(&item.body, old, new);
@@ -755,16 +776,19 @@ pub fn rename_issue(
             continue;
         }
         item.body = new_body;
+        // The renamed issue's own file is reported under its post-rename
+        // slug so dry-run and real-run output agree (both scan `old`).
+        let report_slug = if slug == old { new } else { slug.as_str() };
         for (field, occurrences) in fm_changes {
             changes.push(RefChange {
-                slug: slug.clone(),
+                slug: report_slug.to_string(),
                 field,
                 occurrences,
             });
         }
         if body_n > 0 {
             changes.push(RefChange {
-                slug: slug.clone(),
+                slug: report_slug.to_string(),
                 field: "body".to_string(),
                 occurrences: body_n,
             });
@@ -774,17 +798,32 @@ pub fn rename_issue(
         }
     }
 
+    // Move the directory last: now that every reference is rewritten, the
+    // rename is the final, single atomic step.
+    if !dry_run {
+        std::fs::rename(&src_dir, &new_dir).with_context(|| {
+            format!(
+                "cannot rename {} → {}",
+                src_dir.display(),
+                new_dir.display()
+            )
+        })?;
+    }
+
     Ok(RenameOutcome {
         old_slug: old.to_string(),
         new_slug: new.to_string(),
         new_dir,
         dry_run,
         changes,
+        skipped,
     })
 }
 
 /// Rewrite `epic` / `related` / `blocked_by` slug refs in one frontmatter
 /// mapping. Returns `(field, occurrences)` for each field that changed.
+/// `related` / `blocked_by` are handled whether written as a YAML
+/// sequence or as a bare scalar (`related: @old`).
 fn rewrite_frontmatter_refs(
     fm: &mut serde_yaml::Mapping,
     old: &str,
@@ -799,19 +838,28 @@ fn rewrite_frontmatter_refs(
         }
     }
     for key in ["related", "blocked_by"] {
-        if let Some(Value::Sequence(seq)) = fm.get_mut(Value::String(key.into())) {
-            let mut n = 0;
-            for item in seq.iter_mut() {
-                if let Value::String(s) = item {
-                    if let Some(nv) = crate::refs::rewrite_slug_ref(s, old, new) {
-                        *s = nv;
-                        n += 1;
+        match fm.get_mut(Value::String(key.into())) {
+            Some(Value::Sequence(seq)) => {
+                let mut n = 0;
+                for item in seq.iter_mut() {
+                    if let Value::String(s) = item {
+                        if let Some(nv) = crate::refs::rewrite_slug_ref(s, old, new) {
+                            *s = nv;
+                            n += 1;
+                        }
                     }
                 }
+                if n > 0 {
+                    changes.push((key.to_string(), n));
+                }
             }
-            if n > 0 {
-                changes.push((key.to_string(), n));
+            Some(Value::String(s)) => {
+                if let Some(nv) = crate::refs::rewrite_slug_ref(s, old, new) {
+                    *s = nv;
+                    changes.push((key.to_string(), 1));
+                }
             }
+            _ => {}
         }
     }
     changes
@@ -927,6 +975,70 @@ mod tests {
         assert!(rename_issue(tmp.path(), "old-tame-fox", "taken-wild-stag", false).is_err());
         assert!(rename_issue(tmp.path(), "ghost-quiet-newt", "new-wild-stag", false).is_err());
         assert!(rename_issue(tmp.path(), "old-tame-fox", "old-tame-fox", false).is_err());
+    }
+
+    #[test]
+    fn rename_rewrites_scalar_related_and_blocked_by() {
+        let tmp = fresh_repo();
+        seed_flat(&tmp, "old-tame-fox", "open");
+        seed_with(
+            &tmp,
+            "peer-bright-elk",
+            "related: \"@old-tame-fox\"\nblocked_by: old-tame-fox\n",
+            "# peer\n",
+        );
+        rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", false).unwrap();
+        let peer = fs::read_to_string(tmp.path().join("issues/peer-bright-elk/item.md")).unwrap();
+        assert!(peer.contains("new-wild-stag"));
+        assert!(!peer.contains("old-tame-fox"));
+    }
+
+    #[test]
+    fn rename_rewrites_self_reference_and_reports_new_slug() {
+        let tmp = fresh_repo();
+        seed_with(
+            &tmp,
+            "old-tame-fox",
+            "related: [\"@old-tame-fox\"]\n",
+            "# self\n\nsee @old-tame-fox\n",
+        );
+        let out = rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", false).unwrap();
+        let body = fs::read_to_string(out.new_dir.join("item.md")).unwrap();
+        assert!(body.contains("@new-wild-stag"));
+        assert!(!body.contains("old-tame-fox"));
+        // self-ref changes report under the post-rename slug
+        assert!(out.changes.iter().all(|c| c.slug == "new-wild-stag"));
+    }
+
+    #[test]
+    fn rename_does_not_touch_prefix_overlapping_slug() {
+        let tmp = fresh_repo();
+        seed_flat(&tmp, "old-tame-fox", "open");
+        seed_with(
+            &tmp,
+            "peer-bright-elk",
+            "related: [\"@old-tame-fox-cub\"]\n",
+            "# peer\n\nsee @old-tame-fox-cub here\n",
+        );
+        rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", false).unwrap();
+        let peer = fs::read_to_string(tmp.path().join("issues/peer-bright-elk/item.md")).unwrap();
+        // the longer, unrelated slug is untouched
+        assert!(peer.contains("@old-tame-fox-cub"));
+        assert!(!peer.contains("new-wild-stag"));
+    }
+
+    #[test]
+    fn rename_surfaces_unreadable_files_as_skipped() {
+        let tmp = fresh_repo();
+        seed_flat(&tmp, "old-tame-fox", "open");
+        // A dir with item.md that fails to parse as frontmatter.
+        let bad = tmp.path().join("issues/broken-calm-owl");
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(bad.join("item.md"), "---\n: : not yaml : :\n---\n# bad\n").unwrap();
+        let out = rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", false).unwrap();
+        assert!(out.skipped.iter().any(|s| s.slug == "broken-calm-owl"));
+        // the rename still completed for the readable issue
+        assert!(out.new_dir.join("item.md").is_file());
     }
 
     #[test]

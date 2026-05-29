@@ -62,15 +62,47 @@ pub(crate) fn rewrite_slug_ref(raw: &str, old: &str, new: &str) -> Option<String
 /// rename source. An `@` directly preceded by an alphanumeric (e.g. an
 /// email local part like `jari@old-host`) is skipped so we only touch
 /// standalone `@slug` mentions.
+///
+/// Fenced code blocks (lines opening/closing with ``` or ~~~) are left
+/// verbatim — that's where users paste literal examples of the old slug.
+/// Inline code spans and link URLs are NOT special-cased; review the
+/// `git diff` if a body documents slugs inline.
 pub(crate) fn rewrite_body_refs(body: &str, old: &str, new: &str) -> (String, usize) {
+    // Fast path: nothing to rewrite if the slug doesn't appear at all.
+    if !body.contains(old) {
+        return (body.to_string(), 0);
+    }
     let mut out = String::with_capacity(body.len());
     let mut count = 0usize;
+    let mut in_fence = false;
+    for line in body.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            out.push_str(line);
+            continue;
+        }
+        if in_fence {
+            out.push_str(line);
+            continue;
+        }
+        let n = rewrite_line_refs(line, old, new, &mut out);
+        count += n;
+    }
+    (out, count)
+}
+
+/// Rewrite `@old` mentions in a single line, appending to `out`. Returns
+/// the number of replacements. `prev` resets per line, so a line-leading
+/// `@old` is a valid mention.
+fn rewrite_line_refs(line: &str, old: &str, new: &str, out: &mut String) -> usize {
+    let mut count = 0usize;
     let mut prev: Option<char> = None;
-    let mut chars = body.char_indices().peekable();
+    let mut chars = line.char_indices().peekable();
     while let Some((idx, ch)) = chars.next() {
         if ch == '@' {
             let prev_ok = prev.map(|c| !c.is_alphanumeric()).unwrap_or(true);
-            let rest = &body[idx + ch.len_utf8()..];
+            let rest = &line[idx + ch.len_utf8()..];
             let tok_len: usize = rest
                 .chars()
                 .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
@@ -91,7 +123,7 @@ pub(crate) fn rewrite_body_refs(body: &str, old: &str, new: &str) -> (String, us
         out.push(ch);
         prev = Some(ch);
     }
-    (out, count)
+    count
 }
 
 #[cfg(test)]
@@ -128,6 +160,28 @@ mod tests {
             out,
             "see @new-wild-elk and @old-tame-foxes plus @new-wild-elk."
         );
+    }
+
+    #[test]
+    fn rewrite_body_refs_leaves_fenced_code_untouched() {
+        let body =
+            "ping @old-tame-fox\n```sh\nissuectl show @old-tame-fox\n```\nthen @old-tame-fox\n";
+        let (out, n) = rewrite_body_refs(body, "old-tame-fox", "new-wild-elk");
+        assert_eq!(n, 2);
+        // mention inside the fence is preserved verbatim
+        assert!(out.contains("issuectl show @old-tame-fox"));
+        assert!(out.contains("ping @new-wild-elk"));
+        assert!(out.contains("then @new-wild-elk"));
+    }
+
+    #[test]
+    fn rewrite_body_refs_adjacent_mentions_follow_email_rule() {
+        // The second `@old` is glued to a slug char in the input, so the
+        // email-avoidance rule intentionally leaves it alone.
+        let (out, n) =
+            rewrite_body_refs("@old-tame-fox@old-tame-fox", "old-tame-fox", "new-wild-elk");
+        assert_eq!(n, 1);
+        assert_eq!(out, "@new-wild-elk@old-tame-fox");
     }
 
     #[test]

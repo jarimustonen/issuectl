@@ -2391,22 +2391,33 @@ pub(crate) fn do_close(
 fn cmd_rename(json: bool, old: &str, new: &str, dry_run: bool) -> Result<()> {
     let root = find_root();
     let outcome = repo::rename_issue(&root, old, new, dry_run)?;
+    for s in &outcome.skipped {
+        eprintln!(
+            "Warning: skipped {} ({}); any references to {old} there were left untouched — run `issuectl doctor`",
+            s.slug, s.reason
+        );
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&outcome)?);
         return Ok(());
     }
     let total: usize = outcome.changes.iter().map(|c| c.occurrences).sum();
-    let files = outcome.changes.len();
+    let files = outcome
+        .changes
+        .iter()
+        .map(|c| c.slug.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     if dry_run {
         println!(
-            "Would rename {old} → {new} and rewrite {total} reference(s) across {files} field(s)"
+            "Would rename {old} → {new} and rewrite {total} reference(s) across {files} file(s)"
         );
         for c in &outcome.changes {
             println!("  {} {} ({})", c.slug, c.field, c.occurrences);
         }
     } else {
         println!(
-            "Renamed {old} → {new} ({}); rewrote {total} reference(s) across {files} field(s)",
+            "Renamed {old} → {new} ({}); rewrote {total} reference(s) across {files} file(s)",
             outcome.new_dir.display()
         );
     }
