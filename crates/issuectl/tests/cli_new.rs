@@ -111,12 +111,58 @@ fn new_json_success_prints_expected_payload() {
         item_path.display()
     );
     let dir = tmp.path().join("issues/ab-cd");
+    // Unified field vocabulary: `dir` = issue directory, `path` = item.md.
     let expected = format!(
-        "{{\n  \"dir\": \"{}\",\n  \"item_path\": \"{}\",\n  \"slug\": \"ab-cd\",\n  \"title\": \"Hello\"\n}}\n",
+        "{{\n  \"dir\": \"{}\",\n  \"path\": \"{}\",\n  \"slug\": \"ab-cd\",\n  \"title\": \"Hello\"\n}}\n",
         dir.display(),
         item_path.display(),
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+}
+
+/// The unified `--json` error contract: a failing command under `--json`
+/// emits `{"error":{"code","message"}}` to stderr (not the bare
+/// `Error: …` line) and leaves stdout empty.
+#[test]
+fn json_error_contract_emits_structured_error() {
+    let tmp = fresh_repo();
+    let out = run(tmp.path(), &["--json", "show", "does-not-exist"]);
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    assert!(out.stdout.is_empty(), "{}", dump(&out));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("stderr should be JSON");
+    assert_eq!(v["error"]["code"], "not-found", "{}", dump(&out));
+    assert_eq!(
+        v["error"]["message"], "issue does-not-exist not found",
+        "{}",
+        dump(&out)
+    );
+}
+
+/// A bubble-up anyhow error under `--json` is rendered with the shared
+/// envelope and the generic `command-failed` code.
+#[test]
+fn json_error_contract_wraps_bubbled_errors() {
+    let tmp = fresh_repo();
+    // `update --json` without `--expected-version` is a D4=B violation
+    // that bubbles up as an anyhow error from the command body.
+    let out = run(
+        tmp.path(),
+        &["--json", "update", "ab-cd", "--status", "in-progress"],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    assert!(out.stdout.is_empty(), "{}", dump(&out));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("stderr should be JSON");
+    assert_eq!(v["error"]["code"], "command-failed", "{}", dump(&out));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--expected-version"),
+        "{}",
+        dump(&out)
+    );
 }
 
 #[test]

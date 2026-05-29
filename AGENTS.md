@@ -56,6 +56,24 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
 
 - **Always `--json`** when scripting `issuectl` from another tool or
   agent. The human-readable mode is for terminal users.
+- **`--json` output contract (the agent-facing contract).** One shape
+  across every command so consumers parse them uniformly:
+  - **Success (exit 0)** → one JSON value on **stdout**: the resource
+    (`show`), an array of resources (`ls`/`search`), or a result object
+    (action verbs).
+  - **Failure (exit ≠ 0)** → one object on **stderr**:
+    `{"error":{"code":"<kebab>","message":"…"}}`, with optional extra
+    keys inside `error` (e.g. `matches`). stdout stays empty. The
+    bubble-up path in `fn main` wraps any `anyhow` error as
+    `code:"command-failed"`; explicit `process::exit` sites use the
+    shared `fail()` helper so they honour `--json` too.
+  - **Exit codes**: `0` success · `2` refused-but-actionable (duplicate
+    precheck, partial import) · `1` everything else.
+  - **Shared field vocabulary**: `slug`, `title`, `version`, `dir` (issue
+    directory), `path` (a file), `dry_run`, `diff`, `warnings`. `open`
+    uses `is_dir` (bool) to avoid colliding with the `dir` string field.
+  New commands MUST reuse these keys rather than invent synonyms
+  (`final_dir`/`issue_dir`/`item_path` were unified to `dir`/`path`).
 - **Tests live next to the code** in `#[cfg(test)] mod` blocks by
   default. New features add tests; bug fixes add regression tests.
   - **Exception — `tests/` integration tests:** use only for

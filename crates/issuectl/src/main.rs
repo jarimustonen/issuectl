@@ -1167,12 +1167,69 @@ enum SkillAction {
     },
 }
 
+/// Build the shared `--json` error object: `{"error":{"code","message"[,…]}}`.
+/// `extra` (when an object) is merged into the inner `error` object so a
+/// command can attach structured context (e.g. `matches` for a duplicate
+/// precheck) without inventing a new top-level shape.
+fn json_error_value(code: &str, message: &str, extra: serde_json::Value) -> serde_json::Value {
+    let mut err = serde_json::Map::new();
+    err.insert("code".into(), serde_json::Value::String(code.to_string()));
+    err.insert("message".into(), serde_json::Value::String(message.to_string()));
+    if let serde_json::Value::Object(map) = extra {
+        for (k, v) in map {
+            err.insert(k, v);
+        }
+    }
+    serde_json::json!({ "error": serde_json::Value::Object(err) })
+}
+
+/// Print the shared `--json` error object to stderr.
+fn emit_json_error(code: &str, message: &str, extra: serde_json::Value) {
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&json_error_value(code, message, extra)).unwrap_or_default()
+    );
+}
+
+/// Fail a command under the unified output contract. With `--json` it
+/// emits the shared `{"error":{…}}` object to stderr; otherwise it prints
+/// the historical `Error: <message>` line. Exits with `code` (1 = generic
+/// failure / not-found, 2 = refused-but-actionable). Used by the explicit
+/// `process::exit` sites so they honour `--json` like the bubble-up path
+/// in `main`.
+fn fail(json: bool, code: i32, err_code: &str, message: &str, extra: serde_json::Value) -> ! {
+    if json {
+        emit_json_error(err_code, message, extra);
+    } else {
+        eprintln!("Error: {message}");
+    }
+    std::process::exit(code);
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let json_output = cli.json;
     ROOT_OVERRIDE.set(cli.root).ok();
 
-    match cli.command {
+    // Unified `--json` error contract: any error that bubbles up to
+    // `main` is rendered as the shared `{"error":{code,message}}` object
+    // on stderr (exit 1) so agents parse one shape regardless of which
+    // command failed. Without `--json` we return the error unchanged so
+    // anyhow's default `Error: …` rendering (and existing tests) are
+    // preserved byte-for-byte.
+    let result = dispatch(cli.command, json_output);
+    if json_output {
+        if let Err(e) = result {
+            emit_json_error("command-failed", &format!("{e:#}"), serde_json::Value::Null);
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    result
+}
+
+fn dispatch(command: Command, json_output: bool) -> Result<()> {
+    match command {
         Command::List {
             query,
             assignee,
@@ -1756,10 +1813,13 @@ fn cmd_show(json: bool, slug: &str) -> Result<()> {
             }
             Ok(())
         }
-        None => {
-            eprintln!("Error: issue {slug} not found");
-            std::process::exit(1);
-        }
+        None => fail(
+            json,
+            1,
+            "not-found",
+            &format!("issue {slug} not found"),
+            serde_json::Value::Null,
+        ),
     }
 }
 
@@ -1787,7 +1847,10 @@ fn cmd_open(json: bool, slug: &str, dir: bool, editor: Option<String>) -> Result
         let report = serde_json::json!({
             "slug": slug,
             "path": target.to_string_lossy(),
-            "dir": dir,
+            // `is_dir` (not `dir`) so the key never collides with the
+            // issue-directory `dir` string field used by the action
+            // commands — here it is the boolean "was --dir requested".
+            "is_dir": dir,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -1848,7 +1911,23 @@ fn cmd_search(json: bool, query_str: &str, all: bool) -> Result<()> {
     filtered.sort_by(|a, b| a.slug.cmp(&b.slug));
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&filtered)?);
+        // Mirror `list`/`show`: attach the optimistic-concurrency
+        // `version` token to each issue so a `search` hit can be fed
+        // straight into a mutation without a second `show` round-trip.
+        let with_version: Vec<_> = filtered
+            .iter()
+            .map(|i| {
+                let mut v = serde_json::to_value(i).expect("Issue serializes");
+                if let serde_json::Value::Object(ref mut m) = v {
+                    m.insert(
+                        "version".into(),
+                        serde_json::Value::String(canonical::canonical_hash(i)),
+                    );
+                }
+                v
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&with_version)?);
     } else {
         print_issue_table(&filtered);
     }
@@ -1916,10 +1995,13 @@ fn cmd_duplicates(
         Some(slug) => {
             let target = match issues.iter().find(|i| i.slug == slug) {
                 Some(t) => t,
-                None => {
-                    eprintln!("Error: issue {slug} not found");
-                    std::process::exit(1);
-                }
+                None => fail(
+                    json,
+                    1,
+                    "not-found",
+                    &format!("issue {slug} not found"),
+                    serde_json::Value::Null,
+                ),
             };
             // The target is always a valid candidate scope; `--all`
             // only controls whether *closed* issues are compared
@@ -2050,14 +2132,12 @@ fn duplicate_precheck(json: bool, args: &NewArgs) -> bool {
                 })
             })
             .collect();
-        let report = serde_json::json!({
-            "error": "duplicate-precheck",
-            "message": "strong duplicate(s) found; not created (re-run without --check-duplicates to create anyway)",
-            "matches": out,
-        });
-        eprintln!(
-            "{}",
-            serde_json::to_string_pretty(&report).unwrap_or_default()
+        // Unified error contract: `{"error":{code,message,matches}}` on
+        // stderr. The caller exits 2 (refused-but-actionable).
+        emit_json_error(
+            "duplicate-precheck",
+            "strong duplicate(s) found; not created (re-run without --check-duplicates to create anyway)",
+            serde_json::json!({ "matches": out }),
         );
     } else {
         eprintln!("Refusing to create: strong duplicate(s) found:");
@@ -2080,7 +2160,9 @@ fn cmd_new(json: bool, args: NewArgs, check_duplicates: bool) -> Result<()> {
         let report = serde_json::json!({
             "slug": out.slug,
             "title": out.title,
-            "item_path": out.item_path.to_string_lossy(),
+            // `path` = the item.md file; `dir` = the issue directory.
+            // Shared vocabulary across all commands (see AGENTS.md).
+            "path": out.item_path.to_string_lossy(),
             "dir": out
                 .item_path
                 .parent()
@@ -2267,7 +2349,7 @@ fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
     if json {
         let report = serde_json::json!({
             "slug": slug,
-            "final_dir": out.final_dir.to_string_lossy(),
+            "dir": out.final_dir.to_string_lossy(),
             "moved_to_closed": out.moved_to_closed,
             "moved_to_open": out.moved_to_open,
             "version": out.version,
@@ -2379,7 +2461,7 @@ fn cmd_close(
     if json {
         let report = serde_json::json!({
             "slug": slug,
-            "final_dir": out.final_dir.to_string_lossy(),
+            "dir": out.final_dir.to_string_lossy(),
             "moved_to_closed": out.moved_to_closed,
             "version": out.version,
         });
@@ -3000,7 +3082,7 @@ fn cmd_bulk(json: bool, query_str: &str, spec: BulkSpec, dry_run: bool) -> Resul
                 let mut o = serde_json::json!({
                     "slug": r.slug,
                     "version": r.version,
-                    "final_dir": r.final_dir.to_string_lossy(),
+                    "dir": r.final_dir.to_string_lossy(),
                 });
                 if let Some(d) = &r.diff {
                     o["diff"] = serde_json::Value::String(d.clone());
@@ -3115,7 +3197,7 @@ fn finish_mutation(
         if json {
             let report = serde_json::json!({
                 "slug": slug,
-                "final_dir": outcome.issue_dir.to_string_lossy(),
+                "dir": outcome.issue_dir.to_string_lossy(),
                 "version": outcome.version,
                 "moved_to_closed": outcome.moved_to_closed,
                 "moved_to_open": outcome.moved_to_open,
@@ -3133,7 +3215,7 @@ fn finish_mutation(
     if json {
         let report = serde_json::json!({
             "slug": slug,
-            "final_dir": outcome.issue_dir.to_string_lossy(),
+            "dir": outcome.issue_dir.to_string_lossy(),
             "version": outcome.version,
             "moved_to_closed": outcome.moved_to_closed,
             "moved_to_open": outcome.moved_to_open,
@@ -3218,7 +3300,7 @@ fn cmd_body_set(
         let report = serde_json::json!({
             "slug": slug,
             "version": outcome.version,
-            "issue_dir": outcome.issue_dir.to_string_lossy(),
+            "dir": outcome.issue_dir.to_string_lossy(),
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

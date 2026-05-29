@@ -775,6 +775,10 @@ pub struct SkippedFile {
 pub struct RenameOutcome {
     pub old_slug: String,
     pub new_slug: String,
+    /// Serialized as `dir` so `--json` consumers read the issue
+    /// directory under the same key every command uses (the Rust field
+    /// keeps its `new_dir` name for in-tree callers).
+    #[serde(rename = "dir")]
     pub new_dir: PathBuf,
     pub dry_run: bool,
     pub changes: Vec<RefChange>,

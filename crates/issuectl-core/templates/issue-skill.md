@@ -24,6 +24,30 @@ terminal users only. All examples below already include `--json`.
 when a command fails — the error message names the offending value and
 the valid alternatives.
 
+### `--json` output contract
+
+Every command follows one contract so you can consume any of them the
+same way:
+
+- **Success (exit 0)** → a single JSON value on **stdout**. Read commands
+  (`show`, `ls`, `search`) print the issue (object) or issues (array);
+  action commands (`new`, `update`, `close`, `note`, `apply`, …) print a
+  result object describing what changed.
+- **Failure (exit ≠ 0)** → a single object on **stderr**:
+  `{"error":{"code":"<stable-kebab-code>","message":"<human text>"}}`.
+  Some failures attach extra keys inside `error` (e.g. `matches` for a
+  duplicate precheck). stdout is empty on failure. Branch on the process
+  exit code, then parse stderr.
+- **Exit codes**: `0` success · `2` refused-but-actionable (duplicate
+  precheck strong match; partial import where some records landed) ·
+  `1` everything else (validation error, not-found, conflict).
+- **Shared field vocabulary** (same key, same meaning everywhere):
+  `slug`, `title`, `version` (optimistic-concurrency token — pass back as
+  `--expected-version`), `dir` (the issue's directory), `path` (a single
+  file), `dry_run` (bool), `diff` (unified-diff string), `warnings`
+  (string array). `open` uses `is_dir` (bool: was `--dir` requested) so it
+  never collides with the `dir` directory field.
+
 ## Install or upgrade `issuectl`
 
 This skill was installed for `issuectl {{ISSUECTL_VERSION}}`. On the
@@ -125,8 +149,8 @@ Output shape:
 
 ```json
 { "slug": "extremely-quiet-otter",
-  "final_dir": "/abs/path/issues/closed/extremely-quiet-otter",
-  "moved_to_closed": true }
+  "dir": "/abs/path/issues/closed/extremely-quiet-otter",
+  "moved_to_closed": true, "version": "sha256:..." }
 ```
 
 **Closing statuses** (any of these triggers move to `closed/`):
@@ -184,8 +208,8 @@ the plan; `--no-branch-fallback` disables the implicit
 Output shape:
 
 ```json
-{ "slug": "extremely-quiet-otter", "final_dir": "/abs/path/...",
-  "moved_to_closed": false, "moved_to_open": false }
+{ "slug": "extremely-quiet-otter", "dir": "/abs/path/...",
+  "version": "sha256:...", "moved_to_closed": false, "moved_to_open": false }
 ```
 
 **Adding the issue to an epic**: also update the parent epic's `## Issues` list
@@ -278,7 +302,7 @@ Output shape:
 
 ```json
 { "slug": "extremely-quiet-otter", "version": "sha256:...",
-  "issue_dir": "/abs/path/issues/extremely-quiet-otter" }
+  "dir": "/abs/path/issues/extremely-quiet-otter" }
 ```
 
 ### Action: Create
@@ -350,7 +374,7 @@ The CLI:
 - Writes `issues/open/<slug>/item.md` with the right frontmatter
 - Returns the slug and path in `--json` (parse `.slug`)
 
-Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slug>"` (repeatable), `--field key=value` (repeatable; for custom frontmatter fields declared in `issues/.schema.yaml`, e.g. `--field team=payments`), `--check-duplicates` (refuse to create and exit non-zero — printing a JSON `{error:"duplicate-precheck",matches:[...]}` on stderr — when a strong duplicate already exists; re-run without the flag to create anyway).
+Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slug>"` (repeatable), `--field key=value` (repeatable; for custom frontmatter fields declared in `issues/.schema.yaml`, e.g. `--field team=payments`), `--check-duplicates` (refuse to create and exit 2 — printing the shared error envelope `{"error":{"code":"duplicate-precheck","message":...,"matches":[...]}}` on stderr — when a strong duplicate already exists; re-run without the flag to create anyway).
 
 #### 3. Flesh out the body
 
