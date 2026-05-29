@@ -581,7 +581,9 @@ enum Command {
         #[arg(long, conflicts_with = "from_file")]
         stdin: bool,
 
-        /// Read the note text from this file
+        /// Read the note text from this file. Pass `-` to read stdin
+        /// (use `./-` for a file literally named `-`). Input is capped
+        /// at 10 MiB.
         #[arg(long = "from-file", value_name = "PATH", conflicts_with = "stdin")]
         from_file: Option<PathBuf>,
 
@@ -1103,7 +1105,8 @@ enum BodyAction {
         #[arg(long, conflicts_with = "from_file")]
         stdin: bool,
 
-        /// Read body from this file
+        /// Read body from this file. Pass `-` to read stdin (use `./-`
+        /// for a file literally named `-`). Input is capped at 10 MiB.
         #[arg(long = "from-file", value_name = "PATH", conflicts_with = "stdin")]
         from_file: Option<PathBuf>,
 
@@ -2786,19 +2789,33 @@ const MAX_INPUT_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Read up to [`MAX_INPUT_BYTES`] from `reader`, erroring if the source
 /// exceeds the cap or isn't valid UTF-8. `what`/`source` name the input in
-/// error messages (e.g. "note" from "stdin"). Reads one byte past the cap
-/// so an exactly-at-limit input passes but anything larger is rejected.
-fn read_capped<R: std::io::Read>(reader: R, what: &str, source: &str) -> Result<String> {
+/// error messages (e.g. "note" from "stdin"). Reads one byte past `limit`
+/// so an exactly-at-limit input passes but anything larger is rejected
+/// — and so an unbounded source (`/dev/zero`) is short-circuited after
+/// `limit + 1` bytes rather than buffered to exhaustion. `limit` is a
+/// parameter (not the constant directly) so tests can exercise the cap
+/// with a tiny bound instead of allocating megabytes.
+fn read_capped<R: std::io::Read>(
+    reader: R,
+    limit: u64,
+    what: &str,
+    source: impl std::fmt::Display,
+) -> Result<String> {
     use std::io::Read;
     let mut buf = Vec::new();
     reader
-        .take(MAX_INPUT_BYTES + 1)
+        .take(limit + 1)
         .read_to_end(&mut buf)
         .with_context(|| format!("cannot read {what} from {source}"))?;
-    if buf.len() as u64 > MAX_INPUT_BYTES {
-        bail!("{what} from {source} exceeds the {MAX_INPUT_BYTES}-byte limit");
+    if buf.len() as u64 > limit {
+        bail!("{what} from {source} exceeds the {limit}-byte limit");
     }
-    String::from_utf8(buf).with_context(|| format!("{what} from {source} is not valid UTF-8"))
+    String::from_utf8(buf).map_err(|e| {
+        // Surface the byte offset so an agent (or human) can locate the
+        // bad byte instead of guessing across a multi-megabyte input.
+        let offset = e.utf8_error().valid_up_to();
+        anyhow::anyhow!("{what} from {source} is not valid UTF-8 (first invalid byte at offset {offset})")
+    })
 }
 
 /// Read `what` text from stdin, capped at [`MAX_INPUT_BYTES`]. Refuses to
@@ -2808,21 +2825,22 @@ fn read_capped_stdin(what: &str) -> Result<String> {
     use std::io::IsTerminal;
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
-        bail!("stdin is a terminal; pipe the {what} text in or use --from-file PATH");
+        bail!("stdin is a terminal; pipe the {what} text in, or pass a real file path to --from-file");
     }
-    read_capped(stdin.lock(), what, "stdin")
+    read_capped(stdin.lock(), MAX_INPUT_BYTES, what, "stdin")
 }
 
 /// Read `what` text from a `--from-file` path, capped at [`MAX_INPUT_BYTES`].
 /// A path of `-` means stdin (the standard Unix convention), routed through
-/// [`read_capped_stdin`] so it gets the same TTY guard and cap.
+/// [`read_capped_stdin`] so it gets the same TTY guard and cap. To read a
+/// file literally named `-`, pass `./-`.
 fn read_capped_file(path: &Path, what: &str) -> Result<String> {
     if path.as_os_str() == "-" {
         return read_capped_stdin(what);
     }
     let file = fs::File::open(path)
         .with_context(|| format!("cannot read {what} from {}", path.display()))?;
-    read_capped(file, what, &path.display().to_string())
+    read_capped(file, MAX_INPUT_BYTES, what, path.display())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3344,11 +3362,15 @@ fn cmd_body_set(
     } else {
         bail!("specify exactly one of --stdin or --from-file");
     };
-    // Trim surrounding whitespace so `note` and `body set` treat piped
-    // input the same way (a stray trailing newline from `echo … |` or an
-    // editor's final newline doesn't bloat the stored body). `update_body`
-    // re-adds the canonical leading newline.
-    let body = body.trim().to_string();
+    // Strip only *trailing* whitespace, not leading: a stray final newline
+    // from `echo … |` or an editor's end-of-file newline shouldn't bloat the
+    // stored body, but a body legitimately starts with whitespace (a leading
+    // 4-space indented code block, intentional spacing) that a full `trim()`
+    // would silently corrupt. This is the deliberate divergence from `note`,
+    // whose text is short prose that is fully trimmed and rejected when empty;
+    // a body is a whole document and its leading content is the user's intent.
+    // `update_body` re-adds the canonical leading newline.
+    let body = body.trim_end().to_string();
     let root = find_root();
     let outcome = mutate::update_body(
         &root,
@@ -4376,25 +4398,40 @@ mod tests {
         assert!(read_message_arg(None, false, Some(path)).is_err());
     }
 
+    // Small limit so cap tests stay sub-millisecond instead of allocating
+    // the real 10 MiB bound.
+    const TEST_LIMIT: u64 = 16;
+
     #[test]
     fn read_capped_accepts_input_at_the_limit() {
-        let data = vec![b'a'; MAX_INPUT_BYTES as usize];
-        let got = read_capped(data.as_slice(), "note", "test").unwrap();
-        assert_eq!(got.len(), MAX_INPUT_BYTES as usize);
+        let data = vec![b'a'; TEST_LIMIT as usize];
+        let got = read_capped(data.as_slice(), TEST_LIMIT, "note", "test").unwrap();
+        assert_eq!(got.len(), TEST_LIMIT as usize);
     }
 
     #[test]
     fn read_capped_rejects_input_over_the_limit() {
-        let data = vec![b'a'; MAX_INPUT_BYTES as usize + 1];
-        let err = read_capped(data.as_slice(), "note", "test").unwrap_err();
+        let data = vec![b'a'; TEST_LIMIT as usize + 1];
+        let err = read_capped(data.as_slice(), TEST_LIMIT, "note", "test").unwrap_err();
         assert!(err.to_string().contains("exceeds"), "got: {err}");
     }
 
     #[test]
-    fn read_capped_rejects_invalid_utf8() {
-        let data: &[u8] = &[0xff, 0xfe, 0x00];
-        let err = read_capped(data, "body", "test").unwrap_err();
-        assert!(err.to_string().contains("UTF-8"), "got: {err}");
+    fn read_capped_short_circuits_an_unbounded_source() {
+        // `io::repeat` is an infinite reader (a `/dev/zero` stand-in). If the
+        // `take(limit + 1)` guard regressed to reading everything, this test
+        // would hang / OOM instead of returning a prompt "exceeds" error.
+        let err = read_capped(std::io::repeat(b'a'), TEST_LIMIT, "body", "test").unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "got: {err}");
+    }
+
+    #[test]
+    fn read_capped_rejects_invalid_utf8_with_offset() {
+        let data: &[u8] = &[b'o', b'k', 0xff, 0xfe];
+        let err = read_capped(data, TEST_LIMIT, "body", "test").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("UTF-8"), "got: {msg}");
+        assert!(msg.contains("offset 2"), "got: {msg}");
     }
 
     #[test]
@@ -4411,14 +4448,5 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("does-not-exist.md");
         assert!(read_capped_file(&missing, "body").is_err());
-    }
-
-    #[test]
-    fn read_capped_file_caps_an_oversized_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("big.md");
-        fs::write(&path, vec![b'x'; MAX_INPUT_BYTES as usize + 1]).unwrap();
-        let err = read_capped_file(&path, "body").unwrap_err();
-        assert!(err.to_string().contains("exceeds"), "got: {err}");
     }
 }
