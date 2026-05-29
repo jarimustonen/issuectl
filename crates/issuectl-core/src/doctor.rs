@@ -1400,6 +1400,14 @@ fn populate_extended_validation(
             else {
                 continue;
             };
+            // A status value that `--fix` will coerce is owned by the
+            // alias pass — skip reconciliation for it so the two passes
+            // don't both rewrite the same field (which classified the
+            // pre-coercion value with the lenient `Active` default and
+            // would otherwise clobber the coerced result).
+            if schema::would_coerce(known_schema, "status", hit_status).is_some() {
+                continue;
+            }
             match hit.folder.as_str() {
                 "closed"
                     if (known_schema.status_classes.contains_key(hit_status)
@@ -1659,23 +1667,22 @@ fn populate_schema_violations(
             continue;
         };
         for v in schema::validate(schema, fm) {
-            // `RequiredWhen` (e.g. closing status missing `closed:`) is
+            // The built-in `closed` required-when-closing rule is
             // surfaced by the lifecycle-aware status/closed consistency
-            // check in `populate_extended_validation`; suppress it here
-            // so the same condition isn't reported twice.
-            if matches!(v, schema::ViolationKind::RequiredWhen { .. }) {
-                continue;
+            // check in `populate_extended_validation`; suppress only
+            // THAT specific violation here so the same condition isn't
+            // reported twice. Any OTHER `required_when` (a user-declared
+            // conditional field) has no other reporting channel, so it
+            // must flow through to `schema_violations`.
+            if let schema::ViolationKind::RequiredWhen { field, .. } = &v {
+                if field == "closed" {
+                    continue;
+                }
             }
-            // An enum violation on `status` / `type` whose value has a
-            // declared alias is reported as a pending coercion instead
-            // — `doctor --fix` will rewrite it.
+            // An enum violation on a value `doctor --fix` would coerce
+            // is reported as a pending coercion instead of a violation.
             if let schema::ViolationKind::InvalidEnum { field, value, .. } = &v {
-                let aliased = match field.as_str() {
-                    "status" => schema::status_alias_target(schema, value).is_some(),
-                    "type" => schema::type_alias_target(schema, value).is_some(),
-                    _ => false,
-                };
-                if aliased {
+                if schema::would_coerce(schema, field, value).is_some() {
                     continue;
                 }
             }
@@ -1711,12 +1718,7 @@ fn populate_alias_coercions(
             else {
                 continue;
             };
-            let target = match field {
-                "status" => schema::status_alias_target(schema, value),
-                "type" => schema::type_alias_target(schema, value),
-                _ => None,
-            };
-            if let Some(to) = target {
+            if let Some(to) = schema::would_coerce(schema, field, value) {
                 report.alias_coercions.push((
                     s.dir_name.clone(),
                     field.to_string(),
@@ -1837,17 +1839,23 @@ fn apply(
     // are still valid: directory migration would invalidate them.
     apply_orphan_tempfiles(&mut actions, &mut outcome)?;
 
+    // Alias coercion (legacy status/type values → canonical) runs
+    // BEFORE status/folder reconciliation: reconciliation classifies a
+    // status via the lifecycle layering, and a legacy value like
+    // `resolved` resolves to the lenient `Active` default until it is
+    // coerced to its canonical (`fixed`, closing) form. Coercing first
+    // means reconciliation reasons about canonical statuses, not the
+    // pre-migration ones. Both run before the flat-layout migration so
+    // the rewrites land at the legacy path scan() recorded. Schema is
+    // loaded post-bootstrap so a repo with no prior `.schema.yaml`
+    // still gets the built-in alias table.
+    let apply_schema = schema::load(repo_root)?;
+    apply_alias_coercions(&mut actions, &mut outcome, &apply_schema)?;
+
     // Status/folder reconciliation runs BEFORE the flat-layout
     // migration so the rewrites land at the legacy path that scan()
     // recorded; the subsequent migration moves the corrected file.
     apply_status_reconciliation(&mut actions, &mut outcome)?;
-
-    // Alias coercion (legacy status/type values → canonical) also runs
-    // before the flat-layout migration, against the paths scan()
-    // recorded. Schema is loaded post-bootstrap so a repo with no prior
-    // `.schema.yaml` still gets the built-in alias table.
-    let apply_schema = schema::load(repo_root)?;
-    apply_alias_coercions(&mut actions, &mut outcome, &apply_schema)?;
 
     // Notes → Comments migration is independent of layout migration:
     // it touches body markdown of flat-layout dirs only, never moves
@@ -2149,8 +2157,10 @@ fn apply_status_reconciliation(
 
 /// Rewrite legacy `status` / `type` values to their canonical form via
 /// the schema alias tables. Re-reads the on-disk value and only
-/// rewrites when it still equals the recorded `from` (TOCTOU guard
-/// against a concurrent edit between scan and apply). When a coerced
+/// rewrites when it still equals the recorded `from`. This guard covers
+/// both an external concurrent edit between scan and apply AND an
+/// earlier in-process apply step that already changed the field, so a
+/// stale coercion never clobbers a fresher value. When a coerced
 /// status lands in a closing lifecycle class and no `closed:` date is
 /// present, a `closed:` date is stamped — mirroring the status command
 /// so the migrated issue doesn't immediately trip the `closed:`
@@ -4042,6 +4052,65 @@ mod tests {
         assert!(after.contains("type: improvement"), "type not coerced:\n{after}");
         // Active status → no `closed:` stamped.
         assert!(!after.contains("closed:"), "closed: must not appear:\n{after}");
+    }
+
+    #[test]
+    fn custom_required_when_field_surfaces_as_schema_violation() {
+        // Regression: doctor must NOT swallow a user-declared
+        // `required_when` on a field other than `closed` — only the
+        // built-in closed/closing rule is suppressed (it has a separate
+        // reporting channel). A custom `resolution` required-when-closing
+        // field has no other channel, so a missing value must show up in
+        // `schema_violations`.
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  resolution:\n    required_when:\n      status_class: closing\n",
+        )
+        .unwrap();
+        put_flat(
+            &tmp,
+            "needs-resolution",
+            "---\ntype: bug\nstatus: done\npriority: normal\nclosed: 2026-05-06\n---\n# R\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.schema_violations
+                .iter()
+                .any(|(loc, msg)| loc.contains("needs-resolution") && msg.contains("resolution")),
+            "custom required_when must surface in schema_violations, got {:?}",
+            r.schema_violations
+        );
+    }
+
+    #[test]
+    fn value_valid_in_user_enum_is_not_coerced() {
+        // A repo that adds a built-in alias KEY to its own status enum
+        // makes that value canonical — it must not be silently coerced.
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  status:\n    required: true\n    enum: [open, in-progress, resolved, done]\n",
+        )
+        .unwrap();
+        put_flat(
+            &tmp,
+            "keeps-resolved",
+            "---\ntype: bug\nstatus: resolved\npriority: normal\n---\n# K\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.alias_coercions.is_empty(),
+            "value present in the user enum must not be coerced, got {:?}",
+            r.alias_coercions
+        );
+        assert!(
+            !r.schema_violations
+                .iter()
+                .any(|(loc, _)| loc.contains("keeps-resolved")),
+            "a canonical (enum-valid) value must not be flagged, got {:?}",
+            r.schema_violations
+        );
     }
 
     #[test]

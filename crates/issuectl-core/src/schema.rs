@@ -252,12 +252,17 @@ fields:
 # add your own to extend, or restate a key to override its target. Only
 # `doctor --fix` consumes this map — the regular mutation commands still
 # reject out-of-enum values, so an unaliased typo never slips through.
+#
+# Only unambiguous synonyms are built in. Work-pause states such as
+# `paused` / `blocked` are deliberately NOT mapped: the canonical status
+# set has no equivalent, so coercing them to `in-progress` would
+# misrepresent intent and lose information. A repo that wants them
+# handled should add its own mapping (or a custom status via
+# `status_classes`) below.
 status_aliases:
   closed: done
   resolved: fixed
   in_progress: in-progress
-  paused: in-progress
-  blocked: in-progress
 type_aliases:
   enhancement: improvement
   refactor: chore
@@ -651,6 +656,27 @@ pub fn status_alias_target<'a>(schema: &'a Schema, value: &str) -> Option<&'a st
 /// schema's `type_aliases`. See [`status_alias_target`].
 pub fn type_alias_target<'a>(schema: &'a Schema, value: &str) -> Option<&'a str> {
     schema.type_aliases.get(value).map(String::as_str)
+}
+
+/// The canonical value `doctor --fix` would coerce `value` to for
+/// `field`, or `None` when no coercion applies. Single source of truth
+/// for coercion eligibility, shared by the doctor scan (which records
+/// the pending rewrite) and the apply pass. Only `status` and `type`
+/// carry alias tables today. A coercion applies only when the field
+/// declares an `enum`, the value is NOT already in it, and an alias
+/// maps it — so a value that is canonical for this repo (even one that
+/// collides with a built-in alias key) is never silently rewritten, and
+/// a field with no `enum` constraint has nothing to migrate toward.
+pub fn would_coerce<'a>(schema: &'a Schema, field: &str, value: &str) -> Option<&'a str> {
+    let allowed = schema.fields.get(field)?.allowed.as_ref()?;
+    if allowed.iter().any(|a| a == value) {
+        return None;
+    }
+    match field {
+        "status" => status_alias_target(schema, value),
+        "type" => type_alias_target(schema, value),
+        _ => None,
+    }
 }
 
 /// Lifecycle classification for a status value.
