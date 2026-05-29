@@ -17,7 +17,7 @@
 //! Consumed by the CLI `duplicates` command and the opt-in `new
 //! --check-duplicates` pre-check.
 
-use std::collections::BTreeSet;
+use std::collections::HashMap;
 
 use crate::models::Issue;
 
@@ -83,27 +83,54 @@ pub struct DuplicatePair {
     pub label_overlap: f64,
 }
 
+/// Maps token strings to dense integer IDs so token-set intersection
+/// becomes a merge over sorted `u32` slices instead of repeated
+/// `String` comparisons. One interner is shared across every issue in a
+/// scan, so equal tokens always collapse to the same ID. Title, body,
+/// and label tokens share the ID space — harmless, since dimensions are
+/// only ever intersected against their own kind.
+#[derive(Default)]
+struct Interner {
+    map: HashMap<String, u32>,
+}
+
+impl Interner {
+    fn intern(&mut self, s: &str) -> u32 {
+        if let Some(&id) = self.map.get(s) {
+            return id;
+        }
+        let id = self.map.len() as u32;
+        self.map.insert(s.to_string(), id);
+        id
+    }
+}
+
 /// Pre-tokenized view of an issue, so an all-pairs scan tokenizes each
-/// issue once rather than once per comparison.
+/// issue once rather than once per comparison. Each field is a sorted,
+/// deduplicated list of interned token IDs.
 struct Tokens {
-    title: BTreeSet<String>,
-    body: BTreeSet<String>,
-    labels: BTreeSet<String>,
+    title: Vec<u32>,
+    body: Vec<u32>,
+    labels: Vec<u32>,
 }
 
 impl Tokens {
-    fn new(i: &Issue) -> Self {
+    fn new(i: &Issue, interner: &mut Interner) -> Self {
+        let mut labels: Vec<u32> = i
+            .labels
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|l| l.trim().to_lowercase())
+            .filter(|l| !l.is_empty())
+            .map(|l| interner.intern(&l))
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
         Tokens {
-            title: tokenize(&i.title),
-            body: tokenize(&i.body),
-            labels: i
-                .labels
-                .as_deref()
-                .unwrap_or(&[])
-                .iter()
-                .map(|l| l.trim().to_lowercase())
-                .filter(|l| !l.is_empty())
-                .collect(),
+            title: tokenize(&i.title, interner),
+            body: tokenize(&i.body, interner),
+            labels,
         }
     }
 }
@@ -155,12 +182,13 @@ pub fn find_duplicates<'a, I>(target: &Issue, candidates: I, threshold: f64) -> 
 where
     I: IntoIterator<Item = &'a Issue>,
 {
-    let target_tokens = Tokens::new(target);
+    let mut interner = Interner::default();
+    let target_tokens = Tokens::new(target, &mut interner);
     let mut matches: Vec<DuplicateMatch> = candidates
         .into_iter()
         .filter(|c| c.slug != target.slug)
         .filter_map(|c| {
-            let comp = score_tokens(&target_tokens, &Tokens::new(c));
+            let comp = score_tokens(&target_tokens, &Tokens::new(c, &mut interner));
             (comp.score >= threshold).then(|| DuplicateMatch {
                 slug: c.slug.clone(),
                 title: c.title.clone(),
@@ -182,7 +210,11 @@ where
 /// Scan every unordered pair in `issues`, returning those at or above
 /// `threshold`, sorted by descending score then by slug pair.
 pub fn find_all_pairs(issues: &[Issue], threshold: f64) -> Vec<DuplicatePair> {
-    let toks: Vec<Tokens> = issues.iter().map(Tokens::new).collect();
+    let mut interner = Interner::default();
+    let toks: Vec<Tokens> = issues
+        .iter()
+        .map(|i| Tokens::new(i, &mut interner))
+        .collect();
     let mut pairs = Vec::new();
     for i in 0..issues.len() {
         for j in (i + 1)..issues.len() {
@@ -218,22 +250,40 @@ pub fn find_all_pairs(issues: &[Issue], threshold: f64) -> Vec<DuplicatePair> {
 }
 
 /// Split text into normalized tokens: lowercase, split on any
-/// non-alphanumeric boundary, drop short tokens and stop-words.
-fn tokenize(text: &str) -> BTreeSet<String> {
-    text.split(|c: char| !c.is_alphanumeric())
+/// non-alphanumeric boundary, drop short tokens and stop-words, then
+/// intern to a sorted, deduplicated list of integer IDs.
+fn tokenize(text: &str, interner: &mut Interner) -> Vec<u32> {
+    let mut ids: Vec<u32> = text
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
         .map(|t| t.to_lowercase())
         .filter(|t| t.chars().count() >= MIN_TOKEN_LEN && !STOPWORDS.contains(&t.as_str()))
-        .collect()
+        .map(|t| interner.intern(&t))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
-/// Jaccard similarity: |A ∩ B| / |A ∪ B|. Two empty sets score 0 (no
-/// evidence of similarity), not 1.
-fn jaccard(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
+/// Jaccard similarity: |A ∩ B| / |A ∪ B|, computed by merging two
+/// sorted, deduplicated ID slices. Two empty sets score 0 (no evidence
+/// of similarity), not 1.
+fn jaccard(a: &[u32], b: &[u32]) -> f64 {
     if a.is_empty() && b.is_empty() {
         return 0.0;
     }
-    let inter = a.intersection(b).count();
+    let (mut i, mut j, mut inter) = (0, 0, 0usize);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                inter += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
     let union = a.len() + b.len() - inter;
     if union == 0 {
         0.0
