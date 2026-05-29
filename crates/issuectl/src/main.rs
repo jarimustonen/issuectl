@@ -920,7 +920,9 @@ enum Command {
     },
 
     /// Export issues to stdout in a portable format (json, markdown, csv).
-    /// JSON is the round-trip format consumed by `issuectl import json`.
+    /// JSON serializes the full issue and is what `import json` reads back
+    /// (import re-creates issues, so slug/status/dates are not preserved —
+    /// see `import`). CSV and Markdown are lossy, human-oriented views.
     Export {
         /// Output format
         #[arg(value_enum)]
@@ -941,9 +943,10 @@ enum Command {
         closed: bool,
     },
 
-    /// Import issues from an external source. Each imported issue is
-    /// created through the same validation path as `issuectl new`, with a
-    /// freshly minted slug (foreign slugs are not carried over).
+    /// Import issues from an external source. Each issue is created fresh
+    /// through the same validation path as `issuectl new`: it gets a new
+    /// slug and `open` status. Source status (so closed issues arrive
+    /// open), dates, commits, and custom fields are not carried over.
     Import {
         #[command(subcommand)]
         source: ImportSource,
@@ -990,7 +993,8 @@ enum ImportSource {
         #[arg(long, value_parser = parse_non_empty)]
         repo: String,
 
-        /// Issue state to fetch: open, closed, or all
+        /// Issue state to fetch: open, closed, or all. Note: imported
+        /// issues are always created `open` regardless of this filter.
         #[arg(long, default_value = "open", value_parser = PossibleValuesParser::new(["open", "closed", "all"]))]
         state: String,
 
@@ -1548,6 +1552,21 @@ fn load() -> Vec<models::Issue> {
     repo::load_issues(&root)
 }
 
+/// The implicit folder scope shared by `list` and `export`: open issues
+/// only by default, unless `--all` (no filter), `--closed`, or a
+/// positional query (caller opts into scoping it themselves) is given.
+fn folder_default_filter(all: bool, closed: bool, has_query: bool) -> Option<&'static str> {
+    if all {
+        None
+    } else if closed {
+        Some("closed")
+    } else if has_query {
+        None
+    } else {
+        Some("open")
+    }
+}
+
 // ── Commands ────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -1620,15 +1639,7 @@ fn cmd_list(
     // pre-query-engine `ls`. A *positional* query is the one
     // surface where the caller has explicitly opted into "scope it
     // yourself" mode.
-    let folder_filter: Option<&'static str> = if all {
-        None
-    } else if closed {
-        Some("closed")
-    } else if query_str.is_some() {
-        None
-    } else {
-        Some("open")
-    };
+    let folder_filter = folder_default_filter(all, closed, query_str.is_some());
 
     let issues = load();
     // `repo::load_issues` already returns issues sorted by slug, so
@@ -2029,18 +2040,7 @@ fn cmd_export(
         Some(s) => query::parse(s).context("parsing export query")?,
         None => query::Query::default(),
     };
-    // Same implicit-folder rule as `cmd_list`: default to open issues
-    // unless the caller passed --all/--closed or an explicit positional
-    // query (which opts into "scope it yourself").
-    let folder_filter: Option<&'static str> = if all {
-        None
-    } else if closed {
-        Some("closed")
-    } else if query_str.is_some() {
-        None
-    } else {
-        Some("open")
-    };
+    let folder_filter = folder_default_filter(all, closed, query_str.is_some());
 
     let issues = load();
     let filtered: Vec<_> = issues
@@ -2114,10 +2114,11 @@ fn report_import(json: bool, outcome: ImportOutcome) -> Result<()> {
             failed.len()
         );
     }
-    // Non-zero exit when nothing imported but failures occurred, so
-    // scripts can detect a wholesale failure.
-    if created.is_empty() && !failed.is_empty() {
-        std::process::exit(1);
+    // Distinct exit codes so scripts can tell total from partial
+    // failure: 1 = nothing imported, 2 = some imported but some failed.
+    // Exit 0 only when every record landed.
+    if !failed.is_empty() {
+        std::process::exit(if created.is_empty() { 1 } else { 2 });
     }
     Ok(())
 }

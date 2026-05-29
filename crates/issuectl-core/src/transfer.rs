@@ -4,16 +4,26 @@
 //! owns reading files and shelling out to `gh`):
 //!
 //! * **export** — render a slice of [`Issue`] to JSON, Markdown, or CSV
-//!   on demand. JSON is the round-trip format: it is exactly what
-//!   [`parse_json`] consumes, so `export json | import json` is a faithful
-//!   pipeline (modulo locally-assigned slugs — import always mints fresh
-//!   ones; see the module-level note on [`ImportRecord`]).
+//!   on demand. JSON serializes the full [`Issue`] (every field); CSV and
+//!   Markdown are lossy, human-oriented projections (metadata + title for
+//!   CSV, metadata + body for Markdown — neither carries the issue body
+//!   in CSV nor is re-importable).
 //! * **import** — parse a foreign payload into [`ImportRecord`]s, the
-//!   lenient intake shape. JSON intake reads both issuectl's own export
-//!   and hand-written arrays; [`parse_github`] reads `gh issue list
-//!   --json …` output. Each record converts to a [`NewArgs`] via
+//!   lenient intake shape. JSON intake reads both issuectl's own JSON
+//!   export and hand-written arrays; [`parse_github`] reads `gh issue
+//!   list --json …` output. Each record converts to a [`NewArgs`] via
 //!   [`ImportRecord::into_new_args`] so the CLI funnels every imported
 //!   issue through the same `do_new` validation path as `issuectl new`.
+//!
+//! **Import is content-level, not a byte-faithful round-trip.** Every
+//! imported issue is *created fresh*: it gets a new slug and `open`
+//! status, with today's `created`/`updated` dates. Source fields that
+//! `do_new` does not accept are therefore dropped on import — `status`
+//! (so closed issues, including GitHub `--state closed`, arrive open),
+//! `closed`/`created`/`updated` timestamps, `commits`, `related`, and
+//! custom (`extra`) frontmatter fields. Title, type, priority, labels,
+//! assignee/reporter (or owner for epics), epic, and description survive.
+//! See [`ImportRecord`].
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -144,12 +154,14 @@ fn csv_field(value: &str) -> String {
 /// Lenient intake record. Every field beyond `title` is optional so the
 /// same shape parses issuectl's own JSON export, a hand-authored array,
 /// and (after a field rename in [`parse_github`]) GitHub's `gh` output.
-/// Unknown keys are ignored.
+/// Unknown keys are ignored — this is deliberate so that the rich
+/// [`Issue`] JSON export (which carries `slug`, `status`, `created`,
+/// `commits`, … keys this shape does not model) parses without error.
+/// The flip side is that a typo'd key (`asignee`) is silently dropped.
 ///
-/// **Slugs are not imported.** Slugs are repo-local identifiers; carrying
-/// a foreign slug into an existing repo invites collisions. Every imported
-/// issue gets a freshly minted slug via `do_new`, so a round-trip through
-/// `export json | import json` preserves content but reassigns slugs.
+/// Only the fields modeled here cross into the created issue; see the
+/// module-level note for the full list of source fields that are dropped
+/// on import (status, dates, commits, related, slug, custom fields).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImportRecord {
     pub title: String,
@@ -161,6 +173,8 @@ pub struct ImportRecord {
     pub assignee: Option<String>,
     #[serde(default)]
     pub reporter: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
     #[serde(default)]
     pub epic: Option<String>,
     #[serde(default)]
@@ -175,9 +189,9 @@ pub struct ImportRecord {
 
 impl ImportRecord {
     /// Convert into the `do_new` argument shape. `default_type` supplies
-    /// the issue type when the record omits one. Epics never carry
-    /// reporter/assignee (they'd be rejected downstream), so those are
-    /// dropped for epic records here.
+    /// the issue type when the record omits one. Epics carry `owner` and
+    /// never `reporter`/`assignee` (which `do_new` rejects for epics);
+    /// non-epics carry `reporter`/`assignee` and never `owner`.
     pub fn into_new_args(self, default_type: &str) -> NewArgs {
         let issue_type = self
             .issue_type
@@ -190,7 +204,7 @@ impl ImportRecord {
             slug: None,
             reporter: if is_epic { None } else { self.reporter },
             assignee: if is_epic { None } else { self.assignee },
-            owner: None,
+            owner: if is_epic { self.owner } else { None },
             priority: self
                 .priority
                 .filter(|p| !p.trim().is_empty())
@@ -206,15 +220,22 @@ impl ImportRecord {
 }
 
 /// Parse a JSON import payload: either a top-level array of records or a
-/// single record object.
+/// single record object. Dispatches on the parsed JSON shape (not a
+/// fragile leading-character sniff) and tolerates a leading UTF-8 BOM,
+/// which `serde_json` otherwise rejects.
 pub fn parse_json(input: &str) -> Result<Vec<ImportRecord>> {
-    let trimmed = input.trim_start();
-    if trimmed.starts_with('[') {
-        serde_json::from_str(input).context("parsing JSON import (expected an array of issues)")
-    } else {
-        let single: ImportRecord =
-            serde_json::from_str(input).context("parsing JSON import (expected an issue object)")?;
-        Ok(vec![single])
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+    let value: serde_json::Value =
+        serde_json::from_str(input).context("parsing JSON import (invalid JSON)")?;
+    match value {
+        serde_json::Value::Array(_) => serde_json::from_value(value)
+            .context("parsing JSON import (expected an array of issue objects)"),
+        serde_json::Value::Object(_) => {
+            let single: ImportRecord = serde_json::from_value(value)
+                .context("parsing JSON import (expected an issue object)")?;
+            Ok(vec![single])
+        }
+        _ => anyhow::bail!("JSON import must be an object or an array of objects"),
     }
 }
 
@@ -259,6 +280,7 @@ pub fn parse_github(input: &str) -> Result<Vec<ImportRecord>> {
             priority: None,
             assignee: g.assignees.into_iter().next().map(|u| u.login),
             reporter: None,
+            owner: None,
             epic: None,
             labels: Some(g.labels.into_iter().map(|l| l.name).collect()),
             source: g.url,
@@ -377,15 +399,41 @@ mod tests {
     }
 
     #[test]
-    fn into_new_args_drops_people_for_epic() {
-        let rec = parse_json(r#"{"title":"E","type":"epic","assignee":"bob","reporter":"al"}"#)
-            .unwrap()
-            .pop()
-            .unwrap();
+    fn into_new_args_drops_people_for_epic_but_keeps_owner() {
+        let rec = parse_json(
+            r#"{"title":"E","type":"epic","assignee":"bob","reporter":"al","owner":"cara"}"#,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
         let args = rec.into_new_args("task");
         assert_eq!(args.issue_type, "epic");
         assert!(args.assignee.is_none());
         assert!(args.reporter.is_none());
+        assert_eq!(args.owner.as_deref(), Some("cara"));
+    }
+
+    #[test]
+    fn into_new_args_drops_owner_for_non_epic() {
+        let rec = parse_json(r#"{"title":"B","type":"bug","owner":"cara"}"#)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let args = rec.into_new_args("task");
+        assert!(args.owner.is_none());
+    }
+
+    #[test]
+    fn parse_json_tolerates_leading_bom() {
+        let records = parse_json("\u{feff}[{\"title\":\"A\"}]").unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].title, "A");
+    }
+
+    #[test]
+    fn parse_json_rejects_non_object_array() {
+        assert!(parse_json("42").is_err());
+        assert!(parse_json("\"hi\"").is_err());
     }
 
     #[test]
