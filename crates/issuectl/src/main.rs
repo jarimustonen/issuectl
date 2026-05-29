@@ -2764,18 +2764,9 @@ fn read_message_arg(
     let text = if let Some(m) = message {
         m
     } else if let Some(path) = from_file {
-        fs::read_to_string(&path)
-            .with_context(|| format!("cannot read note from {}", path.display()))?
+        read_capped_file(&path, "note")?
     } else if stdin {
-        use std::io::{IsTerminal, Read};
-        if std::io::stdin().is_terminal() {
-            bail!("--stdin given but stdin is a terminal; pipe the note text in or use --from-file");
-        }
-        let mut buf = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buf)
-            .context("cannot read note from stdin")?;
-        buf
+        read_capped_stdin("note")?
     } else {
         bail!("provide the note text as an argument, or use --stdin / --from-file PATH");
     };
@@ -2784,6 +2775,54 @@ fn read_message_arg(
         bail!("note text is empty");
     }
     Ok(text.to_string())
+}
+
+/// Upper bound on text read from stdin or a `--from-file` path. Bounds
+/// memory so an unbounded source (`/dev/zero`, a runaway producer) fails
+/// with a clear error instead of OOM-ing the process. 10 MiB is far above
+/// any realistic note or issue body yet small enough to never threaten the
+/// process.
+const MAX_INPUT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Read up to [`MAX_INPUT_BYTES`] from `reader`, erroring if the source
+/// exceeds the cap or isn't valid UTF-8. `what`/`source` name the input in
+/// error messages (e.g. "note" from "stdin"). Reads one byte past the cap
+/// so an exactly-at-limit input passes but anything larger is rejected.
+fn read_capped<R: std::io::Read>(reader: R, what: &str, source: &str) -> Result<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    reader
+        .take(MAX_INPUT_BYTES + 1)
+        .read_to_end(&mut buf)
+        .with_context(|| format!("cannot read {what} from {source}"))?;
+    if buf.len() as u64 > MAX_INPUT_BYTES {
+        bail!("{what} from {source} exceeds the {MAX_INPUT_BYTES}-byte limit");
+    }
+    String::from_utf8(buf).with_context(|| format!("{what} from {source} is not valid UTF-8"))
+}
+
+/// Read `what` text from stdin, capped at [`MAX_INPUT_BYTES`]. Refuses to
+/// block on an interactive terminal — an agent or script that forgot to
+/// pipe input gets a clear error rather than a hung process.
+fn read_capped_stdin(what: &str) -> Result<String> {
+    use std::io::IsTerminal;
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        bail!("stdin is a terminal; pipe the {what} text in or use --from-file PATH");
+    }
+    read_capped(stdin.lock(), what, "stdin")
+}
+
+/// Read `what` text from a `--from-file` path, capped at [`MAX_INPUT_BYTES`].
+/// A path of `-` means stdin (the standard Unix convention), routed through
+/// [`read_capped_stdin`] so it gets the same TTY guard and cap.
+fn read_capped_file(path: &Path, what: &str) -> Result<String> {
+    if path.as_os_str() == "-" {
+        return read_capped_stdin(what);
+    }
+    let file = fs::File::open(path)
+        .with_context(|| format!("cannot read {what} from {}", path.display()))?;
+    read_capped(file, what, &path.display().to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3298,20 +3337,18 @@ fn cmd_body_set(
             "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
         );
     }
-    if !stdin && from_file.is_none() {
-        bail!("specify exactly one of --stdin or --from-file");
-    }
     let body = if let Some(path) = from_file {
-        fs::read_to_string(&path)
-            .with_context(|| format!("cannot read body from {}", path.display()))?
+        read_capped_file(&path, "body")?
+    } else if stdin {
+        read_capped_stdin("body")?
     } else {
-        use std::io::Read;
-        let mut buf = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buf)
-            .context("cannot read body from stdin")?;
-        buf
+        bail!("specify exactly one of --stdin or --from-file");
     };
+    // Trim surrounding whitespace so `note` and `body set` treat piped
+    // input the same way (a stray trailing newline from `echo … |` or an
+    // editor's final newline doesn't bloat the stored body). `update_body`
+    // re-adds the canonical leading newline.
+    let body = body.trim().to_string();
     let root = find_root();
     let outcome = mutate::update_body(
         &root,
@@ -4337,5 +4374,51 @@ mod tests {
         let path = tmp.path().join("blank.md");
         fs::write(&path, "\n\n").unwrap();
         assert!(read_message_arg(None, false, Some(path)).is_err());
+    }
+
+    #[test]
+    fn read_capped_accepts_input_at_the_limit() {
+        let data = vec![b'a'; MAX_INPUT_BYTES as usize];
+        let got = read_capped(data.as_slice(), "note", "test").unwrap();
+        assert_eq!(got.len(), MAX_INPUT_BYTES as usize);
+    }
+
+    #[test]
+    fn read_capped_rejects_input_over_the_limit() {
+        let data = vec![b'a'; MAX_INPUT_BYTES as usize + 1];
+        let err = read_capped(data.as_slice(), "note", "test").unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "got: {err}");
+    }
+
+    #[test]
+    fn read_capped_rejects_invalid_utf8() {
+        let data: &[u8] = &[0xff, 0xfe, 0x00];
+        let err = read_capped(data, "body", "test").unwrap_err();
+        assert!(err.to_string().contains("UTF-8"), "got: {err}");
+    }
+
+    #[test]
+    fn read_capped_file_reads_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("body.md");
+        fs::write(&path, "hello body\n").unwrap();
+        let got = read_capped_file(&path, "body").unwrap();
+        assert_eq!(got, "hello body\n");
+    }
+
+    #[test]
+    fn read_capped_file_missing_path_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist.md");
+        assert!(read_capped_file(&missing, "body").is_err());
+    }
+
+    #[test]
+    fn read_capped_file_caps_an_oversized_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("big.md");
+        fs::write(&path, vec![b'x'; MAX_INPUT_BYTES as usize + 1]).unwrap();
+        let err = read_capped_file(&path, "body").unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "got: {err}");
     }
 }
