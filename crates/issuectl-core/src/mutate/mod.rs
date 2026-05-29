@@ -966,11 +966,22 @@ fn update_issue_under_lock(
     let mut moved_to_closed = false;
     let mut moved_to_open = false;
 
+    // Frontmatter keys this mutation actually writes. Threaded into
+    // `hard_schema_failure` so a `RequiredWhen` produced by this very
+    // write (e.g. clearing `closed:` on a closing-status issue) is
+    // rejected, while a pre-existing inconsistency on an untouched field
+    // stays exempt (doctor heals those).
+    let mut written: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
     // Status change is a pure frontmatter PATCH; no directory rename
     // (post-flat-layout). The `moved_to_*` booleans now track the
     // active↔closing transition for messaging parity with the old API.
     if let Patch::Set(s) = &req.status {
         write::set_string(&mut item.frontmatter, "status", s);
+        // The status branch always (re)evaluates `closed:` — it stamps,
+        // backfills, or removes it — so both keys count as written.
+        written.insert("status".into());
+        written.insert("closed".into());
         let prev_closing = crate::schema::is_closing(schema, &prev_status);
         let new_closing = crate::schema::is_closing(schema, s);
         if new_closing {
@@ -1003,12 +1014,23 @@ fn update_issue_under_lock(
 
     if let Patch::Set(t) = &req.issue_type {
         write::set_string(&mut item.frontmatter, "type", t);
+        written.insert("type".into());
     }
-    apply_string_patch(&mut item, "priority", &req.priority);
-    apply_string_patch(&mut item, "assignee", &req.assignee);
-    apply_string_patch(&mut item, "owner", &req.owner);
-    apply_string_patch(&mut item, "epic", &req.epic);
+    for (key, patch) in [
+        ("priority", &req.priority),
+        ("assignee", &req.assignee),
+        ("owner", &req.owner),
+        ("epic", &req.epic),
+    ] {
+        apply_string_patch(&mut item, key, patch);
+        if !matches!(patch, Patch::Unspecified) {
+            written.insert(key.into());
+        }
+    }
 
+    if !req.add_labels.is_empty() || !req.remove_labels.is_empty() {
+        written.insert("labels".into());
+    }
     for label in &req.add_labels {
         write::add_to_string_list(&mut item.frontmatter, "labels", label)
             .map_err(MutateError::Io)?;
@@ -1019,6 +1041,9 @@ fn update_issue_under_lock(
     }
 
     // related refs were normalized before validate(), so use them as-is.
+    if !req.add_related.is_empty() || !req.remove_related.is_empty() {
+        written.insert("related".into());
+    }
     for r in &req.add_related {
         write::add_to_string_list(&mut item.frontmatter, "related", r).map_err(MutateError::Io)?;
     }
@@ -1044,8 +1069,14 @@ fn update_issue_under_lock(
     for (key, patch) in &req.custom_fields {
         match patch {
             Patch::Unspecified => {}
-            Patch::Clear => write::remove_key(&mut item.frontmatter, key),
-            Patch::Set(v) => write::set_string(&mut item.frontmatter, key, v),
+            Patch::Clear => {
+                write::remove_key(&mut item.frontmatter, key);
+                written.insert(key.clone());
+            }
+            Patch::Set(v) => {
+                write::set_string(&mut item.frontmatter, key, v);
+                written.insert(key.clone());
+            }
         }
     }
 
@@ -1131,7 +1162,7 @@ fn update_issue_under_lock(
     //     the caller and threaded in so we don't re-read the file on
     //     each mutation.
     let violations = crate::schema::validate(schema, &item.frontmatter);
-    if let Some(msg) = hard_schema_failure(&violations) {
+    if let Some(msg) = hard_schema_failure(&violations, &written) {
         return Err(MutateError::SchemaViolation(msg));
     }
     // Belt-and-braces status check. `schema::validate` only flags
@@ -1540,7 +1571,9 @@ pub fn update_body(
     // the schema may have tightened since the last write. Refusing here
     // matches the `update_issue` contract.
     let violations = crate::schema::validate(&schema, &item.frontmatter);
-    if let Some(msg) = hard_schema_failure(&violations) {
+    // Body-replace never writes status/closed, so an empty `written`
+    // set keeps the lenient RequiredWhen handling.
+    if let Some(msg) = hard_schema_failure(&violations, &std::collections::BTreeSet::new()) {
         return Err(MutateError::SchemaViolation(msg));
     }
 
@@ -2225,19 +2258,38 @@ fn set_line_checkbox(line: &str, checked: bool) -> Option<String> {
 /// (`update_issue_under_lock`, `update_body`, `note_issue`,
 /// `toggle_checkbox`) enforces the same contract — schema runs once
 /// per write, immediately before atomic write or dry-run return.
-/// Join schema violations into a hard-fail message, dropping
-/// `RequiredWhen` violations. A `required_when` constraint (today:
-/// closing status implies `closed:`) is a lifecycle-consistency rule
-/// that `doctor` owns and heals. The mutation paths always stamp
-/// `closed:` on the active→closing edge themselves, so they can never
-/// *introduce* such a violation — a `RequiredWhen` here only reflects a
-/// pre-existing inconsistency the user didn't touch, and blocking an
-/// unrelated edit (e.g. a checkbox toggle on an already-`done` issue)
-/// would be surprising. Returns `None` when nothing remains to fail on.
-fn hard_schema_failure(violations: &[crate::schema::ViolationKind]) -> Option<String> {
+/// Join schema violations into a hard-fail message, conditionally
+/// dropping `RequiredWhen` violations. A `required_when` constraint
+/// (today: closing status implies `closed:`) is a lifecycle-consistency
+/// rule that `doctor` owns and heals. When a mutation leaves a field's
+/// `required_when` condition unsatisfied *without having touched either
+/// that field or the `status` that drives the condition*, the violation
+/// is a pre-existing inconsistency the user didn't introduce — blocking
+/// an unrelated edit (e.g. a checkbox toggle on an already-`done` issue)
+/// would be surprising, so it's dropped.
+///
+/// But when the mutation *did* write the field or `status`, the
+/// violation is something this very write produced — e.g. explicitly
+/// clearing `closed:` on a closing-status issue (`set closed ""`). That
+/// must be rejected, not silently healed later, so the `RequiredWhen` is
+/// kept. `written` is the set of frontmatter keys this mutation wrote;
+/// body-only paths pass an empty set and so keep the lenient behaviour.
+/// Returns `None` when nothing remains to fail on.
+fn hard_schema_failure(
+    violations: &[crate::schema::ViolationKind],
+    written: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    let status_written = written.contains("status");
     let msgs: Vec<String> = violations
         .iter()
-        .filter(|v| !matches!(v, crate::schema::ViolationKind::RequiredWhen { .. }))
+        .filter(|v| match v {
+            crate::schema::ViolationKind::RequiredWhen { field, .. } => {
+                // Keep (enforce) only when this mutation touched the
+                // required field itself or the status that triggers it.
+                status_written || written.contains(field)
+            }
+            _ => true,
+        })
         .map(|v| v.message())
         .collect();
     (!msgs.is_empty()).then(|| msgs.join("; "))
@@ -2252,7 +2304,9 @@ fn validate_against_schema(
         .schema(root)
         .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let violations = crate::schema::validate(&schema, frontmatter);
-    if let Some(msg) = hard_schema_failure(&violations) {
+    // Body-only mutation: status/closed are never written here, so the
+    // empty `written` set preserves the lenient RequiredWhen behaviour.
+    if let Some(msg) = hard_schema_failure(&violations, &std::collections::BTreeSet::new()) {
         return Err(MutateError::SchemaViolation(msg));
     }
     Ok(())
@@ -2872,6 +2926,64 @@ mod tests {
             after.contains("closed:"),
             "closed: must be stamped on schema-classified closing status; got:\n{after}"
         );
+    }
+
+    #[test]
+    fn status_write_rejects_empty_closed_on_closing_status() {
+        // An issue at a closing status whose `closed:` is empty (an
+        // explicit unset). Re-asserting a closing status *touches* the
+        // status/closed pair, so the resulting RequiredWhen is one this
+        // write is responsible for — it must be rejected, not silently
+        // accepted and left for `doctor` to heal.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/empty-closed-target");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: done\nclosed: \"\"\npriority: normal\n---\n\n# T\n",
+        )
+        .unwrap();
+        let req = UpdateIssueRequest {
+            status: Patch::Set("done".into()),
+            ..Default::default()
+        };
+        let err =
+            update_issue(tmp.path(), "empty-closed-target", req, None, &UncachedConfig).unwrap_err();
+        match err {
+            MutateError::SchemaViolation(msg) => {
+                assert!(
+                    msg.contains("closed"),
+                    "expected the closed RequiredWhen in the message: {msg}"
+                );
+            }
+            other => panic!("expected SchemaViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unrelated_edit_keeps_requiredwhen_exempt_on_closing_status() {
+        // The mirror case: the same inconsistent on-disk state, but the
+        // mutation only bumps `priority` — it touches neither `status`
+        // nor `closed`. Blocking an unrelated edit because of a
+        // pre-existing inconsistency the user didn't introduce would be
+        // surprising, so the RequiredWhen stays exempt and the write
+        // succeeds (doctor owns healing the empty `closed:`).
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/unrelated-edit-target");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: done\nclosed: \"\"\npriority: normal\n---\n\n# T\n",
+        )
+        .unwrap();
+        let req = UpdateIssueRequest {
+            priority: Patch::Set("high".into()),
+            ..Default::default()
+        };
+        let out =
+            update_issue(tmp.path(), "unrelated-edit-target", req, None, &UncachedConfig).unwrap();
+        let after = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
+        assert!(after.contains("priority: high"));
     }
 
     #[test]
