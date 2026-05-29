@@ -1135,9 +1135,7 @@ fn populate_attachment_health(scan: &ScanResult, repo_root: &Path, report: &mut 
             let body = crate::item_text::split(text).body;
             for r in crate::refs::extract_relative_body_refs(body) {
                 if !s.dir_path.join(&r).exists() {
-                    report
-                        .broken_attachment_refs
-                        .push((s.dir_name.clone(), r));
+                    report.broken_attachment_refs.push((s.dir_name.clone(), r));
                 }
             }
         }
@@ -1554,8 +1552,7 @@ const LARGE_BINARY_BYTES: u64 = 1 << 20;
 
 /// Raster image extensions the AVIF convention asks contributors to
 /// convert. Flagged as warning-only nudges, independent of size.
-const NON_AVIF_IMAGE_EXTS: &[&str] =
-    &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tif"];
+const NON_AVIF_IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tif"];
 
 /// Run `git check-ignore -- <path>...` against the canonical paths
 /// that exist on disk and return those that git would actually ignore.
@@ -2238,6 +2235,53 @@ fn apply_orphan_tempfiles(actions: &mut DoctorActions, outcome: &mut ApplyOutcom
     Ok(())
 }
 
+/// Best-effort closed-date for an issue being coerced/reconciled into a
+/// closing status without an explicit `closed:` date. Stamping
+/// `write::today()` is lossy for an issue that was actually closed long
+/// ago, so we prefer, in order: the author date of the last git commit
+/// that touched `item.md`, the file's mtime, then today(). All steps are
+/// best-effort — any failure (not a git repo, untracked file, unreadable
+/// metadata) falls through to the next source.
+fn derive_closed_date(item_path: &Path) -> String {
+    git_last_commit_date(item_path)
+        .or_else(|| file_mtime_date(item_path))
+        .unwrap_or_else(write::today)
+}
+
+/// `git log -1 --format=%aI` (strict ISO 8601 author date) of the last
+/// commit that touched `item_path`, projected to its `YYYY-MM-DD` head.
+/// `None` when git is unavailable, the path is not in a git repo, or the
+/// file is untracked (empty output).
+fn git_last_commit_date(item_path: &Path) -> Option<String> {
+    let dir = item_path.parent()?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("log")
+        .arg("-1")
+        .arg("--format=%aI")
+        .arg("--")
+        .arg(item_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let date = stdout.trim().get(..10)?.to_string();
+    // Validate before trusting it so a malformed line never lands in
+    // frontmatter (and so it stays consistent with `closed:`'s format).
+    chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()?;
+    Some(date)
+}
+
+/// File mtime of `item_path` projected to a local-time `YYYY-MM-DD`.
+fn file_mtime_date(item_path: &Path) -> Option<String> {
+    let modified = fs::metadata(item_path).ok()?.modified().ok()?;
+    let datetime: chrono::DateTime<chrono::Local> = modified.into();
+    Some(datetime.format("%Y-%m-%d").to_string())
+}
+
 fn apply_status_reconciliation(
     actions: &mut DoctorActions,
     outcome: &mut ApplyOutcome,
@@ -2254,7 +2298,11 @@ fn apply_status_reconciliation(
             .map(|s| !s.is_empty())
             .unwrap_or(false);
         if !has_closed {
-            write::set_string(&mut item.frontmatter, "closed", &write::today());
+            write::set_string(
+                &mut item.frontmatter,
+                "closed",
+                &derive_closed_date(&item_path),
+            );
         }
         write::write_item(&item_path, &item)?;
         outcome.status_reconciled.push(slug);
@@ -2285,20 +2333,50 @@ fn apply_alias_coercions(
     schema: &schema::Schema,
 ) -> Result<()> {
     let planned = std::mem::take(&mut actions.alias_coercions);
+    // Group planned coercions by `item_path` so an issue carrying BOTH a
+    // status and a type coercion is read once and written once instead of
+    // read+written per field. `planned` is sorted by scan (slug first), so
+    // entries for one issue are already adjacent — `order` preserves that
+    // first-seen sequence, keeping `alias_coercions_applied` deterministic.
+    let mut order: Vec<PathBuf> = Vec::new();
+    let mut by_path: BTreeMap<PathBuf, Vec<(String, String, String, String)>> = BTreeMap::new();
     for (slug, field, from, to, item_path) in planned {
+        if !by_path.contains_key(&item_path) {
+            order.push(item_path.clone());
+        }
+        by_path
+            .entry(item_path)
+            .or_default()
+            .push((slug, field, from, to));
+    }
+
+    for item_path in order {
+        let coercions = by_path.remove(&item_path).expect("path inserted above");
         if !item_path.is_file() {
             continue;
         }
         let mut item = write::read_item(&item_path)?;
-        let current = item
-            .frontmatter
-            .get(serde_yaml::Value::String(field.clone()))
-            .and_then(|v| v.as_str());
-        if current != Some(from.as_str()) {
-            continue;
+        let mut applied: Vec<(String, String, String, String)> = Vec::new();
+        let mut coerced_to_closing = false;
+        for (slug, field, from, to) in coercions {
+            // Re-read each field from the in-memory mapping (which may
+            // already reflect a sibling coercion on this same file) and
+            // only rewrite when the on-disk value still equals `from`.
+            // Guards against a stale plan clobbering a fresher value.
+            let current = item
+                .frontmatter
+                .get(serde_yaml::Value::String(field.clone()))
+                .and_then(|v| v.as_str());
+            if current != Some(from.as_str()) {
+                continue;
+            }
+            write::set_string(&mut item.frontmatter, &field, &to);
+            if field == "status" && schema::is_closing(schema, &to) {
+                coerced_to_closing = true;
+            }
+            applied.push((slug, field, from, to));
         }
-        write::set_string(&mut item.frontmatter, &field, &to);
-        if field == "status" && schema::is_closing(schema, &to) {
+        if coerced_to_closing {
             let has_closed = item
                 .frontmatter
                 .get(serde_yaml::Value::String("closed".into()))
@@ -2306,11 +2384,17 @@ fn apply_alias_coercions(
                 .map(|s| !s.is_empty())
                 .unwrap_or(false);
             if !has_closed {
-                write::set_string(&mut item.frontmatter, "closed", &write::today());
+                write::set_string(
+                    &mut item.frontmatter,
+                    "closed",
+                    &derive_closed_date(&item_path),
+                );
             }
         }
-        write::write_item(&item_path, &item)?;
-        outcome.alias_coercions_applied.push((slug, field, from, to));
+        if !applied.is_empty() {
+            write::write_item(&item_path, &item)?;
+            outcome.alias_coercions_applied.extend(applied);
+        }
     }
     Ok(())
 }
@@ -4139,11 +4223,12 @@ mod tests {
         );
         let r = scan(tmp.path()).unwrap();
         assert!(
-            r.alias_coercions.iter().any(|(slug, field, from, to, _)| slug
-                == "legacy-status-issue"
-                && field == "status"
-                && from == "closed"
-                && to == "done"),
+            r.alias_coercions
+                .iter()
+                .any(|(slug, field, from, to, _)| slug == "legacy-status-issue"
+                    && field == "status"
+                    && from == "closed"
+                    && to == "done"),
             "expected status closed→done coercion, got {:?}",
             r.alias_coercions
         );
@@ -4185,7 +4270,10 @@ mod tests {
         );
         let after =
             fs::read_to_string(tmp.path().join("issues/legacy-status-issue/item.md")).unwrap();
-        assert!(after.contains("status: done"), "status not coerced:\n{after}");
+        assert!(
+            after.contains("status: done"),
+            "status not coerced:\n{after}"
+        );
         // `done` is a closing status, so `closed:` must be backfilled.
         assert!(
             after.contains("closed:"),
@@ -4221,9 +4309,212 @@ mod tests {
         );
         let after =
             fs::read_to_string(tmp.path().join("issues/legacy-type-issue/item.md")).unwrap();
-        assert!(after.contains("type: improvement"), "type not coerced:\n{after}");
+        assert!(
+            after.contains("type: improvement"),
+            "type not coerced:\n{after}"
+        );
         // Active status → no `closed:` stamped.
-        assert!(!after.contains("closed:"), "closed: must not appear:\n{after}");
+        assert!(
+            !after.contains("closed:"),
+            "closed: must not appear:\n{after}"
+        );
+    }
+
+    #[test]
+    fn fix_stamps_closed_from_git_commit_date_not_today() {
+        // A legacy issue closed long ago: coercing `status: closed` →
+        // `done` must backfill `closed:` from the file's last git commit
+        // date, not today() — otherwise a years-old issue gets a brand
+        // new closed date.
+        let tmp = fresh_repo();
+        let git = |args: &[&str]| {
+            let st = std::process::Command::new("git")
+                .arg("-C")
+                .arg(tmp.path())
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(st.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        put_flat(
+            &tmp,
+            "ancient-closed-issue",
+            "---\ntype: bug\nstatus: closed\npriority: normal\n---\n# A\n",
+        );
+        git(&["add", "."]);
+        // Pin BOTH author and committer date so `%aI` is deterministic.
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args([
+                "commit",
+                "--quiet",
+                "-m",
+                "import",
+                "--date=2020-01-15T12:00:00",
+            ])
+            .env("GIT_COMMITTER_DATE", "2020-01-15T12:00:00")
+            .output()
+            .expect("git commit");
+
+        let mut r = scan(tmp.path()).unwrap();
+        let actions = DoctorActions::from_findings(&mut r);
+        apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        let after =
+            fs::read_to_string(tmp.path().join("issues/ancient-closed-issue/item.md")).unwrap();
+        assert!(
+            after.contains("status: done"),
+            "status not coerced:\n{after}"
+        );
+        assert!(
+            after.contains("closed: 2020-01-15"),
+            "expected closed date from git commit, got:\n{after}"
+        );
+    }
+
+    #[test]
+    fn derive_closed_date_falls_back_to_mtime_when_untracked() {
+        // Not a git repo (no .git): git_last_commit_date returns None,
+        // so the mtime fallback supplies a valid YYYY-MM-DD.
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "untracked-issue",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# U\n",
+        );
+        let path = tmp.path().join("issues/untracked-issue/item.md");
+        let date = derive_closed_date(&path);
+        assert!(
+            chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_ok(),
+            "expected a valid YYYY-MM-DD, got {date:?}"
+        );
+    }
+
+    #[test]
+    fn fix_batches_status_and_type_coercions_for_one_issue() {
+        // An issue with BOTH a status and a type coercion is read once
+        // and written once. The behavioral proof: both fields land
+        // correctly in the same file and `closed:` is stamped exactly
+        // once (a per-field read+write could double-stamp or clobber).
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "double-coercion-issue",
+            "---\ntype: enhancement\nstatus: closed\npriority: normal\n---\n# D\n",
+        );
+        let mut r = scan(tmp.path()).unwrap();
+        // Scan must plan both coercions for the one issue.
+        let planned: Vec<_> = r
+            .alias_coercions
+            .iter()
+            .filter(|(slug, ..)| slug == "double-coercion-issue")
+            .map(|(_, field, ..)| field.clone())
+            .collect();
+        assert!(
+            planned.contains(&"status".to_string()) && planned.contains(&"type".to_string()),
+            "expected both status+type coercions planned, got {planned:?}"
+        );
+
+        let actions = DoctorActions::from_findings(&mut r);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        let applied_fields: Vec<_> = outcome
+            .alias_coercions_applied
+            .iter()
+            .filter(|(slug, ..)| slug == "double-coercion-issue")
+            .map(|(_, field, ..)| field.clone())
+            .collect();
+        assert!(
+            applied_fields.contains(&"status".to_string())
+                && applied_fields.contains(&"type".to_string()),
+            "expected both coercions applied, got {applied_fields:?}"
+        );
+
+        let after =
+            fs::read_to_string(tmp.path().join("issues/double-coercion-issue/item.md")).unwrap();
+        assert!(
+            after.contains("status: done"),
+            "status not coerced:\n{after}"
+        );
+        assert!(
+            after.contains("type: improvement"),
+            "type not coerced:\n{after}"
+        );
+        assert_eq!(
+            after.matches("closed:").count(),
+            1,
+            "closed: must be stamped exactly once:\n{after}"
+        );
+    }
+
+    #[test]
+    fn reconciliation_stamps_closed_from_git_commit_date() {
+        // Status/folder reconciliation (closed/<slug> carrying an active
+        // status) must also derive its backfilled `closed:` from git
+        // history rather than today().
+        let tmp = fresh_repo();
+        let git = |args: &[&str]| {
+            let st = std::process::Command::new("git")
+                .arg("-C")
+                .arg(tmp.path())
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(st.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        // Legacy layout: an active status sitting under issues/closed/.
+        let dir = tmp.path().join("issues/closed/legacy-folder-issue");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: in-progress\npriority: normal\n---\n# F\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args([
+                "commit",
+                "--quiet",
+                "-m",
+                "import",
+                "--date=2019-06-10T09:00:00",
+            ])
+            .env("GIT_COMMITTER_DATE", "2019-06-10T09:00:00")
+            .output()
+            .expect("git commit");
+
+        let mut r = scan(tmp.path()).unwrap();
+        let actions = DoctorActions::from_findings(&mut r);
+        apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        // After flat-layout migration the file lives at issues/<slug>/.
+        let after =
+            fs::read_to_string(tmp.path().join("issues/legacy-folder-issue/item.md")).unwrap();
+        assert!(
+            after.contains("closed: 2019-06-10"),
+            "expected reconciled closed date from git, got:\n{after}"
+        );
     }
 
     #[test]
