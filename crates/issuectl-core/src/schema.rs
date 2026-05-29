@@ -450,7 +450,7 @@ fn prune_stale_builtin_aliases(
     aliases.retain(|from, to| {
         let inherited = builtin.get(from).map(|b| b == to).unwrap_or(false);
         let target_in_enum = allowed.iter().any(|a| a == to);
-        !(inherited && !target_in_enum)
+        !inherited || target_in_enum
     });
 }
 
