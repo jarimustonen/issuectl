@@ -26,6 +26,9 @@ Examples:
   issuectl update <slug> --status testing  Change status
   issuectl close <slug> --status fixed     Set a closing status (fixed/done/...)
   issuectl bulk \"label:stale\" --set status=wontfix  Mutate every matched issue
+  issuectl export json > issues.json       Export issues (json/markdown/csv)
+  issuectl import json issues.json          Import issues from a JSON file
+  issuectl import github --repo o/r         Import open GitHub issues via gh
   issuectl init                            Bootstrap a new repo (schema, agents, skill)
   issuectl doctor                          Health-check the repo
   issuectl doctor --fix                    Migrate legacy numbered issues
@@ -915,6 +918,90 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
+
+    /// Export issues to stdout in a portable format (json, markdown, csv).
+    /// JSON is the round-trip format consumed by `issuectl import json`.
+    Export {
+        /// Output format
+        #[arg(value_enum)]
+        format: ExportFmt,
+
+        /// Optional query to scope the export (same syntax as `list`).
+        /// When supplied, the implicit "open only" default is disabled —
+        /// combine with `--all` / `--closed` or an explicit folder term.
+        #[arg(value_parser = parse_non_empty, allow_hyphen_values = true)]
+        query: Option<String>,
+
+        /// Include closed issues
+        #[arg(long)]
+        all: bool,
+
+        /// Export only closed issues
+        #[arg(long)]
+        closed: bool,
+    },
+
+    /// Import issues from an external source. Each imported issue is
+    /// created through the same validation path as `issuectl new`, with a
+    /// freshly minted slug (foreign slugs are not carried over).
+    Import {
+        #[command(subcommand)]
+        source: ImportSource,
+    },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ExportFmt {
+    Json,
+    Markdown,
+    Csv,
+}
+
+impl From<ExportFmt> for issuectl_core::transfer::ExportFormat {
+    fn from(f: ExportFmt) -> Self {
+        match f {
+            ExportFmt::Json => Self::Json,
+            ExportFmt::Markdown => Self::Markdown,
+            ExportFmt::Csv => Self::Csv,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum ImportSource {
+    /// Import from a JSON file: a top-level array of issue objects (or a
+    /// single object). Reads issuectl's own `export json` output as well
+    /// as hand-authored arrays. Each object needs at least a `title`.
+    Json {
+        /// Path to the JSON file
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Issue type to assign when a record omits `type`
+        #[arg(long, default_value = "task", value_parser = PossibleValuesParser::new(ISSUE_TYPES))]
+        default_type: String,
+    },
+
+    /// Import open/closed issues from a GitHub repository via the `gh`
+    /// CLI (`gh issue list --json …`). Requires `gh` on PATH and an
+    /// authenticated session.
+    Github {
+        /// Repository in `owner/name` form
+        #[arg(long, value_parser = parse_non_empty)]
+        repo: String,
+
+        /// Issue state to fetch: open, closed, or all
+        #[arg(long, default_value = "open", value_parser = PossibleValuesParser::new(["open", "closed", "all"]))]
+        state: String,
+
+        /// Maximum number of issues to fetch
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+
+        /// Issue type to assign to every imported issue
+        #[arg(long, default_value = "task", value_parser = PossibleValuesParser::new(ISSUE_TYPES))]
+        default_type: String,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -1297,6 +1384,23 @@ fn main() -> Result<()> {
             let root = find_root();
             merge_driver::install(&root, apply)
         }
+        Command::Export {
+            format,
+            query,
+            all,
+            closed,
+        } => cmd_export(json_output, format, query, all, closed),
+        Command::Import { source } => match source {
+            ImportSource::Json { file, default_type } => {
+                cmd_import_json(json_output, &file, &default_type)
+            }
+            ImportSource::Github {
+                repo,
+                state,
+                limit,
+                default_type,
+            } => cmd_import_github(json_output, &repo, &state, limit, &default_type),
+        },
     }
 }
 
@@ -1912,6 +2016,152 @@ fn cmd_new(json: bool, args: NewArgs, check_duplicates: bool) -> Result<()> {
         println!("  {}", out.item_path.display());
     }
     Ok(())
+}
+
+fn cmd_export(
+    json: bool,
+    format: ExportFmt,
+    query_str: Option<String>,
+    all: bool,
+    closed: bool,
+) -> Result<()> {
+    let q = match query_str.as_deref() {
+        Some(s) => query::parse(s).context("parsing export query")?,
+        None => query::Query::default(),
+    };
+    // Same implicit-folder rule as `cmd_list`: default to open issues
+    // unless the caller passed --all/--closed or an explicit positional
+    // query (which opts into "scope it yourself").
+    let folder_filter: Option<&'static str> = if all {
+        None
+    } else if closed {
+        Some("closed")
+    } else if query_str.is_some() {
+        None
+    } else {
+        Some("open")
+    };
+
+    let issues = load();
+    let filtered: Vec<_> = issues
+        .into_iter()
+        .filter(|i| folder_filter.map(|f| i.folder == f).unwrap_or(true) && query::matches(&q, i))
+        .collect();
+
+    let rendered = issuectl_core::transfer::export(&filtered, format.into())?;
+    print!("{rendered}");
+    if !rendered.ends_with('\n') {
+        println!();
+    }
+    let _ = json; // export format is selected by `format`, not `--json`
+    Ok(())
+}
+
+struct ImportOutcome {
+    created: Vec<(String, String)>,
+    failed: Vec<(String, String)>,
+}
+
+/// Create every parsed import record through `do_new`, accumulating
+/// successes and per-record failures. Failures never abort the run — a
+/// single malformed record should not lose the rest of an import.
+fn run_import(
+    records: Vec<issuectl_core::transfer::ImportRecord>,
+    default_type: &str,
+) -> ImportOutcome {
+    let root = find_root();
+    let mut outcome = ImportOutcome {
+        created: Vec::new(),
+        failed: Vec::new(),
+    };
+    for rec in records {
+        let title = rec.title.clone();
+        let args = rec.into_new_args(default_type);
+        match do_new(&root, args, &UncachedConfig) {
+            Ok(out) => outcome.created.push((out.slug, out.title)),
+            Err(e) => outcome.failed.push((title, format!("{e:#}"))),
+        }
+    }
+    outcome
+}
+
+fn report_import(json: bool, outcome: ImportOutcome) -> Result<()> {
+    let ImportOutcome { created, failed } = outcome;
+    if json {
+        let report = serde_json::json!({
+            "created": created
+                .iter()
+                .map(|(slug, title)| serde_json::json!({"slug": slug, "title": title}))
+                .collect::<Vec<_>>(),
+            "failed": failed
+                .iter()
+                .map(|(title, error)| serde_json::json!({"title": title, "error": error}))
+                .collect::<Vec<_>>(),
+            "created_count": created.len(),
+            "failed_count": failed.len(),
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for (slug, title) in &created {
+            println!("Created {slug}: {title}");
+        }
+        for (title, error) in &failed {
+            eprintln!("Failed to import {title:?}: {error}");
+        }
+        println!(
+            "Imported {} issue(s); {} failed.",
+            created.len(),
+            failed.len()
+        );
+    }
+    // Non-zero exit when nothing imported but failures occurred, so
+    // scripts can detect a wholesale failure.
+    if created.is_empty() && !failed.is_empty() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn cmd_import_json(json: bool, file: &Path, default_type: &str) -> Result<()> {
+    let raw = fs::read_to_string(file)
+        .with_context(|| format!("cannot read import file {}", file.display()))?;
+    let records = issuectl_core::transfer::parse_json(&raw)?;
+    let outcome = run_import(records, default_type);
+    report_import(json, outcome)
+}
+
+fn cmd_import_github(
+    json: bool,
+    repo: &str,
+    state: &str,
+    limit: u32,
+    default_type: &str,
+) -> Result<()> {
+    let output = std::process::Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            state,
+            "--limit",
+            &limit.to_string(),
+            "--json",
+            "number,title,body,labels,state,assignees,url",
+        ])
+        .output()
+        .context(
+            "failed to run `gh` — install the GitHub CLI and authenticate with `gh auth login`",
+        )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("`gh issue list` failed: {}", stderr.trim());
+    }
+    let stdout = String::from_utf8(output.stdout).context("`gh` produced non-UTF8 output")?;
+    let records = issuectl_core::transfer::parse_github(&stdout)?;
+    let outcome = run_import(records, default_type);
+    report_import(json, outcome)
 }
 
 #[derive(Default)]

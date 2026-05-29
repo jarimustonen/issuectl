@@ -75,6 +75,8 @@ pub mod slug;
 #[doc(hidden)]
 pub mod sync_commits;
 #[doc(hidden)]
+pub mod transfer;
+#[doc(hidden)]
 pub mod transitions;
 #[doc(hidden)]
 pub mod write;
