@@ -1169,9 +1169,15 @@ fn update_issue_under_lock(
         return Err(MutateError::TransitionViolation(rule_violations.join("; ")));
     }
 
+    // Post-mutation closing classification drives both the dry-run dir
+    // prediction and the real unarchive decision below — an archived
+    // issue left non-closing gets lifted back to the active root.
+    let post_closing = crate::schema::is_closing(schema, &projected.status);
+
     // 5) Either dry-run (compute serialized bytes, skip write/publish)
-    //    or atomic write. No directory rename — flat layout means
-    //    `item_path` is the canonical location regardless of status.
+    //    or atomic write. The only directory move is unarchiving (an
+    //    archived issue reopened to a non-closing status); flat-layout
+    //    status changes keep `item_path` as the canonical location.
     if req.dry_run {
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
         let new_issue = parse_serialized(&pending, slug, schema);
@@ -1179,7 +1185,7 @@ fn update_issue_under_lock(
         return Ok(UpdateOutcome {
             issue: new_issue,
             version: new_version,
-            issue_dir: predicted_flat_issue_dir(root, slug),
+            issue_dir: predicted_issue_dir(root, slug, &item_path, post_closing),
             moved_to_closed,
             moved_to_open,
             pending_serialized: Some(pending),
@@ -1195,12 +1201,12 @@ fn update_issue_under_lock(
     //     `item.md` would be unchanged but `.schema.yaml` would be
     //     newly created and the legacy directory permanently moved.
     crate::schema::ensure_default_written(root).map_err(MutateError::Io)?;
-    // Reopening an archived issue (closing → active) must lift it out of
+    // An archived issue left in a non-closing status must be lifted out of
     // cold storage: otherwise the frontmatter write below lands on the
     // `issues/archive/YYYY/MM/<slug>/` path and the issue reads as active
     // in `list`/`show` while physically still living in the archive. This
     // is the inverse of the `archive` move and runs under the same flock.
-    let item_path = unarchive_if_reopened(root, slug, item_path, moved_to_open)?;
+    let item_path = unarchive_if_active(root, slug, item_path, post_closing)?;
     let final_path = migrate_to_flat_if_legacy(root, slug, &item_path)?;
     write_item_atomic(&final_path, &item).map_err(MutateError::Io)?;
 
@@ -1556,10 +1562,13 @@ pub fn update_body(
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
         let new_issue = parse_serialized(&pending, slug, &schema);
         let new_version = canonical_hash(&new_issue);
+        // Body verbs never change status, so an archived issue stays
+        // archived — predict its current dir, not the active root.
+        let post_closing = crate::schema::is_closing(&schema, &new_issue.status);
         return Ok(UpdateOutcome {
             issue: new_issue,
             version: new_version,
-            issue_dir: predicted_flat_issue_dir(root, slug),
+            issue_dir: predicted_issue_dir(root, slug, &item_path, post_closing),
             moved_to_closed: false,
             moved_to_open: false,
             pending_serialized: Some(pending),
@@ -1705,10 +1714,13 @@ pub fn note_issue(
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
         let new_issue = parse_serialized(&pending, slug, &schema);
         let new_version = canonical_hash(&new_issue);
+        // Body verbs never change status, so an archived issue stays
+        // archived — predict its current dir, not the active root.
+        let post_closing = crate::schema::is_closing(&schema, &new_issue.status);
         return Ok(UpdateOutcome {
             issue: new_issue,
             version: new_version,
-            issue_dir: predicted_flat_issue_dir(root, slug),
+            issue_dir: predicted_issue_dir(root, slug, &item_path, post_closing),
             moved_to_closed: false,
             moved_to_open: false,
             pending_serialized: Some(pending),
@@ -1833,10 +1845,13 @@ pub fn toggle_checkbox(
         let pending = write::serialize_item(&item).map_err(MutateError::Io)?;
         let new_issue = parse_serialized(&pending, slug, &schema);
         let new_version = canonical_hash(&new_issue);
+        // Body verbs never change status, so an archived issue stays
+        // archived — predict its current dir, not the active root.
+        let post_closing = crate::schema::is_closing(&schema, &new_issue.status);
         return Ok(UpdateOutcome {
             issue: new_issue,
             version: new_version,
-            issue_dir: predicted_flat_issue_dir(root, slug),
+            issue_dir: predicted_issue_dir(root, slug, &item_path, post_closing),
             moved_to_closed: false,
             moved_to_open: false,
             pending_serialized: Some(pending),
@@ -2285,13 +2300,31 @@ fn apply_string_patch(item: &mut ItemFile, key: &str, p: &Patch<String>) {
     }
 }
 
-/// Where a real write to `slug` would land on disk after any legacy →
-/// flat migration. Used by dry-run paths so the JSON envelope's
-/// `final_dir` agrees with what a follow-up real write would produce
-/// — without this, dry-run on a legacy-layout issue reports the
-/// legacy directory, then the real write actually lands at the flat
-/// path (round-2 #3).
-fn predicted_flat_issue_dir(root: &Path, slug: &str) -> PathBuf {
+/// Where a real write to `slug` would land on disk after any layout
+/// transition the write performs. Used by dry-run paths so the JSON
+/// envelope's `final_dir` agrees with what a follow-up real write would
+/// produce. Three cases:
+///   - currently archived AND the post-mutation status is non-closing →
+///     the real write unarchives it (see [`unarchive_if_active`]), so it
+///     lands at the active flat root `issues/<slug>/`.
+///   - currently archived AND staying closing → the real write leaves it
+///     in cold storage, so the dir is its current archive path.
+///   - active or legacy → the active flat root (legacy migrates to flat).
+/// Without the archive cases, dry-run on an archived issue reported the
+/// active root unconditionally while a non-reopening real write actually
+/// lands back in the archive (and the inverse for reopens).
+fn predicted_issue_dir(root: &Path, slug: &str, item_path: &Path, post_closing: bool) -> PathBuf {
+    let archive_root = root.join("issues").join(repo::ARCHIVE_DIR);
+    let in_archive = item_path
+        .parent()
+        .is_some_and(|p| p.starts_with(&archive_root));
+    if in_archive && post_closing {
+        // Stays in cold storage — report its current archive dir.
+        return item_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| root.join("issues").join(slug));
+    }
     root.join("issues").join(slug)
 }
 
@@ -2339,28 +2372,45 @@ fn migrate_to_flat_if_legacy(
     }
 }
 
-/// Move a reopened issue out of cold storage. When a status mutation
-/// takes an issue from a closing status back to active (`moved_to_open`)
-/// and its `item.md` currently lives under `issues/archive/YYYY/MM/`,
+/// Lift an issue out of cold storage when a mutation leaves it in an
+/// active (non-closing) state. When `post_closing` is false and the
+/// issue's `item.md` currently lives under `issues/archive/YYYY/MM/`,
 /// rename the issue directory back to the active root (`issues/<slug>/`)
 /// — the inverse of the `archive` move. Returns the new `item.md` path
 /// so the subsequent write lands on the active copy. No-op for issues
-/// that aren't archived or aren't being reopened.
+/// that aren't archived or whose post-mutation status is still closing.
+///
+/// The trigger is "archived AND now active", not strictly "reopened
+/// (closing→active)": that also heals an archived issue whose status was
+/// dragged active out-of-band (manual edit / external git op) and then
+/// touched by an unrelated PATCH — `resolve_layout` already reads such an
+/// issue as active, so leaving it physically archived is the same bug.
 ///
 /// Runs under the caller's held flock and only after validation passed,
 /// so it shares the archive move's all-or-nothing guarantee. Refuses
 /// (rather than clobbering) if an active directory for the slug already
 /// exists — that collision is `Ambiguous` and would have failed the
 /// read-time locate, but the check is kept as defence in depth.
-fn unarchive_if_reopened(
+///
+/// Failure mode if the later `write_item_atomic` errors after this
+/// rename: the dir is at the active root carrying its still-closing
+/// pre-mutation `item.md`, i.e. a closed-but-unarchived issue — a
+/// self-consistent state (closed issues live at the active root until
+/// the next `archive` run), not the "active-but-archived" inconsistency
+/// this fix targets. Re-running the mutation completes cleanly.
+fn unarchive_if_active(
     root: &Path,
     slug: &str,
     item_path: PathBuf,
-    moved_to_open: bool,
+    post_closing: bool,
 ) -> Result<PathBuf, MutateError> {
-    if !moved_to_open {
+    if post_closing {
         return Ok(item_path);
     }
+    // `archive_root` and `cur_dir` are both derived by joining the same
+    // `root` (`item_path` came from `resolve_layout(root, …)`), so the
+    // `starts_with` prefix test is robust to whatever base `root` carries
+    // (relative, symlinked) — both sides share it.
     let archive_root = root.join("issues").join(repo::ARCHIVE_DIR);
     let cur_dir = item_path
         .parent()
@@ -2382,7 +2432,28 @@ fn unarchive_if_reopened(
             dest_dir.display()
         ))
     })?;
+    // Best-effort prune of the now-possibly-empty YYYY/MM (and YYYY)
+    // buckets, symmetric with the `archive` move creating them.
+    // `remove_dir` only removes empty dirs, so a bucket still holding
+    // other archived issues is left untouched.
+    prune_empty_archive_buckets(cur_dir, &archive_root);
     Ok(dest_dir.join("item.md"))
+}
+
+/// Remove the now-orphaned `YYYY/MM` (then `YYYY`) archive bucket dirs
+/// after a slug dir was moved out, walking up but never past — or onto —
+/// `archive_root`. Best-effort: any non-empty dir stops the walk.
+fn prune_empty_archive_buckets(moved_dir: &Path, archive_root: &Path) {
+    let mut cur = moved_dir.parent();
+    while let Some(dir) = cur {
+        if dir == archive_root || !dir.starts_with(archive_root) {
+            break;
+        }
+        if fs::remove_dir(dir).is_err() {
+            break; // non-empty or gone — stop pruning
+        }
+        cur = dir.parent();
+    }
 }
 
 /// Atomic write: stage as `.issuectl-tmp-…`, fsync, persist into
@@ -3285,21 +3356,143 @@ mod tests {
     }
 
     #[test]
-    fn unarchive_if_reopened_is_noop_when_not_reopening() {
-        // A non-reopen mutation (moved_to_open == false) on an archived
-        // issue must leave the path untouched.
+    fn unarchive_if_active_is_noop_when_post_status_closing() {
+        // A mutation that leaves the issue closing (post_closing == true)
+        // on an archived issue must leave the path untouched.
         let tmp = fresh_repo();
         let item = tmp
             .path()
             .join("issues/archive/2020/01/keep-archived-owl/item.md");
-        let out = unarchive_if_reopened(
+        let out =
+            unarchive_if_active(tmp.path(), "keep-archived-owl", item.clone(), true).unwrap();
+        assert_eq!(out, item, "still-closing leaves the archived path unchanged");
+    }
+
+    #[test]
+    fn unarchive_if_active_refuses_when_active_copy_exists() {
+        // Defence-in-depth branch: exercised directly because the normal
+        // entry points reject the active+archived collision as Ambiguous
+        // before this helper runs.
+        let tmp = fresh_repo();
+        let archived = seed_archived(
             tmp.path(),
-            "keep-archived-owl",
-            item.clone(),
+            "2020",
+            "01",
+            "collide-fox",
+            "---\ntype: bug\ncreated: 2020-01-01\nstatus: fixed\npriority: normal\n---\n# T\n",
+        );
+        let active = tmp.path().join("issues/collide-fox");
+        fs::create_dir_all(&active).unwrap();
+        let err = unarchive_if_active(
+            tmp.path(),
+            "collide-fox",
+            archived.join("item.md"),
             false,
         )
-        .unwrap();
-        assert_eq!(out, item, "non-reopen leaves the archived path unchanged");
+        .unwrap_err();
+        assert!(matches!(err, MutateError::Io(_)));
+        assert!(archived.join("item.md").exists(), "archive copy untouched");
+    }
+
+    #[test]
+    fn dry_run_reopen_of_archived_issue_predicts_active_dir() {
+        let tmp = fresh_repo();
+        seed_archived(
+            tmp.path(),
+            "2020",
+            "01",
+            "dry-reopen-fox",
+            "---\ntype: bug\ncreated: 2020-01-01\nstatus: fixed\n\
+             priority: normal\nclosed: 2020-01-01\n---\n\n# T\n",
+        );
+        let req = UpdateIssueRequest {
+            status: Patch::Set("open".into()),
+            dry_run: true,
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "dry-reopen-fox", req, None, &UncachedConfig).unwrap();
+        assert_eq!(out.issue_dir, tmp.path().join("issues/dry-reopen-fox"));
+        // Dry-run wrote nothing: still physically archived.
+        assert!(tmp
+            .path()
+            .join("issues/archive/2020/01/dry-reopen-fox/item.md")
+            .is_file());
+        assert!(!tmp.path().join("issues/dry-reopen-fox").exists());
+    }
+
+    #[test]
+    fn dry_run_non_reopen_of_archived_issue_predicts_archive_dir() {
+        // A priority patch that keeps the issue closing must report the
+        // archive dir, matching where a real write would land.
+        let tmp = fresh_repo();
+        let archived = seed_archived(
+            tmp.path(),
+            "2020",
+            "01",
+            "dry-stay-elk",
+            "---\ntype: bug\ncreated: 2020-01-01\nstatus: fixed\n\
+             priority: normal\nclosed: 2020-01-01\n---\n\n# T\n",
+        );
+        let req = UpdateIssueRequest {
+            priority: Patch::Set("high".into()),
+            dry_run: true,
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "dry-stay-elk", req, None, &UncachedConfig).unwrap();
+        assert_eq!(
+            out.issue_dir, archived,
+            "non-reopen dry-run must predict the archive dir"
+        );
+    }
+
+    #[test]
+    fn unarchive_prunes_emptied_month_and_year_buckets() {
+        let tmp = fresh_repo();
+        seed_archived(
+            tmp.path(),
+            "2020",
+            "01",
+            "lonely-newt",
+            "---\ntype: bug\ncreated: 2020-01-01\nstatus: fixed\n\
+             priority: normal\nclosed: 2020-01-01\n---\n\n# T\n",
+        );
+        let req = UpdateIssueRequest {
+            status: Patch::Set("open".into()),
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "lonely-newt", req, None, &UncachedConfig).unwrap();
+        // The slug was the only occupant, so its month/year buckets prune.
+        assert!(!tmp.path().join("issues/archive/2020/01").exists());
+        assert!(!tmp.path().join("issues/archive/2020").exists());
+    }
+
+    #[test]
+    fn unarchive_keeps_bucket_with_other_archived_siblings() {
+        let tmp = fresh_repo();
+        seed_archived(
+            tmp.path(),
+            "2020",
+            "01",
+            "reopen-this-fox",
+            "---\ntype: bug\ncreated: 2020-01-01\nstatus: fixed\n\
+             priority: normal\nclosed: 2020-01-01\n---\n\n# T\n",
+        );
+        let sibling = seed_archived(
+            tmp.path(),
+            "2020",
+            "01",
+            "stay-put-owl",
+            "---\ntype: bug\ncreated: 2020-01-15\nstatus: fixed\n\
+             priority: normal\nclosed: 2020-01-15\n---\n\n# T\n",
+        );
+        let req = UpdateIssueRequest {
+            status: Patch::Set("open".into()),
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "reopen-this-fox", req, None, &UncachedConfig).unwrap();
+        // Bucket still holds the sibling, so it must NOT be pruned.
+        assert!(tmp.path().join("issues/archive/2020/01").exists());
+        assert!(sibling.join("item.md").is_file());
     }
 
     #[test]
