@@ -80,6 +80,38 @@ fn parse_days(s: &str) -> std::result::Result<i64, String> {
     Ok(n)
 }
 
+/// Resolve the "current user" for `:me`-style query terms. Falls
+/// back through `$ISSUECTL_USER`, `$GIT_AUTHOR_NAME`,
+/// `$GIT_COMMITTER_NAME`, and finally `git config user.name`. None
+/// when nothing resolves — callers either bail (the query mentions
+/// `:me`) or proceed with `:me` left as a literal that matches
+/// nothing in practice. Whitespace is trimmed; empty results count
+/// as "unresolved".
+fn whoami() -> Option<String> {
+    for var in ["ISSUECTL_USER", "GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    let out = std::process::Command::new("git")
+        .args(["config", "--get", "user.name"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?;
+    let s = s.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
 fn parse_non_empty(s: &str) -> std::result::Result<String, String> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -1961,6 +1993,8 @@ fn cmd_list(
         Some(s) => query::parse(s).context("parsing positional query")?,
         None => query::Query::default(),
     };
+    let me = whoami();
+    query::resolve_me(&mut q, me.as_deref()).context("resolving `:me` in query")?;
 
     // Translate flag filters into query terms. Flag values are
     // pre-validated by clap (PossibleValuesParser) so they can't
@@ -2284,7 +2318,9 @@ fn cmd_attach(json: bool, slug: &str, files: Vec<PathBuf>) -> Result<()> {
 }
 
 fn cmd_search(json: bool, query_str: &str, all: bool) -> Result<()> {
-    let q = query::parse(query_str).context("parsing search query")?;
+    let mut q = query::parse(query_str).context("parsing search query")?;
+    let me = whoami();
+    query::resolve_me(&mut q, me.as_deref()).context("resolving `:me` in query")?;
     let issues = load();
 
     // `search` keeps the historical scope rule: open-only unless
@@ -2696,10 +2732,12 @@ fn cmd_export(
     all: bool,
     closed: bool,
 ) -> Result<()> {
-    let q = match query_str.as_deref() {
+    let mut q = match query_str.as_deref() {
         Some(s) => query::parse(s).context("parsing export query")?,
         None => query::Query::default(),
     };
+    let me = whoami();
+    query::resolve_me(&mut q, me.as_deref()).context("resolving `:me` in query")?;
     let folder_filter = folder_default_filter(all, closed, query_str.is_some());
 
     let issues = load();
@@ -3642,7 +3680,9 @@ pub(crate) fn bulk_apply(
 
 fn cmd_bulk(json: bool, query_str: &str, spec: BulkSpec, dry_run: bool) -> Result<()> {
     validate_bulk_spec(&spec)?;
-    let q = query::parse(query_str).context("parsing bulk query")?;
+    let mut q = query::parse(query_str).context("parsing bulk query")?;
+    let me = whoami();
+    query::resolve_me(&mut q, me.as_deref()).context("resolving `:me` in query")?;
     let root = find_root();
     let results = bulk_apply(&root, &q, &spec, dry_run)?;
 

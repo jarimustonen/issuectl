@@ -1412,7 +1412,7 @@ mod tests {
         // Relax every constrained built-in to drop enums and requirements.
         fs::write(
             tmp.path().join("issues/.schema.yaml"),
-            "version: 1\nfields:\n  type:\n    required: false\n  status:\n    required: false\n  priority:\n    required: false\n  closed:\n    required: false\n",
+            "version: 1\nfields:\n  type:\n    required: false\n  status:\n    required: false\n  priority:\n    required: false\n  closed:\n    required: false\n  review_status:\n    required: false\n",
         )
         .unwrap();
         write_issue(tmp.path(), "amber-loud-fox", "type: bug\n", "\n# X\n");

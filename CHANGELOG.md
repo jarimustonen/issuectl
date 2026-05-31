@@ -15,6 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   widen the enum per-repo via `issues/.schema.yaml`.
 
 ### Added
+- Optional `reviewer:` and `review_status:` frontmatter fields for teams
+  that review through git/PRs but want issue-level review visibility.
+  `review_status` is enum-validated (`requested` / `in-review` / `approved`
+  / `changes-requested`); `reviewer` is a free-form username that `issuectl
+  doctor` validates against the repo's known-user universe (any name that
+  appears as `reporter`/`assignee`/`owner` on at least one issue) and
+  surfaces under "Unknown reviewers" when it doesn't. The query language
+  (`issuectl ls/search/export/bulk`, web `?q=`) gains `reviewer:`,
+  `review_status:`, `reviewer:any`, `reviewer:none`; CLI queries also
+  support `reviewer:me` / `assignee:me` / `owner:me`, resolved via
+  `$ISSUECTL_USER` → `$GIT_AUTHOR_NAME` → `$GIT_COMMITTER_NAME` → `git
+  config user.name`. Set the fields via `--field reviewer=alice --field
+  review_status=requested` (no dedicated flags in this iteration).
 - Markdown Definition-of-Done validation. New `issuectl-core::body` module
   parses `- [ ]` / `- [x]` task lists in the canonical H2 sections
   `## Acceptance Criteria`, `## Tests Run`, and `## Implementation Notes`

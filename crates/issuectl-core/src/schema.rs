@@ -222,6 +222,11 @@ fields:
     required: false
   owner:
     required: false
+  reviewer:
+    required: false
+  review_status:
+    required: false
+    enum: [requested, in-review, approved, changes-requested]
   epic:
     required: false
   related:

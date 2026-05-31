@@ -68,6 +68,8 @@ pub enum FieldName {
     Updated,
     Created,
     Closed,
+    Reviewer,
+    ReviewStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +166,41 @@ pub fn parse(input: &str) -> Result<Query> {
         terms.push(build_term(t)?);
     }
     Ok(Query { terms })
+}
+
+/// Rewrite identity-style `field:me` terms in `q` to the resolved
+/// `current_user`. Applies to the user-shaped fields (`reviewer`,
+/// `assignee`, `owner`); `reviewer:me` is the canonical caller from
+/// the v0.6.0 review-field work. Errors when `current_user` is
+/// `None` and the query mentions `:me` — silently treating the
+/// literal `"me"` as a username would let the user blindly miss
+/// their own queue, and silently matching no issues would mask the
+/// mis-configuration. Callers that don't know the current user
+/// should skip the call entirely; `parse` leaves `:me` as a literal
+/// `Equals("me")` value that simply matches nothing in practice.
+pub fn resolve_me(q: &mut Query, current_user: Option<&str>) -> Result<()> {
+    for t in &mut q.terms {
+        if let Term::Field { field, m, .. } = t {
+            if !matches!(
+                field,
+                FieldName::Reviewer | FieldName::Assignee | FieldName::Owner
+            ) {
+                continue;
+            }
+            if let FieldMatch::Equals(v) = m {
+                if v.eq_ignore_ascii_case("me") {
+                    let Some(u) = current_user else {
+                        bail!(
+                            "query uses `:me` but no current user is configured \
+                             (set `git config user.name`)"
+                        );
+                    };
+                    *m = FieldMatch::Equals(u.to_string());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Evaluate a query against a single issue using today's local date
@@ -408,6 +445,8 @@ fn parse_field_name(s: &str) -> Result<FieldName> {
         "updated" => FieldName::Updated,
         "created" => FieldName::Created,
         "closed" => FieldName::Closed,
+        "reviewer" => FieldName::Reviewer,
+        "review_status" => FieldName::ReviewStatus,
         other => bail!("unknown field: {other}"),
     })
 }
@@ -503,7 +542,19 @@ fn eval_field(f: FieldName, m: &FieldMatch, i: &Issue, today: NaiveDate) -> bool
         FieldName::Updated => date_match(m, i.updated.as_deref(), today),
         FieldName::Created => date_match(m, i.created.as_deref(), today),
         FieldName::Closed => date_match(m, i.closed.as_deref(), today),
+        FieldName::Reviewer => opt_string_match(m, extra_str(i, "reviewer")),
+        FieldName::ReviewStatus => opt_string_match(m, extra_str(i, "review_status")),
     }
+}
+
+/// Project an `extra` frontmatter key down to a `Option<&str>` for
+/// opt-string matching. Non-string extras (lists, mappings) match
+/// nothing — same shape as `assignee:` matching an empty value.
+fn extra_str<'a>(i: &'a Issue, key: &str) -> Option<&'a str> {
+    i.extra
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
 }
 
 fn string_match(m: &FieldMatch, val: &str) -> bool {
@@ -665,6 +716,70 @@ mod tests {
         assert!(!matches_at(&q, &mk("a-b"), today()));
         let q = parse("label:wontfix").unwrap();
         assert!(!matches_at(&q, &mk("a-b"), today()));
+    }
+
+    #[test]
+    fn reviewer_field_reads_from_extra() {
+        let mut i = mk("a-b");
+        i.extra.insert(
+            "reviewer".to_string(),
+            serde_json::Value::String("dana".to_string()),
+        );
+        let q = parse("reviewer:dana").unwrap();
+        assert!(matches_at(&q, &i, today()));
+        let q = parse("reviewer:bob").unwrap();
+        assert!(!matches_at(&q, &i, today()));
+        let q = parse("reviewer:any").unwrap();
+        assert!(matches_at(&q, &i, today()));
+        let q = parse("reviewer:none").unwrap();
+        assert!(!matches_at(&q, &i, today()));
+    }
+
+    #[test]
+    fn review_status_field_reads_from_extra() {
+        let mut i = mk("a-b");
+        i.extra.insert(
+            "review_status".to_string(),
+            serde_json::Value::String("requested".to_string()),
+        );
+        let q = parse("review_status:requested").unwrap();
+        assert!(matches_at(&q, &i, today()));
+        let q = parse("review_status:approved").unwrap();
+        assert!(!matches_at(&q, &i, today()));
+    }
+
+    #[test]
+    fn resolve_me_substitutes_current_user() {
+        let mut q = parse("reviewer:me").unwrap();
+        resolve_me(&mut q, Some("dana")).unwrap();
+        let mut i = mk("a-b");
+        i.extra.insert(
+            "reviewer".to_string(),
+            serde_json::Value::String("dana".to_string()),
+        );
+        assert!(matches_at(&q, &i, today()));
+    }
+
+    #[test]
+    fn resolve_me_errors_without_current_user() {
+        let mut q = parse("reviewer:me").unwrap();
+        let err = resolve_me(&mut q, None).expect_err("expected error");
+        assert!(err.to_string().contains(":me"), "err={err}");
+    }
+
+    #[test]
+    fn resolve_me_leaves_non_user_fields_alone() {
+        // `type:me` would be a nonsense literal; the resolver must not
+        // touch fields outside the user-shaped set.
+        let mut q = parse("type:me").unwrap();
+        resolve_me(&mut q, Some("dana")).unwrap();
+        match &q.terms[0] {
+            Term::Field {
+                m: FieldMatch::Equals(v),
+                ..
+            } => assert_eq!(v, "me"),
+            _ => panic!("expected Field term"),
+        }
     }
 
     #[test]

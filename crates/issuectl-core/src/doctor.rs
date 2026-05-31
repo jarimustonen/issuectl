@@ -328,6 +328,13 @@ struct DoctorFindings {
     /// `item.md` containing git merge-conflict markers. Logged only;
     /// `--fix` never auto-resolves these.
     conflict_markers: Vec<String>,
+    /// Issues whose `reviewer:` value is not in the repo's known-user
+    /// universe (no other issue lists this name as `reporter`/
+    /// `assignee`/`owner`). `(slug, reviewer)`. Warning-only — there
+    /// is no separate user catalog, so a fresh hire whose first
+    /// touchpoint is a review will trip this until they own/report
+    /// something. `--fix` never edits it.
+    unknown_reviewers: Vec<(String, String)>,
     /// Orphan `.issuectl-tmp-*` files inside `issues/**` (atomic-write
     /// tempfiles that survived a SIGKILL). `--fix` deletes them.
     orphan_tempfiles: Vec<PathBuf>,
@@ -1239,8 +1246,41 @@ fn populate_extended_validation(
         "slug",
         "number",
         "blocked_by",
+        "reviewer",
+        "review_status",
     ] {
         known.insert(k.to_string());
+    }
+
+    // Universe of "known users" for the reviewer-validation check. We
+    // accept any name that appears as `reporter:`, `assignee:`, or
+    // `owner:` on at least one issue in the repo — there is no
+    // separate user catalog, so reusing the values already in the
+    // graph is the lightest-weight signal. Empty strings are stripped
+    // so a stray `reviewer: ""` (which the typed parser already
+    // forbids via the trim check, but custom-field writes could
+    // sneak through) doesn't validate against another empty entry.
+    let mut known_users: BTreeSet<String> = BTreeSet::new();
+    for hits in by_slug.values() {
+        let primary = hits
+            .iter()
+            .find(|h| h.folder == "flat")
+            .copied()
+            .unwrap_or(hits[0]);
+        let Some(fm) = primary.parsed.as_ref().and_then(|p| p.mapping.as_ref()) else {
+            continue;
+        };
+        for key in ["reporter", "assignee", "owner"] {
+            if let Some(v) = fm
+                .get(serde_yaml::Value::String(key.into()))
+                .and_then(|v| v.as_str())
+            {
+                let v = v.trim();
+                if !v.is_empty() {
+                    known_users.insert(v.to_string());
+                }
+            }
+        }
     }
 
     let today = chrono::Local::now().date_naive();
@@ -1325,6 +1365,22 @@ fn populate_extended_validation(
                 if !known.contains(name) {
                     report.unknown_keys.push((slug.clone(), name.clone()));
                 }
+            }
+        }
+
+        // Reviewer must be a known user. The check fires only when
+        // `reviewer:` is present and the value is a non-empty string;
+        // shape errors are surfaced by schema validation and the typed
+        // parser, not here.
+        if let Some(reviewer) = fm
+            .get(serde_yaml::Value::String("reviewer".into()))
+            .and_then(|v| v.as_str())
+        {
+            let reviewer = reviewer.trim();
+            if !reviewer.is_empty() && !known_users.contains(reviewer) {
+                report
+                    .unknown_reviewers
+                    .push((slug.clone(), reviewer.to_string()));
             }
         }
 
@@ -2811,6 +2867,7 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         || !report.status_consistency.is_empty()
         || !report.timestamp_issues.is_empty()
         || !report.unknown_keys.is_empty()
+        || !report.unknown_reviewers.is_empty()
         || !report.conflict_markers.is_empty()
         || !report.orphan_tempfiles.is_empty()
         || !oc.orphan_tempfiles_removed.is_empty()
@@ -3033,6 +3090,13 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         println!("Unknown frontmatter keys (not declared by schema):");
         for (slug, key) in &report.unknown_keys {
             println!("  {slug}: {key}");
+        }
+        println!();
+    }
+    if !report.unknown_reviewers.is_empty() {
+        println!("Unknown reviewers (not present as reporter/assignee/owner anywhere):");
+        for (slug, who) in &report.unknown_reviewers {
+            println!("  {slug}: {who}");
         }
         println!();
     }
@@ -3313,6 +3377,11 @@ fn render_json(
         .iter()
         .map(|(s, k)| serde_json::json!({"slug": s, "key": k}))
         .collect();
+    let unknown_reviewers: Vec<serde_json::Value> = report
+        .unknown_reviewers
+        .iter()
+        .map(|(s, r)| serde_json::json!({"slug": s, "reviewer": r}))
+        .collect();
     let orphan_tempfiles: Vec<String> = report
         .orphan_tempfiles
         .iter()
@@ -3417,6 +3486,10 @@ fn render_json(
         map.insert(
             "broken_attachment_refs".to_string(),
             serde_json::Value::Array(broken_attachment_refs),
+        );
+        map.insert(
+            "unknown_reviewers".to_string(),
+            serde_json::Value::Array(unknown_reviewers),
         );
     }
     // `apply_outcome` is the new structured envelope: emitted only on
@@ -4180,6 +4253,51 @@ mod tests {
         let dir = tmp.path().join("issues").join(slug);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("item.md"), body).unwrap();
+    }
+
+    #[test]
+    fn unknown_reviewer_is_flagged_unless_a_known_user_elsewhere() {
+        // alice is the assignee of issue-one → known user.
+        // bob is only ever referenced as a reviewer → flagged.
+        // alice as reviewer on issue-two → accepted.
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "alpha-known-user",
+            "---\ntype: bug\nstatus: open\npriority: normal\nassignee: alice\n---\n# One\n",
+        );
+        put_flat(
+            &tmp,
+            "beta-known-reviewer",
+            "---\ntype: bug\nstatus: open\npriority: normal\nreviewer: alice\nreview_status: requested\n---\n# Two\n",
+        );
+        put_flat(
+            &tmp,
+            "gamma-unknown-reviewer",
+            "---\ntype: bug\nstatus: open\npriority: normal\nreviewer: bob\nreview_status: in-review\n---\n# Three\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.unknown_reviewers
+                .iter()
+                .any(|(slug, who)| slug == "gamma-unknown-reviewer" && who == "bob"),
+            "expected bob flagged, got {:?}",
+            r.unknown_reviewers
+        );
+        assert!(
+            !r.unknown_reviewers.iter().any(|(_, who)| who == "alice"),
+            "alice is a known user; must not be flagged: {:?}",
+            r.unknown_reviewers
+        );
+        // review_status must not show up under unknown_keys — the schema
+        // declares it.
+        assert!(
+            !r.unknown_keys
+                .iter()
+                .any(|(_, k)| k == "review_status" || k == "reviewer"),
+            "reviewer/review_status are schema-known: {:?}",
+            r.unknown_keys
+        );
     }
 
     #[test]
@@ -5802,7 +5920,8 @@ mod tests {
       "key": "whimsy",
       "slug": "alpha-bright-cat"
     }
-  ]
+  ],
+  "unknown_reviewers": []
 }"#;
         assert_eq!(
             actual, expected,
