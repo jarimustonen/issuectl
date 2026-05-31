@@ -403,6 +403,32 @@ fn sanitize_token(s: &str) -> String {
     out.trim().to_string()
 }
 
+/// Maximum number of enum values rendered inline in an `## Agent
+/// Instructions` rule before the tail is summarised. Keeps the prompt
+/// bundle compact for status-like fields that grow long enum lists
+/// (custom workflows, label vocabularies) while preserving enough
+/// examples for the agent to recognise the shape of the constraint.
+const ENUM_INLINE_CAP: usize = 12;
+
+/// Render an enum value list for an agent-instruction rule, capping at
+/// `ENUM_INLINE_CAP` so a long enum (e.g. 40 statuses) doesn't bloat the
+/// prompt. Beyond the cap the tail is summarised as `…and N more`. Each
+/// value is sanitised and wrapped in an inline-code span.
+fn format_enum_values(values: &[String]) -> String {
+    let rendered: Vec<String> = values
+        .iter()
+        .take(ENUM_INLINE_CAP)
+        .map(|v| format!("`{}`", sanitize_token(v)))
+        .collect();
+    let head = rendered.join(", ");
+    if values.len() > ENUM_INLINE_CAP {
+        let extra = values.len() - ENUM_INLINE_CAP;
+        format!("{head}, …and {extra} more")
+    } else {
+        head
+    }
+}
+
 /// Turn the schema's enforceable constraints into imperative one-line
 /// rules for the editing agent. Walks fields in field-name order
 /// (`BTreeMap` is sorted by key — deterministic, but alphabetical, not
@@ -440,11 +466,7 @@ fn build_instructions(schema: &schema::Schema) -> Vec<String> {
             .as_ref()
             .filter(|allowed| !allowed.is_empty())
             .map(|allowed| {
-                let joined = allowed
-                    .iter()
-                    .map(|v| format!("`{}`", sanitize_token(v)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let joined = format_enum_values(allowed);
                 if spec.list {
                     format!("each value must be one of: {joined}")
                 } else {
@@ -1394,6 +1416,104 @@ mod tests {
         );
         let md = render_markdown(&b);
         assert!(!md.contains("## Agent Instructions"));
+    }
+
+    #[test]
+    fn build_instructions_caps_long_enum_with_summary() {
+        // A 20-value enum must render the first 12 inline and summarise
+        // the remaining 8 so the prompt bundle doesn't bloat.
+        let tmp = fresh_repo();
+        let values: Vec<String> = (0..20).map(|i| format!("v{i:02}")).collect();
+        let yaml = format!(
+            "version: 1\nfields:\n  workflow:\n    required: true\n    enum:\n{}",
+            values
+                .iter()
+                .map(|v| format!("      - {v}\n"))
+                .collect::<String>()
+        );
+        fs::write(tmp.path().join("issues/.schema.yaml"), yaml).unwrap();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: normal\nworkflow: v00\n",
+            "\n# X\n",
+        );
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        let rule = b
+            .schema
+            .instructions
+            .iter()
+            .find(|r| r.starts_with("`workflow`"))
+            .expect("workflow rule present");
+        assert!(
+            rule.contains("`v00`") && rule.contains("`v11`"),
+            "first {ENUM_INLINE_CAP} values must be rendered, got {rule:?}"
+        );
+        assert!(
+            !rule.contains("`v12`") && !rule.contains("`v19`"),
+            "values past the cap must not appear inline, got {rule:?}"
+        );
+        assert!(
+            rule.contains("…and 8 more"),
+            "expected summary of capped values, got {rule:?}"
+        );
+    }
+
+    #[test]
+    fn build_instructions_does_not_cap_small_enum() {
+        // The default schema's `type` enum (well under the cap) must
+        // still render every value with no `…and N more` summary.
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: normal\n",
+            "\n# X\n",
+        );
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        let rule = b
+            .schema
+            .instructions
+            .iter()
+            .find(|r| r.starts_with("`type`"))
+            .expect("type rule present");
+        assert!(
+            !rule.contains("…and"),
+            "small enum must not be summarised, got {rule:?}"
+        );
+    }
+
+    #[test]
+    fn build_instructions_caps_at_exact_boundary() {
+        // Exactly ENUM_INLINE_CAP values: render all, no summary.
+        let tmp = fresh_repo();
+        let values: Vec<String> = (0..ENUM_INLINE_CAP).map(|i| format!("v{i:02}")).collect();
+        let yaml = format!(
+            "version: 1\nfields:\n  workflow:\n    required: true\n    enum:\n{}",
+            values
+                .iter()
+                .map(|v| format!("      - {v}\n"))
+                .collect::<String>()
+        );
+        fs::write(tmp.path().join("issues/.schema.yaml"), yaml).unwrap();
+        write_issue(
+            tmp.path(),
+            "amber-loud-fox",
+            "type: bug\nstatus: open\npriority: normal\nworkflow: v00\n",
+            "\n# X\n",
+        );
+        let b = build(tmp.path(), "amber-loud-fox").unwrap();
+        let rule = b
+            .schema
+            .instructions
+            .iter()
+            .find(|r| r.starts_with("`workflow`"))
+            .expect("workflow rule present");
+        assert!(!rule.contains("…and"), "no summary at the boundary, got {rule:?}");
+        assert!(
+            rule.contains(&format!("`v{:02}`", ENUM_INLINE_CAP - 1)),
+            "last in-cap value must render, got {rule:?}"
+        );
     }
 
     #[test]
