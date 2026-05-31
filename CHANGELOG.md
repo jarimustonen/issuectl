@@ -30,6 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   widen the enum per-repo via `issues/.schema.yaml`.
 
 ### Added
+- Lightweight estimates. Optional `size: S|M|L|XL` (schema-enforced enum)
+  or free-form numeric `estimate:` frontmatter on any issue — schema
+  allows either, not both per issue. New `issuectl workload` aggregates
+  open + in-progress issues by assignee, priority, cycle, and epic,
+  summing point-equivalents (S=1, M=3, L=5, XL=8 for sizes; `estimate:`
+  used verbatim) and surfacing how many issues are unestimated. New
+  `issuectl burndown --cycle <name>` prints an ASCII burndown across
+  the cycle's days; ISO-week labels (`YYYY-Www`) span Mon→Sun, other
+  labels fall back to earliest-`created` → today. Closed issues
+  subtract their points on the `closed:` date. `cycle current` is a
+  valid `--cycle` value. Both commands honour `--json`.
 - Optional `reviewer:` and `review_status:` frontmatter fields for teams
   that review through git/PRs but want issue-level review visibility.
   `review_status` is enum-validated (`requested` / `in-review` / `approved`

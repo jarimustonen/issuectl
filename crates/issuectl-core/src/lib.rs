@@ -39,6 +39,8 @@ pub mod doctor;
 #[doc(hidden)]
 pub mod duplicates;
 #[doc(hidden)]
+pub mod estimate;
+#[doc(hidden)]
 pub mod fmt;
 #[doc(hidden)]
 pub mod git_trailers;

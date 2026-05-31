@@ -227,6 +227,18 @@ fields:
   review_status:
     required: false
     enum: [requested, in-review, approved, changes-requested]
+  # Lightweight estimates. Declare either `size` OR `estimate` on an
+  # issue, not both — the schema can't express the mutual-exclusion
+  # rule directly, but `issuectl workload` / `burndown` will flag any
+  # issue carrying both. `size` is a fixed four-value enum; `estimate`
+  # is a free-form numeric (story points) and is intentionally NOT
+  # declared here because the v1 schema validator is string-typed and
+  # would reject `estimate: 5` (a YAML number). Unknown fields pass
+  # validation, so the numeric form rides through. See
+  # `crates/issuectl-core/src/estimate.rs`.
+  size:
+    required: false
+    enum: [S, M, L, XL]
   epic:
     required: false
   related:

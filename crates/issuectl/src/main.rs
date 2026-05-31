@@ -9,9 +9,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::repo_config::UncachedConfig;
 use issuectl_core::{
-    agents, body_sections, canonical, context, cycle as cycle_mod, docs, doctor, duplicates, fmt,
-    hooks, init as init_cmd, merge_driver, models, mutate, query, recurrence, repo,
-    report as report_mod, server, skill, slug, sync_commits,
+    agents, body_sections, canonical, context, cycle as cycle_mod, docs, doctor, duplicates,
+    estimate as estimate_mod, fmt, hooks, init as init_cmd, merge_driver, models, mutate, query,
+    recurrence, repo, report as report_mod, server, skill, slug, sync_commits,
 };
 
 const TOP_LEVEL_HELP: &str = "\
@@ -1239,6 +1239,24 @@ enum Command {
         #[command(subcommand)]
         action: ScheduleAction,
     },
+
+    /// Aggregate open + in-progress workload across assignee, priority,
+    /// cycle, and epic. Sums point-equivalents from `size:` (S=1, M=3,
+    /// L=5, XL=8) and `estimate:` (free-form numeric) frontmatter; an
+    /// issue without either contributes to the `unestimated` counter.
+    Workload,
+
+    /// ASCII burndown chart for a cycle. `--cycle <name>` selects the
+    /// cycle label (use `current` for today's ISO week). When the
+    /// label is an ISO week tag (`YYYY-Ww`) the chart spans Mon→Sun;
+    /// otherwise it falls back to earliest-`created` → today. Closed
+    /// issues subtract their points on their `closed:` date.
+    Burndown {
+        /// Cycle label (e.g. `2026-W22`). `current` expands to
+        /// today's ISO week.
+        #[arg(long, value_parser = parse_non_empty)]
+        cycle: String,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -1919,6 +1937,8 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 expected_version,
             } => cmd_depend(json_output, &slug, blocked_by, false, expected_version),
         },
+        Command::Workload => cmd_workload(json_output),
+        Command::Burndown { cycle } => cmd_burndown(json_output, &cycle),
         Command::Cycle { action } => match action {
             CycleAction::Current => cmd_cycle_current(json_output),
             CycleAction::Plan { name, all, closed } => {
@@ -2791,6 +2811,87 @@ fn cmd_schedule_run(json: bool, dry_run: bool) -> Result<()> {
         for (name, msg) in &report.errors {
             eprintln!("warning: recurrence {name}: {msg}");
         }
+    }
+    Ok(())
+}
+
+fn cmd_workload(json: bool) -> Result<()> {
+    let issues = load();
+    let w = estimate_mod::workload(&issues);
+    let mixed = estimate_mod::mixed_issues(&issues);
+
+    if json {
+        let out = serde_json::json!({
+            "total": w.total,
+            "total_points": w.total_points,
+            "unestimated": w.unestimated,
+            "by_assignee": w.by_assignee,
+            "by_priority": w.by_priority,
+            "by_cycle": w.by_cycle,
+            "by_epic": w.by_epic,
+            "mixed_estimate_issues": mixed,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    println!(
+        "Workload (open + in-progress): {} issues, {:.1} points  ({} unestimated)",
+        w.total, w.total_points, w.unestimated
+    );
+    if !mixed.is_empty() {
+        println!(
+            "warning: {} issue(s) carry both `size:` and `estimate:` — pick one (preferring `estimate`): {}",
+            mixed.len(),
+            mixed.join(", ")
+        );
+    }
+    print_workload_rows("By assignee", &w.by_assignee);
+    print_workload_rows("By priority", &w.by_priority);
+    print_workload_rows("By cycle", &w.by_cycle);
+    print_workload_rows("By epic", &w.by_epic);
+    Ok(())
+}
+
+fn print_workload_rows(header: &str, rows: &[estimate_mod::WorkloadRow]) {
+    println!();
+    println!("{header}:");
+    if rows.is_empty() {
+        println!("  (no issues)");
+        return;
+    }
+    println!(
+        "  {:<20} {:>6} {:>8} {:>12}",
+        "KEY", "COUNT", "POINTS", "UNESTIMATED"
+    );
+    for r in rows {
+        println!(
+            "  {:<20} {:>6} {:>8.1} {:>12}",
+            truncate_key(&r.key, 20),
+            r.count,
+            r.points,
+            r.unestimated
+        );
+    }
+}
+
+fn truncate_key(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let taken: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{taken}…")
+    }
+}
+
+fn cmd_burndown(json: bool, cycle_name: &str) -> Result<()> {
+    let cycle = resolve_cycle_name(cycle_name);
+    let issues = load();
+    let b = estimate_mod::burndown(&issues, &cycle);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&b)?);
+    } else {
+        print!("{}", estimate_mod::render_ascii(&b));
     }
     Ok(())
 }
