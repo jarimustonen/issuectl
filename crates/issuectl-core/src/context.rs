@@ -1239,18 +1239,18 @@ mod tests {
         let b = build(tmp.path(), "amber-loud-fox").unwrap();
         // Enum rule for `type` is rephrased imperatively.
         assert!(
-            b.schema
-                .instructions
-                .iter()
-                .any(|r| r.starts_with("`type`") && r.contains("must be one of") && r.contains("bug")),
+            b.schema.instructions.iter().any(|r| r.starts_with("`type`")
+                && r.contains("must be one of")
+                && r.contains("bug")),
             "expected an imperative enum rule for `type`, got {:?}",
             b.schema.instructions
         );
         // Conditional `closed` rule names the closing statuses.
         assert!(
-            b.schema.instructions.iter().any(|r| r.starts_with("`closed`")
-                && r.contains("closing")
-                && r.contains("done")),
+            b.schema
+                .instructions
+                .iter()
+                .any(|r| r.starts_with("`closed`") && r.contains("closing") && r.contains("done")),
             "expected conditional `closed` rule listing closing statuses, got {:?}",
             b.schema.instructions
         );
@@ -1266,9 +1266,14 @@ mod tests {
             "\n# X\n",
         );
         let md = render_markdown(&build(tmp.path(), "amber-loud-fox").unwrap());
-        let i_instr = md.find("## Agent Instructions").expect("instructions block present");
+        let i_instr = md
+            .find("## Agent Instructions")
+            .expect("instructions block present");
         let i_schema = md.find("## Schema").expect("schema block present");
-        assert!(i_instr < i_schema, "instructions must render before the schema dump");
+        assert!(
+            i_instr < i_schema,
+            "instructions must render before the schema dump"
+        );
         assert!(md.contains("follow the schema rules"));
     }
 
@@ -1304,8 +1309,11 @@ mod tests {
         );
         let b = build(tmp.path(), "amber-loud-fox").unwrap();
         assert!(
-            b.schema.instructions.iter().any(|r| r.contains("`labels` (a list) is optional; if set,")
-                && r.contains("each value must be one of: `infra`, `frontend`")),
+            b.schema
+                .instructions
+                .iter()
+                .any(|r| r.contains("`labels` (a list) is optional; if set,")
+                    && r.contains("each value must be one of: `infra`, `frontend`")),
             "expected optional element-wise list-enum rule, got {:?}",
             b.schema.instructions
         );
@@ -1509,7 +1517,10 @@ mod tests {
             .iter()
             .find(|r| r.starts_with("`workflow`"))
             .expect("workflow rule present");
-        assert!(!rule.contains("…and"), "no summary at the boundary, got {rule:?}");
+        assert!(
+            !rule.contains("…and"),
+            "no summary at the boundary, got {rule:?}"
+        );
         assert!(
             rule.contains(&format!("`v{:02}`", ENUM_INLINE_CAP - 1)),
             "last in-cap value must render, got {rule:?}"

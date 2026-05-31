@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   widen the enum per-repo via `issues/.schema.yaml`.
 
 ### Added
+- Markdown Definition-of-Done validation. New `issuectl-core::body` module
+  parses `- [ ]` / `- [x]` task lists in the canonical H2 sections
+  `## Acceptance Criteria`, `## Tests Run`, and `## Implementation Notes`
+  (fence-aware: checkboxes inside fenced code blocks are content, not
+  task-list items). A new `issuectl ready <slug>` command reports the
+  completion state of those sections (exits 0 when Acceptance Criteria is
+  fully checked, 1 otherwise; `--json` for machine output). On a transition
+  *into* a closing status, an unchecked Acceptance Criteria section now
+  surfaces a warning on stderr / in `UpdateOutcome.warnings`; set
+  `dod.strict: true` in `issues/.schema.yaml` to upgrade the warning to a
+  blocking error. Existing per-rule `requires_acceptance_criteria_checked`
+  remains an opt-in always-block.
 - `issuectl bulk '<query>'` applies one mutation to every issue matching a
   query (same syntax as `ls`/`search`), in a single batch the user commits
   together. Supports `--set key=value` / `--clear key` (built-in fields route

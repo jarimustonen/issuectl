@@ -1198,7 +1198,11 @@ fn update_issue_under_lock(
     //     post-mutation `Issue` projection. Rules are loaded once by
     //     the caller (same pattern as `schema`).
     let projected = projected_issue_for_rules(slug, &item, &item_path, schema)?;
-    let rule_violations = crate::transitions::evaluate_transition(rules, &projected, &prev_status);
+    let mut rule_violations =
+        crate::transitions::evaluate_transition(rules, &projected, &prev_status);
+    let (dod_warnings, dod_errors) =
+        crate::transitions::evaluate_dod(schema, &projected, &prev_status);
+    rule_violations.extend(dod_errors);
     if !rule_violations.is_empty() {
         return Err(MutateError::TransitionViolation(rule_violations.join("; ")));
     }
@@ -1224,7 +1228,7 @@ fn update_issue_under_lock(
             moved_to_open,
             pending_serialized: Some(pending),
             before_serialized,
-            warnings: Vec::new(),
+            warnings: dod_warnings,
         });
     }
     // 5b) Side effects deferred from `update_issue` so they only fire
@@ -1271,7 +1275,7 @@ fn update_issue_under_lock(
         moved_to_open,
         pending_serialized: None,
         before_serialized: None,
-        warnings: Vec::new(),
+        warnings: dod_warnings,
     })
 }
 
@@ -2481,9 +2485,9 @@ fn unarchive_if_active(
     // `starts_with` prefix test is robust to whatever base `root` carries
     // (relative, symlinked) — both sides share it.
     let archive_root = root.join("issues").join(repo::ARCHIVE_DIR);
-    let cur_dir = item_path
-        .parent()
-        .ok_or_else(|| MutateError::Io(anyhow!("item.md has no parent: {}", item_path.display())))?;
+    let cur_dir = item_path.parent().ok_or_else(|| {
+        MutateError::Io(anyhow!("item.md has no parent: {}", item_path.display()))
+    })?;
     if !cur_dir.starts_with(&archive_root) {
         return Ok(item_path); // not archived — nothing to lift
     }
@@ -2962,8 +2966,14 @@ mod tests {
             status: Patch::Set("done".into()),
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "empty-closed-target", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(
+            tmp.path(),
+            "empty-closed-target",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => {
                 assert!(
@@ -2995,8 +3005,14 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let out =
-            update_issue(tmp.path(), "unrelated-edit-target", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(
+            tmp.path(),
+            "unrelated-edit-target",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
         let after = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
         assert!(after.contains("priority: high"));
     }
@@ -3397,18 +3413,20 @@ mod tests {
         // Physically relocated to the active root.
         let active_dir = tmp.path().join("issues/old-archived-fox");
         assert_eq!(out.issue_dir, active_dir, "issue_dir must be active root");
-        assert!(active_dir.join("item.md").is_file(), "active copy must exist");
+        assert!(
+            active_dir.join("item.md").is_file(),
+            "active copy must exist"
+        );
         assert!(!archived_dir.exists(), "archive copy must be gone");
         let on_disk = fs::read_to_string(active_dir.join("item.md")).unwrap();
         assert!(on_disk.contains("status: open"));
         assert!(!on_disk.contains("closed:"), "closed: cleared on reopen");
         // No leftover empty archive month/year/root tree is required, but
         // the slug dir itself must not linger.
-        assert!(
-            !tmp.path()
-                .join("issues/archive/2020/01/old-archived-fox")
-                .exists()
-        );
+        assert!(!tmp
+            .path()
+            .join("issues/archive/2020/01/old-archived-fox")
+            .exists());
     }
 
     #[test]
@@ -3490,9 +3508,11 @@ mod tests {
         let item = tmp
             .path()
             .join("issues/archive/2020/01/keep-archived-owl/item.md");
-        let out =
-            unarchive_if_active(tmp.path(), "keep-archived-owl", item.clone(), true).unwrap();
-        assert_eq!(out, item, "still-closing leaves the archived path unchanged");
+        let out = unarchive_if_active(tmp.path(), "keep-archived-owl", item.clone(), true).unwrap();
+        assert_eq!(
+            out, item,
+            "still-closing leaves the archived path unchanged"
+        );
     }
 
     #[test]
@@ -3510,13 +3530,8 @@ mod tests {
         );
         let active = tmp.path().join("issues/collide-fox");
         fs::create_dir_all(&active).unwrap();
-        let err = unarchive_if_active(
-            tmp.path(),
-            "collide-fox",
-            archived.join("item.md"),
-            false,
-        )
-        .unwrap_err();
+        let err = unarchive_if_active(tmp.path(), "collide-fox", archived.join("item.md"), false)
+            .unwrap_err();
         assert!(matches!(err, MutateError::Io(_)));
         assert!(archived.join("item.md").exists(), "archive copy untouched");
     }

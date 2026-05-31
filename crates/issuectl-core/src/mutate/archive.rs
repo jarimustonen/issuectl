@@ -211,7 +211,10 @@ mod tests {
     #[test]
     fn skips_recently_closed_and_open_issues() {
         let tmp = repo();
-        let recent = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+        let recent = chrono::Local::now()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
         seed(&tmp, "fresh-done-owl", "fixed", Some(&recent));
         seed(&tmp, "active-open-elk", "open", None);
         let report = archive_closed(tmp.path(), 90, false, &UncachedConfig).unwrap();
@@ -228,7 +231,10 @@ mod tests {
         assert_eq!(report.archived.len(), 1);
         assert!(report.dry_run);
         assert!(tmp.path().join("issues/old-done-fox").exists());
-        assert!(!tmp.path().join("issues/archive/2020/01/old-done-fox").exists());
+        assert!(!tmp
+            .path()
+            .join("issues/archive/2020/01/old-done-fox")
+            .exists());
     }
 
     #[test]
@@ -236,7 +242,11 @@ mod tests {
         let tmp = repo();
         let dir = tmp.path().join("issues/archive/2020/01/old-done-fox");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("item.md"), "---\nstatus: fixed\nclosed: 2020-01-01\n---\n# x\n").unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\nstatus: fixed\nclosed: 2020-01-01\n---\n# x\n",
+        )
+        .unwrap();
         let report = archive_closed(tmp.path(), 90, false, &UncachedConfig).unwrap();
         assert!(report.archived.is_empty());
         assert!(report.skipped.is_empty());

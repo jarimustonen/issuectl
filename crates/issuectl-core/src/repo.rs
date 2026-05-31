@@ -850,7 +850,10 @@ pub fn rename_issue(
     };
     // Target slug must be free at every candidate path. `Absent` already
     // implies no `issues/<new>/` dir exists, so no separate dir check.
-    if !matches!(resolve_layout_in(repo_root, new, &archive), LayoutState::Absent) {
+    if !matches!(
+        resolve_layout_in(repo_root, new, &archive),
+        LayoutState::Absent
+    ) {
         bail!("target slug {new} already exists");
     }
     let new_dir = if src_is_legacy {
@@ -1237,7 +1240,9 @@ mod tests {
         let tmp = fresh_repo();
         seed_archive(&tmp, "2026", "05", "old-done-fox", "fixed");
         let located = locate_issue_full(tmp.path(), "old-done-fox").unwrap();
-        assert!(located.item_path.ends_with("archive/2026/05/old-done-fox/item.md"));
+        assert!(located
+            .item_path
+            .ends_with("archive/2026/05/old-done-fox/item.md"));
         assert!(located.legacy_folder.is_none());
     }
 
@@ -1253,7 +1258,10 @@ mod tests {
             .join("issues/archive/2026/05/new-done-stag/item.md")
             .is_file());
         assert!(!tmp.path().join("issues/new-done-stag").exists());
-        assert!(!tmp.path().join("issues/archive/2026/05/old-done-fox").exists());
+        assert!(!tmp
+            .path()
+            .join("issues/archive/2026/05/old-done-fox")
+            .exists());
     }
 
     #[test]

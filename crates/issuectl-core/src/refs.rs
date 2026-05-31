@@ -149,9 +149,8 @@ pub fn extract_relative_body_refs(body: &str) -> Vec<String> {
     // `!?` — image or link; `\[[^\]]*\]` — the bracketed text;
     // `\(\s*<?([^)>\s]+)>?` — the target, optionally angle-bracketed;
     // `(?:\s+[^)]*)?\)` — an optional `"title"` then the close paren.
-    let re = RE.get_or_init(|| {
-        Regex::new(r#"!?\[[^\]]*\]\(\s*<?([^)>\s]+)>?(?:\s+[^)]*)?\)"#).unwrap()
-    });
+    let re =
+        RE.get_or_init(|| Regex::new(r#"!?\[[^\]]*\]\(\s*<?([^)>\s]+)>?(?:\s+[^)]*)?\)"#).unwrap());
 
     let mut out = Vec::new();
     let mut fence: Option<Fence> = None;
@@ -206,10 +205,12 @@ fn normalize_relative_ref(raw: &str) -> Option<String> {
     // directory once joined. `Path::components` normalises `a/../b`-style
     // forms that a substring check would miss.
     use std::path::{Component, Path};
-    if Path::new(stripped)
-        .components()
-        .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
-    {
+    if Path::new(stripped).components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
         return None;
     }
     Some(stripped.to_string())
@@ -278,18 +279,14 @@ mod tests {
         let body = "see `@old-tame-fox` literal and @old-tame-fox real";
         let (out, n) = rewrite_body_refs(body, "old-tame-fox", "new-wild-elk");
         assert_eq!(n, 1);
-        assert_eq!(
-            out,
-            "see `@old-tame-fox` literal and @new-wild-elk real"
-        );
+        assert_eq!(out, "see `@old-tame-fox` literal and @new-wild-elk real");
     }
 
     #[test]
     fn rewrite_body_refs_leaves_link_urls_untouched() {
         // `](…)` URL contents must survive even when they look like an
         // `@slug` reference (e.g. a fragment or anchor naming the slug).
-        let body =
-            "see [old](https://example.com/@old-tame-fox) plus @old-tame-fox";
+        let body = "see [old](https://example.com/@old-tame-fox) plus @old-tame-fox";
         let (out, n) = rewrite_body_refs(body, "old-tame-fox", "new-wild-elk");
         assert_eq!(n, 1);
         assert_eq!(

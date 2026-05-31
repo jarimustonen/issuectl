@@ -48,7 +48,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::body_sections;
 use crate::models::Issue;
 
 pub const RULES_RELATIVE_PATH: &str = ".issuectl/transitions.yaml";
@@ -321,69 +320,75 @@ pub fn evaluate_existing(rules: &TransitionRules, issue: &Issue) -> Vec<String> 
 /// `~~~`) is content, not a checklist item. Without this guard,
 /// pasting an example into AC would falsely flag the rule.
 fn acceptance_criteria_message(body: &str, status: &str) -> Option<String> {
-    let Some(section) = body_sections::extract_section_text(body, "Acceptance Criteria") else {
+    let section = crate::body::parse_section_checkboxes(body, crate::body::ACCEPTANCE_CRITERIA);
+    if !section.present {
         return Some(format!(
             "status {status:?} requires `## Acceptance Criteria` with at least one checked item, but the section is missing"
         ));
-    };
-    let mut total = 0usize;
-    let mut checked = 0usize;
-    let mut in_fence: Option<&'static str> = None;
-    for line in section.lines() {
-        let trimmed = line.trim_start();
-
-        if let Some(marker) = in_fence {
-            if trimmed.starts_with(marker) {
-                in_fence = None;
-            }
-            continue;
-        }
-        if trimmed.starts_with("```") {
-            in_fence = Some("```");
-            continue;
-        }
-        if trimmed.starts_with("~~~") {
-            in_fence = Some("~~~");
-            continue;
-        }
-
-        // Task-list shape: `- [ ]`, `- [x]`, `- [X]`, plus `*` / `+`
-        // bullet variants. Intentionally not CommonMark-strict — the
-        // rule is keyed on the shape users type when they want to
-        // express a checklist.
-        let bullet = trimmed
-            .strip_prefix("- ")
-            .or_else(|| trimmed.strip_prefix("* "))
-            .or_else(|| trimmed.strip_prefix("+ "));
-        let Some(rest) = bullet else { continue };
-        if let Some(inner) = rest.strip_prefix('[').and_then(|r| {
-            r.split_once(']').and_then(|(c, _)| {
-                if c.chars().count() == 1 {
-                    Some(c)
-                } else {
-                    None
-                }
-            })
-        }) {
-            total += 1;
-            if matches!(inner, "x" | "X") {
-                checked += 1;
-            }
-        }
     }
-    if total == 0 {
+    if section.total() == 0 {
         return Some(format!(
             "status {status:?} requires `## Acceptance Criteria` to contain at least one task-list item (`- [ ]` / `- [x]`)"
         ));
     }
-    if total != checked {
+    if !section.fully_checked() {
         return Some(format!(
             "status {status:?} requires every item in `## Acceptance Criteria` to be checked ({} of {} unchecked)",
-            total - checked,
-            total,
+            section.unchecked(),
+            section.total(),
         ));
     }
     None
+}
+
+/// Evaluate the schema-level Definition-of-Done gate for a write
+/// that transitions the issue to a closing status. Separate from
+/// [`evaluate_transition`] because:
+///
+/// - DoD operates on the schema's lifecycle classification (any
+///   `closing` status, not a hard-coded `done`), so callers that
+///   already had a `&Schema` use this directly.
+/// - DoD distinguishes *warnings* (default — visible on stderr /
+///   JSON `warnings`) from *errors* (when `schema.dod.strict` is
+///   set — blocks the write). The existing `evaluate_transition`
+///   returns errors only; folding DoD into it would silently turn
+///   every warning into a blocker.
+///
+/// Returns `(warnings, errors)`. Both vectors are empty when:
+///
+/// - The transition is *not* into a closing status, OR
+/// - `prev_status` is already closing (closing → closing is a
+///   metadata tweak, not a "ship-it" moment), OR
+/// - The Acceptance Criteria section is empty or fully checked.
+///
+/// Existing per-status rules using `requires_acceptance_criteria_checked`
+/// continue to apply through [`evaluate_transition`]; the DoD gate is
+/// the *zero-config* default that activates whenever a transition
+/// moves the issue from active → closing.
+pub fn evaluate_dod(
+    schema: &crate::schema::Schema,
+    issue_after: &Issue,
+    prev_status: &str,
+) -> (Vec<String>, Vec<String>) {
+    let new_status = issue_after.status.as_str();
+    let going_closing = crate::schema::is_closing(schema, new_status);
+    let was_closing = crate::schema::is_closing(schema, prev_status);
+    if !going_closing || was_closing || prev_status == new_status {
+        return (Vec::new(), Vec::new());
+    }
+    let Some(msg) = acceptance_criteria_message(&issue_after.body, new_status) else {
+        return (Vec::new(), Vec::new());
+    };
+    if schema.dod.strict {
+        (Vec::new(), vec![format!("dod: {msg}")])
+    } else {
+        (
+            vec![format!(
+                "dod: {msg} (set `dod.strict: true` in `.schema.yaml` to block)"
+            )],
+            Vec::new(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -418,6 +423,74 @@ mod tests {
         let mut rules = TransitionRules::default();
         rules.status_rules.insert("done".into(), spec);
         rules
+    }
+
+    fn schema_with_dod(strict: bool) -> crate::schema::Schema {
+        let mut s = crate::schema::default_schema();
+        s.dod.strict = strict;
+        s
+    }
+
+    #[test]
+    fn dod_warns_by_default_when_transitioning_to_done_with_unchecked_ac() {
+        let body = "## Acceptance Criteria\n\n- [x] done\n- [ ] pending\n";
+        let issue = make_issue("done", "feature", body);
+        let s = schema_with_dod(false);
+        let (w, e) = evaluate_dod(&s, &issue, "in-progress");
+        assert_eq!(e.len(), 0);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("dod:"));
+    }
+
+    #[test]
+    fn dod_blocks_in_strict_mode() {
+        let body = "## Acceptance Criteria\n\n- [ ] pending\n";
+        let issue = make_issue("done", "feature", body);
+        let s = schema_with_dod(true);
+        let (w, e) = evaluate_dod(&s, &issue, "in-progress");
+        assert_eq!(w.len(), 0);
+        assert_eq!(e.len(), 1);
+    }
+
+    #[test]
+    fn dod_silent_when_ac_fully_checked() {
+        let body = "## Acceptance Criteria\n\n- [x] done\n";
+        let issue = make_issue("done", "feature", body);
+        let s = schema_with_dod(false);
+        let (w, e) = evaluate_dod(&s, &issue, "in-progress");
+        assert!(w.is_empty());
+        assert!(e.is_empty());
+    }
+
+    #[test]
+    fn dod_skipped_for_non_closing_transition() {
+        // open → in-progress is not a "ship-it" moment.
+        let body = "## Acceptance Criteria\n\n- [ ] pending\n";
+        let issue = make_issue("in-progress", "feature", body);
+        let s = schema_with_dod(true);
+        let (w, e) = evaluate_dod(&s, &issue, "open");
+        assert!(w.is_empty());
+        assert!(e.is_empty());
+    }
+
+    #[test]
+    fn dod_skipped_when_already_closing() {
+        // done → wontfix is a closing-to-closing tweak, not a fresh ship.
+        let body = "## Acceptance Criteria\n\n- [ ] pending\n";
+        let issue = make_issue("wontfix", "feature", body);
+        let s = schema_with_dod(true);
+        let (w, e) = evaluate_dod(&s, &issue, "done");
+        assert!(w.is_empty());
+        assert!(e.is_empty());
+    }
+
+    #[test]
+    fn dod_flags_missing_acceptance_section() {
+        let issue = make_issue("done", "feature", "no sections here\n");
+        let s = schema_with_dod(false);
+        let (w, _) = evaluate_dod(&s, &issue, "in-progress");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("missing"));
     }
 
     #[test]

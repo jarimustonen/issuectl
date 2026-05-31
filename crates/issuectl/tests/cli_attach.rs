@@ -43,7 +43,12 @@ fn attach_json_success_emits_bare_payload_on_stdout() {
 
     let out = run(
         tmp.path(),
-        &["--json", "attach", "calm-quiet-otter", src.to_str().unwrap()],
+        &[
+            "--json",
+            "attach",
+            "calm-quiet-otter",
+            src.to_str().unwrap(),
+        ],
     );
     assert_eq!(out.status.code(), Some(0), "{:?}", out);
     assert!(out.stderr.is_empty(), "stderr={:?}", out.stderr);

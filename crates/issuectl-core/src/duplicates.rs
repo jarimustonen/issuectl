@@ -54,9 +54,9 @@ const MIN_TOKEN_LEN: usize = 2;
 const STOPWORDS: &[&str] = &[
     "is", "to", "of", "or", "an", "in", "on", "at", "be", "by", "as", "we", "it", "do", "no", "so",
     "the", "and", "for", "with", "that", "this", "from", "have", "has", "not", "but", "are", "was",
-    "were", "will", "should", "would", "could", "can", "when", "then", "than", "into", "out", "via",
-    "use", "uses", "using", "make", "made", "does", "did", "all", "any", "some", "its", "our",
-    "your", "their",
+    "were", "will", "should", "would", "could", "can", "when", "then", "than", "into", "out",
+    "via", "use", "uses", "using", "make", "made", "does", "did", "all", "any", "some", "its",
+    "our", "your", "their",
 ];
 
 /// `STOPWORDS` as a hash set, built once. Tokenization checks membership
@@ -357,7 +357,12 @@ mod tests {
     #[test]
     fn unrelated_issues_score_zero() {
         let a = issue("a-a", "Login redirect loop", "auth session cookie", &[]);
-        let b = issue("b-b", "Export CSV pagination", "report download offset", &[]);
+        let b = issue(
+            "b-b",
+            "Export CSV pagination",
+            "report download offset",
+            &[],
+        );
         let m = find_duplicates(&a, std::slice::from_ref(&b), 0.0001);
         assert!(m.is_empty(), "got {m:?}");
     }
@@ -396,11 +401,7 @@ mod tests {
         let target = issue("t-t", "alpha beta gamma delta", "", &[]);
         let strong = issue("s-s", "alpha beta gamma delta", "", &[]);
         let weak = issue("w-w", "alpha zulu yankee xray", "", &[]);
-        let m = find_duplicates(
-            &target,
-            vec![&weak, &strong],
-            0.0001,
-        );
+        let m = find_duplicates(&target, vec![&weak, &strong], 0.0001);
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].slug, "s-s", "highest score first");
         assert!(m[0].score >= m[1].score);
@@ -426,7 +427,10 @@ mod tests {
         let a = issue("a-a", "the a an of", "to be or", &[]);
         let b = issue("b-b", "the a an of", "to be or", &[]);
         let m = find_duplicates(&a, std::slice::from_ref(&b), 0.0001);
-        assert!(m.is_empty(), "stop-words must not manufacture a match: {m:?}");
+        assert!(
+            m.is_empty(),
+            "stop-words must not manufacture a match: {m:?}"
+        );
     }
 
     #[test]
@@ -458,7 +462,11 @@ mod tests {
         let b = issue("b-b", "bug crash", "", &[]);
         let m = find_duplicates(&a, std::slice::from_ref(&b), DEFAULT_THRESHOLD);
         assert_eq!(m.len(), 1);
-        assert!((m[0].title_overlap - 1.0).abs() < 1e-9, "got {}", m[0].title_overlap);
+        assert!(
+            (m[0].title_overlap - 1.0).abs() < 1e-9,
+            "got {}",
+            m[0].title_overlap
+        );
     }
 
     #[test]

@@ -356,7 +356,11 @@ mod tests {
 
     #[test]
     fn export_markdown_lists_metadata_and_body() {
-        let md = export(&[issue("amber-loud-fox", "Login loops")], ExportFormat::Markdown).unwrap();
+        let md = export(
+            &[issue("amber-loud-fox", "Login loops")],
+            ExportFormat::Markdown,
+        )
+        .unwrap();
         assert!(md.contains("## Login loops (amber-loud-fox)"));
         assert!(md.contains("- **type**: bug"));
         assert!(md.contains("- **labels**: interop"));

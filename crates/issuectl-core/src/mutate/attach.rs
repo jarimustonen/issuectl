@@ -51,9 +51,7 @@ pub fn attach_files(
     sources: &[PathBuf],
 ) -> Result<AttachReport, MutateError> {
     if sources.is_empty() {
-        return Err(MutateError::Validation(
-            "no files to attach".to_string(),
-        ));
+        return Err(MutateError::Validation("no files to attach".to_string()));
     }
     let _lock = WriteLock::acquire(repo_root).map_err(MutateError::Io)?;
 
@@ -69,9 +67,8 @@ pub fn attach_files(
     // against itself) shouldn't leave a half-finished attachments dir.
     let mut planned: Vec<(PathBuf, String)> = Vec::with_capacity(sources.len());
     for src in sources {
-        let meta = std::fs::symlink_metadata(src).map_err(|e| {
-            MutateError::Validation(format!("cannot stat {}: {e}", src.display()))
-        })?;
+        let meta = std::fs::symlink_metadata(src)
+            .map_err(|e| MutateError::Validation(format!("cannot stat {}: {e}", src.display())))?;
         if meta.is_dir() {
             return Err(MutateError::Validation(format!(
                 "{} is a directory; attach takes files only",
@@ -224,10 +221,7 @@ mod tests {
         assert_eq!(fs::read(att_dir.join("shot.png")).unwrap(), b"PNGDATA");
         assert_eq!(fs::read(att_dir.join("log.txt")).unwrap(), b"hello");
         assert!(report.attached.iter().all(|f| !f.renamed));
-        assert_eq!(
-            report.dir,
-            PathBuf::from("issues/calm-quiet-otter")
-        );
+        assert_eq!(report.dir, PathBuf::from("issues/calm-quiet-otter"));
         assert_eq!(report.attached[0].bytes, b"PNGDATA".len() as u64);
         assert_eq!(
             report.attached[0].path,
@@ -301,9 +295,12 @@ mod tests {
     #[test]
     fn missing_source_is_a_validation_error() {
         let tmp = repo_with_issue("calm-quiet-otter");
-        let err =
-            attach_files(tmp.path(), "calm-quiet-otter", &[PathBuf::from("/no/such/file")])
-                .unwrap_err();
+        let err = attach_files(
+            tmp.path(),
+            "calm-quiet-otter",
+            &[PathBuf::from("/no/such/file")],
+        )
+        .unwrap_err();
         assert!(matches!(err, MutateError::Validation(_)));
     }
 

@@ -43,7 +43,10 @@ fn stdout(out: &Output) -> String {
 #[test]
 fn export_csv_lists_open_issues_with_header() {
     let repo = fresh_repo();
-    run(repo.path(), &["new", "--type", "bug", "--title", "First bug"]);
+    run(
+        repo.path(),
+        &["new", "--type", "bug", "--title", "First bug"],
+    );
     let out = stdout(&run(repo.path(), &["export", "csv"]));
     let mut lines = out.lines();
     assert_eq!(
@@ -58,8 +61,22 @@ fn export_csv_lists_open_issues_with_header() {
 #[test]
 fn export_json_round_trips_through_import_into_fresh_repo() {
     let src = fresh_repo();
-    run(src.path(), &["new", "--type", "bug", "--title", "Login loops", "--assignee", "bob"]);
-    run(src.path(), &["new", "--type", "feature", "--title", "Dark mode"]);
+    run(
+        src.path(),
+        &[
+            "new",
+            "--type",
+            "bug",
+            "--title",
+            "Login loops",
+            "--assignee",
+            "bob",
+        ],
+    );
+    run(
+        src.path(),
+        &["new", "--type", "feature", "--title", "Dark mode"],
+    );
     let json = stdout(&run(src.path(), &["export", "json"]));
 
     let dst = fresh_repo();
@@ -87,7 +104,13 @@ fn import_json_default_type_applies_when_omitted() {
     std::fs::write(&file, r#"[{"title":"Typeless"}]"#).unwrap();
     run(
         repo.path(),
-        &["import", "json", file.to_str().unwrap(), "--default-type", "chore"],
+        &[
+            "import",
+            "json",
+            file.to_str().unwrap(),
+            "--default-type",
+            "chore",
+        ],
     );
     let csv = stdout(&run(repo.path(), &["export", "csv"]));
     assert!(csv.contains(",chore,open,"), "{csv}");
@@ -105,7 +128,10 @@ fn import_json_missing_title_fails_with_exit_1() {
 #[test]
 fn export_markdown_includes_heading_and_metadata() {
     let repo = fresh_repo();
-    run(repo.path(), &["new", "--type", "bug", "--title", "Crash on boot"]);
+    run(
+        repo.path(),
+        &["new", "--type", "bug", "--title", "Crash on boot"],
+    );
     let md = stdout(&run(repo.path(), &["export", "markdown"]));
     assert!(md.starts_with("# Issues"), "{md}");
     assert!(md.contains("## Crash on boot ("), "{md}");

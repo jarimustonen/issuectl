@@ -2689,35 +2689,35 @@ fn rewrite_text(
         text,
         crate::body_sections::RewriteSkips::code_only(),
         |seg| {
-        // heading_re is line-anchored, but a prose segment that
-        // starts at a line beginning (the common case for legacy
-        // `# E10. Title` headings — which never contain inline code
-        // or link URLs in the heading number/dot) still matches the
-        // pattern. If the segment doesn't begin a line, `^` simply
-        // doesn't fire and the segment passes through.
-        let seg = heading_re.replace(seg, "$1$2");
-        let seg = ref_re.replace_all(&seg, |caps: &Captures| {
-            let n: u32 = match caps[1].parse() {
-                Ok(v) => v,
-                Err(_) => return caps[0].to_string(),
-            };
-            if ambiguous_numbers.contains(&n) {
-                return caps[0].to_string();
+            // heading_re is line-anchored, but a prose segment that
+            // starts at a line beginning (the common case for legacy
+            // `# E10. Title` headings — which never contain inline code
+            // or link URLs in the heading number/dot) still matches the
+            // pattern. If the segment doesn't begin a line, `^` simply
+            // doesn't fire and the segment passes through.
+            let seg = heading_re.replace(seg, "$1$2");
+            let seg = ref_re.replace_all(&seg, |caps: &Captures| {
+                let n: u32 = match caps[1].parse() {
+                    Ok(v) => v,
+                    Err(_) => return caps[0].to_string(),
+                };
+                if ambiguous_numbers.contains(&n) {
+                    return caps[0].to_string();
+                }
+                match number_to_slug.get(&n) {
+                    Some(s) => format!("@{s}"),
+                    None => caps[0].to_string(),
+                }
+            });
+            let mut s = seg.into_owned();
+            for (re, new) in &dir_regexes {
+                s = re
+                    .replace_all(&s, |caps: &Captures| {
+                        format!("{}{}{}", &caps[1], new, &caps[2])
+                    })
+                    .to_string();
             }
-            match number_to_slug.get(&n) {
-                Some(s) => format!("@{s}"),
-                None => caps[0].to_string(),
-            }
-        });
-        let mut s = seg.into_owned();
-        for (re, new) in &dir_regexes {
-            s = re
-                .replace_all(&s, |caps: &Captures| {
-                    format!("{}{}{}", &caps[1], new, &caps[2])
-                })
-                .to_string();
-        }
-        s
+            s
         },
     )
 }
@@ -3799,7 +3799,10 @@ mod tests {
         let amb = BTreeSet::new();
         let text = "use `#7` literally, but rewrite #7 here.\n";
         let out = rewrite_text(text, &nm, &dm, &amb);
-        assert_eq!(out, "use `#7` literally, but rewrite @amber-loud-fox here.\n");
+        assert_eq!(
+            out,
+            "use `#7` literally, but rewrite @amber-loud-fox here.\n"
+        );
     }
 
     #[test]

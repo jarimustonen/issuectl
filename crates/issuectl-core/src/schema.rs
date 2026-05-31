@@ -82,6 +82,25 @@ pub struct Schema {
     /// [`status_aliases`](Self::status_aliases).
     #[serde(default)]
     pub type_aliases: BTreeMap<String, String>,
+    /// Definition-of-Done gate configuration. When `strict` is true, a
+    /// transition into a closing status with unchecked items in
+    /// `## Acceptance Criteria` is rejected. When false (default),
+    /// the same condition surfaces as a warning. Heading and parser
+    /// live in [`crate::body`]; only the gate's *severity* is
+    /// configurable. Zero frontmatter changes — the gate reads the
+    /// body, not custom YAML fields.
+    #[serde(default)]
+    pub dod: DodConfig,
+}
+
+/// Severity knob for the Definition-of-Done gate. Default = warn.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DodConfig {
+    /// When true, the gate blocks the write; otherwise it surfaces as
+    /// a non-fatal warning.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 /// Lifecycle classification for a status value.
@@ -333,6 +352,7 @@ pub(crate) fn load_uncached(root: &Path) -> Result<Schema> {
     for (from, to) in user.type_aliases {
         merged.type_aliases.insert(from, to);
     }
+    merged.dod = user.dod;
     // Drop inherited built-in aliases whose target fell outside a
     // user-narrowed field enum. The alias merge has no removal semantics,
     // so a project that narrows `status`/`type` cannot delete a now-stale
@@ -419,7 +439,10 @@ fn validate_loadability(schema: &Schema) -> Result<()> {
     }
     validate_alias_map(
         "status",
-        schema.fields.get("status").and_then(|s| s.allowed.as_deref()),
+        schema
+            .fields
+            .get("status")
+            .and_then(|s| s.allowed.as_deref()),
         &schema.status_aliases,
         "status_aliases",
     )?;
@@ -1227,8 +1250,9 @@ mod tests {
             serde_yaml::from_str("type: bug\nstatus: done\npriority: normal\n").unwrap();
         let v = validate(&schema, &fm);
         assert!(
-            v.iter()
-                .any(|x| matches!(x, ViolationKind::RequiredWhen { field, .. } if field == "closed")),
+            v.iter().any(
+                |x| matches!(x, ViolationKind::RequiredWhen { field, .. } if field == "closed")
+            ),
             "expected RequiredWhen for closed on a closing status, got {v:?}"
         );
     }
@@ -1236,13 +1260,13 @@ mod tests {
     #[test]
     fn validate_required_when_satisfied_by_present_closed() {
         let schema = default_schema();
-        let fm: Mapping = serde_yaml::from_str(
-            "type: bug\nstatus: done\npriority: normal\nclosed: 2026-05-06\n",
-        )
-        .unwrap();
+        let fm: Mapping =
+            serde_yaml::from_str("type: bug\nstatus: done\npriority: normal\nclosed: 2026-05-06\n")
+                .unwrap();
         let v = validate(&schema, &fm);
         assert!(
-            !v.iter().any(|x| matches!(x, ViolationKind::RequiredWhen { .. })),
+            !v.iter()
+                .any(|x| matches!(x, ViolationKind::RequiredWhen { .. })),
             "closed present must satisfy required_when, got {v:?}"
         );
     }
@@ -1254,7 +1278,8 @@ mod tests {
             serde_yaml::from_str("type: bug\nstatus: open\npriority: normal\n").unwrap();
         let v = validate(&schema, &fm);
         assert!(
-            !v.iter().any(|x| matches!(x, ViolationKind::RequiredWhen { .. })),
+            !v.iter()
+                .any(|x| matches!(x, ViolationKind::RequiredWhen { .. })),
             "active status must not trigger closed required_when, got {v:?}"
         );
     }
@@ -1268,7 +1293,9 @@ mod tests {
         let schema: Schema = serde_yaml::from_str(yaml).unwrap();
         // The user schema above has no `fields`, so merge with defaults.
         let mut merged = default_schema();
-        merged.status_classes.insert("done".into(), StatusClass::Active);
+        merged
+            .status_classes
+            .insert("done".into(), StatusClass::Active);
         let fm: Mapping =
             serde_yaml::from_str("type: bug\nstatus: done\npriority: normal\n").unwrap();
         assert!(
@@ -1434,7 +1461,10 @@ mod tests {
         assert_eq!(status_alias_target(&schema, "closed"), None);
         assert_eq!(would_coerce(&schema, "status", "closed"), None);
         // `in_progress → in-progress` survives (target still in enum).
-        assert_eq!(status_alias_target(&schema, "in_progress"), Some("in-progress"));
+        assert_eq!(
+            status_alias_target(&schema, "in_progress"),
+            Some("in-progress")
+        );
     }
 
     #[test]

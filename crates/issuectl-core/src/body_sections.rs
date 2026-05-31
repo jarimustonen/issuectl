@@ -260,12 +260,11 @@ fn skip_regions_regex(skips: RewriteSkips) -> Option<&'static Regex> {
                 .expect("valid skip regex")
         })),
         (true, false) => Some(CODE_ONLY.get_or_init(|| {
-            Regex::new(r"```[^`\n]+```|``[^`\n]+``|`[^`\n]+`")
-                .expect("valid skip regex")
+            Regex::new(r"```[^`\n]+```|``[^`\n]+``|`[^`\n]+`").expect("valid skip regex")
         })),
-        (false, true) => Some(URLS_ONLY.get_or_init(|| {
-            Regex::new(r"\]\([^)\n]*\)").expect("valid skip regex")
-        })),
+        (false, true) => {
+            Some(URLS_ONLY.get_or_init(|| Regex::new(r"\]\([^)\n]*\)").expect("valid skip regex")))
+        }
         (false, false) => None,
     }
 }

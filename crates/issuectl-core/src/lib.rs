@@ -23,6 +23,8 @@ pub mod agents;
 #[doc(hidden)]
 pub mod boards;
 #[doc(hidden)]
+pub mod body;
+#[doc(hidden)]
 pub mod body_sections;
 #[doc(hidden)]
 pub mod canonical;
@@ -31,9 +33,9 @@ pub mod context;
 #[doc(hidden)]
 pub mod docs;
 #[doc(hidden)]
-pub mod duplicates;
-#[doc(hidden)]
 pub mod doctor;
+#[doc(hidden)]
+pub mod duplicates;
 #[doc(hidden)]
 pub mod fmt;
 #[doc(hidden)]

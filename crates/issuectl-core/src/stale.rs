@@ -133,10 +133,7 @@ pub(crate) fn parse_date(s: &str) -> Option<NaiveDate> {
 /// fallback in [`last_activity`]. Returns an empty map outside a git
 /// repo (the walk fails or finds nothing), so callers fall back to
 /// `created`, matching the per-issue behavior this replaced.
-fn batch_git_last_commit_dates(
-    repo_root: &Path,
-    issues: &[Issue],
-) -> HashMap<String, NaiveDate> {
+fn batch_git_last_commit_dates(repo_root: &Path, issues: &[Issue]) -> HashMap<String, NaiveDate> {
     // Map each candidate's repo-relative item.md path back to its slug.
     let mut slug_by_rel: HashMap<PathBuf, String> = HashMap::new();
     for issue in issues {
@@ -260,7 +257,11 @@ mod tests {
         let report = find_stale_at(Path::new("/nonexistent"), &issues, 30, today());
         // most-stale-first: the older `open` sorts ahead of the newer WIP
         assert_eq!(report.stale[0].slug, "open-older-newt");
-        let wip = report.stale.iter().find(|s| s.slug == "wip-old-stag").unwrap();
+        let wip = report
+            .stale
+            .iter()
+            .find(|s| s.slug == "wip-old-stag")
+            .unwrap();
         assert!(wip.in_progress);
         let plain = report
             .stale
@@ -332,8 +333,7 @@ mod tests {
             issue_no_updated("beta-new-owl"),
         ];
         let report = find_stale_at(root, &issues, 30, today());
-        let by_slug: HashMap<_, _> =
-            report.stale.iter().map(|s| (s.slug.as_str(), s)).collect();
+        let by_slug: HashMap<_, _> = report.stale.iter().map(|s| (s.slug.as_str(), s)).collect();
         let alpha = by_slug["alpha-old-fox"];
         assert_eq!(alpha.source, "git");
         assert_eq!(alpha.last_activity, "2025-01-15");
@@ -366,7 +366,10 @@ mod tests {
 
     #[test]
     fn parse_date_accepts_bare_and_rfc3339_prefix() {
-        assert_eq!(parse_date("2026-05-06"), NaiveDate::from_ymd_opt(2026, 5, 6));
+        assert_eq!(
+            parse_date("2026-05-06"),
+            NaiveDate::from_ymd_opt(2026, 5, 6)
+        );
         assert_eq!(
             parse_date("2026-05-06T12:30:00Z"),
             NaiveDate::from_ymd_opt(2026, 5, 6)

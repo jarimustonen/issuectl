@@ -129,11 +129,11 @@ fn json_error_contract_emits_structured_error() {
     let out = run(tmp.path(), &["--json", "show", "does-not-exist"]);
     assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
     assert!(out.stdout.is_empty(), "{}", dump(&out));
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stderr).expect("stderr should be JSON");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr should be JSON");
     assert_eq!(v["error"]["code"], "not-found", "{}", dump(&out));
     assert_eq!(
-        v["error"]["message"], "issue does-not-exist not found",
+        v["error"]["message"],
+        "issue does-not-exist not found",
         "{}",
         dump(&out)
     );
@@ -148,8 +148,7 @@ fn json_error_contract_wraps_clap_usage_errors() {
     let out = run(tmp.path(), &["--json", "show", "ab-cd", "--bogus-flag"]);
     assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
     assert!(out.stdout.is_empty(), "{}", dump(&out));
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stderr).expect("stderr should be JSON");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr should be JSON");
     assert_eq!(v["error"]["code"], "usage-error", "{}", dump(&out));
 }
 
@@ -166,8 +165,7 @@ fn json_error_contract_wraps_bubbled_errors() {
     );
     assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
     assert!(out.stdout.is_empty(), "{}", dump(&out));
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stderr).expect("stderr should be JSON");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr should be JSON");
     assert_eq!(v["error"]["code"], "command-failed", "{}", dump(&out));
     assert!(
         v["error"]["message"]

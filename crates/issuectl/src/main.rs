@@ -340,6 +340,17 @@ enum Command {
     /// Show summary statistics
     Stats,
 
+    /// Report Definition-of-Done completion for an issue. Parses the
+    /// canonical `## Acceptance Criteria`, `## Tests Run`, and
+    /// `## Implementation Notes` sections, counts checked / unchecked
+    /// task-list items, and exits 0 when the AC section is fully
+    /// checked, 1 otherwise. Use `--json` for machine-readable output.
+    Ready {
+        /// Issue slug
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+    },
+
     /// Flag likely-duplicate issues using local heuristics (title,
     /// label, and body-token overlap — no remote AI). With a SLUG,
     /// reports issues similar to that one; without, scans all pairs.
@@ -1199,7 +1210,10 @@ enum SkillAction {
 fn json_error_value(code: &str, message: &str, extra: serde_json::Value) -> serde_json::Value {
     let mut err = serde_json::Map::new();
     err.insert("code".into(), serde_json::Value::String(code.to_string()));
-    err.insert("message".into(), serde_json::Value::String(message.to_string()));
+    err.insert(
+        "message".into(),
+        serde_json::Value::String(message.to_string()),
+    );
     if let serde_json::Value::Object(map) = extra {
         for (k, v) in map {
             err.insert(k, v);
@@ -1254,7 +1268,11 @@ fn main() -> Result<()> {
                         | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
                 )
             {
-                emit_json_error("usage-error", e.to_string().trim_end(), serde_json::Value::Null);
+                emit_json_error(
+                    "usage-error",
+                    e.to_string().trim_end(),
+                    serde_json::Value::Null,
+                );
                 std::process::exit(1);
             }
             e.exit();
@@ -1305,11 +1323,8 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             closed,
         ),
         Command::Show { slug } => cmd_show(json_output, &slug),
-        Command::Open {
-            slug,
-            dir,
-            editor,
-        } => cmd_open(json_output, &slug, dir, editor),
+        Command::Ready { slug } => cmd_ready(json_output, &slug),
+        Command::Open { slug, dir, editor } => cmd_open(json_output, &slug, dir, editor),
         Command::Attach { slug, files } => cmd_attach(json_output, &slug, files),
         Command::Search { query, all } => cmd_search(json_output, &query, all),
         Command::Stats => cmd_stats(json_output),
@@ -1876,6 +1891,91 @@ fn cmd_show(json: bool, slug: &str) -> Result<()> {
     }
 }
 
+/// Report Definition-of-Done completion for one issue. Routes through
+/// the shared parser in `issuectl_core::body` so the output matches
+/// what the schema-level DoD gate (in `transitions::evaluate_dod`)
+/// would see at write time. Exits 0 when `## Acceptance Criteria` is
+/// present and fully checked, 1 otherwise — agents can gate a
+/// "ready to mark done" step on `issuectl ready <slug>`.
+fn cmd_ready(json: bool, slug: &str) -> Result<()> {
+    use issuectl_core::body::DodReport;
+    let issues = load();
+    let Some(issue) = issues.into_iter().find(|i| i.slug == slug) else {
+        fail(
+            json,
+            1,
+            "not-found",
+            &format!("issue {slug} not found"),
+            serde_json::Value::Null,
+        );
+    };
+    let report = DodReport::from_body(&issue.body);
+    let ready = report.acceptance.fully_checked();
+
+    if json {
+        let section_json = |s: &issuectl_core::body::SectionStatus| {
+            serde_json::json!({
+                "present": s.present,
+                "total": s.total(),
+                "checked": s.checked(),
+                "unchecked_items": s.unchecked_items()
+                    .into_iter()
+                    .map(|c| c.text.clone())
+                    .collect::<Vec<_>>(),
+            })
+        };
+        let v = serde_json::json!({
+            "slug": issue.slug,
+            "status": issue.status,
+            "ready": ready,
+            "acceptance_criteria": section_json(&report.acceptance),
+            "tests_run": section_json(&report.tests),
+            "implementation_notes": serde_json::json!({
+                "present": report.notes.present,
+            }),
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else {
+        println!("issue: {} ({})", issue.slug, issue.status);
+        println!("ready: {ready}");
+        println!(
+            "  Acceptance Criteria: {} of {} checked{}",
+            report.acceptance.checked(),
+            report.acceptance.total(),
+            if !report.acceptance.present {
+                " (section missing)"
+            } else {
+                ""
+            },
+        );
+        for u in report.acceptance.unchecked_items() {
+            println!("    [ ] {}", u.text);
+        }
+        println!(
+            "  Tests Run: {} of {} checked{}",
+            report.tests.checked(),
+            report.tests.total(),
+            if !report.tests.present {
+                " (section missing)"
+            } else {
+                ""
+            },
+        );
+        println!(
+            "  Implementation Notes: {}",
+            if report.notes.present {
+                "present"
+            } else {
+                "missing"
+            },
+        );
+    }
+    if !ready {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// Open an issue's `item.md` (or its directory with `--dir`) in an
 /// editor. The issue is a real file on disk, so we just resolve the
 /// path and hand it to the editor. With `--json` we print the resolved
@@ -1910,12 +2010,18 @@ fn cmd_open(json: bool, slug: &str, dir: bool, editor: Option<String>) -> Result
     }
 
     let editor = editor
-        .or_else(|| std::env::var("VISUAL").ok().filter(|s| !s.trim().is_empty()))
-        .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| {
+            std::env::var("VISUAL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .or_else(|| {
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no editor configured; pass --editor <cmd> or set $VISUAL / $EDITOR"
-            )
+            anyhow::anyhow!("no editor configured; pass --editor <cmd> or set $VISUAL / $EDITOR")
         })?;
 
     // Hand the editor string to `sh -c` so shell quoting works the way
@@ -1962,7 +2068,11 @@ fn cmd_attach(json: bool, slug: &str, files: Vec<PathBuf>) -> Result<()> {
             } else {
                 String::new()
             };
-            println!("  {} -> {}{rename_note}", f.source.display(), f.path.display());
+            println!(
+                "  {} -> {}{rename_note}",
+                f.source.display(),
+                f.path.display()
+            );
         }
     }
     Ok(())
@@ -2064,12 +2174,7 @@ fn cmd_stats(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_duplicates(
-    json: bool,
-    slug: Option<&str>,
-    threshold: Option<f64>,
-    all: bool,
-) -> Result<()> {
+fn cmd_duplicates(json: bool, slug: Option<&str>, threshold: Option<f64>, all: bool) -> Result<()> {
     let threshold = threshold.unwrap_or(duplicates::DEFAULT_THRESHOLD);
     let issues = load();
 
@@ -2866,7 +2971,9 @@ fn read_capped<R: std::io::Read>(
         // Surface the byte offset so an agent (or human) can locate the
         // bad byte instead of guessing across a multi-megabyte input.
         let offset = e.utf8_error().valid_up_to();
-        anyhow::anyhow!("{what} from {source} is not valid UTF-8 (first invalid byte at offset {offset})")
+        anyhow::anyhow!(
+            "{what} from {source} is not valid UTF-8 (first invalid byte at offset {offset})"
+        )
     })
 }
 
@@ -2877,7 +2984,9 @@ fn read_capped_stdin(what: &str) -> Result<String> {
     use std::io::IsTerminal;
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
-        bail!("stdin is a terminal; pipe the {what} text in, or pass a real file path to --from-file");
+        bail!(
+            "stdin is a terminal; pipe the {what} text in, or pass a real file path to --from-file"
+        );
     }
     read_capped(stdin.lock(), MAX_INPUT_BYTES, what, "stdin")
 }
