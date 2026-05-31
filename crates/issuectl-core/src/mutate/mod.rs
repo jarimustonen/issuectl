@@ -19,6 +19,7 @@
 //! mutate state.
 
 pub mod archive;
+pub mod attach;
 pub mod new_issue;
 
 use std::fs::{self, File, OpenOptions};

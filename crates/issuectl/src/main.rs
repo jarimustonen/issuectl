@@ -25,6 +25,7 @@ Examples:
   issuectl new --type bug --title \"...\"    Create a new issue (random slug)
   issuectl update <slug> --status testing  Change status
   issuectl close <slug> --status fixed     Set a closing status (fixed/done/...)
+  issuectl attach <slug> shot.png log.txt  Copy files into the issue's attachments/
   issuectl bulk \"label:stale\" --set status=wontfix  Mutate every matched issue
   issuectl export json > issues.json       Export issues (json/markdown/csv)
   issuectl import json issues.json          Import issues from a JSON file
@@ -308,6 +309,21 @@ enum Command {
         /// e.g. `--editor "code -w"`.
         #[arg(long, value_parser = parse_non_empty)]
         editor: Option<String>,
+    },
+
+    /// Copy one or more files into an issue's `attachments/` directory,
+    /// creating the directory on demand. Each FILE is copied under its
+    /// basename; collisions are auto-renamed with a numeric suffix
+    /// (`shot.png` → `shot-1.png`) so a batch attach never bails halfway.
+    /// `--json` reports the per-file outcomes (including `renamed`).
+    Attach {
+        /// Issue slug
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+
+        /// One or more source files to copy in
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<PathBuf>,
     },
 
     /// Search issues by keyword in title, slug, and body
@@ -1288,6 +1304,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             dir,
             editor,
         } => cmd_open(json_output, &slug, dir, editor),
+        Command::Attach { slug, files } => cmd_attach(json_output, &slug, files),
         Command::Search { query, all } => cmd_search(json_output, &query, all),
         Command::Stats => cmd_stats(json_output),
         Command::Duplicates {
@@ -1912,6 +1929,35 @@ fn cmd_open(json: bool, slug: &str, dir: bool, editor: Option<String>) -> Result
         // Propagate the editor's own exit code so callers can tell, e.g.,
         // a vim `:cq` abort from a crash.
         std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+/// Copy `files` into `issues/<slug>/attachments/`. Thin shim over
+/// `mutate::attach::attach_files`; collision handling, lock acquisition,
+/// and the per-file outcome shape all live there.
+fn cmd_attach(json: bool, slug: &str, files: Vec<PathBuf>) -> Result<()> {
+    let root = find_root();
+    let report = match mutate::attach::attach_files(&root, slug, &files) {
+        Ok(r) => r,
+        Err(mutate::MutateError::Validation(msg)) => {
+            fail(json, 1, "validation", &msg, serde_json::Value::Null);
+        }
+        Err(e) => return Err(anyhow::anyhow!("{e}")),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("Attached {} file(s) to @{slug}:", report.attached.len());
+        for f in &report.attached {
+            let rename_note = if f.renamed {
+                format!(" (renamed from {})", f.original_name)
+            } else {
+                String::new()
+            };
+            println!("  {} -> {}{rename_note}", f.source.display(), f.path.display());
+        }
     }
     Ok(())
 }
