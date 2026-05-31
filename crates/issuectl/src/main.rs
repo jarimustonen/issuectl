@@ -385,7 +385,13 @@ enum Command {
         #[arg(long, value_parser = parse_non_empty)]
         owner: Option<String>,
 
-        /// Priority
+        /// Priority. Two values by design: `high` means "jumps the queue",
+        /// `normal` means everything else. The schema deliberately omits
+        /// `low`/`medium`/`critical` — `low` items belong in a
+        /// `wontfix`/`obsolete` close or a backlog label, and `critical`
+        /// incidents are handled out-of-band (paging, hotfix). Repos that
+        /// need finer gradations can widen the enum in
+        /// `issues/.schema.yaml`; see `docs/design/frontmatter-schema.md`.
         #[arg(short = 'p', long, default_value = "normal", value_parser = PossibleValuesParser::new(PRIORITIES))]
         priority: String,
 

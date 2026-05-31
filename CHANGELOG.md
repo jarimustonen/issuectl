@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- Document the rationale for the two-value priority enum
+  (`normal`/`high`) in `docs/design/frontmatter-schema.md`, the
+  `PRIORITIES` constant, and `issuectl new --help`: triage cost,
+  why `low` and `critical` are intentionally omitted, and how to
+  widen the enum per-repo via `issues/.schema.yaml`.
+
 ### Added
 - `issuectl bulk '<query>'` applies one mutation to every issue matching a
   query (same syntax as `ls`/`search`), in a single batch the user commits
