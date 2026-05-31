@@ -308,15 +308,6 @@ pub fn burndown_for(issues: &[Issue], cycle: &str, today: NaiveDate) -> Burndown
         .filter(|i| issue_cycle(i) == Some(cycle))
         .collect();
 
-    let mut total = 0.0_f64;
-    let mut unestimated = 0_usize;
-    for i in &in_scope {
-        match issue_estimate(i).points() {
-            Some(p) => total += p,
-            None => unestimated += 1,
-        }
-    }
-
     let (start, end, iso_week) = match parse_iso_week(cycle) {
         Some((s, e)) => (s, e, true),
         None => {
@@ -334,21 +325,49 @@ pub fn burndown_for(issues: &[Issue], cycle: &str, today: NaiveDate) -> Burndown
         }
     };
 
+    // Precompute per-issue (points, close_date) once. The burndown loop
+    // is O(scope * span_days); without precomputing, `issue_estimate`
+    // walks `extra` and reallocates a `Size` string on every iteration.
+    // Issues closed *before* the cycle start are excluded from `total`
+    // entirely — otherwise Day 0 `remaining` would start visibly below
+    // the ideal line on day 0 (they "completed" before the cycle began).
+    let scope: Vec<(f64, Option<NaiveDate>, bool)> = in_scope
+        .iter()
+        .map(|i| {
+            let pts = issue_estimate(i).points();
+            // For a closed issue, fall back to `updated` then to the
+            // cycle start: a closed-without-`closed:` issue counts as
+            // done at the earliest representable moment rather than
+            // floating forever in the burndown.
+            let close_date = if i.folder == "closed" {
+                Some(
+                    i.closed
+                        .as_deref()
+                        .or(i.updated.as_deref())
+                        .and_then(parse_ymd)
+                        .unwrap_or(start),
+                )
+            } else {
+                None
+            };
+            (pts.unwrap_or(0.0), close_date, pts.is_some())
+        })
+        .collect();
+    let unestimated = scope.iter().filter(|(_, _, has)| !*has).count();
+    let total: f64 = scope
+        .iter()
+        .filter(|(_, close, _)| close.map(|d| d >= start).unwrap_or(true))
+        .map(|(p, _, _)| *p)
+        .sum();
+
     let mut days = Vec::new();
     let span_days = (end - start).num_days().max(0) as usize;
     for offset in 0..=span_days {
         let day = start + Duration::days(offset as i64);
-        let closed_pts: f64 = in_scope
+        let closed_pts: f64 = scope
             .iter()
-            .filter(|i| {
-                i.folder == "closed"
-                    && i.closed
-                        .as_deref()
-                        .and_then(parse_ymd)
-                        .map(|d| d <= day)
-                        .unwrap_or(false)
-            })
-            .map(|i| issue_estimate(i).points().unwrap_or(0.0))
+            .filter(|(_, close, _)| close.map(|d| d >= start && d <= day).unwrap_or(false))
+            .map(|(p, _, _)| *p)
             .sum();
         let remaining = (total - closed_pts).max(0.0);
         let ideal = if span_days == 0 {
@@ -405,13 +424,17 @@ pub fn render_ascii(b: &Burndown) -> String {
         return out;
     }
     let max = b.total.max(1.0);
-    let bar_width = 30_f64;
+    let bar_width: usize = 30;
+    let bar_width_f = bar_width as f64;
+    let last_slot = (bar_width - 1) as f64;
     for d in &b.days {
-        let bar_len = (d.remaining / max * bar_width)
+        let bar_len = (d.remaining / max * bar_width_f)
             .round()
-            .clamp(0.0, bar_width) as usize;
-        let ideal_pos = (d.ideal / max * bar_width).round().clamp(0.0, bar_width) as usize;
-        let mut bar = vec![' '; bar_width as usize];
+            .clamp(0.0, bar_width_f) as usize;
+        // Index, not length — clamp to the last char slot so the ideal
+        // marker on the very last day lands inside the bar.
+        let ideal_pos = (d.ideal / max * last_slot).round().clamp(0.0, last_slot) as usize;
+        let mut bar = vec![' '; bar_width];
         for slot in bar.iter_mut().take(bar_len) {
             *slot = '#';
         }
@@ -633,6 +656,37 @@ mod tests {
         assert!(s.contains("Scope: 1 issues"));
         // 7 day rows + header + scope line + legend ≥ 10 lines
         assert!(s.lines().count() >= 10);
+    }
+
+    #[test]
+    fn burndown_excludes_issues_closed_before_cycle_start() {
+        // A pre-cycle close shouldn't deflate Day 0 below the ideal —
+        // its points are simply out of scope.
+        let mut a = with_cycle(with_size(mk("a"), "M"), "2026-W22"); // 3 pts
+        a.folder = "closed".into();
+        a.closed = Some("2026-05-10".into()); // before W22 (Mon=2026-05-25)
+        let b = with_cycle(with_size(mk("b"), "S"), "2026-W22"); // 1 pt, open
+        let today = NaiveDate::from_ymd_opt(2026, 5, 28).unwrap();
+        let bd = burndown_for(&[a, b], "2026-W22", today);
+        assert_eq!(bd.total, 1.0);
+        for d in &bd.days {
+            assert_eq!(d.remaining, 1.0);
+        }
+    }
+
+    #[test]
+    fn burndown_closed_without_close_date_burns_on_start() {
+        // A closed issue with no `closed:` stamp falls back to start
+        // rather than floating forever in the chart.
+        let mut a = with_cycle(with_size(mk("a"), "M"), "2026-W22"); // 3 pts
+        a.folder = "closed".into();
+        // No `closed:` field, no `updated:`.
+        let today = NaiveDate::from_ymd_opt(2026, 5, 28).unwrap();
+        let bd = burndown_for(&[a], "2026-W22", today);
+        // Counts in total (close_date defaults to start, which is >= start)
+        assert_eq!(bd.total, 3.0);
+        // And is subtracted on day 0.
+        assert_eq!(bd.days[0].remaining, 0.0);
     }
 
     #[test]

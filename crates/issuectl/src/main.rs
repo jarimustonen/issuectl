@@ -2818,7 +2818,15 @@ fn cmd_schedule_run(json: bool, dry_run: bool) -> Result<()> {
 fn cmd_workload(json: bool) -> Result<()> {
     let issues = load();
     let w = estimate_mod::workload(&issues);
-    let mixed = estimate_mod::mixed_issues(&issues);
+    // Only flag mixed on the same scope `workload` rolls up (open +
+    // in-progress) — long-closed issues with both fields aren't
+    // actionable noise on the user's current load summary.
+    let open_issues: Vec<_> = issues
+        .iter()
+        .filter(|i| i.folder != "closed")
+        .cloned()
+        .collect();
+    let mixed = estimate_mod::mixed_issues(&open_issues);
 
     if json {
         let out = serde_json::json!({
@@ -2840,10 +2848,21 @@ fn cmd_workload(json: bool) -> Result<()> {
         w.total, w.total_points, w.unestimated
     );
     if !mixed.is_empty() {
+        const SHOW: usize = 5;
+        let shown = mixed
+            .iter()
+            .take(SHOW)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let suffix = if mixed.len() > SHOW {
+            format!(" (and {} more)", mixed.len() - SHOW)
+        } else {
+            String::new()
+        };
         println!(
-            "warning: {} issue(s) carry both `size:` and `estimate:` — pick one (preferring `estimate`): {}",
-            mixed.len(),
-            mixed.join(", ")
+            "warning: {} issue(s) carry both `size:` and `estimate:` — pick one (preferring `estimate`): {shown}{suffix}",
+            mixed.len()
         );
     }
     print_workload_rows("By assignee", &w.by_assignee);
