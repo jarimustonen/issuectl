@@ -9,8 +9,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::repo_config::UncachedConfig;
 use issuectl_core::{
-    agents, body_sections, canonical, context, docs, doctor, duplicates, fmt, hooks,
-    init as init_cmd, merge_driver, models, mutate, query, repo, server, skill, slug, sync_commits,
+    agents, body_sections, canonical, context, cycle as cycle_mod, docs, doctor, duplicates, fmt,
+    hooks, init as init_cmd, merge_driver, models, mutate, query, repo, server, skill, slug,
+    sync_commits,
 };
 
 const TOP_LEVEL_HELP: &str = "\
@@ -27,6 +28,8 @@ Examples:
   issuectl close <slug> --status fixed     Set a closing status (fixed/done/...)
   issuectl attach <slug> shot.png log.txt  Copy files into the issue's attachments/
   issuectl bulk \"label:stale\" --set status=wontfix  Mutate every matched issue
+  issuectl cycle current                   Print current ISO-week cycle label
+  issuectl cycle status                    Open/closed rollup for current cycle
   issuectl export json > issues.json       Export issues (json/markdown/csv)
   issuectl import json issues.json          Import issues from a JSON file
   issuectl import github --repo o/r         Import open GitHub issues via gh
@@ -1041,6 +1044,17 @@ enum Command {
         #[command(subcommand)]
         source: ImportSource,
     },
+
+    /// Linear-style lightweight cycles (iterations).
+    ///
+    /// Issues opt in via an optional `cycle:` frontmatter label
+    /// (e.g. `cycle: 2026-W22`). Set it with `issuectl set <slug>
+    /// cycle 2026-W22`. There is no cycle catalog — the label is
+    /// whatever string the team chose.
+    Cycle {
+        #[command(subcommand)]
+        action: CycleAction,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -1058,6 +1072,44 @@ impl From<ExportFmt> for issuectl_core::transfer::ExportFormat {
             ExportFmt::Csv => Self::Csv,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum CycleAction {
+    /// Print the current cycle label (today's ISO week tag, e.g.
+    /// `2026-W22`). With `--json`, emits `{"cycle":"..."}`.
+    Current,
+
+    /// List issues planned for `<name>`. Without `--all` / `--closed`,
+    /// shows open issues only (mirrors `ls`). Output respects `--json`.
+    Plan {
+        /// Cycle label (e.g. `2026-W22`). Pass `current` to use the
+        /// label `cycle current` would print — handy for scripts.
+        #[arg(value_parser = parse_non_empty)]
+        name: String,
+
+        /// Include closed issues
+        #[arg(long)]
+        all: bool,
+
+        /// Show only closed issues
+        #[arg(long)]
+        closed: bool,
+    },
+
+    /// Show open/closed rollup counts for a cycle. With no `<name>`,
+    /// uses the current cycle. With `--all`, lists every distinct
+    /// cycle found in the repo and its counts (ignores `<name>`).
+    Status {
+        /// Cycle label (optional). Pass `current` to use the
+        /// current-cycle label.
+        #[arg(value_parser = parse_non_empty)]
+        name: Option<String>,
+
+        /// Roll up every distinct cycle in the repo instead of one.
+        #[arg(long, conflicts_with = "name")]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1584,6 +1636,15 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             all,
             closed,
         } => cmd_export(json_output, format, query, all, closed),
+        Command::Cycle { action } => match action {
+            CycleAction::Current => cmd_cycle_current(json_output),
+            CycleAction::Plan { name, all, closed } => {
+                cmd_cycle_plan(json_output, &name, all, closed)
+            }
+            CycleAction::Status { name, all } => {
+                cmd_cycle_status(json_output, name.as_deref(), all)
+            }
+        },
         Command::Import { source } => match source {
             ImportSource::Json { file, default_type } => {
                 cmd_import_json(json_output, &file, &default_type)
@@ -2171,6 +2232,127 @@ fn cmd_stats(json: bool) -> Result<()> {
         });
     }
 
+    Ok(())
+}
+
+fn cmd_cycle_current(json: bool) -> Result<()> {
+    let label = cycle_mod::current_cycle();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "cycle": label }))?
+        );
+    } else {
+        println!("{label}");
+    }
+    Ok(())
+}
+
+/// Resolve the user-supplied cycle name. `current` is a magic alias
+/// that expands to the current-cycle label; every other string is
+/// returned verbatim. Trimmed so trailing whitespace from a shell
+/// pipeline doesn't silently miss matches.
+fn resolve_cycle_name(name: &str) -> String {
+    let n = name.trim();
+    if n.eq_ignore_ascii_case("current") {
+        cycle_mod::current_cycle()
+    } else {
+        n.to_string()
+    }
+}
+
+fn cmd_cycle_plan(json: bool, name: &str, all: bool, closed: bool) -> Result<()> {
+    let cycle = resolve_cycle_name(name);
+    let folder_filter = folder_default_filter(all, closed, false);
+    let issues = load();
+    let filtered: Vec<_> = issues
+        .into_iter()
+        .filter(|i| {
+            cycle_mod::issue_cycle(i) == Some(cycle.as_str())
+                && folder_filter.map(|f| i.folder == f).unwrap_or(true)
+        })
+        .collect();
+
+    if json {
+        let with_version: Vec<_> = filtered
+            .iter()
+            .map(|i| {
+                let mut v = serde_json::to_value(i).expect("Issue serializes");
+                if let serde_json::Value::Object(ref mut m) = v {
+                    m.insert(
+                        "version".into(),
+                        serde_json::Value::String(canonical::canonical_hash(i)),
+                    );
+                }
+                v
+            })
+            .collect();
+        let out = serde_json::json!({ "cycle": cycle, "issues": with_version });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else if filtered.is_empty() {
+        println!("(no issues in cycle {cycle})");
+    } else {
+        println!("Cycle {cycle}:");
+        print_issue_table(&filtered);
+    }
+    Ok(())
+}
+
+fn cmd_cycle_status(json: bool, name: Option<&str>, all: bool) -> Result<()> {
+    let issues = load();
+
+    if all {
+        let groups = cycle_mod::group_by_cycle(&issues);
+        let rollups: Vec<_> = groups
+            .keys()
+            .map(|c| cycle_mod::status_for(&issues, c))
+            .collect();
+        if json {
+            println!("{}", serde_json::to_string_pretty(&rollups)?);
+        } else if rollups.is_empty() {
+            println!("(no cycles found)");
+        } else {
+            println!(
+                "{:<14} {:>5} {:>7} {:>6}",
+                "CYCLE", "OPEN", "CLOSED", "TOTAL"
+            );
+            for r in &rollups {
+                println!(
+                    "{:<14} {:>5} {:>7} {:>6}",
+                    r.cycle, r.open, r.closed, r.total
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    let cycle = match name {
+        Some(n) => resolve_cycle_name(n),
+        None => cycle_mod::current_cycle(),
+    };
+    let s = cycle_mod::status_for(&issues, &cycle);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&s)?);
+    } else {
+        println!(
+            "Cycle {}:  open: {}, closed: {}, total: {}",
+            s.cycle, s.open, s.closed, s.total
+        );
+        if !s.by_status.is_empty() {
+            println!();
+            println!("By status (open):");
+            for (k, v) in &s.by_status {
+                println!("  {k:<14} {v}");
+            }
+        }
+        if !s.by_type.is_empty() {
+            println!();
+            println!("By type (open):");
+            for (k, v) in &s.by_type {
+                println!("  {k:<14} {v}");
+            }
+        }
+    }
     Ok(())
 }
 

@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dod.strict: true` in `issues/.schema.yaml` to upgrade the warning to a
   blocking error. Existing per-rule `requires_acceptance_criteria_checked`
   remains an opt-in always-block.
+- `issuectl cycle` subcommand for Linear-style lightweight cycles
+  (iterations). Issues opt in via an optional `cycle:` frontmatter label
+  (e.g. `cycle: 2026-W22`) — no schema-side cycle catalog, no start/end
+  dates. `issuectl cycle current` prints today's ISO-week label;
+  `issuectl cycle plan <name>` lists planned issues; `issuectl cycle
+  status [<name>]` rolls up open/closed counts (defaults to the current
+  cycle, `--all` lists every distinct cycle). All subcommands honour
+  `--json`. The literal `current` is accepted as an alias for the
+  current-cycle label so scripts can avoid a second `cycle current`
+  call.
 - `issuectl bulk '<query>'` applies one mutation to every issue matching a
   query (same syntax as `ls`/`search`), in a single batch the user commits
   together. Supports `--set key=value` / `--clear key` (built-in fields route

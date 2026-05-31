@@ -31,6 +31,8 @@ pub mod canonical;
 #[doc(hidden)]
 pub mod context;
 #[doc(hidden)]
+pub mod cycle;
+#[doc(hidden)]
 pub mod docs;
 #[doc(hidden)]
 pub mod doctor;
