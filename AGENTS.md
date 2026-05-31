@@ -160,6 +160,44 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
   `load_issues_with_warnings_via(root, config)` pattern: optional
   `_via` variant takes the config; the no-config alias delegates to
   `UncachedConfig` for CLI ergonomics.
+- **Schema `required_when` + status/type aliases drive `doctor --fix`
+  coercion.** A `FieldSpec.required_when: { status_class: <class> }`
+  declares conditional required fields; built-in: `closed` is required
+  when status_class is closing. `status_aliases` / `type_aliases`
+  (top-level schema keys, per-key merge over built-in defaults) map
+  legacy values to canonical ones (closed→done, resolved→fixed,
+  refactor→chore, …); only `doctor --fix` consumes them and coerces —
+  mutation commands still reject out-of-enum values, and the mutation
+  RequiredWhen exemption is scoped to fields a write did **not** touch
+  (so explicitly clearing `closed` on a closing-status issue is
+  rejected). A coerced legacy status whose `closed:` is unset gets
+  stamped from git history (`git log -1 --format=%aI` on `item.md`,
+  falling back to mtime, then today).
+- **Archived issues live at `issues/archive/YYYY/MM/<slug>/` and are
+  repo-resident.** Bucketed by `closed:` (fallback `updated:`).
+  `repo.rs` discovery is archive-aware: `discover_slugs` /
+  `resolve_layout` treat archived issues as `LayoutState::Flat`
+  candidates via a single-walk archive index, so `show` / `list` /
+  `locate` / queries find them transparently. An active+archived same
+  slug surfaces as `Ambiguous`. A status mutation that takes an
+  archived issue out of a closing status auto-unarchives it (renames
+  its dir back to the active root under the write flock); empty
+  `YYYY/MM[/YYYY]` buckets are pruned.
+- **The planning-doc-type list (`plan` / `analysis` / `validation` /
+  `design` / `breakdown` / `todo`) lives in the `init-project` skill,
+  not here.** That convention is owned upstream (a project-scaffolding
+  template); `issuectl-core` deliberately does not enumerate or
+  enforce it. Do not add it to issuectl-core or this repo's
+  `AGENTS.md` — let the upstream skill stay the single source.
+- **Per-issue `attachments/` and `fixtures/` directories.** Created on
+  demand via `ensure_issue_subdir` (not eagerly by `issuectl new`,
+  since git drops empty dirs). Relative body-image / link targets
+  resolve relative to the issue dir; the extractor is hardened
+  against `../` and backslash path traversal. `doctor` emits
+  warning-only checks for large binaries (>1 MiB), non-AVIF raster
+  images, and unresolved relative body refs. The `issuectl attach
+  <slug> <file>…` command copies files into `attachments/` (creates
+  the dir on demand, handles name collisions).
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, repo layout,
   PR process, and commit-message conventions.
 - See [issues/AGENTS.md](issues/AGENTS.md) for how this project's own
