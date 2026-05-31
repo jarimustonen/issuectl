@@ -1,13 +1,14 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-31
 type: feature
-status: open
+status: done
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
 labels: [cli, qol]
+closed: 2026-05-31
 ---
 
 # QoL bundle: triage inbox + fuzzy picker + slug prefix matching + shell completions + scan-todos

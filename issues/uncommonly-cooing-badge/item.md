@@ -1,13 +1,14 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-31
 type: feature
-status: open
+status: done
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
 labels: [dependencies, schema]
+closed: 2026-05-31
 ---
 
 # Dependency tracking: canonical blocked_by + cycle detection + dependency-aware queries

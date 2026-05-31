@@ -1,13 +1,14 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-31
 type: feature
-status: open
+status: done
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
 labels: [v0.6.0-candidate, workflow]
+closed: 2026-05-31
 ---
 
 # Recurring / scheduled issues (cron-driven, materialize new file per occurrence)

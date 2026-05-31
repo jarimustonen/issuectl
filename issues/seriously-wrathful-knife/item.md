@@ -1,13 +1,14 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-31
 type: feature
-status: open
+status: done
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
 labels: [validation, workflow]
+closed: 2026-05-31
 ---
 
 # Markdown DoD validation: parse acceptance criteria + block done transition until satisfied
