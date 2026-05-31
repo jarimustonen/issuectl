@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Git-derived reporting commands. `issuectl activity [--since 7d] [--limit N]`
+  lists recent commits that touched `issues/`, grouped back to slugs.
+  `issuectl timeline <slug>` reconstructs status transitions from
+  `git log -p` on the issue's `item.md` (uses a `:(glob)` pathspec so
+  legacy `open/`/`closed/` layouts and archive moves are included).
+  `issuectl changelog <ref>..<ref>` walks `Refs-Issue:` / `Fixes-Issue:`
+  trailers in the range and emits a markdown release-note table grouped
+  by issue type. `issuectl metrics [--since 30d]` computes throughput,
+  median/p90/mean cycle time from frontmatter `created`/`closed`, and
+  open/closed workload by effective assignee. All four commands honour
+  `--json`. Git history is the event log — there is no event database;
+  when rebases/squashes reshape it, frontmatter timestamps are
+  authoritative.
+
 ### Documentation
 - Document the rationale for the two-value priority enum
   (`normal`/`high`) in `docs/design/frontmatter-schema.md`, the

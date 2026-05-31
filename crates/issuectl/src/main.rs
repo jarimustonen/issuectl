@@ -10,8 +10,8 @@ use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::repo_config::UncachedConfig;
 use issuectl_core::{
     agents, body_sections, canonical, context, cycle as cycle_mod, docs, doctor, duplicates, fmt,
-    hooks, init as init_cmd, merge_driver, models, mutate, query, repo, server, skill, slug,
-    sync_commits,
+    hooks, init as init_cmd, merge_driver, models, mutate, query, repo, report as report_mod,
+    server, skill, slug, sync_commits,
 };
 
 const TOP_LEVEL_HELP: &str = "\
@@ -1164,6 +1164,49 @@ enum Command {
         source: ImportSource,
     },
 
+    /// Show recent commits that touched issue files. Reads `git log`
+    /// scoped to `issues/` and groups affected `item.md` paths back to
+    /// slugs. History rewrites (rebase/squash) reshape what appears
+    /// here; frontmatter `updated:` is authoritative when it disagrees.
+    Activity {
+        /// Time window (e.g. `7d`, `30`, or bare integer days).
+        #[arg(long, value_parser = parse_non_empty)]
+        since: Option<String>,
+
+        /// Cap the number of entries returned.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+
+    /// Reconstruct the status-transition history for one issue from
+    /// `git log --follow -p` on its `item.md`. Only commits that change
+    /// `status:` are listed (plus the creation commit). Frontmatter
+    /// `created:` / `closed:` are authoritative when history has been
+    /// rewritten.
+    Timeline {
+        /// Issue slug.
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+    },
+
+    /// Generate markdown release notes for a git range. Walks
+    /// `git log <range>` for `Refs-Issue:` / `Fixes-Issue:` trailers
+    /// and groups the referenced issues by type.
+    Changelog {
+        /// Git revision range (`<ref>..<ref>` or a single SHA).
+        #[arg(value_parser = parse_non_empty)]
+        range: String,
+    },
+
+    /// Lightweight metrics derived from issue frontmatter. Cycle time
+    /// uses `closed - created`; throughput counts closed issues; the
+    /// workload rollup counts open issues by effective assignee.
+    Metrics {
+        /// Time window for throughput / cycle-time (e.g. `30d`).
+        #[arg(long, value_parser = parse_non_empty)]
+        since: Option<String>,
+    },
+
     /// Linear-style lightweight cycles (iterations).
     ///
     /// Issues opt in via an optional `cycle:` frontmatter label
@@ -1812,6 +1855,10 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
         Command::Completions { shell } => cmd_completions(shell),
         Command::CompleteValues { kind } => cmd_complete_values(kind),
         Command::ScanTodos { create_inbox } => cmd_scan_todos(json_output, create_inbox),
+        Command::Activity { since, limit } => cmd_activity(json_output, since, limit),
+        Command::Timeline { slug } => cmd_timeline(json_output, &slug),
+        Command::Changelog { range } => cmd_changelog(json_output, &range),
+        Command::Metrics { since } => cmd_metrics(json_output, since),
     }
 }
 
@@ -4537,6 +4584,103 @@ where
         println!("  {:20} {}", key, count);
     }
     println!();
+}
+
+fn cmd_activity(json: bool, since: Option<String>, limit: Option<usize>) -> Result<()> {
+    let since_days = match since.as_deref() {
+        Some(s) => Some(report_mod::parse_since_days(s)?),
+        None => None,
+    };
+    let root = find_root();
+    let entries = report_mod::activity(&root, since_days, limit)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else if entries.is_empty() {
+        println!("(no issue-file activity in range)");
+    } else {
+        for e in &entries {
+            println!(
+                "{}  {}  {}  {}",
+                e.date,
+                e.sha,
+                e.slugs.join(","),
+                e.summary
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_timeline(json: bool, slug: &str) -> Result<()> {
+    let root = find_root();
+    let events = report_mod::timeline(&root, slug)?;
+    if json {
+        let out = serde_json::json!({ "slug": slug, "events": events });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else if events.is_empty() {
+        println!("(no history for {slug})");
+    } else {
+        for e in &events {
+            let arrow = match &e.prev_status {
+                Some(p) => format!("{p} → {}", e.status),
+                None => format!("(created) {}", e.status),
+            };
+            println!("{}  {}  {:<28} {}", e.date, e.sha, arrow, e.summary);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_changelog(json: bool, range: &str) -> Result<()> {
+    let root = find_root();
+    let issues = repo::load_issues(&root);
+    let report = report_mod::changelog(&root, range, &issues)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", report_mod::render_changelog_markdown(&report));
+    }
+    Ok(())
+}
+
+fn cmd_metrics(json: bool, since: Option<String>) -> Result<()> {
+    let since_days = match since.as_deref() {
+        Some(s) => Some(report_mod::parse_since_days(s)?),
+        None => None,
+    };
+    let root = find_root();
+    let issues = repo::load_issues(&root);
+    let m = report_mod::metrics_today(&issues, since_days);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&m)?);
+    } else {
+        match m.since_days {
+            Some(d) => println!("Since {d}d:"),
+            None => println!("All-time:"),
+        }
+        println!("  throughput: {}", m.throughput);
+        if let Some(cs) = &m.cycle_time_days {
+            println!(
+                "  cycle time (days): median {}, p90 {}, mean {:.1} (n={})",
+                cs.median, cs.p90, cs.mean, cs.sample
+            );
+        } else {
+            println!("  cycle time: (no samples)");
+        }
+        if !m.closed_by_assignee.is_empty() {
+            println!("\nClosed in window by assignee:");
+            for (k, v) in &m.closed_by_assignee {
+                println!("  {k:<20} {v}");
+            }
+        }
+        if !m.workload_by_assignee.is_empty() {
+            println!("\nOpen workload by assignee:");
+            for (k, v) in &m.workload_by_assignee {
+                println!("  {k:<20} {v}");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
