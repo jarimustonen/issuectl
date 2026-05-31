@@ -7,7 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-31
+
+Two `/orchestrate` campaigns (14 + 9 worker nodes) landed 23 issues
+under v0.6.0. Theme: CLI-mode improvements — no kanban / web-board
+work in this release. See `docs/releases/v0.6.0.md` for the
+human-readable digest.
+
 ### Added
+- `issuectl rename <old-slug> <new-slug>` rewrites every reference
+  to the renamed slug across the repo: `epic:`, `related:`,
+  `blocked_by:`, `@slug` body references, recorded `commits:`, board
+  configs, and cached prompt bundles. Doctor flags any leftover
+  dangling references. Archived issues are renamed in place.
+- First-class issue attachments and fixtures.
+  `issuectl attach <slug> <file>...` copies files into
+  `issues/<slug>/attachments/`; `--fixtures` targets
+  `issues/<slug>/fixtures/`. Body references use relative paths so
+  they survive renames and archive moves. Doctor warns on
+  path-traversal patterns and oversized binaries.
+- Issue lifecycle: stale detector and auto-archive.
+  `issuectl stale [--days N]` reports open issues with no recent
+  updates; `issuectl archive [--older-than N]` moves closed issues
+  to `issues/archive/YYYY/MM/`. All read commands (`ls`, `show`,
+  `search`, `metrics`, …) now consult both the active root and the
+  archive root, so archived issues stay findable but don't clutter
+  default listings. Renamed-then-archived issues are followed
+  correctly.
+- Heuristic local-only duplicate detection. `issuectl duplicates`
+  reports likely-duplicate open issues using title-token overlap,
+  shared labels, and body-token similarity — no AI, deterministic,
+  offline, repository-local.
+- Issue import/export. `issuectl import json|github` ingests issues
+  from JSON dumps or GitHub Issues (via `gh`).
+  `issuectl export json|csv|markdown` writes a portable snapshot of
+  issues matching the given query.
+- Schema-driven agent instructions in the context bundle.
+  `issuectl context <slug>` now injects schema-declared constraints
+  (enum value lists, estimate rules, reserved keys) into the
+  rendered prompt as system instructions, so AI agents working from
+  the bundle can't invent values outside the schema. Long enums are
+  capped and summarized rather than dumped wholesale.
+- Custom-field plumbing. Unknown frontmatter fields now flow through
+  `Issue.extra` instead of being silently dropped, and
+  `context::read_blocked_by` consumes the parsed model directly —
+  closing the previous TOCTOU window from a redundant second
+  `item.md` read.
+- Declarative schema rules. `required_when` in `issues/.schema.yaml`
+  expresses field-level conditional requirements (e.g. a closing
+  status implies `closed:` must be set); validated by `doctor` and
+  at mutation time. `status_aliases` / `type_aliases` map legacy
+  enum values to current ones; `doctor --fix` auto-coerces them
+  during migration. Alias targets are validated against the field
+  enum and alias chains are rejected.
+- `issuectl note <slug> --stdin` / `--from-file PATH` accept the
+  note body from stdin or a file; the same hardening covers
+  `issuectl body set`.
+- `issuectl open <slug>` launches the issue's `item.md` in `$EDITOR`
+  (or `--editor <CMD>`); `--dir` opens the issue directory instead.
+- `validation.md` and `breakdown.md` doc-types added to the
+  init-project planning-document template and the AGENTS.md
+  convention list.
 - Git-derived reporting commands. `issuectl activity [--since 7d] [--limit N]`
   lists recent commits that touched `issues/`, grouped back to slugs.
   `issuectl timeline <slug>` reconstructs status transitions from
@@ -158,6 +218,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target's validation and its write.
 
 ### Changed
+- Unified `--json` output envelope across mutating commands. Clap
+  usage errors now also flow through the JSON envelope, and the
+  partial-success contract for batch operations is documented:
+  per-target outcomes carry explicit success/failure markers.
 - `issuectl new --slug <existing>` now fails with an actionable error that
   names the colliding slug and path and suggests retrying with a different
   `--slug` or omitting it for a random auto-generated one (was a terse
