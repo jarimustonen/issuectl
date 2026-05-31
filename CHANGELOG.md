@@ -64,6 +64,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reserved-key list adds `blocked_by` with a hint pointing at `issuectl
   depend`, so `--field blocked_by=...` and the equivalent PATCH custom
   field are rejected with that hint.
+- `issuectl schedule` subcommand for recurring / scheduled issues.
+  Definitions live at `.issuectl/recurrences/<name>.yaml` (title,
+  cron `schedule`, optional `type`/`priority`/`labels`/`assignee`/
+  `reporter`/`description`). `issuectl schedule list` reports loaded
+  definitions and their materialization state; `issuectl schedule
+  run` materializes a new issue per due cron fire, stamping
+  `recurrence_of: <template>` and `occurrence: <ISO8601>`
+  frontmatter. The manifest at
+  `.issuectl/recurrences/.manifest.yaml` dedupes occurrences and
+  tracks each definition's `last_fire` cursor — closing an instance
+  has no effect on the next one (per-occurrence file, never
+  overwrite). First sight of a definition only "subscribes" the
+  cursor at `now` so installing a new definition doesn't
+  retro-materialize history; subsequent fires materialize on the
+  next `run`. Catch-up is capped at 50 occurrences per run. Cron
+  expressions accept either standard 5-field (`min hour DoM mon
+  DoW`) or 6/7-field with explicit seconds.
 - Markdown Definition-of-Done validation. New `issuectl-core::body` module
   parses `- [ ]` / `- [x]` task lists in the canonical H2 sections
   `## Acceptance Criteria`, `## Tests Run`, and `## Implementation Notes`

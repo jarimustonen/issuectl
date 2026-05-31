@@ -63,6 +63,8 @@ pub mod parser;
 #[doc(hidden)]
 pub mod query;
 #[doc(hidden)]
+pub mod recurrence;
+#[doc(hidden)]
 pub mod refs;
 #[doc(hidden)]
 pub mod repo;

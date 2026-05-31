@@ -10,8 +10,8 @@ use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::repo_config::UncachedConfig;
 use issuectl_core::{
     agents, body_sections, canonical, context, cycle as cycle_mod, docs, doctor, duplicates, fmt,
-    hooks, init as init_cmd, merge_driver, models, mutate, query, repo, report as report_mod,
-    server, skill, slug, sync_commits,
+    hooks, init as init_cmd, merge_driver, models, mutate, query, recurrence, repo,
+    report as report_mod, server, skill, slug, sync_commits,
 };
 
 const TOP_LEVEL_HELP: &str = "\
@@ -1225,6 +1225,20 @@ enum Command {
         #[command(subcommand)]
         action: CycleAction,
     },
+
+    /// Recurring / scheduled issues.
+    ///
+    /// Definitions live in `.issuectl/recurrences/<name>.yaml`
+    /// (title, schedule cron, type, priority, labels, assignee,
+    /// reporter, description). `issuectl schedule run` materializes a
+    /// new issue file per due cron fire, with `recurrence_of:` and
+    /// `occurrence:` frontmatter. The manifest at
+    /// `.issuectl/recurrences/.manifest.yaml` dedupes occurrences —
+    /// closing an instance has no effect on the next one.
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleAction,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -1319,6 +1333,21 @@ enum CycleAction {
         /// Roll up every distinct cycle in the repo instead of one.
         #[arg(long, conflicts_with = "name")]
         all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleAction {
+    /// List loaded recurrence definitions.
+    List,
+
+    /// Materialize a new issue per due cron occurrence. First sight
+    /// of a definition only "subscribes" — no retro-materialization.
+    Run {
+        /// Show what would be materialized without writing issues or
+        /// updating the manifest.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -1898,6 +1927,10 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             CycleAction::Status { name, all } => {
                 cmd_cycle_status(json_output, name.as_deref(), all)
             }
+        },
+        Command::Schedule { action } => match action {
+            ScheduleAction::List => cmd_schedule_list(json_output),
+            ScheduleAction::Run { dry_run } => cmd_schedule_run(json_output, dry_run),
         },
         Command::Import { source } => match source {
             ImportSource::Json { file, default_type } => {
@@ -2647,6 +2680,103 @@ fn cmd_cycle_status(json: bool, name: Option<&str>, all: bool) -> Result<()> {
             for (k, v) in &s.by_type {
                 println!("  {k:<14} {v}");
             }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_schedule_list(json: bool) -> Result<()> {
+    let root = find_root();
+    let defs = recurrence::load_definitions(&root)?;
+    let manifest = recurrence::load_manifest(&root).unwrap_or_default();
+    if json {
+        let value: Vec<serde_json::Value> = defs
+            .iter()
+            .map(|d| {
+                let state = manifest.recurrences.get(&d.name);
+                serde_json::json!({
+                    "name": d.name,
+                    "title": d.file.title,
+                    "schedule": d.file.schedule,
+                    "template": d.template_label(),
+                    "type": d.file.issue_type,
+                    "priority": d.file.priority,
+                    "labels": d.file.labels,
+                    "assignee": d.file.assignee,
+                    "reporter": d.file.reporter,
+                    "last_fire": state.and_then(|s| s.last_fire.clone()),
+                    "materialized_count": state.map(|s| s.occurrences.len()).unwrap_or(0),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else if defs.is_empty() {
+        println!("(no recurrences in .issuectl/recurrences/)");
+    } else {
+        println!("{:<24} {:<18} {}", "NAME", "SCHEDULE", "TITLE");
+        for d in &defs {
+            println!("{:<24} {:<18} {}", d.name, d.file.schedule, d.file.title);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_schedule_run(json: bool, dry_run: bool) -> Result<()> {
+    let root = find_root();
+    let report = recurrence::run_now(&root, &UncachedConfig, dry_run)?;
+    if json {
+        // Custom-shape so `path` flattens to a plain string instead
+        // of PathBuf's debug rendering — matches the rest of the
+        // CLI's JSON contract.
+        let materialized: Vec<serde_json::Value> = report
+            .materialized
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "recurrence": m.recurrence,
+                    "occurrence": m.occurrence,
+                    "slug": m.slug,
+                    "title": m.title,
+                    "path": m.path.display().to_string(),
+                })
+            })
+            .collect();
+        let value = serde_json::json!({
+            "dry_run": report.dry_run,
+            "recurrences_evaluated": report.recurrences_evaluated,
+            "skipped_already_materialized": report.skipped_already_materialized,
+            "materialized": materialized,
+            "errors": report
+                .errors
+                .iter()
+                .map(|(n, m)| serde_json::json!({"recurrence": n, "message": m}))
+                .collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        let prefix = if dry_run { "[dry-run] " } else { "" };
+        if report.materialized.is_empty() {
+            println!(
+                "{prefix}no occurrences due ({} recurrence(s) evaluated)",
+                report.recurrences_evaluated
+            );
+        } else {
+            for m in &report.materialized {
+                if dry_run {
+                    println!(
+                        "{prefix}would materialize {} @ {}",
+                        m.recurrence, m.occurrence
+                    );
+                } else {
+                    println!(
+                        "materialized {} @ {} → {}",
+                        m.recurrence, m.occurrence, m.slug
+                    );
+                }
+            }
+        }
+        for (name, msg) in &report.errors {
+            eprintln!("warning: recurrence {name}: {msg}");
         }
     }
     Ok(())
