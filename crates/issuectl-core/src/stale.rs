@@ -4,7 +4,8 @@
 //! issues are flagged specially: a WIP nobody has touched in weeks is
 //! the highest-signal rot. Read-only; never mutates the store.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use chrono::{Local, NaiveDate};
@@ -56,13 +57,16 @@ pub fn find_stale_at(
     days: i64,
     today: NaiveDate,
 ) -> StaleReport {
+    // One git walk yields last-commit dates for every issue that needs
+    // the git fallback, instead of one `git log` process per issue.
+    let git_dates = batch_git_last_commit_dates(repo_root, issues);
     let mut stale = Vec::new();
     for issue in issues {
         // Only active (open-bucket) issues can be stale.
         if issue.folder != "open" {
             continue;
         }
-        let Some((last, source)) = last_activity(repo_root, issue) else {
+        let Some((last, source)) = last_activity(issue, &git_dates) else {
             continue;
         };
         let days_inactive = (today - last).num_days();
@@ -93,12 +97,18 @@ pub fn find_stale_at(
 /// Preference order: frontmatter `updated` → last commit touching the
 /// issue's `item.md` → frontmatter `created`. `None` when no signal
 /// exists at all (issue can't be assessed and is omitted from the scan).
-fn last_activity(repo_root: &Path, issue: &Issue) -> Option<(NaiveDate, &'static str)> {
+/// `git_dates` is the precomputed slug → last-commit-date map from
+/// [`batch_git_last_commit_dates`]; only issues lacking a usable
+/// `updated` appear in it.
+fn last_activity(
+    issue: &Issue,
+    git_dates: &HashMap<String, NaiveDate>,
+) -> Option<(NaiveDate, &'static str)> {
     if let Some(d) = issue.updated.as_deref().and_then(parse_date) {
         return Some((d, "updated"));
     }
-    if let Some(d) = git_last_commit_date(repo_root, &issue.slug) {
-        return Some((d, "git"));
+    if let Some(d) = git_dates.get(&issue.slug) {
+        return Some((*d, "git"));
     }
     if let Some(d) = issue.created.as_deref().and_then(parse_date) {
         return Some((d, "created"));
@@ -112,23 +122,77 @@ pub(crate) fn parse_date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s.get(0..10).unwrap_or(s), "%Y-%m-%d").ok()
 }
 
-/// Committer date (`YYYY-MM-DD`) of the most recent commit touching the
-/// issue's `item.md`. Returns `None` outside a git repo, for an
-/// uncommitted issue, or if the slug can't be located.
-fn git_last_commit_date(repo_root: &Path, slug: &str) -> Option<NaiveDate> {
-    let located = crate::repo::locate_issue_full(repo_root, slug).ok()?;
-    let rel = located.item_path.strip_prefix(repo_root).ok()?;
-    let out = Command::new("git")
-        .args(["log", "-1", "--format=%cs", "--"])
-        .arg(rel)
-        .current_dir(repo_root)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+/// Committer dates (`YYYY-MM-DD`) of the most recent commit touching each
+/// issue's `item.md`, keyed by slug. Computed with a single `git log`
+/// walk over all relevant paths instead of one process per issue:
+/// `git log` reports commits newest-first, so the first time a path
+/// appears in the `--name-only` output is its latest commit.
+///
+/// Only open-bucket issues lacking a usable frontmatter `updated` are
+/// queried — exactly the set that would fall through to the git
+/// fallback in [`last_activity`]. Returns an empty map outside a git
+/// repo (the walk fails or finds nothing), so callers fall back to
+/// `created`, matching the per-issue behavior this replaced.
+fn batch_git_last_commit_dates(
+    repo_root: &Path,
+    issues: &[Issue],
+) -> HashMap<String, NaiveDate> {
+    // Map each candidate's repo-relative item.md path back to its slug.
+    let mut slug_by_rel: HashMap<PathBuf, String> = HashMap::new();
+    for issue in issues {
+        if issue.folder != "open" {
+            continue;
+        }
+        if issue.updated.as_deref().and_then(parse_date).is_some() {
+            continue;
+        }
+        let Ok(located) = crate::repo::locate_issue_full(repo_root, &issue.slug) else {
+            continue;
+        };
+        let Ok(rel) = located.item_path.strip_prefix(repo_root) else {
+            continue;
+        };
+        slug_by_rel.insert(rel.to_path_buf(), issue.slug.clone());
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    parse_date(&s)
+    if slug_by_rel.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut cmd = Command::new("git");
+    cmd.args(["log", "--format=%cs", "--name-only"])
+        .arg("--")
+        .current_dir(repo_root);
+    for rel in slug_by_rel.keys() {
+        cmd.arg(rel);
+    }
+    let Ok(out) = cmd.output() else {
+        return HashMap::new();
+    };
+    if !out.status.success() {
+        return HashMap::new();
+    }
+
+    // The pathspec restricts `--name-only` to our item.md paths, so
+    // every non-date line is one of them. Walk newest-first and keep the
+    // first date seen per path — that is its latest commit.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut dates: HashMap<String, NaiveDate> = HashMap::new();
+    let mut current: Option<NaiveDate> = None;
+    for line in stdout.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(slug) = slug_by_rel.get(Path::new(line)) {
+            if let Some(d) = current {
+                dates.entry(slug.clone()).or_insert(d);
+            }
+        } else if line.len() == 10 {
+            if let Some(d) = parse_date(line) {
+                current = Some(d);
+            }
+        }
+    }
+    dates
 }
 
 #[cfg(test)]
@@ -204,6 +268,100 @@ mod tests {
             .find(|s| s.slug == "open-older-newt")
             .unwrap();
         assert!(!plain.in_progress);
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let st = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?} failed");
+    }
+
+    fn fresh_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        git(tmp.path(), &["init", "-q", "-b", "main"]);
+        for (k, v) in [("user.email", "t@example.com"), ("user.name", "t")] {
+            git(tmp.path(), &["config", "--local", k, v]);
+        }
+        tmp
+    }
+
+    fn seed_item(root: &Path, slug: &str) {
+        let dir = root.join("issues").join(slug);
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = format!(
+            "---\ncreated: 2020-01-01\ntype: feature\nstatus: open\npriority: normal\n---\n\n# {slug}\n\nbody\n"
+        );
+        std::fs::write(dir.join("item.md"), body).unwrap();
+    }
+
+    fn commit_with_date(root: &Path, msg: &str, date: &str) {
+        git(root, &["add", "."]);
+        let env_date = format!("{date}T12:00:00");
+        let st = Command::new("git")
+            .args(["commit", "-q", "-m", msg])
+            .env("GIT_AUTHOR_DATE", &env_date)
+            .env("GIT_COMMITTER_DATE", &env_date)
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(st.success(), "git commit failed");
+    }
+
+    fn issue_no_updated(slug: &str) -> Issue {
+        let mut i = issue(slug, "open", "2020-01-01");
+        i.updated = None;
+        i
+    }
+
+    #[test]
+    fn batches_git_fallback_into_one_call_per_scan() {
+        // Two issues lacking frontmatter `updated` get distinct
+        // last-commit dates from a single batched git log walk.
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        seed_item(root, "alpha-old-fox");
+        commit_with_date(root, "add alpha", "2025-01-15");
+        seed_item(root, "beta-new-owl");
+        commit_with_date(root, "add beta", "2026-05-01");
+
+        let issues = vec![
+            issue_no_updated("alpha-old-fox"),
+            issue_no_updated("beta-new-owl"),
+        ];
+        let report = find_stale_at(root, &issues, 30, today());
+        let by_slug: HashMap<_, _> =
+            report.stale.iter().map(|s| (s.slug.as_str(), s)).collect();
+        let alpha = by_slug["alpha-old-fox"];
+        assert_eq!(alpha.source, "git");
+        assert_eq!(alpha.last_activity, "2025-01-15");
+        let beta = by_slug["beta-new-owl"];
+        assert_eq!(beta.source, "git");
+        assert_eq!(beta.last_activity, "2026-05-01");
+    }
+
+    #[test]
+    fn batch_picks_latest_commit_per_path() {
+        // Multiple commits on the same item.md: the batch must keep the
+        // most recent date, just like the per-issue `-1` did.
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        seed_item(root, "twice-touched-elk");
+        commit_with_date(root, "create", "2025-02-01");
+        std::fs::write(
+            root.join("issues/twice-touched-elk/item.md"),
+            "---\ncreated: 2020-01-01\ntype: feature\nstatus: open\npriority: normal\n---\n\n# twice-touched-elk\n\nedited\n",
+        )
+        .unwrap();
+        commit_with_date(root, "edit", "2026-03-10");
+
+        let issues = vec![issue_no_updated("twice-touched-elk")];
+        let report = find_stale_at(root, &issues, 30, today());
+        assert_eq!(report.stale.len(), 1);
+        assert_eq!(report.stale[0].source, "git");
+        assert_eq!(report.stale[0].last_activity, "2026-03-10");
     }
 
     #[test]
