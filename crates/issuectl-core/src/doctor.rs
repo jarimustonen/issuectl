@@ -2680,62 +2680,46 @@ fn rewrite_text(
             (Regex::new(&pat).expect("valid dir regex"), new.clone())
         })
         .collect();
-    let fence_re = Regex::new(r"^\s{0,3}(```+|~~~+)").expect("valid fence");
-
-    let mut rewritten = Vec::new();
-    let mut in_fence: Option<String> = None;
-    for line in text.lines() {
-        // Track fenced code-block state and pass through unchanged
-        // inside fences. The fence marker line itself is also passed
-        // through (no rewrites apply to ` ```rust` either).
-        if let Some(fence) = fence_re.captures(line).and_then(|c| c.get(1)) {
-            let marker = fence.as_str().chars().next().unwrap();
-            let len = fence.as_str().len();
-            let opening = marker.to_string().repeat(len);
-            in_fence = match in_fence {
-                None => Some(opening.clone()),
-                Some(open) if line.trim_start().starts_with(&open) && len >= open.len() => None,
-                Some(open) => Some(open),
+    // Skip-region awareness (fenced code blocks, inline code spans,
+    // and link URLs) is delegated to the shared
+    // `body_sections::rewrite_outside_code_and_urls` walker that
+    // `refs::rewrite_body_refs` also uses — keeping the two callers
+    // from drifting on which markdown constructs are off-limits.
+    crate::body_sections::rewrite_outside_code_and_urls(
+        text,
+        crate::body_sections::RewriteSkips::code_only(),
+        |seg| {
+        // heading_re is line-anchored, but a prose segment that
+        // starts at a line beginning (the common case for legacy
+        // `# E10. Title` headings — which never contain inline code
+        // or link URLs in the heading number/dot) still matches the
+        // pattern. If the segment doesn't begin a line, `^` simply
+        // doesn't fire and the segment passes through.
+        let seg = heading_re.replace(seg, "$1$2");
+        let seg = ref_re.replace_all(&seg, |caps: &Captures| {
+            let n: u32 = match caps[1].parse() {
+                Ok(v) => v,
+                Err(_) => return caps[0].to_string(),
             };
-            rewritten.push(line.to_string());
-            continue;
-        }
-        if in_fence.is_some() {
-            rewritten.push(line.to_string());
-            continue;
-        }
-
-        let line = heading_re.replace(line, "$1$2").to_string();
-        let line = ref_re
-            .replace_all(&line, |caps: &Captures| {
-                let n: u32 = match caps[1].parse() {
-                    Ok(v) => v,
-                    Err(_) => return caps[0].to_string(),
-                };
-                if ambiguous_numbers.contains(&n) {
-                    return caps[0].to_string();
-                }
-                match number_to_slug.get(&n) {
-                    Some(s) => format!("@{s}"),
-                    None => caps[0].to_string(),
-                }
-            })
-            .to_string();
-        let mut line = line;
+            if ambiguous_numbers.contains(&n) {
+                return caps[0].to_string();
+            }
+            match number_to_slug.get(&n) {
+                Some(s) => format!("@{s}"),
+                None => caps[0].to_string(),
+            }
+        });
+        let mut s = seg.into_owned();
         for (re, new) in &dir_regexes {
-            line = re
-                .replace_all(&line, |caps: &Captures| {
+            s = re
+                .replace_all(&s, |caps: &Captures| {
                     format!("{}{}{}", &caps[1], new, &caps[2])
                 })
                 .to_string();
         }
-        rewritten.push(line);
-    }
-    let mut out = rewritten.join("\n");
-    if text.ends_with('\n') {
-        out.push('\n');
-    }
-    out
+        s
+        },
+    )
 }
 
 // ── Output rendering ────────────────────────────────────────────────────────
@@ -3802,6 +3786,37 @@ mod tests {
         assert!(out.contains("Outside @amber-loud-fox"));
         assert!(out.contains("// inside #7"), "code block content untouched");
         assert!(out.contains("After @amber-loud-fox"));
+    }
+
+    #[test]
+    fn rewrite_text_skips_inline_code_spans() {
+        // Inline code is documentation, not a live reference: a
+        // user explaining `the old #7 syntax` doesn't want it
+        // silently rewritten to `the old @amber-loud-fox syntax`.
+        let mut nm = BTreeMap::new();
+        nm.insert(7, "amber-loud-fox".to_string());
+        let dm = BTreeMap::new();
+        let amb = BTreeSet::new();
+        let text = "use `#7` literally, but rewrite #7 here.\n";
+        let out = rewrite_text(text, &nm, &dm, &amb);
+        assert_eq!(out, "use `#7` literally, but rewrite @amber-loud-fox here.\n");
+    }
+
+    #[test]
+    fn rewrite_text_still_rewrites_paths_inside_link_urls() {
+        // Doctor intentionally rewrites intra-repo paths inside link
+        // URLs — that's the whole point of the dir-rename step.
+        // (Contrast `refs::rewrite_body_refs`, which DOES skip URLs.)
+        let nm = BTreeMap::new();
+        let mut dm = BTreeMap::new();
+        dm.insert("7-something".to_string(), "amber-loud-fox".to_string());
+        let amb = BTreeSet::new();
+        let text = "see [link](../7-something/item.md).\n";
+        let out = rewrite_text(text, &nm, &dm, &amb);
+        assert!(
+            out.contains("../amber-loud-fox/item.md"),
+            "link-URL path must still be rewritten by doctor: {out:?}"
+        );
     }
 
     #[test]

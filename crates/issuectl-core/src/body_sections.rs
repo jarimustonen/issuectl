@@ -10,8 +10,11 @@
 //! snippet with a `## comment` line would have subsequent appends
 //! spliced into their code block — silent on-disk corruption.
 
+use std::sync::OnceLock;
+
 use anyhow::{bail, Result};
 use chrono::{SecondsFormat, Utc};
+use regex::Regex;
 
 /// Canonical section name for free-form human/agent comments.
 pub const COMMENTS: &str = "Comments";
@@ -156,6 +159,140 @@ pub(crate) fn closes_fence(line: &str, open: Fence) -> bool {
     }
     let after = &trimmed[open.ch.len_utf8() * run..];
     after.trim().is_empty()
+}
+
+/// Which markdown constructs the rewriter should treat as off-limits
+/// in addition to fenced code blocks (which are always skipped).
+/// `refs::rewrite_body_refs` enables both — a literal `` `@slug` `` or
+/// a URL fragment is documentation, not a live mention. `doctor`'s
+/// `#NN`+path rewriter enables only `inline_code`: intra-repo link
+/// URLs like `[t](../old-slug/item.md)` are exactly what doctor must
+/// rewrite when a directory is renamed.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RewriteSkips {
+    pub inline_code: bool,
+    pub link_urls: bool,
+}
+
+impl RewriteSkips {
+    pub fn code_and_urls() -> Self {
+        Self {
+            inline_code: true,
+            link_urls: true,
+        }
+    }
+    pub fn code_only() -> Self {
+        Self {
+            inline_code: true,
+            link_urls: false,
+        }
+    }
+}
+
+/// Walk `body` and apply `transform` to every span of plain prose
+/// text — i.e. text that is NOT inside a fenced code block, and
+/// (depending on `skips`) NOT inside an inline code span (`` `…` ``,
+/// `` ``…`` ``, `` ```…``` ``) or a markdown link URL (`](…)`).
+/// Skip regions are emitted verbatim. The shared implementation
+/// behind `refs::rewrite_body_refs` and `doctor::rewrite_text` so the
+/// two callers cannot drift on fence/inline-code/URL detection even
+/// though they differ on which subset of those they skip.
+///
+/// `transform` is called with each prose segment as `&str` and must
+/// return its replacement; segment boundaries fall at fence lines
+/// and at the start/end of every skip region, so a token straddling
+/// such a boundary is never rewritten (and is also never a real
+/// token in the source).
+pub(crate) fn rewrite_outside_code_and_urls<F>(
+    body: &str,
+    skips: RewriteSkips,
+    mut transform: F,
+) -> String
+where
+    F: FnMut(&str) -> String,
+{
+    let mut out = String::with_capacity(body.len());
+    let mut fence: Option<Fence> = None;
+    for raw in body.split_inclusive('\n') {
+        let (line, nl) = match raw.strip_suffix('\n') {
+            Some(stripped) => (stripped, "\n"),
+            None => (raw, ""),
+        };
+        match fence {
+            Some(open) => {
+                if closes_fence(line, open) {
+                    fence = None;
+                }
+                out.push_str(line);
+                out.push_str(nl);
+            }
+            None => {
+                if let Some(o) = opening_fence(line) {
+                    fence = Some(o);
+                    out.push_str(line);
+                    out.push_str(nl);
+                } else {
+                    rewrite_line_outside_code_and_urls(line, skips, &mut transform, &mut out);
+                    out.push_str(nl);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn skip_regions_regex(skips: RewriteSkips) -> Option<&'static Regex> {
+    // Four pre-compiled variants — we never need both "no skips" (no
+    // walker call at all) and intermediate combinations are cheap.
+    // Order matters in each pattern: try the longest backtick run
+    // first so a `` `` `` span isn't truncated as two single-backtick
+    // spans. Link URLs are matched as `](…)` — we don't re-check the
+    // `[…]` half because a bare `](url)` without a preceding bracket
+    // is vanishingly rare in prose, and matching the full link form
+    // would either need balanced brackets (regex can't) or
+    // false-negative on `[a [b] c](url)`.
+    static CODE_AND_URLS: OnceLock<Regex> = OnceLock::new();
+    static CODE_ONLY: OnceLock<Regex> = OnceLock::new();
+    static URLS_ONLY: OnceLock<Regex> = OnceLock::new();
+    match (skips.inline_code, skips.link_urls) {
+        (true, true) => Some(CODE_AND_URLS.get_or_init(|| {
+            Regex::new(r"```[^`\n]+```|``[^`\n]+``|`[^`\n]+`|\]\([^)\n]*\)")
+                .expect("valid skip regex")
+        })),
+        (true, false) => Some(CODE_ONLY.get_or_init(|| {
+            Regex::new(r"```[^`\n]+```|``[^`\n]+``|`[^`\n]+`")
+                .expect("valid skip regex")
+        })),
+        (false, true) => Some(URLS_ONLY.get_or_init(|| {
+            Regex::new(r"\]\([^)\n]*\)").expect("valid skip regex")
+        })),
+        (false, false) => None,
+    }
+}
+
+fn rewrite_line_outside_code_and_urls<F>(
+    line: &str,
+    skips: RewriteSkips,
+    transform: &mut F,
+    out: &mut String,
+) where
+    F: FnMut(&str) -> String,
+{
+    let Some(re) = skip_regions_regex(skips) else {
+        out.push_str(&transform(line));
+        return;
+    };
+    let mut last = 0usize;
+    for m in re.find_iter(line) {
+        if m.start() > last {
+            out.push_str(&transform(&line[last..m.start()]));
+        }
+        out.push_str(m.as_str());
+        last = m.end();
+    }
+    if last < line.len() {
+        out.push_str(&transform(&line[last..]));
+    }
 }
 
 fn is_h2_named(line: &str, name: &str) -> bool {
