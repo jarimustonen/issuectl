@@ -231,9 +231,16 @@ fn parse_bulk_clear_key(s: &str) -> std::result::Result<String, String> {
 /// in line with the canonical slug shape.
 fn parse_slug_arg(s: &str) -> std::result::Result<String, String> {
     let s = parse_non_empty(s)?;
-    if !slug::is_valid(&s) {
+    // Accept either a canonical slug or a slug *prefix* (single segment
+    // allowed). The central resolver (`repo::resolve_slug_input`,
+    // called from `locate_issue_full`) expands a unique prefix to the
+    // matching canonical slug, so `issuectl show extremely` works the
+    // same as the full slug. Creation paths (`new --slug`, `rename
+    // new_slug`) still apply the stricter `slug::is_valid` check
+    // server-side so a single-segment input cannot land on disk.
+    if !slug::is_valid_prefix(&s) {
         return Err(format!(
-            "{s:?} is not a valid slug (lowercase ASCII, kebab-case, ≥2 segments, no path separators)"
+            "{s:?} is not a valid slug or slug prefix (lowercase ASCII letters/digits, kebab-case, no path separators)"
         ));
     }
     Ok(s)
@@ -442,6 +449,12 @@ enum Command {
         /// flag to create anyway.
         #[arg(long = "check-duplicates")]
         check_duplicates: bool,
+
+        /// Drop the new issue under `issues/inbox/<slug>/` as a draft.
+        /// Inbox drafts stay out of `ls` by default; promote one to the
+        /// canonical flat layout with `issuectl triage <slug>`.
+        #[arg(long)]
+        inbox: bool,
     },
 
     /// Update fields of an existing issue or epic
@@ -1036,6 +1049,80 @@ enum Command {
         closed: bool,
     },
 
+    /// Promote a draft issue from `issues/inbox/<slug>/` to the
+    /// canonical flat `issues/<slug>/` layout. Without a slug, lists
+    /// the current inbox drafts.
+    Triage {
+        /// Inbox slug to promote. Omit to list inbox drafts.
+        #[arg(value_parser = parse_slug_arg)]
+        slug: Option<String>,
+    },
+
+    /// Fuzzy-pick one issue and print its slug to stdout. Designed for
+    /// piping into other commands: `issuectl pick | xargs issuectl show`.
+    /// Without QUERY, all open issues are listed for interactive
+    /// selection. With QUERY, a substring match across slug, title, and
+    /// labels narrows the list; a unique match is printed immediately
+    /// (non-interactive). The interactive prompt is sent to stderr so
+    /// stdout stays clean for piping.
+    Pick {
+        /// Optional substring to filter on (matched against slug, title, labels).
+        query: Option<String>,
+
+        /// Include closed issues in the candidate pool.
+        #[arg(long)]
+        all: bool,
+
+        /// Skip the interactive prompt — when multiple candidates match,
+        /// pick the first (sorted alphabetically by slug) and exit.
+        /// Combine with QUERY for scripted slug resolution.
+        #[arg(long)]
+        first: bool,
+    },
+
+    /// Generate shell completion scripts. Pipe to your shell's
+    /// completion directory (e.g. `issuectl completions zsh
+    /// > ~/.zsh/completions/_issuectl`). The generated script statically
+    /// covers subcommand and option names; dynamic value completions for
+    /// slugs / statuses / labels / users are exposed via the hidden
+    /// helper `issuectl _complete <kind>` which prints one value per
+    /// line — the generated script (with manual wiring) or a shell
+    /// completion hook can consume that helper.
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: ShellArg,
+    },
+
+    /// Walk a hidden helper used by shell completion scripts. Prints one
+    /// candidate value per line on stdout — the kind controls what is
+    /// listed:
+    /// - `slugs`: every active (non-archived, non-inbox) issue slug
+    /// - `slugs-all`: every slug, including inbox + closed + archived
+    /// - `statuses`: schema-declared status enum
+    /// - `labels`: every label currently in use
+    /// - `users`: every reporter/assignee/owner currently in use
+    #[command(hide = true, name = "_complete")]
+    CompleteValues {
+        /// Kind of value to list.
+        #[arg(value_enum)]
+        kind: CompleteKind,
+    },
+
+    /// Walk repository source files and report `TODO(issue: <slug>)`
+    /// markers. Categorises each hit as `tracked` (slug → open issue),
+    /// `stale` (slug → closed issue), `unknown` (slug not found), or
+    /// `untracked` (marker without a slug). With `--create-inbox` every
+    /// `untracked` hit is materialised as a fresh draft under
+    /// `issues/inbox/<slug>/` whose body links back to the source line.
+    ScanTodos {
+        /// Create an inbox draft per untracked TODO hit. The source
+        /// path:line and surrounding context land in the draft body so
+        /// the user can `issuectl triage` it later.
+        #[arg(long = "create-inbox")]
+        create_inbox: bool,
+    },
+
     /// Import issues from an external source. Each issue is created fresh
     /// through the same validation path as `issuectl new`: it gets a new
     /// slug and `open` status. Source status (so closed issues arrive
@@ -1158,6 +1245,36 @@ enum LabelOp {
 
 /// Clap-side mirror of `init_cmd::AgentSelection`. Kept here so the
 /// core crate doesn't have to depend on clap.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ShellArg {
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
+    Elvish,
+}
+
+impl From<ShellArg> for clap_complete::Shell {
+    fn from(s: ShellArg) -> Self {
+        match s {
+            ShellArg::Bash => clap_complete::Shell::Bash,
+            ShellArg::Zsh => clap_complete::Shell::Zsh,
+            ShellArg::Fish => clap_complete::Shell::Fish,
+            ShellArg::Powershell => clap_complete::Shell::PowerShell,
+            ShellArg::Elvish => clap_complete::Shell::Elvish,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum CompleteKind {
+    Slugs,
+    SlugsAll,
+    Statuses,
+    Labels,
+    Users,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum AgentArg {
     Claude,
@@ -1400,6 +1517,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             description,
             custom_fields,
             check_duplicates,
+            inbox,
         } => cmd_new(
             json_output,
             NewArgs {
@@ -1416,6 +1534,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 source,
                 description,
                 custom_fields,
+                inbox,
             },
             check_duplicates,
         ),
@@ -1656,6 +1775,11 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 default_type,
             } => cmd_import_github(json_output, &repo, &state, limit, &default_type),
         },
+        Command::Triage { slug } => cmd_triage(json_output, slug),
+        Command::Pick { query, all, first } => cmd_pick(json_output, query, all, first),
+        Command::Completions { shell } => cmd_completions(shell),
+        Command::CompleteValues { kind } => cmd_complete_values(kind),
+        Command::ScanTodos { create_inbox } => cmd_scan_todos(json_output, create_inbox),
     }
 }
 
@@ -1924,7 +2048,27 @@ fn cmd_list(
 
 fn cmd_show(json: bool, slug: &str) -> Result<()> {
     let issues = load();
-    let issue = issues.iter().find(|i| i.slug == slug);
+    // Prefix expansion: `show extremely` resolves to `extremely-quiet-otter`
+    // when unique. `locate_issue_full` does this for mutating verbs; `show`
+    // bypasses it (in-memory lookup), so route through `resolve_slug_input`
+    // here. An ambiguous prefix surfaces its error; a no-match returns the
+    // input unchanged so the existing not-found error path fires below.
+    let root = find_root();
+    let resolved = match repo::resolve_slug_input(&root, slug) {
+        Ok(s) => s,
+        Err(e) => {
+            // Ambiguous prefix — surface the error to the user under the
+            // unified output contract.
+            return fail(
+                json,
+                1,
+                "ambiguous-slug",
+                &format!("{e:#}"),
+                serde_json::Value::Null,
+            );
+        }
+    };
+    let issue = issues.iter().find(|i| i.slug == resolved);
 
     match issue {
         Some(i) => {
@@ -3754,6 +3898,447 @@ fn cmd_skill_print(agent: &str) -> Result<()> {
     skill::print_skill(resolved)
 }
 
+// ── Triage / pick / completions / scan-todos ───────────────────────────────
+
+fn cmd_triage(json: bool, slug: Option<String>) -> Result<()> {
+    let root = find_root();
+    match slug {
+        None => {
+            // List inbox drafts.
+            let issues = repo::load_issues(&root);
+            let drafts: Vec<_> = issues.iter().filter(|i| i.folder == "inbox").collect();
+            if json {
+                let out: Vec<_> = drafts
+                    .iter()
+                    .map(|i| {
+                        serde_json::json!({
+                            "slug": i.slug,
+                            "title": i.title,
+                            "type": i.issue_type,
+                            "created": i.created,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else if drafts.is_empty() {
+                println!("Inbox is empty.");
+            } else {
+                println!("Inbox drafts ({}):", drafts.len());
+                for i in &drafts {
+                    println!("  {}  {}", i.slug, i.title);
+                }
+                println!("\nPromote one with: issuectl triage <slug>");
+            }
+            Ok(())
+        }
+        Some(slug) => {
+            // Triage expects a real on-disk inbox slug; expand prefixes
+            // through the central resolver so `triage extrem` works.
+            let resolved =
+                repo::resolve_slug_input(&root, &slug).map_err(|e| anyhow::anyhow!("{e:#}"))?;
+            let out =
+                mutate::triage::triage(&root, &resolved).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "slug": out.slug,
+                        "from": out.from.to_string_lossy(),
+                        "to": out.to.to_string_lossy(),
+                    }))?
+                );
+            } else {
+                println!(
+                    "Triaged {}: {} -> {}",
+                    out.slug,
+                    out.from.display(),
+                    out.to.display()
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn cmd_pick(json: bool, q: Option<String>, all: bool, first: bool) -> Result<()> {
+    let root = find_root();
+    let issues = repo::load_issues(&root);
+    // Default: open-only (no inbox). With --all, include closed AND inbox.
+    let needle = q.as_deref().map(|s| s.to_lowercase());
+    let candidates: Vec<_> = issues
+        .iter()
+        .filter(|i| {
+            if !all && i.folder != "open" {
+                return false;
+            }
+            match &needle {
+                None => true,
+                Some(n) => {
+                    i.slug.to_lowercase().contains(n)
+                        || i.title.to_lowercase().contains(n)
+                        || i.labels
+                            .as_ref()
+                            .map(|ls| ls.iter().any(|l| l.to_lowercase().contains(n)))
+                            .unwrap_or(false)
+                }
+            }
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        if json {
+            emit_json_error(
+                "no-match",
+                "no issues match the picker query",
+                serde_json::Value::Null,
+            );
+        } else {
+            eprintln!("No matching issues.");
+        }
+        std::process::exit(1);
+    }
+    if candidates.len() == 1 || first {
+        let chosen = candidates[0];
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "slug": chosen.slug,
+                    "title": chosen.title,
+                }))?
+            );
+        } else {
+            println!("{}", chosen.slug);
+        }
+        return Ok(());
+    }
+    // Multiple matches — print menu on stderr, read selection from stdin.
+    use std::io::{BufRead, Write};
+    let stderr = std::io::stderr();
+    let mut e = stderr.lock();
+    writeln!(e, "{} matches:", candidates.len())?;
+    for (idx, i) in candidates.iter().enumerate() {
+        writeln!(e, "  [{:>3}] {}  {}", idx + 1, i.slug, i.title)?;
+    }
+    write!(e, "Select [1-{}]: ", candidates.len())?;
+    e.flush()?;
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line)?;
+    let idx: usize = line
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid selection: {line:?}"))?;
+    if idx == 0 || idx > candidates.len() {
+        bail!("selection out of range: {idx}");
+    }
+    let chosen = candidates[idx - 1];
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "slug": chosen.slug,
+                "title": chosen.title,
+            }))?
+        );
+    } else {
+        println!("{}", chosen.slug);
+    }
+    Ok(())
+}
+
+fn cmd_completions(shell: ShellArg) -> Result<()> {
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    let bin = "issuectl";
+    clap_complete::generate(
+        clap_complete::Shell::from(shell),
+        &mut cmd,
+        bin,
+        &mut std::io::stdout(),
+    );
+    Ok(())
+}
+
+fn cmd_complete_values(kind: CompleteKind) -> Result<()> {
+    let root = find_root();
+    match kind {
+        CompleteKind::Slugs => {
+            let issues = repo::load_issues(&root);
+            for i in issues.iter().filter(|i| i.folder == "open") {
+                println!("{}", i.slug);
+            }
+        }
+        CompleteKind::SlugsAll => {
+            for i in repo::load_issues(&root) {
+                println!("{}", i.slug);
+            }
+        }
+        CompleteKind::Statuses => {
+            // Surface every status the schema knows about (built-in defaults
+            // when no project schema is declared).
+            let schema = issuectl_core::schema::load(&root)
+                .unwrap_or_else(|_| std::sync::Arc::new(issuectl_core::schema::default_schema()));
+            for s in issuectl_core::schema::status_universe(&schema) {
+                println!("{s}");
+            }
+        }
+        CompleteKind::Labels => {
+            let mut all: std::collections::BTreeSet<String> = Default::default();
+            for i in repo::load_issues(&root) {
+                if let Some(ls) = i.labels {
+                    for l in ls {
+                        all.insert(l);
+                    }
+                }
+            }
+            for l in all {
+                println!("{l}");
+            }
+        }
+        CompleteKind::Users => {
+            let mut all: std::collections::BTreeSet<String> = Default::default();
+            for i in repo::load_issues(&root) {
+                if let Some(r) = i.reporter {
+                    all.insert(r);
+                }
+                if let Some(a) = i.assignee {
+                    all.insert(a);
+                }
+                if let Some(o) = i.owner {
+                    all.insert(o);
+                }
+            }
+            for u in all {
+                println!("{u}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct TodoHit {
+    file: PathBuf,
+    line: usize,
+    slug: Option<String>,
+    status: &'static str, // "tracked" | "stale" | "unknown" | "untracked"
+    context: String,
+}
+
+fn cmd_scan_todos(json: bool, create_inbox: bool) -> Result<()> {
+    let root = find_root();
+    let issues = repo::load_issues(&root);
+    // Build slug -> closing-or-not map.
+    let schema = issuectl_core::schema::load(&root)
+        .unwrap_or_else(|_| std::sync::Arc::new(issuectl_core::schema::default_schema()));
+    let mut known: std::collections::BTreeMap<String, bool> = Default::default();
+    for i in &issues {
+        let closing = issuectl_core::schema::is_closing(&schema, &i.status);
+        known.insert(i.slug.clone(), closing);
+    }
+    let hits = scan_todos_walk(&root, &known)?;
+
+    if json {
+        let arr: Vec<_> = hits
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "file": h.file.to_string_lossy(),
+                    "line": h.line,
+                    "slug": h.slug,
+                    "status": h.status,
+                    "context": h.context,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&arr)?);
+    } else {
+        if hits.is_empty() {
+            println!("No TODO(issue: …) markers found.");
+        }
+        for h in &hits {
+            println!(
+                "{} {}:{} {}{}",
+                h.status,
+                h.file.display(),
+                h.line,
+                h.slug.as_deref().unwrap_or("-"),
+                if h.context.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", h.context)
+                }
+            );
+        }
+    }
+
+    if create_inbox {
+        let untracked: Vec<&TodoHit> = hits.iter().filter(|h| h.status == "untracked").collect();
+        for h in untracked {
+            let title = if h.context.is_empty() {
+                format!("TODO from {}:{}", h.file.display(), h.line)
+            } else {
+                h.context.clone()
+            };
+            let args = mutate::new_issue::NewArgs {
+                issue_type: "task".into(),
+                title: title.clone(),
+                priority: "normal".into(),
+                description: Some(format!(
+                    "_Source: {}:{}_\n\n```\n{}\n```\n",
+                    h.file.display(),
+                    h.line,
+                    h.context
+                )),
+                inbox: true,
+                ..mutate::new_issue::NewArgs::default()
+            };
+            match do_new(&root, args, &UncachedConfig) {
+                Ok(out) => {
+                    if !json {
+                        println!(
+                            "  + inbox draft {} for {}:{}",
+                            out.slug,
+                            h.file.display(),
+                            h.line
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warn: could not create inbox draft for {}:{}: {e:#}",
+                        h.file.display(),
+                        h.line
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Walk the repo tree, scanning every text-ish file for `TODO(issue: …)`
+/// markers. Skips `.git`, `target`, `node_modules`, `issues/`, and any
+/// path whose name starts with `.`. Lines are captured as `context` up
+/// to 200 chars for the report.
+fn scan_todos_walk(
+    root: &Path,
+    known: &std::collections::BTreeMap<String, bool>,
+) -> Result<Vec<TodoHit>> {
+    let mut hits = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let ft = match entry.file_type() {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            if name.starts_with('.') {
+                continue;
+            }
+            if ft.is_dir() {
+                if matches!(name.as_str(), "target" | "node_modules" | "issues") {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if !ft.is_file() {
+                continue;
+            }
+            // Cap per-file size to keep large lockfiles from dominating
+            // the walk.
+            if let Ok(meta) = entry.metadata() {
+                if meta.len() > 1_000_000 {
+                    continue;
+                }
+            }
+            scan_one_file(&path, root, known, &mut hits);
+        }
+    }
+    hits.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+    Ok(hits)
+}
+
+fn scan_one_file(
+    path: &Path,
+    root: &Path,
+    known: &std::collections::BTreeMap<String, bool>,
+    hits: &mut Vec<TodoHit>,
+) {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    // Skip binary-ish files: presence of a NUL byte is a strong signal.
+    if bytes.contains(&0) {
+        return;
+    }
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let rel = path.strip_prefix(root).unwrap_or(path).to_path_buf();
+    for (idx, line) in text.lines().enumerate() {
+        if let Some(hit) = parse_todo_marker(line) {
+            let status = match &hit {
+                TodoMarker::Tracked(s) => match known.get(s) {
+                    Some(true) => "stale",
+                    Some(false) => "tracked",
+                    None => "unknown",
+                },
+                TodoMarker::Untracked => "untracked",
+            };
+            let slug = match hit {
+                TodoMarker::Tracked(s) => Some(s),
+                TodoMarker::Untracked => None,
+            };
+            hits.push(TodoHit {
+                file: rel.clone(),
+                line: idx + 1,
+                slug,
+                status,
+                context: line.trim().chars().take(200).collect(),
+            });
+        }
+    }
+}
+
+enum TodoMarker {
+    Tracked(String),
+    Untracked,
+}
+
+/// Recognise the `TODO(issue: <slug>)` and `TODO(issue:)` shapes.
+/// Whitespace inside the parens is tolerated. Only the first marker on
+/// a line is reported.
+fn parse_todo_marker(line: &str) -> Option<TodoMarker> {
+    let needle = "TODO(issue:";
+    let start = line.find(needle)?;
+    let rest = &line[start + needle.len()..];
+    let end = rest.find(')')?;
+    let inner = rest[..end].trim();
+    if inner.is_empty() {
+        return Some(TodoMarker::Untracked);
+    }
+    // Tolerate a leading `@`.
+    let inner = inner.strip_prefix('@').unwrap_or(inner);
+    if !slug::is_valid(inner) {
+        return Some(TodoMarker::Untracked);
+    }
+    Some(TodoMarker::Tracked(inner.to_string()))
+}
+
 // ── Display helpers ─────────────────────────────────────────────────────────
 
 const TABLE_HEADERS: &[&str] = &["Slug", "Title", "Type", "Status", "Pri", "Assignee"];
@@ -3941,6 +4526,7 @@ mod tests {
             source: None,
             description: None,
             custom_fields: vec![],
+            inbox: false,
         }
     }
 

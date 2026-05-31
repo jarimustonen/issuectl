@@ -144,6 +144,12 @@ fn plan_move(
         repo::LayoutState::Legacy { .. } => {
             return Err("issue is at a legacy path — run `issuectl doctor --fix` first".to_string())
         }
+        repo::LayoutState::Inbox { .. } => {
+            return Err(
+                "issue is in the inbox — run `issuectl triage <slug>` to promote it first"
+                    .to_string(),
+            )
+        }
         repo::LayoutState::Ambiguous { .. } => return Err("slug is ambiguous".to_string()),
         repo::LayoutState::Absent => return Err("issue vanished mid-run".to_string()),
         repo::LayoutState::Invalid { reason, .. } => return Err(reason),

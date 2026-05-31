@@ -60,6 +60,31 @@ pub struct NewArgs {
     pub source: Option<String>,
     pub description: Option<String>,
     pub custom_fields: Vec<(String, String)>,
+    /// Drop the new issue under `issues/inbox/<slug>/` instead of the
+    /// canonical flat root. Default `false`. Inbox issues stay out of
+    /// `ls` by default and are promoted with `issuectl triage <slug>`.
+    pub inbox: bool,
+}
+
+impl Default for NewArgs {
+    fn default() -> Self {
+        Self {
+            issue_type: "bug".into(),
+            title: String::new(),
+            slug: None,
+            reporter: None,
+            assignee: None,
+            owner: None,
+            priority: "normal".into(),
+            epic: None,
+            labels: Vec::new(),
+            related: Vec::new(),
+            source: None,
+            description: None,
+            custom_fields: Vec::new(),
+            inbox: false,
+        }
+    }
 }
 
 pub struct WriteOutcome {
@@ -248,7 +273,11 @@ pub(crate) fn do_new_locked(
         }
     };
 
-    let issues_parent = root.join("issues");
+    let issues_parent = if args.inbox {
+        root.join("issues").join(crate::repo::INBOX_DIR)
+    } else {
+        root.join("issues")
+    };
     fs::create_dir_all(&issues_parent)
         .with_context(|| format!("cannot create {}", issues_parent.display()))
         .map_err(DoNewError::Io)?;
@@ -272,6 +301,21 @@ pub(crate) fn do_new_locked(
             if legacy_open.exists() || legacy_closed.exists() {
                 return Err(DoNewError::Conflict(format!(
                     "slug {normalized} already used at legacy path; run `issuectl doctor --fix` first"
+                )));
+            }
+            // Cross-bucket conflict: a slug must be unique across the
+            // active flat root and the inbox drafts zone so `triage`
+            // can move one into the other later without colliding.
+            let flat_path = root.join("issues").join(&normalized);
+            let inbox_path = root
+                .join("issues")
+                .join(crate::repo::INBOX_DIR)
+                .join(&normalized);
+            let other = if args.inbox { &flat_path } else { &inbox_path };
+            if other.exists() {
+                return Err(DoNewError::Conflict(format!(
+                    "slug {normalized} already exists at {}; pick a different slug",
+                    other.display()
                 )));
             }
             let dir = issues_parent.join(&normalized);
@@ -375,6 +419,7 @@ mod tests {
             source: None,
             description: None,
             custom_fields: vec![],
+            inbox: false,
         }
     }
 

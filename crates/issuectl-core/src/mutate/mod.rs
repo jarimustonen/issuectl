@@ -21,6 +21,7 @@
 pub mod archive;
 pub mod attach;
 pub mod new_issue;
+pub mod triage;
 
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -2411,7 +2412,9 @@ fn predicted_issue_dir(root: &Path, slug: &str, item_path: &Path, post_closing: 
 fn locate_for_dry_run(root: &Path, slug: &str) -> Result<PathBuf, MutateError> {
     use repo::LayoutState;
     match repo::resolve_layout(root, slug) {
-        LayoutState::Flat { item_path } | LayoutState::Legacy { item_path, .. } => Ok(item_path),
+        LayoutState::Flat { item_path }
+        | LayoutState::Inbox { item_path }
+        | LayoutState::Legacy { item_path, .. } => Ok(item_path),
         LayoutState::Ambiguous { paths } => Err(MutateError::AmbiguousSlug { paths }),
         LayoutState::Absent => Err(MutateError::NotFound),
         LayoutState::Invalid { reason, .. } => Err(MutateError::Io(anyhow!("{reason}"))),
@@ -2435,7 +2438,7 @@ fn migrate_to_flat_if_legacy(
     }
     repo::migrate_to_flat_inplace(root, slug).map_err(MutateError::Io)?;
     match repo::resolve_layout(root, slug) {
-        LayoutState::Flat { item_path } => Ok(item_path),
+        LayoutState::Flat { item_path } | LayoutState::Inbox { item_path } => Ok(item_path),
         LayoutState::Absent => Err(MutateError::NotFound),
         LayoutState::Ambiguous { paths } => Err(MutateError::AmbiguousSlug { paths }),
         LayoutState::Invalid { reason, .. } => Err(MutateError::Io(anyhow!("{reason}"))),
@@ -2764,6 +2767,7 @@ pub fn new_issue(
             source: req.source,
             description: req.description,
             custom_fields: req.custom_fields,
+            inbox: false,
         },
         config,
     )

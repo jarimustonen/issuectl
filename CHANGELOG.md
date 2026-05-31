@@ -37,6 +37,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--json`. The literal `current` is accepted as an alias for the
   current-cycle label so scripts can avoid a second `cycle current`
   call.
+- **Inbox drafts**: `issuectl new --inbox` drops the new issue under
+  `issues/inbox/<slug>/` instead of the canonical flat root, so half-baked
+  ideas have a low-friction landing zone. `issuectl triage` (no args) lists
+  every inbox draft; `issuectl triage <slug>` promotes one to
+  `issues/<slug>/`. Inbox drafts are hidden from `ls` by default; `mutate`
+  verbs still work on them (so a draft can be iterated in place before
+  triage).
+- **Slug prefix matching**: `issuectl show extremely` (and every other
+  per-slug command) now resolves `extremely` to `extremely-quiet-otter`
+  when the prefix is unique. An ambiguous prefix lists the candidates;
+  no-match errors as before. The expansion lives in
+  `repo::resolve_slug_input`, called from the central `locate_issue_full`
+  path so every command benefits without per-command plumbing.
+- **`issuectl pick`**: fuzzy-pick an issue for piping into other commands.
+  Without QUERY, lists open issues for interactive selection; with QUERY,
+  filters by substring across slug + title + labels. A unique match prints
+  immediately (non-interactive). The interactive menu goes to stderr so
+  stdout stays clean for `issuectl pick | xargs issuectl show`.
+- **`issuectl completions {bash,zsh,fish,powershell,elvish}`**: prints
+  shell completion scripts (via `clap_complete`). Paired with the hidden
+  `issuectl _complete <kind>` helper (`slugs`, `slugs-all`, `statuses`,
+  `labels`, `users`), shell users can wire dynamic value completion.
+- **`issuectl scan-todos`**: walks repository source and reports
+  `TODO(issue: <slug>)` markers, classifying each hit as `tracked`,
+  `stale` (slug → closed issue), `unknown`, or `untracked`.
+  `--create-inbox` materialises a fresh inbox draft per untracked hit so
+  the user can later `issuectl triage` and refine it.
 - `issuectl bulk '<query>'` applies one mutation to every issue matching a
   query (same syntax as `ls`/`search`), in a single batch the user commits
   together. Supports `--set key=value` / `--clear key` (built-in fields route

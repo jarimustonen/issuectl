@@ -9,6 +9,13 @@ use crate::parser;
 const ISSUES_DIR: &str = "issues";
 /// Legacy status-folder names walked separately as compat-read paths.
 const LEGACY_FOLDERS: &[&str] = &["open", "closed"];
+/// Drafts landing zone: `issues/inbox/<slug>/item.md`. Not a legacy
+/// folder (it's a forward-looking workflow surface, not a layout
+/// holdover) but the discovery + resolver walk treats it as another
+/// reserved parent so its slug-dirs don't collide with the flat layout.
+/// Use [`issuectl triage`] to promote an inbox item to the canonical
+/// flat path.
+pub const INBOX_DIR: &str = "inbox";
 /// Cold-storage root under `issues/`. Closed issues are archived to
 /// `issues/archive/YYYY/MM/<slug>/`. The name fails `slug::is_valid`
 /// (single segment) so the flat-layout walk never mistakes it for an
@@ -90,6 +97,10 @@ pub enum LayoutState {
         folder: &'static str,
         item_path: PathBuf,
     },
+    /// Slug at the drafts landing zone `issues/inbox/<slug>/item.md`.
+    /// Surfaced separately from `Flat` so `list` can hide drafts by
+    /// default and `triage` can promote them.
+    Inbox { item_path: PathBuf },
     /// Slug exists at >1 candidate path; refuse to pick a side.
     Ambiguous { paths: Vec<PathBuf> },
     /// Path-shape rejection — symlinked dir, dir contained outside
@@ -225,13 +236,26 @@ fn discover_slugs(repo_root: &Path) -> std::collections::BTreeSet<String> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if LEGACY_FOLDERS.contains(&name.as_str()) {
+            if LEGACY_FOLDERS.contains(&name.as_str()) || name == INBOX_DIR {
                 continue;
             }
             if !crate::slug::is_valid(&name) {
                 continue;
             }
             slugs.insert(name);
+        }
+    }
+    // Inbox is a parallel reserved parent — discover its children.
+    let inbox_dir = issues_dir.join(INBOX_DIR);
+    if let Ok(rd) = std::fs::read_dir(&inbox_dir) {
+        for entry in rd.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if crate::slug::is_valid(&name) {
+                slugs.insert(name);
+            }
         }
     }
     for legacy in LEGACY_FOLDERS {
@@ -368,22 +392,30 @@ fn resolve_layout_with_archive(
 
     // Archived issues resolve as `Flat` at their cold-storage path: the
     // on-disk depth differs but they behave like any other flat issue
-    // (status-derived folder, in-place edits). Treating them as a
-    // `legacy: None` candidate means a slug present both active and
-    // archived correctly surfaces as `Ambiguous`.
-    let mut candidates: Vec<(PathBuf, Option<&'static str>)> = vec![
-        (issues_root.join(slug), None),
-        (issues_root.join("open").join(slug), Some("open")),
-        (issues_root.join("closed").join(slug), Some("closed")),
+    // (status-derived folder, in-place edits). The `CandKind` tag
+    // distinguishes Flat / Legacy(folder) / Inbox so the resolver can
+    // surface the right `LayoutState` variant; a slug present at more
+    // than one of these surfaces as `Ambiguous`.
+    let mut candidates: Vec<(PathBuf, CandKind)> = vec![
+        (issues_root.join(slug), CandKind::Flat),
+        (
+            issues_root.join("open").join(slug),
+            CandKind::Legacy("open"),
+        ),
+        (
+            issues_root.join("closed").join(slug),
+            CandKind::Legacy("closed"),
+        ),
+        (issues_root.join(INBOX_DIR).join(slug), CandKind::Inbox),
     ];
     for dir in archive_dirs {
-        candidates.push((dir.clone(), None));
+        candidates.push((dir.clone(), CandKind::Flat));
     }
 
-    let mut hits: Vec<(PathBuf, Option<&'static str>, ItemCheck)> = Vec::new();
-    for (dir, legacy) in candidates {
+    let mut hits: Vec<(PathBuf, CandKind, ItemCheck)> = Vec::new();
+    for (dir, kind) in candidates {
         match check_dir(&dir, canon_root.as_deref()) {
-            Some(check) => hits.push((dir, legacy, check)),
+            Some(check) => hits.push((dir, kind, check)),
             None => continue,
         }
     }
@@ -391,14 +423,15 @@ fn resolve_layout_with_archive(
     match hits.len() {
         0 => LayoutState::Absent,
         1 => {
-            let (dir, legacy, check) = hits.into_iter().next().unwrap();
+            let (dir, kind, check) = hits.into_iter().next().unwrap();
             match check {
-                ItemCheck::Ok(item) => match legacy {
-                    None => LayoutState::Flat { item_path: item },
-                    Some(folder) => LayoutState::Legacy {
+                ItemCheck::Ok(item) => match kind {
+                    CandKind::Flat => LayoutState::Flat { item_path: item },
+                    CandKind::Legacy(folder) => LayoutState::Legacy {
                         folder,
                         item_path: item,
                     },
+                    CandKind::Inbox => LayoutState::Inbox { item_path: item },
                 },
                 ItemCheck::Invalid(reason) => LayoutState::Invalid {
                     item_path: Some(dir.join("item.md")),
@@ -410,6 +443,13 @@ fn resolve_layout_with_archive(
             paths: hits.into_iter().map(|(d, _, _)| d).collect(),
         },
     }
+}
+
+#[derive(Copy, Clone)]
+enum CandKind {
+    Flat,
+    Legacy(&'static str),
+    Inbox,
 }
 
 enum ItemCheck {
@@ -491,6 +531,11 @@ pub fn load_issues_with_config(
                 issue.folder = folder_for_status(&schema, &issue.status).to_string();
                 result.push(issue);
             }
+            LayoutState::Inbox { item_path } => {
+                let mut issue = parser::parse_item_md(&item_path, &slug, "open");
+                issue.folder = INBOX_DIR.to_string();
+                result.push(issue);
+            }
             LayoutState::Ambiguous { paths } => {
                 eprintln!(
                     "Warning: {slug} present at multiple paths ({:?}) — resolve manually",
@@ -555,6 +600,9 @@ pub fn load_issues_with_warnings_via(
                     &mut warnings,
                 );
             }
+            LayoutState::Inbox { item_path } => {
+                push_inbox_issue(&slug, &item_path, &mut issues, &mut warnings);
+            }
             LayoutState::Ambiguous { paths } => {
                 warnings.push(LoadWarning {
                     slug: slug.clone(),
@@ -584,6 +632,26 @@ pub fn load_issues_with_warnings_via(
 
     issues.sort_by(|a, b| a.slug.cmp(&b.slug));
     (issues, warnings)
+}
+
+fn push_inbox_issue(
+    slug: &str,
+    item_path: &Path,
+    issues: &mut Vec<Issue>,
+    warnings: &mut Vec<LoadWarning>,
+) {
+    let parsed = parser::parse_item_md_with_warnings(item_path, slug, "open");
+    for w in parsed.warnings {
+        warnings.push(LoadWarning {
+            slug: slug.to_string(),
+            folder: INBOX_DIR.to_string(),
+            message: w,
+            code: Some(LoadWarningCode::ParseWarning),
+        });
+    }
+    let mut issue = parsed.issue;
+    issue.folder = INBOX_DIR.to_string();
+    issues.push(issue);
 }
 
 fn push_issue_with_parse(
@@ -644,10 +712,11 @@ pub struct Located {
 /// `Invalid` — callers that need to disambiguate use `resolve_layout`
 /// directly.
 pub fn locate_issue_full(repo_root: &Path, slug: &str) -> Result<Located> {
-    if !crate::slug::is_valid(slug) {
+    if !crate::slug::is_valid_prefix(slug) {
         bail!("invalid slug shape: {slug:?}");
     }
-    match resolve_layout(repo_root, slug) {
+    let slug = resolve_slug_input(repo_root, slug)?;
+    match resolve_layout(repo_root, &slug) {
         LayoutState::Flat { item_path } => Ok(Located {
             item_path,
             legacy_folder: None,
@@ -655,6 +724,10 @@ pub fn locate_issue_full(repo_root: &Path, slug: &str) -> Result<Located> {
         LayoutState::Legacy { folder, item_path } => Ok(Located {
             item_path,
             legacy_folder: Some(folder),
+        }),
+        LayoutState::Inbox { item_path } => Ok(Located {
+            item_path,
+            legacy_folder: None,
         }),
         LayoutState::Absent => bail!(
             "issue {slug} not found under {}",
@@ -669,6 +742,59 @@ pub fn locate_issue_full(repo_root: &Path, slug: &str) -> Result<Located> {
                 .join(", ")
         ),
         LayoutState::Invalid { reason, .. } => bail!("{reason}"),
+    }
+}
+
+/// Resolve a user-supplied slug or slug prefix to the unique canonical
+/// slug present in the repo. Exact matches win; otherwise a unique
+/// `starts_with` match wins. Returns the input unchanged when it
+/// matches an on-disk slug exactly OR when no other slug starts with
+/// it — letting [`locate_issue_full`] surface the resulting `Absent`
+/// state with its own error message.
+///
+/// This is the central prefix-resolution hook every CLI command flows
+/// through via `locate_issue_full`, so a single change here makes
+/// `issuectl show extremely`, `update extremely`, `note extremely …`
+/// etc. all DWIM-expand to the matching slug.
+pub fn resolve_slug_input(repo_root: &Path, input: &str) -> Result<String> {
+    if !crate::slug::is_valid_prefix(input) {
+        bail!("invalid slug shape: {input:?}");
+    }
+    let all = discover_slugs(repo_root);
+    if all.contains(input) {
+        return Ok(input.to_string());
+    }
+    // Prefix expansion: any on-disk slug that starts with `input-` (a
+    // hyphen boundary) or is exactly `input`. Requiring the hyphen
+    // boundary avoids matching `pick` against `picker-*` (which would
+    // surprise a user typing the full intended slug `pick-foo`).
+    let matches: Vec<&String> = all
+        .iter()
+        .filter(|s| {
+            s.as_str() == input
+                || (s.len() > input.len()
+                    && s.starts_with(input)
+                    && s.as_bytes()[input.len()] == b'-')
+        })
+        .collect();
+    match matches.len() {
+        0 => Ok(input.to_string()),
+        1 => Ok(matches[0].clone()),
+        _ => {
+            let preview: Vec<String> = matches.iter().take(10).map(|s| s.to_string()).collect();
+            let suffix = if matches.len() > preview.len() {
+                format!(" (and {} more)", matches.len() - preview.len())
+            } else {
+                String::new()
+            };
+            bail!(
+                "prefix {:?} is ambiguous, matches {}: {}{}",
+                input,
+                matches.len(),
+                preview.join(", "),
+                suffix
+            )
+        }
     }
 }
 
@@ -720,6 +846,11 @@ pub fn migrate_to_flat_inplace(repo_root: &Path, slug: &str) -> Result<PathBuf> 
     match resolve_layout(repo_root, slug) {
         LayoutState::Flat { item_path } => {
             // Already flat — return parent dir.
+            Ok(item_path.parent().unwrap_or(repo_root).to_path_buf())
+        }
+        LayoutState::Inbox { item_path } => {
+            // Inbox drafts intentionally stay put — promote via
+            // `issuectl triage`, not via `doctor --fix`.
             Ok(item_path.parent().unwrap_or(repo_root).to_path_buf())
         }
         LayoutState::Absent => Ok(repo_root.join(ISSUES_DIR).join(slug)),
@@ -833,6 +964,7 @@ pub fn rename_issue(
     // rather than silently un-archiving it.
     let (src_dir, src_is_legacy) = match resolve_layout_in(repo_root, old, &archive) {
         LayoutState::Flat { item_path } => (parent_dir(&item_path)?, false),
+        LayoutState::Inbox { item_path } => (parent_dir(&item_path)?, false),
         LayoutState::Legacy { item_path, .. } => (parent_dir(&item_path)?, true),
         LayoutState::Absent => bail!(
             "issue {old} not found under {}",
@@ -871,7 +1003,9 @@ pub fn rename_issue(
     let mut skipped = Vec::new();
     for slug in discover_slugs(repo_root) {
         let item_path = match resolve_layout_in(repo_root, &slug, &archive) {
-            LayoutState::Flat { item_path } | LayoutState::Legacy { item_path, .. } => item_path,
+            LayoutState::Flat { item_path }
+            | LayoutState::Inbox { item_path }
+            | LayoutState::Legacy { item_path, .. } => item_path,
             LayoutState::Absent => continue,
             LayoutState::Ambiguous { .. } => {
                 skipped.push(SkippedFile {
@@ -1023,6 +1157,94 @@ mod tests {
             format!("---\nstatus: {status}\n---\n\n# {slug}\n"),
         )
         .unwrap();
+    }
+
+    fn seed_inbox(tmp: &TempDir, slug: &str) {
+        let dir = tmp.path().join("issues").join("inbox").join(slug);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            format!("---\nstatus: open\n---\n\n# {slug}\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resolve_slug_input_expands_unique_prefix() {
+        let tmp = fresh_repo();
+        seed_flat(&tmp, "extremely-quiet-otter", "open");
+        seed_flat(&tmp, "calm-loud-fox", "open");
+        assert_eq!(
+            resolve_slug_input(tmp.path(), "extremely").unwrap(),
+            "extremely-quiet-otter"
+        );
+        assert_eq!(
+            resolve_slug_input(tmp.path(), "extremely-quiet").unwrap(),
+            "extremely-quiet-otter"
+        );
+        // Exact match wins over prefix consideration.
+        assert_eq!(
+            resolve_slug_input(tmp.path(), "calm-loud-fox").unwrap(),
+            "calm-loud-fox"
+        );
+    }
+
+    #[test]
+    fn resolve_slug_input_reports_ambiguous_prefix() {
+        let tmp = fresh_repo();
+        seed_flat(&tmp, "extremely-quiet-otter", "open");
+        seed_flat(&tmp, "extremely-loud-fox", "open");
+        let err = resolve_slug_input(tmp.path(), "extremely").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ambiguous"), "{msg}");
+        assert!(msg.contains("extremely-quiet-otter"), "{msg}");
+        assert!(msg.contains("extremely-loud-fox"), "{msg}");
+    }
+
+    #[test]
+    fn resolve_slug_input_returns_input_on_no_match() {
+        // Caller (`locate_issue_full`) surfaces the Absent error itself.
+        let tmp = fresh_repo();
+        seed_flat(&tmp, "extremely-quiet-otter", "open");
+        assert_eq!(
+            resolve_slug_input(tmp.path(), "nonexistent-slug").unwrap(),
+            "nonexistent-slug"
+        );
+    }
+
+    #[test]
+    fn resolve_slug_input_requires_hyphen_boundary() {
+        // `pick` should not silently expand to `picker-foo-bar`. The
+        // hyphen boundary keeps prefixes from gobbling unintended slugs.
+        let tmp = fresh_repo();
+        seed_flat(&tmp, "picker-foo-bar", "open");
+        // `pick` doesn't match `picker-foo-bar` (no hyphen after `pick`).
+        assert_eq!(resolve_slug_input(tmp.path(), "pick").unwrap(), "pick");
+        // `picker` is an exact-or-hyphen-bounded prefix.
+        assert_eq!(
+            resolve_slug_input(tmp.path(), "picker").unwrap(),
+            "picker-foo-bar"
+        );
+    }
+
+    #[test]
+    fn inbox_layout_surfaces_as_inbox_variant() {
+        let tmp = fresh_repo();
+        seed_inbox(&tmp, "draft-half-baked");
+        assert!(matches!(
+            resolve_layout(tmp.path(), "draft-half-baked"),
+            LayoutState::Inbox { .. }
+        ));
+    }
+
+    #[test]
+    fn inbox_issues_load_with_folder_inbox() {
+        let tmp = fresh_repo();
+        seed_inbox(&tmp, "draft-half-baked");
+        let issues = load_issues(tmp.path());
+        let drafts: Vec<_> = issues.iter().filter(|i| i.folder == "inbox").collect();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].slug, "draft-half-baked");
     }
 
     fn seed_legacy(tmp: &TempDir, folder: &str, slug: &str, status: &str) {

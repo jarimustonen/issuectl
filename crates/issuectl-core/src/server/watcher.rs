@@ -467,7 +467,8 @@ fn parse_slug_state(root: &Path, slug: &str) -> ParseOutcome {
 
     let item_path = match crate::repo::resolve_layout(root, slug) {
         crate::repo::LayoutState::Absent => return ParseOutcome::Vanished,
-        crate::repo::LayoutState::Flat { item_path } => item_path,
+        crate::repo::LayoutState::Flat { item_path }
+        | crate::repo::LayoutState::Inbox { item_path } => item_path,
         crate::repo::LayoutState::Legacy { folder, .. } => {
             // M5 / user decision #17: legacy paths are surfaced as
             // Invalid. Card remains visible with a warning until the

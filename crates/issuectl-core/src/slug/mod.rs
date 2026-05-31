@@ -97,17 +97,27 @@ fn slug_exists(repo_root: &Path, slug: &str) -> bool {
 /// subset). User-supplied `--slug` overrides may include digits or extra
 /// segments — that's intentional, and `is_valid` accepts them.
 pub fn is_valid(s: &str) -> bool {
+    if !is_valid_prefix(s) {
+        return false;
+    }
+    s.split('-').count() >= 2
+}
+
+/// Validate that `s` is shaped like a slug *prefix* — same character
+/// rules as a canonical slug but allowing a single segment. Used by
+/// the CLI's prefix-resolver path (`repo::resolve_slug_input`) so a
+/// user can type `extremely` instead of the full `extremely-quiet-otter`
+/// and still pass the input-shape gate. Canonical slugs (≥2 segments)
+/// trivially satisfy this; on-disk slugs are still required to satisfy
+/// the stricter [`is_valid`] check.
+pub fn is_valid_prefix(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
     if s.starts_with('-') || s.ends_with('-') || s.contains("--") {
         return false;
     }
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() < 2 {
-        return false;
-    }
-    for p in &parts {
+    for p in s.split('-') {
         if p.is_empty() {
             return false;
         }
