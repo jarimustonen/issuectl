@@ -33,7 +33,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use cron::Schedule;
 use serde::{Deserialize, Serialize};
 
-use crate::mutate::new_issue::{do_new, NewArgs, WriteOutcome};
+use crate::mutate::new_issue::{do_new_locked, NewArgs, WriteOutcome};
+use crate::mutate::WriteLock;
 use crate::repo_config::ConfigSource;
 
 /// Directory holding recurrence definitions (one YAML per recurrence).
@@ -137,9 +138,12 @@ pub struct ManifestOccurrence {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ManifestRecurrence {
-    /// Last fire time the run loop has *evaluated* — not necessarily
-    /// the time of the most recent occurrence in `occurrences` (we
-    /// advance this even on dry runs to avoid re-evaluation churn).
+    /// Cursor for the next `schedule run`: the last fire time
+    /// `run` *successfully advanced past* on a non-dry run. The
+    /// cron iterator is started with `schedule.after(last_fire)`
+    /// so a failed materialization leaves its own fire time as
+    /// the next-run target (the cursor only advances past fires
+    /// that materialized cleanly).
     #[serde(default)]
     pub last_fire: Option<String>,
     #[serde(default)]
@@ -196,8 +200,11 @@ pub fn load_definitions(root: &Path) -> Result<Vec<RecurrenceDef>> {
         if name.starts_with('.') {
             continue;
         }
-        let ext = path.extension().and_then(|s| s.to_str());
-        if !matches!(ext, Some("yaml") | Some("yml")) {
+        let ext_lower = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase());
+        if !matches!(ext_lower.as_deref(), Some("yaml") | Some("yml")) {
             continue;
         }
         if !path.is_file() {
@@ -281,6 +288,15 @@ pub struct RunReport {
     pub skipped_already_materialized: usize,
     pub recurrences_evaluated: usize,
     pub dry_run: bool,
+    /// Names of recurrences that hit the [`MAX_CATCHUP_PER_RUN`] cap
+    /// on this invocation — surfaces silent truncation so a dormant
+    /// definition catching up after months isn't a black box.
+    pub capped: Vec<String>,
+    /// Names of recurrences this run subscribed for the first time
+    /// (recorded `last_fire = now` without materializing anything).
+    /// Exposed so the CLI can explain why a brand-new definition
+    /// produced "no occurrences due".
+    pub subscribed: Vec<String>,
     /// Errors per recurrence that did not abort the whole run (e.g.
     /// an unparseable cron expression in one definition). Format:
     /// `(recurrence_name, message)`.
@@ -290,23 +306,29 @@ pub struct RunReport {
 /// Compute the list of fire times in `(cursor, now]` for `schedule`.
 /// Caps at [`MAX_CATCHUP_PER_RUN`]. The `cron` crate's `after`
 /// iterator is exclusive on the lower bound, which matches the
-/// "advance past last_fire" semantics we want.
+/// "advance past last_fire" semantics we want. The boolean return
+/// is `true` when the cap kicked in *and* there is at least one
+/// more in-window fire pending — callers surface it to the user
+/// rather than silently truncating.
 pub fn fires_between(
     schedule: &Schedule,
     cursor: DateTime<Utc>,
     now: DateTime<Utc>,
-) -> Vec<DateTime<Utc>> {
+) -> (Vec<DateTime<Utc>>, bool) {
     let mut out = Vec::new();
+    let mut capped = false;
     for t in schedule.after(&cursor) {
         if t > now {
             break;
         }
-        out.push(t);
         if out.len() >= MAX_CATCHUP_PER_RUN {
+            // There is at least one more fire ≤ now beyond the cap.
+            capped = true;
             break;
         }
+        out.push(t);
     }
-    out
+    (out, capped)
 }
 
 /// Run the schedule: walk every definition, materialize due
@@ -322,8 +344,21 @@ pub fn run(
     now: DateTime<Utc>,
     dry_run: bool,
 ) -> Result<RunReport> {
+    // Hold the repo-wide flock around the manifest read/process/write
+    // window. Without this, two parallel `schedule run` invocations
+    // (e.g. system cron + a user-triggered run) would both read the
+    // same cursor, both materialize the same occurrences, and the
+    // last manifest writer would overwrite the other's record.
+    // `do_new_locked` (below) shares this same WriteLock so we don't
+    // re-enter and deadlock per fire.
+    let lock = WriteLock::acquire(root)?;
     let defs = load_definitions(root)?;
-    let mut manifest = load_manifest(root).unwrap_or_default();
+    // Propagate manifest parse errors. Silently treating a
+    // corrupted manifest as empty would reset every cursor and
+    // re-materialize history — a far worse failure mode than asking
+    // the operator to look at the broken YAML.
+    let mut manifest = load_manifest(root)?;
+    let before = manifest.clone();
     let mut report = RunReport {
         dry_run,
         ..Default::default()
@@ -331,17 +366,33 @@ pub fn run(
     report.recurrences_evaluated = defs.len();
 
     for def in &defs {
-        if let Err(e) = run_one(root, config, &def, now, dry_run, &mut manifest, &mut report) {
+        if let Err(e) = run_one(
+            &lock,
+            root,
+            config,
+            def,
+            now,
+            dry_run,
+            &mut manifest,
+            &mut report,
+        ) {
             // One bad definition shouldn't black-hole the whole
             // schedule. Record and continue.
             report.errors.push((def.name.clone(), format!("{e:#}")));
         }
     }
 
-    if !dry_run {
+    if !dry_run && manifest_changed(&before, &manifest) {
         save_manifest(root, &manifest)?;
     }
     Ok(report)
+}
+
+/// Cheap equality on the manifest's logical content. Used to skip
+/// the atomic rename when nothing changed, so an idle `schedule run`
+/// doesn't churn `git status` or the disk.
+fn manifest_changed(a: &Manifest, b: &Manifest) -> bool {
+    serde_yaml::to_string(a).ok() != serde_yaml::to_string(b).ok()
 }
 
 /// Wall-clock variant of [`run`] — convenience for the CLI so it
@@ -351,6 +402,7 @@ pub fn run_now(root: &Path, config: &dyn ConfigSource, dry_run: bool) -> Result<
 }
 
 fn run_one(
+    lock: &WriteLock,
     root: &Path,
     config: &dyn ConfigSource,
     def: &RecurrenceDef,
@@ -360,10 +412,12 @@ fn run_one(
     report: &mut RunReport,
 ) -> Result<()> {
     let schedule = def.parsed_schedule()?;
-    // Pull the per-recurrence state once; we mutate the entry by
-    // value and write it back at the end so a mid-loop error
-    // doesn't leave a half-updated entry behind.
-    let mut state = manifest.recurrences.remove(&def.name).unwrap_or_default();
+    // Mutate state in-place via the `entry()` API. The prior
+    // remove-then-insert pattern lost the entire entry whenever this
+    // function returned `Err` via `?` between the two operations —
+    // meaning a single materialization error reset the cursor and
+    // re-subscribed the definition on the next run.
+    let state = manifest.recurrences.entry(def.name.clone()).or_default();
 
     let cursor = match state
         .last_fire
@@ -373,23 +427,33 @@ fn run_one(
     {
         Some(t) => t,
         None => {
-            // First sight of this definition: subscribe at `now`,
-            // do NOT retro-materialize. See the module docs.
-            state.last_fire = Some(format_fire_time(now));
-            manifest.recurrences.insert(def.name.clone(), state);
+            // First sight of this definition: subscribe at `now`, do
+            // NOT retro-materialize. Skip the manifest mutation under
+            // dry-run so a preview doesn't covertly persist the
+            // subscription. See the module docs for the rationale.
+            if !dry_run {
+                state.last_fire = Some(format_fire_time(now));
+            }
+            report.subscribed.push(def.name.clone());
             return Ok(());
         }
     };
 
-    let fires = fires_between(&schedule, cursor, now);
-    let mut latest_seen = cursor;
+    let (fires, hit_cap) = fires_between(&schedule, cursor, now);
+    if hit_cap {
+        report.capped.push(def.name.clone());
+    }
+    let mut latest_success = cursor;
     for fire in fires {
-        latest_seen = fire;
         let occ_key = format_fire_time(fire);
         if state.occurrences.iter().any(|o| o.occurrence == occ_key) {
-            // Already materialized — `last_fire` will still advance
-            // past it via `latest_seen` so we don't keep finding it.
+            // Already materialized in a prior run — safe to skip and
+            // advance past it. Defensive: shouldn't normally happen
+            // because the cron iterator starts strictly after the
+            // cursor, but a hand-edited manifest or a mid-flight
+            // schedule change can produce overlap.
             report.skipped_already_materialized += 1;
+            latest_success = fire;
             continue;
         }
 
@@ -401,31 +465,50 @@ fn run_one(
                 title: def.file.title.clone(),
                 path: PathBuf::new(),
             });
+            latest_success = fire;
             continue;
         }
 
-        let outcome = materialize(root, config, def, &occ_key)
-            .with_context(|| format!("materializing {} @ {occ_key}", def.name))?;
-        state.occurrences.push(ManifestOccurrence {
-            occurrence: occ_key.clone(),
-            slug: outcome.slug.clone(),
-            materialized: format_fire_time(now),
-        });
-        report.materialized.push(Materialized {
-            recurrence: def.name.clone(),
-            occurrence: occ_key,
-            slug: outcome.slug,
-            title: outcome.title,
-            path: outcome.item_path,
-        });
+        match materialize(lock, root, config, def, &occ_key) {
+            Ok(outcome) => {
+                state.occurrences.push(ManifestOccurrence {
+                    occurrence: occ_key.clone(),
+                    slug: outcome.slug.clone(),
+                    materialized: format_fire_time(now),
+                });
+                report.materialized.push(Materialized {
+                    recurrence: def.name.clone(),
+                    occurrence: occ_key,
+                    slug: outcome.slug,
+                    title: outcome.title,
+                    path: outcome.item_path,
+                });
+                latest_success = fire;
+            }
+            Err(e) => {
+                // Advance the cursor only past *successful* fires —
+                // leaving the failed one as the next-run target.
+                // Stop processing this def so we don't blast through
+                // a hundred broken occurrences in one go.
+                report
+                    .errors
+                    .push((def.name.clone(), format!("@{occ_key}: {e:#}")));
+                break;
+            }
+        }
     }
 
-    state.last_fire = Some(format_fire_time(latest_seen));
-    manifest.recurrences.insert(def.name.clone(), state);
+    // Persist the new cursor, but only when we're not in dry-run
+    // mode. Persisting a cursor advance from a preview run would
+    // mask exactly the thing the user is trying to preview.
+    if !dry_run {
+        state.last_fire = Some(format_fire_time(latest_success));
+    }
     Ok(())
 }
 
 fn materialize(
+    lock: &WriteLock,
     root: &Path,
     config: &dyn ConfigSource,
     def: &RecurrenceDef,
@@ -453,7 +536,12 @@ fn materialize(
         ],
         inbox: false,
     };
-    do_new(root, args, config)
+    // Use the under-lock entry point so we don't double-acquire the
+    // repo flock (fs2 advisory flock is per-fd; re-acquire would
+    // either succeed silently and break the invariant, or deadlock,
+    // depending on the platform). The outer `run()` already holds
+    // it for the full read-process-write window.
+    do_new_locked(lock, root, args, config).map_err(Into::into)
 }
 
 fn parse_fire_time(s: &str) -> Result<DateTime<Utc>> {
@@ -677,13 +765,106 @@ mod tests {
         let cursor = Utc.with_ymd_and_hms(2026, 5, 25, 0, 0, 0).unwrap();
         // Exact `now` matches a fire — include it (`<=` semantics).
         let now = Utc.with_ymd_and_hms(2026, 5, 27, 0, 0, 0).unwrap();
-        let fires = fires_between(&schedule, cursor, now);
+        let (fires, capped) = fires_between(&schedule, cursor, now);
+        assert!(!capped);
         assert_eq!(fires.len(), 2);
         assert_eq!(
             fires[0],
             Utc.with_ymd_and_hms(2026, 5, 26, 0, 0, 0).unwrap()
         );
         assert_eq!(fires[1], now);
+    }
+
+    #[test]
+    fn catchup_cap_is_surfaced_via_capped_field() {
+        let tmp = fresh_repo();
+        write_def(tmp.path(), "hourly", "title: H\nschedule: 0 * * * *\n");
+        let t0 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2026, 5, 31, 0, 0, 0).unwrap();
+        let report = run(tmp.path(), &UncachedConfig, t1, false).unwrap();
+        // Cap was hit because thousands of hours fit in the window.
+        assert_eq!(report.capped, vec!["hourly".to_string()]);
+    }
+
+    #[test]
+    fn first_sight_surfaces_subscribed_in_report() {
+        let tmp = fresh_repo();
+        write_def(tmp.path(), "daily", "title: D\nschedule: 0 0 * * *\n");
+        let t0 = Utc.with_ymd_and_hms(2026, 5, 25, 12, 0, 0).unwrap();
+        let report = run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        assert_eq!(report.subscribed, vec!["daily".to_string()]);
+        assert!(report.materialized.is_empty());
+    }
+
+    #[test]
+    fn dry_run_preserves_subscription_state() {
+        // Repro for the gemini review: a brand-new def under
+        // `--dry-run` must NOT covertly persist `last_fire=now`,
+        // because the very next non-dry run is supposed to subscribe.
+        let tmp = fresh_repo();
+        write_def(tmp.path(), "daily", "title: D\nschedule: 0 0 * * *\n");
+        let t0 = Utc.with_ymd_and_hms(2026, 5, 25, 12, 0, 0).unwrap();
+        let report = run(tmp.path(), &UncachedConfig, t0, true).unwrap();
+        assert_eq!(report.subscribed, vec!["daily".to_string()]);
+        assert!(!manifest_path(tmp.path()).exists());
+        // A subsequent non-dry run still treats it as first-sight.
+        let report = run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        assert_eq!(report.subscribed, vec!["daily".to_string()]);
+    }
+
+    #[test]
+    fn idle_run_does_not_rewrite_manifest() {
+        // Skip the atomic rename when nothing about the manifest
+        // changed: otherwise every cron tick churns `git status` and
+        // the file's mtime.
+        let tmp = fresh_repo();
+        write_def(tmp.path(), "daily", "title: D\nschedule: 0 0 * * *\n");
+        let t0 = Utc.with_ymd_and_hms(2026, 5, 25, 0, 0, 0).unwrap();
+        run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        let mtime_before = fs::metadata(manifest_path(tmp.path()))
+            .unwrap()
+            .modified()
+            .unwrap();
+        // Sleep just enough that a *different* mtime would be
+        // observable if the file were rewritten.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Now == cursor (no due fires) → no write.
+        run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        let mtime_after = fs::metadata(manifest_path(tmp.path()))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(
+            mtime_before, mtime_after,
+            "idle run should not rewrite manifest"
+        );
+    }
+
+    #[test]
+    fn corrupt_manifest_is_an_error_not_silent_reset() {
+        // Repro for the deepseek review: `load_manifest` errors must
+        // propagate so a corrupt manifest doesn't silently reset
+        // every cursor and re-materialize history.
+        let tmp = fresh_repo();
+        write_def(tmp.path(), "daily", "title: D\nschedule: 0 0 * * *\n");
+        fs::write(
+            manifest_path(tmp.path()),
+            "this: is: not valid: yaml: at all",
+        )
+        .unwrap();
+        let t0 = Utc.with_ymd_and_hms(2026, 5, 25, 0, 0, 0).unwrap();
+        assert!(run(tmp.path(), &UncachedConfig, t0, false).is_err());
+    }
+
+    #[test]
+    fn load_definitions_accepts_uppercase_yaml_extension() {
+        let tmp = fresh_repo();
+        let path = recurrences_dir(tmp.path()).join("Weekly.YAML");
+        fs::write(path, "title: W\nschedule: 0 0 * * 1\n").unwrap();
+        let defs = load_definitions(tmp.path()).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "Weekly");
     }
 
     #[test]

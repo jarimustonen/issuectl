@@ -2746,6 +2746,8 @@ fn cmd_schedule_run(json: bool, dry_run: bool) -> Result<()> {
             "recurrences_evaluated": report.recurrences_evaluated,
             "skipped_already_materialized": report.skipped_already_materialized,
             "materialized": materialized,
+            "subscribed": report.subscribed,
+            "capped": report.capped,
             "errors": report
                 .errors
                 .iter()
@@ -2774,6 +2776,17 @@ fn cmd_schedule_run(json: bool, dry_run: bool) -> Result<()> {
                     );
                 }
             }
+        }
+        for name in &report.subscribed {
+            eprintln!(
+                "subscribed recurrence {name:?} at this run; first issue will materialize at next cron tick"
+            );
+        }
+        for name in &report.capped {
+            eprintln!(
+                "warning: recurrence {name:?} hit the per-run catch-up cap ({} occurrences); rerun to continue",
+                recurrence::MAX_CATCHUP_PER_RUN
+            );
         }
         for (name, msg) in &report.errors {
             eprintln!("warning: recurrence {name}: {msg}");

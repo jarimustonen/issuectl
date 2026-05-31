@@ -80,7 +80,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retro-materialize history; subsequent fires materialize on the
   next `run`. Catch-up is capped at 50 occurrences per run. Cron
   expressions accept either standard 5-field (`min hour DoM mon
-  DoW`) or 6/7-field with explicit seconds.
+  DoW`) or 6/7-field with explicit seconds. **All schedules are
+  evaluated in UTC** — a future enhancement may add a per-def
+  `timezone:` field; for now express times in UTC. The
+  `recurrence_of` and `occurrence` keys are written as custom
+  frontmatter, so a repo schema that forbids extra keys must
+  declare them explicitly.
 - Markdown Definition-of-Done validation. New `issuectl-core::body` module
   parses `- [ ]` / `- [x]` task lists in the canonical H2 sections
   `## Acceptance Criteria`, `## Tests Run`, and `## Implementation Notes`
