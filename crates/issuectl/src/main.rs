@@ -1207,6 +1207,14 @@ enum Command {
         since: Option<String>,
     },
 
+    /// Edit an issue's blocker relationships. `blocked_by:` is the
+    /// canonical frontmatter list; the reverse `blocks` view is
+    /// derived at read time and never stored.
+    Depend {
+        #[command(subcommand)]
+        action: DependAction,
+    },
+
     /// Linear-style lightweight cycles (iterations).
     ///
     /// Issues opt in via an optional `cycle:` frontmatter label
@@ -1234,6 +1242,46 @@ impl From<ExportFmt> for issuectl_core::transfer::ExportFormat {
             ExportFmt::Csv => Self::Csv,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum DependAction {
+    /// Add `<other>` (repeatable) to `<slug>`'s `blocked_by:` list.
+    /// Each `--blocked-by` accepts a bare slug or `@<slug>`. Idempotent
+    /// per-blocker: a value already in the list is a no-op for that
+    /// entry. Self-references are rejected — an issue cannot block
+    /// itself.
+    Add {
+        /// Issue whose `blocked_by:` list is being edited
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+
+        /// Slug of the blocker (repeatable). `--blocked-by foo --blocked-by bar`
+        /// adds both in one call.
+        #[arg(long = "blocked-by", value_parser = parse_non_empty, required = true)]
+        blocked_by: Vec<String>,
+
+        /// Optimistic-concurrency token; required with --json.
+        #[arg(long = "expected-version", value_parser = parse_non_empty)]
+        expected_version: Option<String>,
+    },
+
+    /// Remove `<other>` (repeatable) from `<slug>`'s `blocked_by:`
+    /// list. Removing a value that isn't present is a no-op for that
+    /// entry.
+    Remove {
+        /// Issue whose `blocked_by:` list is being edited
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+
+        /// Slug of the blocker to remove (repeatable).
+        #[arg(long = "blocked-by", value_parser = parse_non_empty, required = true)]
+        blocked_by: Vec<String>,
+
+        /// Optimistic-concurrency token; required with --json.
+        #[arg(long = "expected-version", value_parser = parse_non_empty)]
+        expected_version: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1830,6 +1878,18 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             all,
             closed,
         } => cmd_export(json_output, format, query, all, closed),
+        Command::Depend { action } => match action {
+            DependAction::Add {
+                slug,
+                blocked_by,
+                expected_version,
+            } => cmd_depend(json_output, &slug, blocked_by, true, expected_version),
+            DependAction::Remove {
+                slug,
+                blocked_by,
+                expected_version,
+            } => cmd_depend(json_output, &slug, blocked_by, false, expected_version),
+        },
         Command::Cycle { action } => match action {
             CycleAction::Current => cmd_cycle_current(json_output),
             CycleAction::Plan { name, all, closed } => {
@@ -2099,10 +2159,17 @@ fn cmd_list(
 
     let issues = load();
     // `repo::load_issues` already returns issues sorted by slug, so
-    // we don't re-sort here.
+    // we don't re-sort here. Build a blocker graph once so `blocks:`
+    // queries can resolve against the loaded set (plain `query::matches`
+    // can't see other issues and would return false for every `blocks:`
+    // term).
+    let graph = query::build_blocked_by_graph(&issues);
+    let ctx = query::MatchCtx::today(&graph);
     let filtered: Vec<_> = issues
         .into_iter()
-        .filter(|i| folder_filter.map(|f| i.folder == f).unwrap_or(true) && query::matches(&q, i))
+        .filter(|i| {
+            folder_filter.map(|f| i.folder == f).unwrap_or(true) && query::matches_with(&q, i, &ctx)
+        })
         .collect();
 
     if json {
@@ -2378,13 +2445,15 @@ fn cmd_search(json: bool, query_str: &str, all: bool) -> Result<()> {
         || q.has_positive_field(query::FieldName::Folder)
         || q.has_positive_field(query::FieldName::Status);
 
+    let graph = query::build_blocked_by_graph(&issues);
+    let ctx = query::MatchCtx::today(&graph);
     let mut filtered: Vec<_> = issues
         .into_iter()
         .filter(|i| {
             if !scope_expanded && i.folder != "open" {
                 return false;
             }
-            query::matches(&q, i)
+            query::matches_with(&q, i, &ctx)
         })
         .collect();
 
@@ -2788,9 +2857,13 @@ fn cmd_export(
     let folder_filter = folder_default_filter(all, closed, query_str.is_some());
 
     let issues = load();
+    let graph = query::build_blocked_by_graph(&issues);
+    let ctx = query::MatchCtx::today(&graph);
     let filtered: Vec<_> = issues
         .into_iter()
-        .filter(|i| folder_filter.map(|f| i.folder == f).unwrap_or(true) && query::matches(&q, i))
+        .filter(|i| {
+            folder_filter.map(|f| i.folder == f).unwrap_or(true) && query::matches_with(&q, i, &ctx)
+        })
         .collect();
 
     let rendered = issuectl_core::transfer::export(&filtered, format.into())?;
@@ -3559,6 +3632,38 @@ fn cmd_label(
     finish_mutation(json, slug, &outcome, dry_run, "Updated labels for")
 }
 
+fn cmd_depend(
+    json: bool,
+    slug: &str,
+    blocked_by: Vec<String>,
+    add: bool,
+    expected_version: Option<String>,
+) -> Result<()> {
+    if json && expected_version.is_none() {
+        bail!(
+            "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
+        );
+    }
+    let mut req = mutate::UpdateIssueRequest {
+        expected_version,
+        ..Default::default()
+    };
+    if add {
+        req.add_blocked_by = blocked_by;
+    } else {
+        req.remove_blocked_by = blocked_by;
+    }
+    let root = find_root();
+    let outcome = mutate::update_issue(&root, slug, req, None, &UncachedConfig)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let verb = if add {
+        "Added blockers for"
+    } else {
+        "Removed blockers from"
+    };
+    finish_mutation(json, slug, &outcome, false, verb)
+}
+
 fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
     let yaml_text = fs::read_to_string(patch_path)
         .with_context(|| format!("cannot read patch file {}", patch_path.display()))?;
@@ -3686,9 +3791,12 @@ pub(crate) fn bulk_apply(
     spec: &BulkSpec,
     dry_run: bool,
 ) -> Result<Vec<BulkResult>> {
-    let slugs: Vec<String> = repo::load_issues(root)
+    let issues = repo::load_issues(root);
+    let graph = query::build_blocked_by_graph(&issues);
+    let ctx = query::MatchCtx::today(&graph);
+    let slugs: Vec<String> = issues
         .into_iter()
-        .filter(|i| query::matches(q, i))
+        .filter(|i| query::matches_with(q, i, &ctx))
         .map(|i| i.slug)
         .collect();
     if slugs.is_empty() {

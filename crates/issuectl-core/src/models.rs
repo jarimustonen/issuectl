@@ -77,4 +77,40 @@ impl Issue {
             .or(self.owner.as_deref())
             .unwrap_or("")
     }
+
+    /// Canonical, deduplicated, sorted slug list for this issue's
+    /// `blocked_by:` frontmatter array. Reads from `extra` because
+    /// `blocked_by` is intentionally NOT a typed `Frontmatter` field
+    /// (see `parser::Frontmatter::unknown` doc) — promoting it would
+    /// let serde consume the key before `extra` is built and silently
+    /// drop it from query/context bundles. Accepts a list of strings
+    /// or a single string for hand-edited tolerance; any other shape
+    /// yields an empty list. The reverse `blocks` relationship is
+    /// derived at runtime by scanning every issue's `blocked_by`
+    /// across the repo (see `crate::refs::blocked_by_graph`).
+    pub fn blocked_by(&self) -> Vec<String> {
+        use serde_json::Value;
+        let raw: Vec<String> = match self.extra.get("blocked_by") {
+            Some(Value::Array(seq)) => seq
+                .iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect(),
+            Some(Value::String(s)) => vec![s.clone()],
+            _ => Vec::new(),
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for r in raw {
+            let t = r.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let candidate = t.strip_prefix('@').unwrap_or(t);
+            if crate::slug::is_valid(candidate) && seen.insert(candidate.to_string()) {
+                out.push(candidate.to_string());
+            }
+        }
+        out.sort();
+        out
+    }
 }

@@ -43,6 +43,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `$ISSUECTL_USER` → `$GIT_AUTHOR_NAME` → `$GIT_COMMITTER_NAME` → `git
   config user.name`. Set the fields via `--field reviewer=alice --field
   review_status=requested` (no dedicated flags in this iteration).
+- Canonical dependency tracking via `blocked_by:` frontmatter. The
+  reverse `blocks` relationship is **derived at runtime** by scanning
+  every issue's `blocked_by` — it is intentionally never stored, which
+  avoids the drift class. New `issuectl depend add/remove <slug>
+  --blocked-by <other>` mutation goes through the same flock + schema
+  validation path as `update`. The mutation rejects self-blockers
+  (`depend add foo --blocked-by foo`) and overlap between `--blocked-by`
+  add / remove sets. The list-mutation slot (`add_blocked_by` /
+  `remove_blocked_by`) is also wired into the JSON `PATCH /api/issues`
+  body for parity. The query language gains `blocked_by:<slug>` /
+  `:any` / `:none` (resolved per-issue) and `blocks:<slug>` / `:any` /
+  `:none` (resolved from the precomputed repo-wide blocker graph;
+  `query::matches_with` + `query::MatchCtx` carry the graph through).
+  `issuectl doctor` keeps detecting missing blocker refs and dependency
+  cycles via `blocked_by_cycles` and now reports self-dependencies
+  separately under `blocked_by_self` so the error message points at the
+  fix. The agent context bundle already surfaces the blocker summary in
+  `Bundle.blocking_issues` (used by `issuectl context`). The schema's
+  reserved-key list adds `blocked_by` with a hint pointing at `issuectl
+  depend`, so `--field blocked_by=...` and the equivalent PATCH custom
+  field are rejected with that hint.
 - Markdown Definition-of-Done validation. New `issuectl-core::body` module
   parses `- [ ]` / `- [x]` task lists in the canonical H2 sections
   `## Acceptance Criteria`, `## Tests Run`, and `## Implementation Notes`

@@ -315,6 +315,11 @@ struct DoctorFindings {
     /// Dependency cycles via `blocked_by:`. Each inner Vec is a cycle
     /// path (canonicalised so the lowest slug appears first).
     blocked_by_cycles: Vec<Vec<String>>,
+    /// Slugs that list themselves in their own `blocked_by` array.
+    /// Reported separately from `blocked_by_cycles` because the fix
+    /// is local (drop the self-reference) and the error message can
+    /// be sharper than the generic cycle list.
+    blocked_by_self: Vec<String>,
     /// Status/closed-date consistency violations. `(slug, message)`.
     status_consistency: Vec<(String, String)>,
     /// Timestamp sanity violations (created > updated, future dates).
@@ -832,6 +837,12 @@ fn blockers_for(findings: &DoctorFindings, scope: BlockerScope) -> Vec<String> {
         blockers.push(format!(
             "dependency cycles via blocked_by: {} cycle(s)",
             findings.blocked_by_cycles.len()
+        ));
+    }
+    if !layout_only && !findings.blocked_by_self.is_empty() {
+        blockers.push(format!(
+            "self-dependencies in blocked_by: {:?}",
+            findings.blocked_by_self
         ));
     }
     if !layout_only && !findings.status_consistency.is_empty() {
@@ -1523,7 +1534,15 @@ fn populate_extended_validation(
                                 .push((slug.clone(), key.to_string(), missing));
                         } else if key == "blocked_by" {
                             let bare = s.trim().strip_prefix('@').unwrap_or(s.trim()).to_string();
-                            if existing_slugs.contains(&bare) {
+                            if bare == *slug {
+                                // Self-dep: surface explicitly so the user
+                                // gets a focused remediation, and skip it
+                                // for the cycle graph so we don't double-
+                                // report it as a (trivial) 1-node cycle.
+                                if !report.blocked_by_self.contains(slug) {
+                                    report.blocked_by_self.push(slug.clone());
+                                }
+                            } else if existing_slugs.contains(&bare) {
                                 deps.push(bare);
                             }
                         }
@@ -2864,6 +2883,7 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         || report.schema_parse_error.is_some()
         || !report.broken_refs.is_empty()
         || !report.blocked_by_cycles.is_empty()
+        || !report.blocked_by_self.is_empty()
         || !report.status_consistency.is_empty()
         || !report.timestamp_issues.is_empty()
         || !report.unknown_keys.is_empty()
@@ -3069,6 +3089,13 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         println!("Dependency cycles via `blocked_by`:");
         for cycle in &report.blocked_by_cycles {
             println!("  {} → {}", cycle.join(" → "), cycle[0]);
+        }
+        println!();
+    }
+    if !report.blocked_by_self.is_empty() {
+        println!("Self-dependencies in `blocked_by`:");
+        for slug in &report.blocked_by_self {
+            println!("  {slug}: lists itself as a blocker");
         }
         println!();
     }
@@ -4839,6 +4866,26 @@ mod tests {
         let cycle = &r.blocked_by_cycles[0];
         assert_eq!(cycle[0], "alpha-bright-cat");
         assert!(cycle.contains(&"beta-bright-cat".to_string()));
+    }
+
+    #[test]
+    fn detects_blocked_by_self_dependency() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "self-loop-target",
+            "---\ntype: bug\nstatus: open\npriority: normal\nblocked_by: ['@self-loop-target']\n---\n# S\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert_eq!(r.blocked_by_self, vec!["self-loop-target".to_string()]);
+        // The 1-node "cycle" must not also be reported as a cycle:
+        // the self-dep branch claims it as its own finding so the user
+        // gets a focused message.
+        assert!(
+            r.blocked_by_cycles.is_empty(),
+            "self-dep should be deduped from cycle list: {:?}",
+            r.blocked_by_cycles
+        );
     }
 
     #[test]

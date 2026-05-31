@@ -34,6 +34,8 @@
 //! Inside `"..."` quoted strings, `\\` and `\"` are recognized;
 //! everything else is literal.
 
+use std::collections::BTreeMap;
+
 use anyhow::{anyhow, bail, Result};
 use chrono::{Duration, Local, NaiveDate};
 
@@ -70,6 +72,15 @@ pub enum FieldName {
     Closed,
     Reviewer,
     ReviewStatus,
+    /// `blocked_by:<slug>` / `:any` / `:none` — read directly off the
+    /// current issue's `blocked_by` array (no graph needed).
+    BlockedBy,
+    /// `blocks:<slug>` / `:any` / `:none` — derived at evaluation time
+    /// from the repo-wide blocker graph (see `MatchCtx`). Requires a
+    /// non-empty graph in the context; the plain `matches`/`matches_at`
+    /// entry points return `false` for `Blocks` terms because they
+    /// can't see other issues.
+    Blocks,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,28 +214,77 @@ pub fn resolve_me(q: &mut Query, current_user: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Per-evaluation context: today's date anchor plus an optional
+/// repo-wide `slug -> blocked_by` map used to resolve `blocks:<slug>`
+/// queries. Callers that don't care about `blocks:` (boards summary,
+/// tests) build an empty graph; CLI list/search/bulk routes populate
+/// the graph from the loaded issue set.
+pub struct MatchCtx<'a> {
+    pub today: NaiveDate,
+    pub blocked_by_graph: &'a BTreeMap<String, Vec<String>>,
+}
+
+impl<'a> MatchCtx<'a> {
+    pub fn new(today: NaiveDate, graph: &'a BTreeMap<String, Vec<String>>) -> Self {
+        Self {
+            today,
+            blocked_by_graph: graph,
+        }
+    }
+
+    /// Today's local-date anchor + the supplied graph. Convenience for
+    /// CLI call sites that don't need a controlled clock.
+    pub fn today(graph: &'a BTreeMap<String, Vec<String>>) -> Self {
+        Self::new(Local::now().date_naive(), graph)
+    }
+}
+
+/// Build the `slug -> blocked_by` graph the query layer needs to
+/// resolve `blocks:<slug>` and the doctor uses to detect cycles. The
+/// reverse `blocks` relationship is intentionally not stored in
+/// frontmatter — it is derived here.
+pub fn build_blocked_by_graph(issues: &[Issue]) -> BTreeMap<String, Vec<String>> {
+    let mut g = BTreeMap::new();
+    for i in issues {
+        let deps = i.blocked_by();
+        if !deps.is_empty() {
+            g.insert(i.slug.clone(), deps);
+        }
+    }
+    g
+}
+
 /// Evaluate a query against a single issue using today's local date
 /// as the anchor for relative-date terms. Empty query matches
-/// everything.
+/// everything. `blocks:<slug>` terms always evaluate to false through
+/// this entry point — use [`matches_with`] with a populated graph to
+/// enable that filter.
 pub fn matches(q: &Query, i: &Issue) -> bool {
     matches_at(q, i, Local::now().date_naive())
 }
 
 /// Like [`matches`], but takes the "today" anchor explicitly. Used
 /// by tests and (eventually) saved-query evaluators that want a
-/// stable clock.
+/// stable clock. Same `blocks:` caveat as [`matches`].
 pub fn matches_at(q: &Query, i: &Issue, today: NaiveDate) -> bool {
+    static EMPTY: std::sync::OnceLock<BTreeMap<String, Vec<String>>> = std::sync::OnceLock::new();
+    let ctx = MatchCtx {
+        today,
+        blocked_by_graph: EMPTY.get_or_init(BTreeMap::new),
+    };
+    matches_with(q, i, &ctx)
+}
+
+/// Full-context evaluator. Honours `blocks:<slug>` when the context
+/// graph is populated.
+pub fn matches_with(q: &Query, i: &Issue, ctx: &MatchCtx<'_>) -> bool {
     if q.terms.is_empty() {
         return true;
     }
-    // Lowercase title/slug/body once per issue when any text term is
-    // present, instead of per-term. The Issue is read-only here so
-    // we can't memoize across calls without changing the API; doing
-    // it once per `matches` call is the cheap win.
     let text_lc = q.has_text_term().then(|| TextLc::new(i));
     q.terms
         .iter()
-        .all(|t| eval_term(t, i, today, text_lc.as_ref()))
+        .all(|t| eval_term(t, i, ctx, text_lc.as_ref()))
 }
 
 // ── tokenizer ───────────────────────────────────────────────────────────────
@@ -447,6 +507,8 @@ fn parse_field_name(s: &str) -> Result<FieldName> {
         "closed" => FieldName::Closed,
         "reviewer" => FieldName::Reviewer,
         "review_status" => FieldName::ReviewStatus,
+        "blocked_by" => FieldName::BlockedBy,
+        "blocks" => FieldName::Blocks,
         other => bail!("unknown field: {other}"),
     })
 }
@@ -510,10 +572,10 @@ impl TextLc {
     }
 }
 
-fn eval_term(t: &Term, i: &Issue, today: NaiveDate, text_lc: Option<&TextLc>) -> bool {
+fn eval_term(t: &Term, i: &Issue, ctx: &MatchCtx<'_>, text_lc: Option<&TextLc>) -> bool {
     match t {
         Term::Text { needle_lc, negated } => {
-            // Invariant (enforced by `matches_at`): `text_lc` is
+            // Invariant (enforced by `matches_with`): `text_lc` is
             // `Some` whenever the query contains a text term, so a
             // `Text` term is only ever evaluated with the cache in
             // hand. Panicking here is the right behavior for an
@@ -521,11 +583,11 @@ fn eval_term(t: &Term, i: &Issue, today: NaiveDate, text_lc: Option<&TextLc>) ->
             let lc = text_lc.expect("text_lc must be present when evaluating a Text term");
             lc.contains(needle_lc) ^ *negated
         }
-        Term::Field { field, m, negated } => eval_field(*field, m, i, today) ^ *negated,
+        Term::Field { field, m, negated } => eval_field(*field, m, i, ctx) ^ *negated,
     }
 }
 
-fn eval_field(f: FieldName, m: &FieldMatch, i: &Issue, today: NaiveDate) -> bool {
+fn eval_field(f: FieldName, m: &FieldMatch, i: &Issue, ctx: &MatchCtx<'_>) -> bool {
     match f {
         FieldName::Status => string_match(m, &i.status),
         FieldName::Type => string_match(m, &i.issue_type),
@@ -539,11 +601,46 @@ fn eval_field(f: FieldName, m: &FieldMatch, i: &Issue, today: NaiveDate) -> bool
         FieldName::Owner => opt_string_match(m, i.owner.as_deref()),
         FieldName::Epic => opt_string_match(m, i.epic.as_deref()),
         FieldName::Label => label_match(m, i.labels.as_deref()),
-        FieldName::Updated => date_match(m, i.updated.as_deref(), today),
-        FieldName::Created => date_match(m, i.created.as_deref(), today),
-        FieldName::Closed => date_match(m, i.closed.as_deref(), today),
+        FieldName::Updated => date_match(m, i.updated.as_deref(), ctx.today),
+        FieldName::Created => date_match(m, i.created.as_deref(), ctx.today),
+        FieldName::Closed => date_match(m, i.closed.as_deref(), ctx.today),
         FieldName::Reviewer => opt_string_match(m, extra_str(i, "reviewer")),
         FieldName::ReviewStatus => opt_string_match(m, extra_str(i, "review_status")),
+        FieldName::BlockedBy => blocked_by_match(m, &i.blocked_by()),
+        FieldName::Blocks => blocks_match(m, i, ctx),
+    }
+}
+
+fn blocked_by_match(m: &FieldMatch, deps: &[String]) -> bool {
+    match m {
+        FieldMatch::Equals(v) => {
+            let needle = v.trim().strip_prefix('@').unwrap_or(v.trim());
+            deps.iter().any(|d| d.eq_ignore_ascii_case(needle))
+        }
+        FieldMatch::Present => !deps.is_empty(),
+        FieldMatch::Absent => deps.is_empty(),
+        FieldMatch::DateRel { .. } => false,
+    }
+}
+
+/// `blocks:<slug>` matches issues that appear in the target slug's
+/// `blocked_by` list. `blocks:any` / `blocks:none` ask: does this
+/// issue block any other / no other issue in the repo. Both rely on
+/// the precomputed `blocked_by_graph` in [`MatchCtx`]; with an empty
+/// graph everything but `blocks:none` evaluates to false.
+fn blocks_match(m: &FieldMatch, i: &Issue, ctx: &MatchCtx<'_>) -> bool {
+    let graph = ctx.blocked_by_graph;
+    match m {
+        FieldMatch::Equals(v) => {
+            let target = v.trim().strip_prefix('@').unwrap_or(v.trim()).to_string();
+            graph
+                .get(&target)
+                .map(|deps| deps.iter().any(|d| d.eq_ignore_ascii_case(&i.slug)))
+                .unwrap_or(false)
+        }
+        FieldMatch::Present => graph.values().any(|deps| deps.contains(&i.slug)),
+        FieldMatch::Absent => graph.values().all(|deps| !deps.contains(&i.slug)),
+        FieldMatch::DateRel { .. } => false,
     }
 }
 
@@ -1083,6 +1180,79 @@ mod tests {
             } => assert_eq!(v, "foo barbaz"),
             other => panic!("expected label field, got {other:?}"),
         }
+    }
+
+    fn mk_with_blocked_by(slug: &str, refs: &[&str]) -> Issue {
+        let mut i = mk(slug);
+        i.extra.insert(
+            "blocked_by".into(),
+            serde_json::Value::Array(
+                refs.iter()
+                    .map(|s| serde_json::Value::String((*s).into()))
+                    .collect(),
+            ),
+        );
+        i
+    }
+
+    #[test]
+    fn blocked_by_any_none_match_on_issue_alone() {
+        let q = parse("blocked_by:any").unwrap();
+        let with = mk_with_blocked_by("a-b", &["@other-issue-here"]);
+        let without = mk("c-d");
+        assert!(matches_at(&q, &with, today()));
+        assert!(!matches_at(&q, &without, today()));
+        let q = parse("blocked_by:none").unwrap();
+        assert!(!matches_at(&q, &with, today()));
+        assert!(matches_at(&q, &without, today()));
+    }
+
+    #[test]
+    fn blocked_by_equals_strips_at_sigil_and_is_case_insensitive() {
+        let q = parse("blocked_by:other-issue-here").unwrap();
+        let i = mk_with_blocked_by("a-b", &["@other-issue-here"]);
+        assert!(matches_at(&q, &i, today()));
+        let q = parse("blocked_by:@other-issue-here").unwrap();
+        assert!(matches_at(&q, &i, today()));
+        let q = parse("blocked_by:OTHER-issue-here").unwrap();
+        assert!(matches_at(&q, &i, today()));
+        let q = parse("blocked_by:not-present").unwrap();
+        assert!(!matches_at(&q, &i, today()));
+    }
+
+    #[test]
+    fn blocks_requires_graph_in_context() {
+        // `blocks:<slug>` needs the target's `blocked_by` list. The plain
+        // `matches_at` entry has no graph and therefore evaluates the
+        // term to false; `matches_with` + a populated graph honours it.
+        let target = mk_with_blocked_by("target-issue-here", &["@source-one-here"]);
+        let source = mk("source-one-here");
+        let unrelated = mk("third-other-here");
+        let q = parse("blocks:target-issue-here").unwrap();
+
+        // No graph: every issue evaluates false.
+        assert!(!matches_at(&q, &source, today()));
+
+        let graph = build_blocked_by_graph(&[target.clone(), source.clone(), unrelated.clone()]);
+        let ctx = MatchCtx::new(today(), &graph);
+        assert!(matches_with(&q, &source, &ctx));
+        assert!(!matches_with(&q, &unrelated, &ctx));
+        assert!(!matches_with(&q, &target, &ctx));
+    }
+
+    #[test]
+    fn blocks_any_lists_issues_that_block_anything() {
+        let target = mk_with_blocked_by("blocked-target-here", &["@first-source-here"]);
+        let first = mk("first-source-here");
+        let idle = mk("idle-issue-here");
+        let graph = build_blocked_by_graph(&[target, first.clone(), idle.clone()]);
+        let ctx = MatchCtx::new(today(), &graph);
+        let q = parse("blocks:any").unwrap();
+        assert!(matches_with(&q, &first, &ctx));
+        assert!(!matches_with(&q, &idle, &ctx));
+        let q = parse("blocks:none").unwrap();
+        assert!(!matches_with(&q, &first, &ctx));
+        assert!(matches_with(&q, &idle, &ctx));
     }
 
     #[test]

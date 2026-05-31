@@ -117,6 +117,16 @@ pub struct UpdateIssueRequest {
     pub add_related: Vec<String>,
     #[serde(default)]
     pub remove_related: Vec<String>,
+    /// `blocked_by:` list operations. Mirrors `add_related`/`remove_related`
+    /// — the value type is a slug (with or without the `@` sigil) that
+    /// the under-lock path normalizes via `refs::normalize_related_refs`.
+    /// Driven by `issuectl depend add/remove <slug> --blocked-by <other>`.
+    /// The reverse `blocks` edge is intentionally not stored: it's
+    /// derived at read time from every issue's `blocked_by` array.
+    #[serde(default)]
+    pub add_blocked_by: Vec<String>,
+    #[serde(default)]
+    pub remove_blocked_by: Vec<String>,
     #[serde(default)]
     pub add_commits: Vec<CommitSpec>,
     /// Per-key custom-frontmatter PATCH. Mirrors the top-level `Patch`
@@ -172,6 +182,10 @@ pub const RESERVED_CUSTOM_FIELD_KEYS: &[(&str, &str)] = &[
     ("epic", "--epic"),
     ("labels", "--label (repeatable)"),
     ("related", "--related (repeatable)"),
+    (
+        "blocked_by",
+        "use `issuectl depend add/remove <slug> --blocked-by <other>`",
+    ),
     ("status", "set automatically by `new` (always `open`)"),
     ("created", "set automatically by `new` (today)"),
     ("updated", "set automatically by `new`/`update` (today)"),
@@ -402,6 +416,8 @@ impl UpdateIssueRequest {
             && self.remove_labels.is_empty()
             && self.add_related.is_empty()
             && self.remove_related.is_empty()
+            && self.add_blocked_by.is_empty()
+            && self.remove_blocked_by.is_empty()
             && self.add_commits.is_empty()
             && self.custom_fields.is_empty()
             && self.body_ops.is_empty()
@@ -476,6 +492,8 @@ impl UpdateIssueRequest {
             ("remove_labels", &self.remove_labels),
             ("add_related", &self.add_related),
             ("remove_related", &self.remove_related),
+            ("add_blocked_by", &self.add_blocked_by),
+            ("remove_blocked_by", &self.remove_blocked_by),
         ] {
             if list.iter().any(|s| s.is_empty()) {
                 return Err(MutateError::Validation(format!(
@@ -501,6 +519,11 @@ impl UpdateIssueRequest {
         if let Some(overlap) = first_overlap(&self.add_related, &self.remove_related) {
             return Err(MutateError::ConflictingIntent(format!(
                 "related ref {overlap:?} appears in both add_related and remove_related"
+            )));
+        }
+        if let Some(overlap) = first_overlap(&self.add_blocked_by, &self.remove_blocked_by) {
+            return Err(MutateError::ConflictingIntent(format!(
+                "blocked_by ref {overlap:?} appears in both add_blocked_by and remove_blocked_by"
             )));
         }
 
@@ -781,9 +804,27 @@ pub fn update_issue(
         .map_err(|e| MutateError::Validation(e.to_string()))?;
     let normalized_remove_related = crate::refs::normalize_related_refs(&req.remove_related)
         .map_err(|e| MutateError::Validation(e.to_string()))?;
+    let normalized_add_blocked_by = crate::refs::normalize_related_refs(&req.add_blocked_by)
+        .map_err(|e| MutateError::Validation(e.to_string()))?;
+    let normalized_remove_blocked_by = crate::refs::normalize_related_refs(&req.remove_blocked_by)
+        .map_err(|e| MutateError::Validation(e.to_string()))?;
+    // Reject self-blockers up front. Doctor flags them too, but the
+    // mutation API is the authoring surface — failing here keeps
+    // `issuectl depend add foo --blocked-by foo` from producing a
+    // file the next `doctor` run will immediately complain about.
+    if normalized_add_blocked_by
+        .iter()
+        .any(|s| s.trim_start_matches('@') == slug)
+    {
+        return Err(MutateError::Validation(format!(
+            "issue {slug:?} cannot block itself (blocked_by must reference a different slug)"
+        )));
+    }
     let mut req_normalized = req;
     req_normalized.add_related = normalized_add_related.clone();
     req_normalized.remove_related = normalized_remove_related.clone();
+    req_normalized.add_blocked_by = normalized_add_blocked_by.clone();
+    req_normalized.remove_blocked_by = normalized_remove_blocked_by.clone();
     let req = req_normalized;
 
     req.validate()?;
@@ -1053,6 +1094,21 @@ fn update_issue_under_lock(
     }
     for r in &req.remove_related {
         write::remove_from_string_list(&mut item.frontmatter, "related", r)
+            .map_err(MutateError::Io)?;
+    }
+
+    // blocked_by: same shape contract as `related`. Normalization
+    // already ran in `update_issue` so the list elements are bare
+    // slugs by the time we get here.
+    if !req.add_blocked_by.is_empty() || !req.remove_blocked_by.is_empty() {
+        written.insert("blocked_by".into());
+    }
+    for r in &req.add_blocked_by {
+        write::add_to_string_list(&mut item.frontmatter, "blocked_by", r)
+            .map_err(MutateError::Io)?;
+    }
+    for r in &req.remove_blocked_by {
+        write::remove_from_string_list(&mut item.frontmatter, "blocked_by", r)
             .map_err(MutateError::Io)?;
     }
 
@@ -1477,9 +1533,15 @@ fn prepare_bulk_req(req: UpdateIssueRequest) -> Result<UpdateIssueRequest, Mutat
         .map_err(|e| MutateError::Validation(e.to_string()))?;
     let remove = crate::refs::normalize_related_refs(&req.remove_related)
         .map_err(|e| MutateError::Validation(e.to_string()))?;
+    let add_bb = crate::refs::normalize_related_refs(&req.add_blocked_by)
+        .map_err(|e| MutateError::Validation(e.to_string()))?;
+    let rem_bb = crate::refs::normalize_related_refs(&req.remove_blocked_by)
+        .map_err(|e| MutateError::Validation(e.to_string()))?;
     let mut req = req;
     req.add_related = add;
     req.remove_related = remove;
+    req.add_blocked_by = add_bb;
+    req.remove_blocked_by = rem_bb;
     req.validate()?;
     Ok(req)
 }
@@ -2829,6 +2891,83 @@ mod tests {
         let schema = crate::schema::default_schema();
         issue.folder = crate::repo::folder_for_status(&schema, &issue.status).to_string();
         canonical_hash(&issue)
+    }
+
+    #[test]
+    fn depend_add_writes_blocked_by_and_normalizes_at_sigil() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "subject-issue-here", "open");
+        seed_issue(tmp.path(), "open", "blocker-one-here", "open");
+        let req = UpdateIssueRequest {
+            add_blocked_by: vec!["@blocker-one-here".into()],
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "subject-issue-here", req, None, &UncachedConfig).unwrap();
+        let after =
+            fs::read_to_string(tmp.path().join("issues/subject-issue-here/item.md")).unwrap();
+        // Normalization strips the sigil before writing.
+        assert!(
+            after.contains("blocked_by:") && after.contains("blocker-one-here"),
+            "{after}"
+        );
+    }
+
+    #[test]
+    fn depend_remove_drops_blocker_and_removes_empty_key() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "subject-issue-here", "open");
+        seed_issue(tmp.path(), "open", "blocker-one-here", "open");
+        let add = UpdateIssueRequest {
+            add_blocked_by: vec!["blocker-one-here".into()],
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "subject-issue-here", add, None, &UncachedConfig).unwrap();
+        let remove = UpdateIssueRequest {
+            remove_blocked_by: vec!["blocker-one-here".into()],
+            ..Default::default()
+        };
+        update_issue(
+            tmp.path(),
+            "subject-issue-here",
+            remove,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
+        let after =
+            fs::read_to_string(tmp.path().join("issues/subject-issue-here/item.md")).unwrap();
+        assert!(
+            !after.contains("blocked_by:"),
+            "empty list must drop the key: {after}"
+        );
+    }
+
+    #[test]
+    fn depend_rejects_self_blocker() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "loop-target-here", "open");
+        let req = UpdateIssueRequest {
+            add_blocked_by: vec!["loop-target-here".into()],
+            ..Default::default()
+        };
+        let err =
+            update_issue(tmp.path(), "loop-target-here", req, None, &UncachedConfig).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cannot block itself"), "got: {msg}");
+    }
+
+    #[test]
+    fn depend_add_and_remove_overlap_is_conflicting_intent() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "subject-issue-here", "open");
+        let req = UpdateIssueRequest {
+            add_blocked_by: vec!["blocker-x-here".into()],
+            remove_blocked_by: vec!["blocker-x-here".into()],
+            ..Default::default()
+        };
+        let err =
+            update_issue(tmp.path(), "subject-issue-here", req, None, &UncachedConfig).unwrap_err();
+        assert!(matches!(err, MutateError::ConflictingIntent(_)));
     }
 
     #[test]

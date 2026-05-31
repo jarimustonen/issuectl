@@ -260,30 +260,10 @@ fn related_slugs(issue: &Issue) -> Vec<String> {
     normalise_refs(issue.related.clone().unwrap_or_default())
 }
 
-/// `blocked_by` is not part of the typed `Frontmatter` struct (it's a
-/// schema-extensible custom field), so it arrives via `Issue.extra`,
-/// which the parser populates from the same single read that produced
-/// the rest of the issue. Reading it here — rather than re-opening
-/// `item.md` — closes the TOCTOU window between that load and a second
-/// read, so `blocked_by` reflects the same on-disk state as the rest of
-/// the issue. Accepts a list of strings or a single string; any other
-/// shape yields no blockers.
-///
-/// NOTE: this deliberately depends on `blocked_by` staying *out* of the
-/// typed `parser::Frontmatter`. If it is ever promoted to a typed field,
-/// serde will consume it before `unknown`/`extra` is built and it will
-/// silently vanish here — see the matching warning in `parser.rs`.
+/// Thin wrapper around `Issue::blocked_by()`. Kept as a local helper
+/// so the bundle-build site reads symmetrically with `related_slugs`.
 fn read_blocked_by(issue: &Issue) -> Vec<String> {
-    use serde_json::Value;
-    let raw: Vec<String> = match issue.extra.get("blocked_by") {
-        Some(Value::Array(seq)) => seq
-            .iter()
-            .filter_map(|x| x.as_str().map(|s| s.to_string()))
-            .collect(),
-        Some(Value::String(s)) => vec![s.clone()],
-        _ => Vec::new(),
-    };
-    normalise_refs(raw)
+    issue.blocked_by()
 }
 
 fn resolve_refs(slugs: &[String], all: &[Issue]) -> Vec<RelatedRef> {
