@@ -145,6 +145,29 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
     resolves the blockers and re-runs `--fix`.
   Scripted callers should branch on `stop_phase` rather than infer
   from `blockers` + `fix_applied`.
+- **Preflight blockers are layout-fatal only.** Per-file manual-merge
+  findings — `## Notes`/`## Comments` ambiguity, malformed
+  `.issuectl/AGENTS.md`, drift-check-skipped — drive exit-1 via
+  `critical_blockers` but are NOT in `apply_blockers`. They surface
+  through `outcome.notes_conflicts_at_apply` (and the regen-gate on
+  AGENTS.md flags inside `DoctorActions::from_findings`) instead of
+  aborting the whole pass, so orthogonal auto-fixes (alias coercion,
+  AGENTS.md schema-block regen, NN-rename) still run. Adding a new
+  finding to `blockers_for(ApplyPreflight)` requires a one-line
+  justification that it makes the repo genuinely unsafe for the apply
+  pipeline (layout ambiguity, parse failure, symlink risk). See
+  `@doctor-fix-noop`.
+- **`doctor --fix --json` error envelope is scoped to `--fix`.** On
+  non-zero exit, `--fix --json` emits
+  `{"error":{"code","message","details"}}` on stderr (stdout empty);
+  stable codes are `doctor-blocked` (preflight refusal),
+  `doctor-partial` (Ok with manual leftovers, PostApply bail, or
+  critical findings remain), `doctor-apply-error` (mid-pipeline
+  failure). The full result object is nested under `details` so
+  scripts still see what landed. Read-only `--json doctor` keeps the
+  historical contract — full result on stdout regardless of exit
+  code, so `issuectl --json doctor | jq …` on an unhealthy repo
+  continues to work.
 - **Config reads go through `ConfigSource`, not bare `schema::load`.**
   Every mutate entry point (`update_issue`, `new_issue`, `update_body`,
   `close_issue`, `note_issue`, `toggle_checkbox`, `do_new`) and every
