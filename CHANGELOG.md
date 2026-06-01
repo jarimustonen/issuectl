@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `/issue` skill (and Codex prompt) now treats a newer-than-pinned
+  `issuectl` binary as a signal to refresh the skill itself: the
+  install/upgrade section recommends `issuectl skill install --force`
+  and `issuectl doctor` so the agent's instructions and the repo's
+  schema both catch up to the binary it's actually talking to.
+
 ## [0.6.0] - 2026-05-31
 
 Two `/orchestrate` campaigns (14 + 9 worker nodes) landed 23 issues

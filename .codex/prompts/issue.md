@@ -64,7 +64,15 @@ first invocation in a session, run `issuectl --version` and compare:
   they originally used (`brew upgrade jarimustonen/issuectl/issuectl`,
   `cargo install issuectl --force`, or re-run the shell installer).
   Stop and wait — schema/CLI surface may have changed.
-- **Equal or newer**: proceed normally.
+- **Newer than `0.5.2`**: the installed binary is ahead
+  of what this prompt was written for. Tell the user to refresh the
+  prompt so the instructions match the CLI surface they actually have:
+  `issuectl skill install --force --agent codex` (Codex; add
+  `--agent all` for the Claude Code skill too). Then run
+  `issuectl doctor` (or `issuectl doctor --fix`) — a newer binary
+  often ships schema rules or migrations the repo hasn't picked up
+  yet. Continue with the task once both are done.
+- **Equal**: proceed normally.
 
 ## Identifiers
 
