@@ -6,6 +6,13 @@ reporter: jari
 assignee: jari
 status: in-progress
 priority: high
+commits:
+- hash: 438d22f
+  summary: fix doctor --fix silent no-op on unrelated findings
+- hash: 1573d2a
+  summary: address multi-LLM review findings
+- hash: 5a49a14
+  summary: document narrowed doctor preflight scope
 ---
 
 # doctor --fix silently no-ops on alias coercions and AGENTS.md drift
