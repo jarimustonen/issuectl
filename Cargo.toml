@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/issuectl", "crates/issuectl-core"]
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 rust-version = "1.82"
 authors = ["Jari Mustonen <jari.mustonen@iki.fi>"]
