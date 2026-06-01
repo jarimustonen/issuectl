@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-01
+
 ### Changed
 - `/issue` skill (and Codex prompt) now treats a newer-than-pinned
   `issuectl` binary as a signal to refresh the skill itself: the
