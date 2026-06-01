@@ -23,7 +23,7 @@ Examples:
   issuectl open extremely-quiet-otter          Edit item.md in $EDITOR
   issuectl search redirect                 Keyword search
   issuectl duplicates                      Flag likely-duplicate issue pairs
-  issuectl new --type bug --title \"...\"    Create a new issue (random slug)
+  issuectl new --type bug --title \"...\" --slug login-loop    Create a new issue
   issuectl update <slug> --status testing  Change status
   issuectl close <slug> --status fixed     Set a closing status (fixed/done/...)
   issuectl attach <slug> shot.png log.txt  Copy files into the issue's attachments/
@@ -412,7 +412,7 @@ enum Command {
         all: bool,
     },
 
-    /// Create a new issue or epic (random slug auto-generated)
+    /// Create a new issue or epic. Pass `--slug <descriptive-2-3-word-kebab>` derived from the title; a random `intensifier-adjective-noun` slug is the fallback when `--slug` is omitted
     New {
         /// Item type
         #[arg(short = 't', long = "type", value_parser = PossibleValuesParser::new(ISSUE_TYPES))]
@@ -422,7 +422,7 @@ enum Command {
         #[arg(long, value_parser = parse_non_empty)]
         title: String,
 
-        /// Override the auto-generated slug (any kebab-case identifier)
+        /// Descriptive 2-3 word kebab-case slug derived from the title (e.g. `login-redirect-loops`). Omit to fall back to a random `intensifier-adjective-noun` slug — only do that when no obvious short slug exists or the title would leak sensitive data
         #[arg(long, value_parser = parse_non_empty)]
         slug: Option<String>,
 

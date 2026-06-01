@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-06-01
+
+### Changed
+- Strengthen the descriptive-slug guidance so agents stop defaulting
+  to the random `intensifier-adjective-noun` slug when an obvious
+  short slug exists. The `/issue` skill's `Identifiers` section now
+  leads with "prefer a descriptive 2-3 word slug derived from the
+  title; random is the fallback" (previously it stated random as the
+  norm and buried the policy in the Create action). The same flip is
+  applied to the Codex prompt. The `issuectl new` clap help text and
+  top-level usage example also frame `--slug` as the recommended path
+  with random as the fallback instead of an "override".
+
 ## [0.6.2] - 2026-06-01
 
 ### Fixed

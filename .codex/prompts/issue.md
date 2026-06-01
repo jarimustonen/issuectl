@@ -4,7 +4,7 @@
 Manage issues and epics in `issues/` using the `issuectl` CLI as the primary
 interface. The user's message determines the action:
 
-- **Create**: user describes a problem, task, or feature → `issuectl new ...`
+- **Create**: user describes a problem, task, or feature → `issuectl new --slug <descriptive-2-3-word-kebab> ...` (see "Identifiers" for slug policy)
 - **Search/list**: user asks to find, list, or check issues → `issuectl ls`, `issuectl show`, `issuectl search`
 - **Close**: user says an issue is done/resolved → `issuectl close <slug>`
 - **Update**: user wants to change status, assignee, or other details → `issuectl update <slug> ...`
@@ -76,11 +76,18 @@ first invocation in a session, run `issuectl --version` and compare:
 
 ## Identifiers
 
-Issues are identified by random `intensifier-adjective-noun` slugs (e.g.
-`extremely-quiet-otter`). The slug is the primary key in every command
-that takes an issue argument. Body cross-references use `@<slug>` form
-(e.g. `@extremely-quiet-otter`). The `epic:` and `related:` frontmatter
-fields store bare slugs / `@<slug>` strings (no leading `#NN`).
+Issues are identified by short kebab-case slugs (the primary key in
+every command that takes an issue argument). **Prefer a descriptive
+2-3 word slug derived from the title** (e.g. `login-redirect-loops`)
+by passing `--slug` on `issuectl new` — the slug shows up in directory
+names, branch names, and every agent command, so making it
+recognizable pays off. The CLI generates a random
+`intensifier-adjective-noun` slug (e.g. `extremely-quiet-otter`) only
+as a fallback when `--slug` is omitted or no obvious short slug exists
+(see "Action: Create → step 2" for the operational details). Body
+cross-references use `@<slug>` form. The `epic:` and `related:`
+frontmatter fields store bare slugs / `@<slug>` strings (no leading
+`#NN`).
 
 ## Arguments
 
