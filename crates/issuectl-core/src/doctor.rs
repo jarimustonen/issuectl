@@ -468,13 +468,11 @@ impl DoctorActions {
             legacy_dirs: std::mem::take(&mut findings.legacy_dirs),
             flat_layout_plan: findings.flat_layout_plan.take(),
             notes_to_rename: std::mem::take(&mut findings.notes_to_rename),
-            // Cloned (not taken): findings.notes_conflicts is also
-            // surfaced in the read-only render block + JSON top-level
-            // `notes_conflicts` field. We need both: a copy for the
-            // apply pipeline to fold into `notes_conflicts_at_apply`,
-            // and the original for the user-facing render after the
-            // post-apply rescan.
-            notes_conflicts: findings.notes_conflicts.clone(),
+            // Taken (not cloned): `run()` unconditionally re-scans
+            // after `apply()` returns, so the rendered findings come
+            // from a fresh scan and don't depend on this field
+            // surviving the move. Issue: @doctor-fix-noop.
+            notes_conflicts: std::mem::take(&mut findings.notes_conflicts),
             orphan_tempfiles: std::mem::take(&mut findings.orphan_tempfiles),
             closed_with_active_status: std::mem::take(&mut findings.closed_with_active_status),
             open_with_closing_status: std::mem::take(&mut findings.open_with_closing_status),
@@ -683,13 +681,13 @@ pub fn run(repo_root: &Path, fix: bool, json: bool, verbose: bool) -> Result<()>
 
     let exit_decision = classify_exit(&findings, outcome.as_ref(), fix);
     if json {
-        if exit_decision.code != 0 {
-            // Structured error envelope on stderr per the `/issue`
-            // skill contract: `--json` + non-zero exit must yield
-            // `{"error":{code,message,details}}` on stderr with
-            // empty stdout. `details` nests the full result object
-            // so consumers can still see what got applied (issue:
-            // @doctor-fix-noop).
+        // The envelope-on-stderr contract is scoped to `--fix --json`
+        // per the success criteria: read-only `--json doctor` keeps
+        // the historical behaviour of emitting the full result on
+        // stdout regardless of exit code, so existing scripts doing
+        // `issuectl --json doctor | jq …` on an unhealthy repo still
+        // work. Issue: @doctor-fix-noop.
+        if fix && exit_decision.code != 0 {
             let details = render_json(&findings, outcome.as_ref(), fix, repo_root);
             let envelope = serde_json::json!({
                 "error": {
@@ -784,16 +782,14 @@ fn classify_exit(
                 };
             }
             StopPhase::Ok => {
-                if !crit.is_empty() {
-                    return ExitDecision {
-                        code: 1,
-                        error_code: "doctor-partial",
-                        message: format!(
-                            "doctor --fix partial: {} unfixable finding(s) remain",
-                            crit.len()
-                        ),
-                    };
-                }
+                // Manual-merge notes/comments findings produce a
+                // specific message — checked BEFORE the generic
+                // `crit` branch because notes_conflicts persists in
+                // `findings.notes_conflicts` (and therefore in
+                // `crit` via `critical_blockers`) after the apply
+                // pass that recorded them; the generic branch would
+                // otherwise mask the specific guidance the user
+                // needs.
                 if !oc.notes_conflicts_at_apply.is_empty() {
                     return ExitDecision {
                         code: 1,
@@ -801,6 +797,16 @@ fn classify_exit(
                         message: format!(
                             "doctor --fix partial: {} issue(s) need manual `## Notes`/`## Comments` merge",
                             oc.notes_conflicts_at_apply.len()
+                        ),
+                    };
+                }
+                if !crit.is_empty() {
+                    return ExitDecision {
+                        code: 1,
+                        error_code: "doctor-partial",
+                        message: format!(
+                            "doctor --fix partial: {} unfixable finding(s) remain",
+                            crit.len()
                         ),
                     };
                 }
@@ -999,18 +1005,16 @@ fn blockers_for(findings: &DoctorFindings, scope: BlockerScope) -> Vec<String> {
     // already records skipped slugs via `outcome.notes_conflicts_at_apply`,
     // and `regenerate_agents_md` is already gated on these AGENTS.md
     // flags in `DoctorActions::from_findings`. See issue: @doctor-fix-noop.
-    if !layout_only && !findings.notes_conflicts.is_empty() {
-        blockers.push(format!(
-            "## Notes / ## Comments conflicts (manual merge): {:?}",
-            findings.notes_conflicts
-        ));
-    }
     if !layout_only {
+        if !findings.notes_conflicts.is_empty() {
+            blockers.push(format!(
+                "## Notes / ## Comments conflicts (manual merge): {:?}",
+                findings.notes_conflicts
+            ));
+        }
         if let Some(reason) = &findings.agents_md_malformed {
             blockers.push(format!("AGENTS.md is malformed: {reason}"));
         }
-    }
-    if !layout_only {
         if let Some(err) = &findings.agents_md_check_skipped {
             blockers.push(format!("AGENTS.md drift check skipped: {err}"));
         }
@@ -3432,13 +3436,18 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
     if fix {
         // Coherent end-of-run summary. Previously every `--fix` run
         // printed an `Applied. …` count line even when the pipeline
-        // had refused to mutate at preflight (issue: @doctor-fix-noop).
-        // Now the prefix follows `stop_phase`:
-        //   - Preflight  → "Refused — N preflight blocker(s); no writes applied."
-        //   - PostApply  → "Partial — N post-apply blocker(s); partial writes retained."
-        //   - apply_error → "Aborted mid-pipeline." (legacy partial-progress path)
-        //   - Ok + manual leftovers → "Partial — N issue(s) need manual attention…"
-        //   - Ok + clean → "Applied. …"
+        // had refused to mutate at preflight, or when unfixable
+        // findings remained (issue: @doctor-fix-noop). Prefix
+        // follows `stop_phase` first, then falls back to whether the
+        // post-apply scan still surfaces critical findings.
+        let counts = format!(
+            "{} legacy dir(s) migrated, {} flat-layout dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} AGENTS.md block(s) regenerated.",
+            oc.legacy_dirs_migrated.len(),
+            oc.flat_layout_migrated.len(),
+            oc.files_rewritten,
+            oc.notes_renamed.len(),
+            if oc.agents_md_regenerated { 1 } else { 0 }
+        );
         match (oc.stop_phase, oc.apply_error.is_some()) {
             (StopPhase::Preflight, _) => {
                 println!(
@@ -3447,46 +3456,34 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
                 );
             }
             (_, true) => {
-                println!(
-                    "Aborted mid-pipeline. {} legacy dir(s) migrated, {} flat-layout dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} AGENTS.md block(s) regenerated.",
-                    oc.legacy_dirs_migrated.len(),
-                    oc.flat_layout_migrated.len(),
-                    oc.files_rewritten,
-                    oc.notes_renamed.len(),
-                    if oc.agents_md_regenerated { 1 } else { 0 }
-                );
+                println!("Aborted mid-pipeline. {counts}");
             }
             (StopPhase::PostApply, _) => {
                 println!(
-                    "Partial — {} post-apply blocker(s); partial writes retained. {} legacy dir(s) migrated, {} flat-layout dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} AGENTS.md block(s) regenerated.",
-                    oc.blockers.len(),
-                    oc.legacy_dirs_migrated.len(),
-                    oc.flat_layout_migrated.len(),
-                    oc.files_rewritten,
-                    oc.notes_renamed.len(),
-                    if oc.agents_md_regenerated { 1 } else { 0 }
+                    "Partial — {} post-apply blocker(s); partial writes retained. {counts}",
+                    oc.blockers.len()
                 );
             }
             (StopPhase::Ok, _) if !oc.notes_conflicts_at_apply.is_empty() => {
                 println!(
-                    "Partial — auto-fixes ran where possible. {} issue(s) need manual attention (see above). {} legacy dir(s) migrated, {} flat-layout dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} AGENTS.md block(s) regenerated.",
-                    oc.notes_conflicts_at_apply.len(),
-                    oc.legacy_dirs_migrated.len(),
-                    oc.flat_layout_migrated.len(),
-                    oc.files_rewritten,
-                    oc.notes_renamed.len(),
-                    if oc.agents_md_regenerated { 1 } else { 0 }
+                    "Partial — auto-fixes ran where possible. {} issue(s) need manual attention (see above). {counts}",
+                    oc.notes_conflicts_at_apply.len()
                 );
             }
             (StopPhase::Ok, _) => {
-                println!(
-                    "Applied. {} legacy dir(s) migrated, {} flat-layout dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} AGENTS.md block(s) regenerated.",
-                    oc.legacy_dirs_migrated.len(),
-                    oc.flat_layout_migrated.len(),
-                    oc.files_rewritten,
-                    oc.notes_renamed.len(),
-                    if oc.agents_md_regenerated { 1 } else { 0 }
-                );
+                // Even on a clean apply pass, unfixable findings in
+                // the post-apply scan (e.g. schema violations,
+                // broken refs) drive exit-1; the summary must
+                // acknowledge them rather than claim success.
+                let crit = critical_blockers(report);
+                if crit.is_empty() {
+                    println!("Applied. {counts}");
+                } else {
+                    println!(
+                        "Partial — {} unfixable finding(s) remain (see above). {counts}",
+                        crit.len()
+                    );
+                }
             }
         }
     } else {
@@ -6942,15 +6939,27 @@ mod tests {
     fn classify_exit_maps_apply_outcomes_to_envelope_codes() {
         // Clean Ok + no manual leftovers → exit 0.
         let findings = DoctorFindings::default();
-        let mut oc = ApplyOutcome::default();
+        let oc = ApplyOutcome::default();
         let d = classify_exit(&findings, Some(&oc), true);
         assert_eq!(d.code, 0, "clean Ok must exit 0");
 
-        // Ok + manual leftovers (notes_conflicts_at_apply) → doctor-partial.
+        // Realistic Ok + notes leftovers: `findings.notes_conflicts`
+        // ALSO contains the slug (because the post-apply rescan
+        // surfaces unmergeable bodies), so the dead-code regression
+        // (gemini #1, opus 1.2) requires this assertion to hit the
+        // specific notes-merge branch despite `crit` being non-empty.
+        let mut findings_with_notes = DoctorFindings::default();
+        findings_with_notes.notes_conflicts.push("foo".into());
+        let mut oc = ApplyOutcome::default();
         oc.notes_conflicts_at_apply.push("foo".into());
-        let d = classify_exit(&findings, Some(&oc), true);
+        let d = classify_exit(&findings_with_notes, Some(&oc), true);
         assert_eq!(d.code, 1);
         assert_eq!(d.error_code, "doctor-partial");
+        assert!(
+            d.message.contains("manual") && d.message.contains("Notes"),
+            "message must call out the manual notes/comments merge, got: {}",
+            d.message
+        );
 
         // Preflight → doctor-blocked.
         let oc = ApplyOutcome {
@@ -6961,6 +6970,7 @@ mod tests {
         let d = classify_exit(&findings, Some(&oc), true);
         assert_eq!(d.code, 1);
         assert_eq!(d.error_code, "doctor-blocked");
+        assert!(d.message.contains("preflight"));
 
         // PostApply → doctor-partial.
         let oc = ApplyOutcome {
@@ -6971,6 +6981,7 @@ mod tests {
         let d = classify_exit(&findings, Some(&oc), true);
         assert_eq!(d.code, 1);
         assert_eq!(d.error_code, "doctor-partial");
+        assert!(d.message.contains("post-apply"));
 
         // apply_error → doctor-apply-error.
         let oc = ApplyOutcome {
@@ -6981,13 +6992,15 @@ mod tests {
         assert_eq!(d.code, 1);
         assert_eq!(d.error_code, "doctor-apply-error");
 
-        // Critical findings + Ok apply → doctor-partial.
+        // Ok + generic critical findings (no notes leftover) →
+        // doctor-partial with the generic "unfixable" message.
         let mut findings = DoctorFindings::default();
         findings.duplicate_slugs.push("dup".into());
         let oc = ApplyOutcome::default();
         let d = classify_exit(&findings, Some(&oc), true);
         assert_eq!(d.code, 1);
         assert_eq!(d.error_code, "doctor-partial");
+        assert!(d.message.contains("unfixable"));
 
         // Read-only with critical findings → doctor-unhealthy.
         let d = classify_exit(&findings, None, false);

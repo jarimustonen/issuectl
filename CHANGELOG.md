@@ -15,10 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surfaced as per-file findings rather than aborting the entire
   apply pass at preflight. The human end-of-run summary is coherent
   with the actual outcome (`Applied.` / `Partial — …` /
-  `Refused — …`), and `--json --fix` on a non-zero exit emits the
+  `Refused — …`), and `--json --fix` on a non-zero exit now emits the
   documented `{"error":{"code":"doctor-blocked"|"doctor-partial"|…,
   "message":"…","details":{…}}}` envelope on stderr instead of a
-  contradictory result object on stdout. (issue: `@doctor-fix-noop`)
+  contradictory result object on stdout. Read-only `--json doctor`
+  is unchanged — it still emits the full result on stdout regardless
+  of exit code, so existing `issuectl --json doctor | jq …` scripts
+  are unaffected. (issue: `@doctor-fix-noop`)
 
 ## [0.6.1] - 2026-06-01
 

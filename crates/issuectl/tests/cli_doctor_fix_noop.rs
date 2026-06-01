@@ -183,4 +183,124 @@ fn doctor_fix_json_emits_error_envelope_on_partial_exit() {
         outcome["agents_md_regenerated"],
         serde_json::Value::Bool(true)
     );
+    // Tighten the message assertion: it must call out the specific
+    // manual-merge action (not the generic "unfixable" message).
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("manual"),
+        "message must mention the manual merge, got: {}",
+        err["message"]
+    );
+}
+
+/// Issue @doctor-fix-noop: the conflict can also live under
+/// `issues/{open,closed}/<slug>/` (pre-flat-layout). The post-flat-layout
+/// rescan must feed it into `notes_conflicts_at_apply`, AND NN-rename
+/// for an unrelated numbered-legacy dir MUST still run.
+#[test]
+fn doctor_fix_handles_legacy_folder_notes_conflict() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("issues/open/foo-bar")).unwrap();
+    std::fs::write(
+        root.join("issues/open/foo-bar/item.md"),
+        "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2026-01-01\n---\n# T\n\n## Notes\nold\n\n## Comments\nnew\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("issues/closed/3-old")).unwrap();
+    std::fs::write(
+        root.join("issues/closed/3-old/item.md"),
+        "---\nnumber: 3\ntype: bug\nstatus: open\npriority: normal\n---\n# Old\n",
+    )
+    .unwrap();
+
+    let out = run(root, &["--json", "doctor", "--fix"]);
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&stderr)
+        .unwrap_or_else(|e| panic!("expected JSON envelope, got: {stderr} ({e})"));
+    let outcome = &v["error"]["details"]["apply_outcome"];
+
+    // foo-bar must surface in notes_conflicts_at_apply (via the
+    // post-flat-layout rescan).
+    let nca = outcome["notes_conflicts_at_apply"].as_array().unwrap();
+    assert!(
+        nca.iter().any(|s| s.as_str() == Some("foo-bar")),
+        "post-flat-layout notes conflict must surface, got: {nca:?}"
+    );
+    // The unrelated numbered-legacy dir must have been renamed.
+    let migrated = outcome["legacy_dirs_migrated"].as_array().unwrap();
+    assert!(
+        !migrated.is_empty(),
+        "NN-rename must run despite an unrelated notes conflict, got: {migrated:?}"
+    );
+    // foo-bar still landed at flat layout (the flat-layout migration
+    // ran independently of the notes conflict).
+    assert!(root.join("issues/foo-bar/item.md").is_file());
+}
+
+/// Issue @doctor-fix-noop: read-only `--json doctor` on an unhealthy
+/// repo MUST keep the historical contract — full result on stdout,
+/// exit 1. The envelope-on-stderr contract is scoped to `--fix --json`
+/// only; widening it would silently break `issuectl --json doctor | jq …`.
+#[test]
+fn doctor_readonly_json_still_emits_result_on_stdout() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("issues")).unwrap();
+    // Duplicate-slug fixture → critical finding → exit 1.
+    std::fs::create_dir_all(root.join("issues/open/quiet-brave-otter")).unwrap();
+    std::fs::write(
+        root.join("issues/open/quiet-brave-otter/item.md"),
+        "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("issues/closed/quiet-brave-otter")).unwrap();
+    std::fs::write(
+        root.join("issues/closed/quiet-brave-otter/item.md"),
+        "---\ntype: bug\nstatus: closed\npriority: normal\nclosed: 2026-01-01\n---\n# T\n",
+    )
+    .unwrap();
+
+    let out = run(root, &["--json", "doctor"]);
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.trim().is_empty(),
+        "read-only --json must keep emitting on stdout. {}",
+        dump(&out)
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout must be JSON, got: {stdout} ({e})"));
+    // Sanity: the duplicate finding is in the payload, in the
+    // historical (non-envelope) shape.
+    assert!(
+        !v["both_open_and_closed"].as_array().unwrap().is_empty(),
+        "expected duplicate-slug finding in result, got: {v}"
+    );
+}
+
+/// Issue @doctor-fix-noop: clean `--fix --json` run still emits a
+/// result object on stdout (not an envelope) with exit 0. Pin the
+/// success-path contract so a future widening of the envelope to
+/// success cases is caught.
+#[test]
+fn doctor_fix_json_clean_run_stays_on_stdout() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("issues")).unwrap();
+
+    let out = run(root, &["--json", "doctor", "--fix"]);
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout must be JSON, got: {stdout} ({e})"));
+    assert!(v.get("apply_outcome").is_some(), "expected apply_outcome");
+    assert!(
+        v.get("error").is_none(),
+        "clean run must NOT include error envelope, got: {v}"
+    );
 }
