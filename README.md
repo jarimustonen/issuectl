@@ -1,64 +1,169 @@
 # issuectl
 
 [![CI](https://github.com/jarimustonen/issuectl/actions/workflows/ci.yml/badge.svg)](https://github.com/jarimustonen/issuectl/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/issuectl.svg)](https://crates.io/crates/issuectl)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust: 2021](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 
-> AI-first CLI for managing markdown-based issues — no database, no server,
-> just files in your repo.
+> AI-first CLI for managing markdown-based issues — no database, no
+> server, just files in your repo.
 
 `issuectl` tracks issues, tasks, features, and epics as plain markdown
-files with YAML frontmatter, stored under
-`issues/open/<slug>/item.md`. Each issue gets a random
-`intensifier-adjective-noun` slug (e.g. `extremely-quiet-otter`) so that
-work in parallel branches and worktrees never collides.
-The CLI is designed to be driven by AI agents (e.g. via the `/issue`
-[Claude Code](https://claude.com/claude-code) skill) — strict input
-validation, structured JSON output, no interactive prompts — but humans
+files with YAML frontmatter, stored under `issues/<slug>/item.md`.
+Slugs are short kebab-case identifiers — prefer a descriptive 2-3 word
+slug derived from the title (`login-redirect-loops`); the CLI generates
+a random `intensifier-adjective-noun` slug (`extremely-quiet-otter`) as
+a fallback when no obvious short slug exists.
+
+The CLI is designed to be driven by AI agents (via the `/issue`
+[Claude Code](https://claude.com/claude-code) skill or the Codex
+prompt) — strict input validation, a unified `--json` envelope, no
+interactive prompts, byte-deterministic context bundles — but humans
 can use it from a terminal too.
 
 ## Why issuectl?
 
 - **Zero infrastructure.** Issues live in your repo. Diff them, branch
   them, blame them, review them in PRs.
-- **AI-friendly.** Every command speaks `--json`, validates inputs strictly,
-  and returns meaningful exit codes. Designed to be a tool for agents
-  rather than a UI for humans.
+- **AI-friendly.** Every command speaks `--json`, validates inputs
+  strictly, and returns meaningful exit codes. `issuectl context
+  <slug>` renders a deterministic prompt bundle that agents can feed
+  to themselves; `issuectl ready <slug>` reports Definition-of-Done
+  completion as a parseable result.
+- **Lightweight planning, no SaaS.** Cycles, estimates, dependencies,
+  reviewer state, recurring issues, DoD checklists — all in
+  frontmatter or markdown, all offline.
 - **Markdown-first.** Issues are just files. Edit them in your editor,
-  attach screenshots and analysis docs, search them with `grep`.
-- **Worktree-friendly context handoff.** In worktree-based agent flows,
-  an issue body doubles as a durable, self-contained prompt: one agent
-  investigates and writes up `## Reproduction` / `## Analysis` /
-  `## Scope`, then a follow-up agent in a fresh worktree reads the
-  issue and implements directly from it. Frontmatter carries the
-  routing (assignee, status, epic, related); the body *is* the work
-  order. No external task tracker to sync, no chat history to
-  reconstruct — the file in `issues/` is the context.
+  attach screenshots and analysis docs alongside them, search them
+  with `grep`.
+- **Worktree-friendly context handoff.** An issue body doubles as a
+  durable, self-contained prompt: one agent investigates and writes
+  up `## Reproduction` / `## Analysis` / `## Acceptance Criteria`,
+  then a follow-up agent in a fresh worktree reads the issue and
+  implements directly from it. Frontmatter carries the routing
+  (assignee, status, epic, related, blocked_by); the body *is* the
+  work order.
 - **Round-trip safe.** Frontmatter mutations preserve field order and
-  unknown keys. Body text is left verbatim.
-- **Collision-free by construction.** Random `intensifier-adjective-noun`
-  slugs (~100M combinations) replace sequential numbering. Two branches
-  creating issues independently can be merged in any order without
-  renaming.
+  unknown keys. Body text is left verbatim outside the sections you
+  ask to touch.
+- **Git is the event log.** No event database — `issuectl activity` /
+  `timeline` / `changelog` / `metrics` derive everything from
+  `git log` and `Refs-Issue:` / `Fixes-Issue:` commit trailers.
+- **Collision-free by construction.** Two branches creating issues
+  independently can be merged in any order: the random-slug fallback
+  has ~100M combinations, and the optional YAML merge driver
+  union-merges `labels` / `related` / `blocked_by` / `commits` and
+  picks the newer `updated:` instead of conflicting.
 
-## Features
+## Features at a glance
 
-- `list` / `show` / `search` / `stats` — browse with filters and JSON output
-- `new` / `update` / `close` — create, mutate, and resolve issues with strict validation
-- `doctor` — health-check the repo (slug sanity, duplicates, orphans)
-- `skill install` / `skill print` — install or preview the `/issue` skill
-  template for Claude Code or Codex CLI (or both)
-- `serve` — run a local Trello-style web board (read-only)
-- `fmt` — normalize `item.md` files (canonical key order, sorted arrays,
-  ATX headings) so reviews focus on real changes
-- `merge-driver` — opt-in git custom merge driver that union-merges
-  `labels` / `related` / `blocked_by` / `commits` and picks the newer
-  `updated:` instead of conflicting on every cross-branch edit
-- `--root <PATH>` — operate on an external repo from any working directory
+**Core lifecycle.** `new`, `update`, `note`, `close`, `rename`,
+`show`, `list`, `search`, `stats`, `fmt`.
+
+**Lightweight planning.**
+- `depend add/remove` — canonical `blocked_by:` arrays; reverse
+  `blocks:` derived at runtime; doctor flags cycles and self-deps.
+- `cycle current/plan/status` — Linear-style iterations via an
+  optional `cycle: 2026-W22` frontmatter label.
+- `size:` / `estimate:` frontmatter + `workload` (open + in-progress
+  per assignee / cycle / epic) and `burndown --cycle <name>` (ASCII).
+- `reviewer:` + `review_status:` for teams that review through PRs
+  but want issue-level review visibility.
+- `schedule list/run` — recurring issues defined in
+  `.issuectl/recurrences/<name>.yaml` (cron expression), materialised
+  as one file per occurrence.
+- `ready <slug>` — Markdown DoD validation. Parses `## Acceptance
+  Criteria` / `## Tests Run` / `## Implementation Notes` task lists;
+  `→ done` transition warns (or blocks, with `dod.strict: true`) on
+  unchecked acceptance criteria.
+
+**Git-derived reporting.**
+- `activity [--since 7d]` — recent commits that touched `issues/`,
+  grouped back to slugs.
+- `timeline <slug>` — status transitions reconstructed from
+  `git log -p` on the issue's `item.md`.
+- `changelog <ref>..<ref>` — markdown release notes built from
+  `Refs-Issue:` / `Fixes-Issue:` trailers.
+- `metrics [--since 30d]` — throughput, median/p90/mean cycle time,
+  open/closed workload by assignee.
+
+**CLI ergonomics.**
+- `open <slug>` — launch `item.md` in `$EDITOR`; `--dir` for the
+  directory.
+- `attach <slug> <file>...` — copy files into `issues/<slug>/attachments/`.
+- `bulk '<query>' --set/--add-label/...` — apply one mutation across
+  every query-matched issue under a single repo-wide lock;
+  `--dry-run` shows the per-issue diff.
+- `pick [QUERY]` — interactive fuzzy picker; prints the chosen slug.
+- `triage` / `new --inbox` — `issues/inbox/<slug>/` landing zone for
+  drafts; `triage <slug>` promotes one to the canonical layout.
+- `scan-todos` — finds `// TODO(issue: <slug>)` markers in source;
+  reports stale, untracked, and unknown hits;
+  `--create-inbox` files untracked ones.
+- `completions {bash,zsh,fish,powershell,elvish}` — shell completion
+  scripts with dynamic value completion for slugs / statuses /
+  labels / users.
+- Slug prefix matching — `issuectl show login-redirect` resolves to
+  the unique match; ambiguous prefixes list candidates.
+- `note <slug> --stdin` / `--from-file PATH` — pipe a note into the
+  `## Comments` section.
+
+**Content & interop.**
+- First-class `issues/<slug>/attachments/` and `fixtures/`
+  directories. Doctor warns on path-traversal patterns and oversized
+  binaries.
+- `duplicates [<slug>]` — heuristic local-only duplicate detection
+  (title-token overlap, shared labels, body tokens).
+- `import json|github` / `export json|csv|markdown` — portable
+  snapshots; GitHub import uses `gh`.
+
+**Maintenance.**
+- `stale [--days N]` — issues with no recent activity.
+- `archive [--older-than N]` — moves closed issues to
+  `issues/archive/YYYY/MM/`. All read commands consult both the
+  active and archive roots.
+- `doctor` / `doctor --fix` — health-check the repo, coerce legacy
+  enum values via schema aliases, regenerate the AGENTS.md
+  schema-derived block, fix layout drift, migrate legacy numbered
+  layouts.
+
+**Schema & validation.**
+- `issues/.schema.yaml` declares required fields, enum constraints,
+  `required_when` conditional rules, and `status_aliases` /
+  `type_aliases` for migration.
+- `doctor` enforces all of these. `doctor --fix` applies the alias
+  coercions and regenerates the `.issuectl/AGENTS.md` agent-policy
+  block.
+- `issuectl context <slug>` injects schema-declared constraints into
+  the agent context bundle as system instructions, so AI agents
+  can't invent values outside the schema.
+
+**Agent integration.**
+- `skill install --agent claude|codex|all` — install the `/issue`
+  skill template into the current repo (Claude Code or Codex CLI).
+- `context <slug>` — render a deterministic prompt bundle (issue +
+  parent epic + related/blocking refs + commits + schema rules).
+- `prompt <template> <slug>` — render repo-local prompt templates
+  (`.issuectl/prompts/<template>.md`) with `{{key}}` substitution.
+- `sync-commits` — walk git history and attach commits to issues via
+  `Refs-Issue:` / `Fixes-Issue:` trailers.
+
+**Web view.** `serve` — read-only Trello-style kanban board at
+`http://127.0.0.1:7878`.
+
+**Cross-repo & customisation.**
+- `--root <PATH>` — operate on an external repo from any working
+  directory.
+- `--json` — unified JSON envelope across every mutating command.
+- `merge-driver` — opt-in git custom merge driver for
+  `issues/**/item.md` that union-merges list fields.
+- `fmt [--check] [--diff]` — normalise on-disk files for clean
+  diffs.
 
 ## Install
 
-Pick whichever channel suits your platform. After installing, verify with:
+Pick whichever channel suits your platform. After installing, verify
+with:
 
 ```sh
 issuectl --version
@@ -81,7 +186,7 @@ cargo install issuectl
 
 ### Shell installer — any platform, no toolchain required
 
-Downloads the prebuilt binary for your OS/arch and drops it in
+Downloads the prebuilt binary for your OS/arch and drops it into
 `~/.cargo/bin` (or equivalent):
 
 ```sh
@@ -99,134 +204,312 @@ Apple Silicon) and Linux x86_64.
 ```sh
 git clone https://github.com/jarimustonen/issuectl
 cd issuectl
-cargo install --path .
+cargo install --path crates/issuectl
 ```
 
 ## Quick start
 
-After installing, set up your repo and create your first issue:
+After installing, bootstrap a repo and walk through one issue's
+lifecycle:
 
 ```sh
 cd path/to/your/repo
 
-# Install the /issue skill so Claude Code or Codex CLI can drive issuectl.
-# This also creates issues/AGENTS.md and issues/{open,closed}/ if they
-# don't exist yet.
-issuectl skill install --agent all
+# One-shot bootstrap: writes issues/.schema.yaml, .issuectl/AGENTS.md,
+# and the /issue skill for Claude Code + Codex.
+issuectl init
 
-# Create your first issue (random slug auto-generated):
-issuectl new --type bug --title "Login loops on Safari" \
+# Create your first issue with a descriptive 2-3 word slug from the title.
+issuectl new --type bug \
+    --slug login-redirect-loops \
+    --title "Login loops on Safari after SSO" \
     --reporter alice --assignee bob --priority high
-# → Created extremely-quiet-otter: Login loops on Safari
-#     /your/repo/issues/open/extremely-quiet-otter/item.md
+# → Created login-redirect-loops: Login loops on Safari after SSO
+#     /your/repo/issues/login-redirect-loops/item.md
 
 # Browse:
 issuectl list
-issuectl show extremely-quiet-otter
+issuectl show login-redirect-loops
 
 # Move it through the workflow:
-issuectl update extremely-quiet-otter --status in-progress
-issuectl update extremely-quiet-otter --add-commit "abc1234:fix redirect state init"
-issuectl close extremely-quiet-otter                       # status → fixed (default for bugs)
+issuectl update login-redirect-loops --status in-progress
+issuectl note login-redirect-loops --as alice "Repros on Safari 17.0; works on 16.x"
+issuectl update login-redirect-loops --add-commit "abc1234:fix(auth): redirect after SSO"
+issuectl close login-redirect-loops                # status → fixed (default for bugs)
 ```
 
-JSON output for any command (for scripting and AI agents):
+Every command speaks `--json`:
 
 ```sh
 issuectl --json list -t bug --status open
-issuectl --json show extremely-quiet-otter
+issuectl --json show login-redirect-loops
+issuectl --json update login-redirect-loops --status testing \
+    --expected-version $(issuectl --json show login-redirect-loops | jq -r .version)
+```
+
+### Agent-driven example
+
+The skill that `issuectl init` installs teaches an agent to turn a
+natural-language request into the right command. A typical exchange:
+
+> **User:** "There's a bug where the login loops on Safari after SSO. I want to track it."
+
+The agent reads `/issue`, picks a descriptive slug, and runs:
+
+```sh
+issuectl --json new --type bug \
+    --slug login-redirect-loops \
+    --title "Login loops on Safari after SSO" \
+    --reporter alice --assignee bob --priority high
+```
+
+Later, asked to start implementation in a worktree:
+
+> **User:** "Pick up `@login-redirect-loops` and implement."
+
+The agent generates a context bundle, hands it off to itself in the
+worktree, and ticks off Acceptance Criteria as it goes:
+
+```sh
+issuectl --json context login-redirect-loops > /tmp/issue-context.json
+# …work happens…
+issuectl --json check login-redirect-loops "Redirect chain unwinds on Safari"
+issuectl --json ready login-redirect-loops      # exits 0 when AC is complete
+issuectl --json close login-redirect-loops \
+    --expected-version $(issuectl --json show login-redirect-loops | jq -r .version)
 ```
 
 ## Usage
 
-### Browse
+### Browse, search, and inspect
 
-```
-issuectl list                          List open issues (default)
-issuectl ls -a alice                   Filter by assignee
-issuectl ls -t bug -p high             Combine filters
-issuectl ls --all                      Include closed issues
-issuectl ls --closed --json            Closed issues, machine-readable
-issuectl show <slug>                   Show single issue details
-issuectl search redirect [--all]       Keyword search in title/slug/body
-issuectl stats [--json]                Summary statistics
+```sh
+issuectl list                            # open issues (default scope)
+issuectl ls -a alice                     # filter by assignee
+issuectl ls -t bug -p high               # combine filters
+issuectl ls "label:auth -label:wontfix updated:<-14d"  # query language
+issuectl ls --all                        # include closed
+issuectl ls --closed --json              # closed only, machine-readable
+
+issuectl show <slug>                     # full details
+issuectl search redirect [--all]         # keyword search across title/slug/body
+issuectl stats [--json]                  # repo-wide rollup
+
+issuectl duplicates                      # likely-duplicate pairs across all open issues
+issuectl duplicates <slug>               # candidates similar to one issue
+
+issuectl pick "auth"                     # interactive fuzzy picker; prints chosen slug
 ```
 
 Filter flags: `-a/--assignee`, `-t/--type`, `-p/--priority`,
-`-s/--status`, `-e/--epic` (slug), `-l/--label`, `--all`, `--closed`.
+`-s/--status`, `-e/--epic`, `-l/--label`, `--all`, `--closed`. The
+query language additionally supports `reviewer:`, `review_status:`,
+`cycle:`, `blocked_by:`, `blocks:`, `size:`, `estimate:`, negation
+(`-label:wontfix`), and relative date filters (`updated:<-14d`,
+`created:>=-7d`).
 
-### Write
+`issuectl --json ls/search/show` is the contract surface for agents —
+output is stable and documented.
 
-```
-issuectl new --type bug --title "Login loops" \
+### Create, mutate, and resolve
+
+```sh
+issuectl new --type bug \
+    --slug login-redirect-loops \
+    --title "Login loops on Safari" \
     --reporter alice --assignee bob
-# Random slug auto-generated; pass --slug <kebab> to override.
 
 issuectl new --type epic --title "API v2 migration" \
+    --slug api-v2-migration \
     --owner cara --priority high
 
 issuectl update <slug> --status in-progress
-issuectl update <slug> --add-commit "abc123:fix login state" --add-label frontend
-issuectl update <slug> --add-related "@other-slug" --epic api-v2-migration
+issuectl update <slug> --add-commit "abc1234:fix login state"
+issuectl update <slug> --add-label frontend --add-related "@another-slug"
+issuectl update <slug> --epic api-v2-migration
 issuectl update <slug> --no-epic --remove-label stale
 
-issuectl close <slug>                   Defaults: `fixed` for bugs, `done` otherwise
-issuectl close <slug> --status wontfix --commit "abc123:design decision"
+# Single-field focused verbs (also flock-and-version-safe):
+issuectl set    <slug> assignee bob
+issuectl label  <slug> add frontend
+issuectl check  <slug> "Redirect chain unwinds on Safari"
+
+# Notes / decisions / agent runs are appended to the body, not frontmatter:
+issuectl note     <slug> --as alice "Repros on Safari 17.0"
+issuectl note     <slug> --decision --as alice "We'll ship the fix as a hotfix"
+echo "log…" | issuectl note <slug> --as ci-bot --stdin
+
+# Multi-field transactional patch:
+issuectl apply patch.yaml                # slug + fields + body_ops in one flock
+
+# Close:
+issuectl close <slug>                    # → `fixed` for bugs, `done` otherwise
+issuectl close <slug> --status wontfix --commit "abc1234:design decision"
 ```
 
-Cross-references in body markdown use `@<slug>` (e.g. `@extremely-quiet-otter`).
-The `epic:` and `related:` frontmatter fields store bare slugs / `@<slug>`.
+Cross-references in body markdown use `@<slug>`. `epic:`, `related:`,
+and `blocked_by:` frontmatter fields store bare slugs / `@<slug>`.
 
-Strict validation: invalid `--type`, `--priority`, or `--status` values
-are rejected with the list of valid options. Closing statuses (`done`,
-`fixed`, `wontfix`, `duplicate`, `cannot-reproduce`, `obsolete`)
-automatically move the directory from `open/` to `closed/` and stamp
-`closed:` with today's date. Setting a non-closing status on a closed
-issue moves it back to `open/` and clears `closed:`.
+Strict validation: invalid `--type`, `--priority`, `--status`, or
+`--size` values are rejected with the list of valid options. Closing
+statuses (`done`, `fixed`, `wontfix`, `duplicate`,
+`cannot-reproduce`, `obsolete`) stamp `closed:` with today's date.
 
-### Maintenance
+### Dependencies
 
-```
-issuectl doctor                        Read-only health-check report
-issuectl --json doctor                 Machine-readable report
-issuectl skill install                 Install /issue skill (default: Claude Code)
-issuectl skill install --agent codex   Install Codex prompt instead
-issuectl skill install --agent all     Install both
-issuectl skill print [--agent codex]   Preview the template without installing
+```sh
+issuectl depend add    <slug> --blocked-by another-slug
+issuectl depend remove <slug> --blocked-by another-slug
+issuectl ls "blocked_by:any"             # everything that's blocked
+issuectl ls "blocks:<slug>"              # what does this slug block?
+issuectl ls "blocked_by:none"            # ready to start
 ```
 
-`doctor` performs the following checks:
+`blocked_by:` is canonical (a `[slug]` array in frontmatter); the
+reverse `blocks:` relationship is derived at runtime to avoid drift.
+`doctor` reports missing referenced slugs, self-dependencies, and
+cycles.
 
-- **Slug sanity.** Flags slugs that don't pass `is_valid()` (lowercase
-  ASCII kebab-case, at least two segments, letters/digits only).
-- **Duplicates.** Flags any slug used twice across `open/` + `closed/`.
-- **Missing item.md.** Flags directories without an `item.md`.
-- **Orphan epic refs.** Flags `epic:` values that don't resolve to an
-  existing slug.
+### Cycles, estimates, workload
+
+```sh
+issuectl cycle current                   # today's ISO-week label (e.g. 2026-W22)
+issuectl cycle plan 2026-W22             # what's slotted for this cycle
+issuectl cycle status [--all] [--json]   # open/closed rollup by cycle
+issuectl set <slug> cycle 2026-W22       # assign
+
+issuectl set <slug> size M               # S | M | L | XL (point-equivalents)
+# or for free-form numeric estimates:
+issuectl set <slug> estimate 3
+
+issuectl workload [--json]               # open + in-progress points by assignee, cycle, epic
+issuectl burndown --cycle 2026-W22       # ASCII burndown across the cycle's days
+```
+
+### Reviewer field
+
+```sh
+issuectl set <slug> reviewer alice
+issuectl set <slug> review_status requested  # requested|in-review|approved|changes-requested
+issuectl ls "reviewer:me"                # resolves via $ISSUECTL_USER → git config user.name
+```
+
+### Definition-of-Done
+
+Standardise body sections so DoD is machine-checkable:
+
+```markdown
+## Acceptance Criteria
+- [x] Redirect chain unwinds on Safari 17
+- [ ] Error case shows friendly message
+- [ ] Manual test on Safari 16.x
+
+## Tests Run
+- [ ] cargo test passes
+```
+
+```sh
+issuectl ready <slug>                    # exit 0 only if AC is fully checked
+issuectl --json ready <slug>             # parseable totals + per-section breakdown
+```
+
+Set `dod.strict: true` in `issues/.schema.yaml` to upgrade the
+`→ done` warning to a hard block.
+
+### Recurring / scheduled issues
+
+```sh
+issuectl schedule list                   # loaded recurrence definitions + materialisation state
+issuectl schedule run                    # materialise occurrences whose cron has fired
+```
+
+Definitions live at `.issuectl/recurrences/<name>.yaml`:
+
+```yaml
+title: Weekly dependency review
+schedule: "0 9 * * MON"                  # cron (UTC)
+type: chore
+labels: [maintenance, weekly]
+assignee: alice
+description: |
+  Review npm and cargo dependency updates; bump security patches.
+```
+
+Each fire produces a fresh file with `recurrence_of:` and
+`occurrence:` frontmatter — never overwrites a previous one, so git
+history of each occurrence is preserved.
+
+### Git-derived reporting
+
+```sh
+issuectl activity --since 7d             # commits touching issues/, grouped to slugs
+issuectl timeline <slug>                 # status transitions from git log -p
+issuectl changelog v0.5.2..v0.6.0        # release-note markdown from commit trailers
+issuectl metrics --since 30d             # throughput, cycle time, workload
+```
+
+All four honour `--json`. Frontmatter timestamps win when rebases
+have reshaped history.
+
+### Bulk mutations
+
+```sh
+issuectl bulk "status:open label:auth" --add-label v0.6.0 --dry-run
+issuectl bulk "status:open label:auth" --add-label v0.6.0
+issuectl bulk "epic:api-v2-migration"  --set assignee=bob
+```
+
+The whole batch runs under a single repo-wide lock and validates
+every target before any write lands. `--dry-run` shows affected
+slugs plus a per-issue unified diff.
+
+### Maintenance & cleanup
+
+```sh
+issuectl doctor                          # read-only health report
+issuectl doctor --fix                    # apply migrations + alias coercions + AGENTS.md regen
+issuectl stale --days 90                 # issues with no recent activity
+issuectl archive --older-than 180        # move old closed issues to issues/archive/YYYY/MM/
+issuectl rename old-slug new-slug        # rewrites every reference across the repo
+issuectl fmt [--check] [--diff]          # normalise on-disk files
+issuectl scan-todos [--create-inbox]     # find TODO(issue:slug) markers in source
+```
+
+`doctor --fix` is conservative: notes/comments merges that need
+human judgement, malformed `AGENTS.md`, schema parse errors are
+surfaced as findings rather than aborting the whole apply pass.
+
+### Content & interop
+
+```sh
+issuectl attach <slug> screenshot.avif logs.txt
+# Copies into issues/<slug>/attachments/; collisions auto-rename (shot-1.png, …).
+
+issuectl attach <slug> --fixtures sample.json
+# Targets issues/<slug>/fixtures/ instead.
+
+issuectl import json --file dump.json
+issuectl import github --repo owner/name           # via the `gh` CLI
+
+issuectl export json    > snapshot.json
+issuectl export markdown > status-report.md
+issuectl export csv     > export.csv
+```
 
 ### Web view
 
-```
-issuectl serve                         Start the local board on http://127.0.0.1:7878
-issuectl serve --port 9000             Pick a different port
-issuectl serve --host 0.0.0.0          Bind to all interfaces (LAN access)
+```sh
+issuectl serve                           # http://127.0.0.1:7878
+issuectl serve --port 9000               # different port
+issuectl serve --host 0.0.0.0            # LAN access (no auth, no TLS — trusted networks only)
 ```
 
-`serve` runs a small read-only web server that renders `issues/` as a
-Trello-style Kanban board (Open / In progress / Testing / Closed columns,
-plus an "Other" catchall for unrecognised statuses). Filter by type,
-assignee, epic, or label and search across slug and title; filter state
-persists in the URL, so reloads and bookmarks work. Click any card to
-open a modal with the rendered markdown body, frontmatter, and any
-additional `*.md` files alongside `item.md`. The server re-reads the
-filesystem on every request, so editing an `item.md` and refreshing the
-browser shows the change without restarting.
-
-Bind defaults to `127.0.0.1` (local-only). `--host 0.0.0.0` exposes the
-board to your network: there is **no authentication and no TLS**, so use
-it only on trusted networks — `serve` prints a stderr warning when bound
-to a non-loopback interface as a reminder. Edits via the browser will
-land in a follow-up release.
+`serve` renders `issues/` as a Trello-style kanban (Open /
+In progress / Testing / Closed + an "Other" catchall). Filter by
+type / assignee / epic / label / cycle / reviewer; search across
+slug + title; URL-encoded state survives reloads. The server re-reads
+the filesystem per request, so refreshing the browser shows
+edits without restarting.
 
 ### Pointing to an external repo
 
@@ -237,67 +520,94 @@ issuectl --root /path/to/another/repo stats
 
 ## File format
 
-Issues are markdown files with YAML frontmatter:
+Issues are markdown files with YAML frontmatter at
+`issues/<slug>/item.md`. Optional sibling files:
+`issues/<slug>/attachments/`, `issues/<slug>/fixtures/`, plus any
+free-form `*.md` (e.g. `plan.md`, `analysis.md`) the agent or you
+write.
+
+A full-featured example:
 
 ```markdown
 ---
-created: 2026-05-02
-updated: 2026-05-02
+created: 2026-05-15
+updated: 2026-05-31
 type: bug
+status: in-progress
+priority: high
 reporter: alice
 assignee: bob
-status: open
-priority: normal
+reviewer: cara
+review_status: requested
 epic: api-v2-migration
-related: ["@notably-brave-otter", "@simply-fierce-comet"]
+cycle: 2026-W22
+size: M
+related: ["@notably-brave-otter"]
+blocked_by: ["@simply-fierce-comet"]
 labels: [frontend, auth]
 commits:
   - hash: abc1234
     summary: "fix(auth): redirect after SSO"
 ---
 
-# Issue title
+# Login loops on Safari after SSO
 
-_Source: which service / page / feature_
+_Source: frontend/login_
 
 ## Description
 
-...
+Users get stuck in a 302 redirect loop after the SAML POST-back from
+the IdP. Affects Safari 17 only.
+
+## Reproduction
+
+1. Open the app in Safari 17.0
+2. Click "Sign in with SSO"
+3. Complete the IdP flow
+4. Observe the URL bar bouncing between `/auth/callback` and `/home`
+
+## Acceptance Criteria
+
+- [ ] Redirect chain unwinds on Safari 17
+- [ ] Error case shows a friendly message
+- [ ] Manual test on Safari 16.x
+
+## Tests Run
+
+- [ ] cargo test passes
+- [ ] integration test for the redirect path added
 ```
 
-### `issuectl fmt` — normalize on-disk files
+### `issuectl fmt` — normalise on-disk files
 
 ```sh
-issuectl fmt                    # rewrite every issues/<slug>/item.md
-issuectl fmt some-slug          # specific slug(s)
-issuectl fmt --check            # exit non-zero if anything would change (CI)
-issuectl fmt --diff             # print a unified diff, no writes
-issuectl --json fmt --check     # per-file JSON results
+issuectl fmt                             # rewrite every issues/<slug>/item.md
+issuectl fmt some-slug another-slug      # specific slugs
+issuectl fmt --check                     # CI: exit non-zero if anything would change
+issuectl fmt --diff                      # print unified diff, no writes
+issuectl --json fmt --check              # per-file JSON results
 ```
 
-`fmt` is idempotent — `issuectl fmt && issuectl fmt --check` always
-exits 0. Normalises:
+`fmt` is idempotent. It normalises:
 
-- **frontmatter key order**: `created`, `updated`, `closed`, `type`,
-  `status`, `priority`, `reporter`, `assignee`, `owner`, `epic`,
-  `blocked_by`, `related`, `labels`, `commits`, then any unknown keys
-  alphabetically;
-- **arrays** (`labels` / `related` / `blocked_by`) sorted;
-  `commits` keeps its order (it's chronological);
-- markdown setext headings (`====`) rewritten to ATX (`#`);
+- frontmatter key order (canonical sequence then unknown keys
+  alphabetically),
+- arrays (`labels` / `related` / `blocked_by`) sorted; `commits` is
+  preserved in chronological order,
+- markdown setext headings (`====`) rewritten to ATX (`#`),
 - one blank line between `---` close and the body, no trailing
   whitespace, single final newline.
 
 ### Optional git merge driver
 
 `issuectl merge-driver` is a custom three-way merge driver for
-`issues/**/*.md`. It union-merges `labels` / `related` / `blocked_by`,
-keeps `commits` as a hash-keyed log, and picks the newer `updated:` —
-mitigating the most common cross-branch conflict mode for file-based
-issue trackers. Scalar fields that diverge on both sides still produce
-a conflict (the driver never silently picks a side).
+`issues/**/item.md`. It union-merges `labels` / `related` /
+`blocked_by`, keeps `commits` as a hash-keyed log, and picks the
+newer `updated:` — eliminating the most common cross-branch conflict
+mode for file-based issue trackers. Scalar fields that diverge on
+both sides still produce a conflict.
 
-To enable it for a repo:
+To enable:
 
 ```sh
 # Add to .gitattributes (commit this):
@@ -306,78 +616,196 @@ echo 'issues/**/item.md merge=issuectl-yaml' >> .gitattributes
 # Configure the driver locally (per-clone, not committed):
 git config merge.issuectl-yaml.driver \
     "issuectl merge-driver --base %O --ours %A --theirs %B --output %A"
+
+# Or print + apply for you:
+issuectl install-merge-driver --apply
 ```
 
-Or print and apply via:
+`install-merge-driver` never modifies `.gitattributes` itself —
+that file is shared, so its contents are your decision.
 
-```sh
-issuectl install-merge-driver           # print the snippets
-issuectl install-merge-driver --apply   # also run `git config` for you
+## Schema & validation
+
+`issues/.schema.yaml` declares the validation surface: required
+fields, enum constraints, conditional rules, and migration aliases.
+A repo-local schema layers on top of the built-in defaults — declare
+only what you want to add or override.
+
+```yaml
+version: 1
+
+fields:
+  type:
+    required: true
+    enum: [bug, task, feature, improvement, chore, epic]
+  status:
+    required: true
+    enum: [open, in-progress, testing, done, fixed, wontfix, duplicate, cannot-reproduce, obsolete]
+  priority:
+    required: true
+    enum: [normal, high]
+
+# A closing status implies the closed: date is set.
+required_when:
+  closed:
+    when:
+      status: [done, fixed, wontfix, duplicate, cannot-reproduce, obsolete]
+
+# Legacy values doctor --fix coerces during migration:
+status_aliases:
+  closed: done
+  resolved: fixed
+  in_progress: in-progress
+type_aliases:
+  enhancement: improvement
+  refactor: chore
+
+# Optional: block --status done transitions on unchecked AC.
+dod:
+  strict: false
 ```
 
-`install-merge-driver` never modifies `.gitattributes` — that file is
-shared, so its contents are your decision.
+`doctor` enforces all of this read-only. `doctor --fix` applies the
+alias coercions, fills in derived `closed:` dates, regenerates the
+`.issuectl/AGENTS.md` schema-derived block, and migrates legacy
+numbered or `open/`+`closed/` layouts to the canonical flat layout.
 
-See [issues/AGENTS.md](issues/AGENTS.md) for the full schema reference,
-status workflow, and conventions.
+`issuectl context <slug>` reads the schema and injects the enum
+constraints into the agent context bundle as system instructions, so
+AI agents working from the bundle can't invent values outside the
+schema.
 
 ## Agent integration
 
-`issuectl skill install` writes a `/issue` skill template into a target
-repo so an AI agent can drive issue management through `issuectl`
-rather than poking at the filesystem directly. Two formats are
-supported:
+`issuectl init` (and `issuectl skill install`) writes a `/issue`
+skill template into a target repo so an AI agent can drive issue
+management through `issuectl` rather than poking at the filesystem.
 
-| Agent             | Destination                       | Format                                 |
-| ----------------- | --------------------------------- | -------------------------------------- |
-| Claude Code       | `.claude/skills/issue/SKILL.md`   | YAML frontmatter + markdown body       |
-| Codex CLI         | `.codex/prompts/issue.md`         | Plain markdown prompt                  |
+| Agent       | Destination                       | Format                              |
+| ----------- | --------------------------------- | ----------------------------------- |
+| Claude Code | `.claude/skills/issue/SKILL.md`   | YAML frontmatter + markdown body    |
+| Codex CLI   | `.codex/prompts/issue.md`         | Plain markdown prompt               |
 
 ```sh
-issuectl skill install                  # Claude Code skill (default)
-issuectl skill install --agent codex    # Codex prompt
-issuectl skill install --agent all      # both
-issuectl skill print                    # preview Claude template to stdout
-issuectl skill print --agent codex      # preview Codex template
+issuectl skill install                   # Claude Code skill (default)
+issuectl skill install --agent codex     # Codex prompt
+issuectl skill install --agent all       # both
+issuectl skill install --force           # refresh when binary > skill version
+issuectl skill print [--agent codex]     # preview without installing
 ```
 
-The skill instructs the agent to delegate Search/List/Show/Create/Update/Close
-to `issuectl`, but leaves body markdown editing (`## Reproduction`,
-epic `## Issues`/`## Phases` sections, screenshot attachments) to the
-agent since those are out of scope for the CLI.
+The skill instructs the agent to:
+
+- delegate Search / List / Show / Create / Update / Close to
+  `issuectl --json …`;
+- prefer a descriptive 2-3 word `--slug` derived from the title;
+- write body markdown (`## Reproduction`, `## Analysis`, epic
+  `## Issues`/`## Phases` sections) directly, since structured body
+  editing is out of scope for the CLI;
+- when the installed binary is newer than the skill's pinned
+  version, re-run `issuectl skill install --force` and
+  `issuectl doctor` so instructions and repo schema both catch up.
 
 Source templates live at
-[`templates/issue-skill.md`](templates/issue-skill.md) (Claude) and
-[`templates/issue-prompt.md`](templates/issue-prompt.md) (Codex) if you
-want to customize before installing.
+[`crates/issuectl-core/templates/issue-skill.md`](crates/issuectl-core/templates/issue-skill.md)
+(Claude) and
+[`crates/issuectl-core/templates/issue-prompt.md`](crates/issuectl-core/templates/issue-prompt.md)
+(Codex) if you want to customize before installing.
+
+### Context bundles
+
+`issuectl context <slug>` renders a deterministic prompt bundle for
+an issue: the issue body, parent epic, related and blocking refs,
+acceptance criteria, recorded commits, and the schema rules an agent
+must obey when proposing edits.
+
+```sh
+issuectl context login-redirect-loops                    # markdown to stdout
+issuectl --json context login-redirect-loops             # JSON to stdout
+issuectl context login-redirect-loops --write            # cache under .issuectl/cache/agent/<slug>/
+```
+
+The JSON form includes the same `version` token as
+`issuectl --json show`, so an agent can pass it to
+`--expected-version` on a follow-up `update` / `close` without a
+second `show` round-trip.
+
+### Repo-local prompt templates
+
+`.issuectl/prompts/<template>.md` are markdown files with `{{key}}`
+substitution against the context bundle (e.g. `{{slug}}`,
+`{{title}}`, `{{body}}`, `{{epic_goal}}`, `{{acceptance_criteria}}`).
+Any `## H2` heading in the issue body is reachable via its
+snake-cased name — `## Risks` → `{{risks}}`, `## Test Plan` →
+`{{test_plan}}`.
+
+```sh
+issuectl prompt implement login-redirect-loops
+issuectl prompt implement login-redirect-loops --write    # cache to .issuectl/cache/agent/<slug>/prompts/
+```
+
+### Commit trailers and `sync-commits`
+
+Add `Refs-Issue: @<slug>` (or `Fixes-Issue: @<slug>` to signal
+"close-when-verified") to commit messages, then:
+
+```sh
+issuectl sync-commits                    # walk merge-base..HEAD and attach commits to issues
+issuectl sync-commits --dry-run          # preview without writing
+```
+
+Idempotent — safe to re-run. The pre-commit hook
+(`issuectl hooks install`) optionally runs `issuectl doctor` on
+staged issue files so frontmatter problems surface before the commit
+lands.
 
 ## Configuration
 
-| Flag       | Scope     | Description                                           |
-| ---------- | --------- | ----------------------------------------------------- |
-| `--root`   | global    | Override repo root (the dir containing `issues/`)     |
-| `--json`   | global    | Emit JSON to stdout instead of human-readable tables  |
+| Flag / env var                | Scope   | Description                                                                |
+| ----------------------------- | ------- | -------------------------------------------------------------------------- |
+| `--root <PATH>`               | global  | Override repo root (the dir containing `issues/`)                          |
+| `--json`                      | global  | Emit a JSON envelope to stdout instead of human tables                     |
+| `$ISSUECTL_USER`              | env     | `me:` query resolution and `--as` default for `note`                       |
+| `$EDITOR` / `$VISUAL`         | env     | Used by `issuectl open <slug>`                                             |
+| `$GIT_AUTHOR_NAME`            | env     | Fallback after `$ISSUECTL_USER` for `me:`                                  |
 
-Without `--root`, `issuectl` walks up from cwd looking for `issues/` or
-`.git`.
+Without `--root`, `issuectl` walks up from the cwd looking for
+`issues/` or `.git`.
+
+`--json` is the contract surface for agents and CI:
+
+- success (exit 0) → a single JSON value on stdout (object for action
+  commands, array for list commands);
+- error (exit ≠ 0) → an envelope on stderr
+  `{"error":{"code":"<stable-kebab-code>","message":"…"[,...]}}`;
+  stdout is empty. Validation errors, not-found, conflicts, and even
+  bad flags (`code:"usage-error"`) all flow through this contract.
 
 ## Development
 
-Requires a Rust toolchain (2021 edition or newer).
+Requires a Rust toolchain (2021 edition, MSRV `1.82`).
 
 ```sh
 cargo build
-cargo test
+cargo test --workspace
 cargo clippy --all-targets
+cargo fmt --all --check
 ```
 
-See [AGENTS-AI-FIRST-CLI.md](AGENTS-AI-FIRST-CLI.md) for the design
-principles every command follows.
+The workspace is `crates/issuectl-core` (library) +
+`crates/issuectl` (CLI binary).
+
+See
+[AGENTS-AI-FIRST-CLI.md](AGENTS-AI-FIRST-CLI.md) for the design
+principles every command follows, and
+[docs/](docs/) for additional design notes and per-release digests
+(e.g.
+[`docs/releases/v0.6.0.md`](docs/releases/v0.6.0.md)).
 
 ## Contributing
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
-PR process, dev setup, and coding conventions.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
+the PR process, dev setup, and coding conventions.
 
 To report a security vulnerability, please follow the process in
 [SECURITY.md](SECURITY.md).
