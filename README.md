@@ -11,15 +11,21 @@
 `issuectl` tracks issues, tasks, features, and epics as plain markdown
 files with YAML frontmatter, stored under `issues/<slug>/item.md`.
 Slugs are short kebab-case identifiers — prefer a descriptive 2-3 word
-slug derived from the title (`login-redirect-loops`); the CLI generates
-a random `intensifier-adjective-noun` slug (`extremely-quiet-otter`) as
-a fallback when no obvious short slug exists.
+slug derived from the title (`login-redirect-loops`).
 
-The CLI is designed to be driven by AI agents (via the `/issue`
-[Claude Code](https://claude.com/claude-code) skill or the Codex
-prompt) — strict input validation, a unified `--json` envelope, no
-interactive prompts, byte-deterministic context bundles — but humans
-can use it from a terminal too.
+It is built for AI coding workflows. An issue's body is durable,
+self-contained context: one agent investigates and writes up
+`## Reproduction` / `## Analysis` / `## Acceptance Criteria` into
+`issues/<slug>/item.md`; a follow-up agent in a fresh git worktree
+reads the same issue and implements directly from it. Frontmatter
+carries the routing (assignee, status, epic, related, blocked_by);
+the body *is* the work order. `issuectl context <slug>` packages all
+of that into a deterministic prompt bundle the agent can feed to
+itself, `issuectl ready <slug>` reports Definition-of-Done completion
+as a parseable result, and the `/issue` skill teaches Claude Code and
+Codex CLI to drive the rest. Every command speaks `--json`, validates
+strictly, and never prompts interactively — humans can use it from a
+terminal too, but the design centre is the agent.
 
 ## Why issuectl?
 
@@ -36,13 +42,6 @@ can use it from a terminal too.
 - **Markdown-first.** Issues are just files. Edit them in your editor,
   attach screenshots and analysis docs alongside them, search them
   with `grep`.
-- **Worktree-friendly context handoff.** An issue body doubles as a
-  durable, self-contained prompt: one agent investigates and writes
-  up `## Reproduction` / `## Analysis` / `## Acceptance Criteria`,
-  then a follow-up agent in a fresh worktree reads the issue and
-  implements directly from it. Frontmatter carries the routing
-  (assignee, status, epic, related, blocked_by); the body *is* the
-  work order.
 - **Round-trip safe.** Frontmatter mutations preserve field order and
   unknown keys. Body text is left verbatim outside the sections you
   ask to touch.
@@ -148,8 +147,10 @@ can use it from a terminal too.
 - `sync-commits` — walk git history and attach commits to issues via
   `Refs-Issue:` / `Fixes-Issue:` trailers.
 
-**Web view.** `serve` — read-only Trello-style kanban board at
-`http://127.0.0.1:7878`.
+**Web view.** `serve` — Trello-style kanban board at
+`http://127.0.0.1:7878` with drag-and-drop status changes and an
+in-browser body editor (read-only when bound to a non-loopback
+address).
 
 **Cross-repo & customisation.**
 - `--root <PATH>` — operate on an external repo from any working
@@ -169,7 +170,7 @@ with:
 issuectl --version
 ```
 
-### Homebrew — macOS and Linux
+### Homebrew
 
 ```sh
 brew install jarimustonen/issuectl/issuectl
@@ -178,13 +179,13 @@ brew install jarimustonen/issuectl/issuectl
 The first run automatically taps `jarimustonen/homebrew-issuectl`. To
 upgrade later: `brew upgrade issuectl`.
 
-### Cargo — any platform with a Rust toolchain
+### Cargo
 
 ```sh
 cargo install issuectl
 ```
 
-### Shell installer — any platform, no toolchain required
+### Shell installer
 
 Downloads the prebuilt binary for your OS/arch and drops it into
 `~/.cargo/bin` (or equivalent):
@@ -265,7 +266,7 @@ issuectl --json new --type bug \
 
 Later, asked to start implementation in a worktree:
 
-> **User:** "Pick up `@login-redirect-loops` and implement."
+> **User:** "Pick up login-redirect-loops and implement."
 
 The agent generates a context bundle, hands it off to itself in the
 worktree, and ticks off Acceptance Criteria as it goes:
@@ -505,11 +506,15 @@ issuectl serve --host 0.0.0.0            # LAN access (no auth, no TLS — trust
 ```
 
 `serve` renders `issues/` as a Trello-style kanban (Open /
-In progress / Testing / Closed + an "Other" catchall). Filter by
-type / assignee / epic / label / cycle / reviewer; search across
-slug + title; URL-encoded state survives reloads. The server re-reads
-the filesystem per request, so refreshing the browser shows
-edits without restarting.
+In progress / Testing / Closed + an "Other" catchall). On a loopback
+bind, cards can be dragged between columns (PATCH-back to the on-disk
+frontmatter) and bodies edited inline in the browser. Filter by type /
+assignee / epic / label / cycle / reviewer; search across slug + title;
+URL-encoded state survives reloads. The board falls back to read-only
+when bound to a non-loopback address (no auth, no TLS, so writes are
+gated to local-only by default — opt in explicitly for LAN access).
+For the full security model and write semantics, run
+`issuectl docs kanban`.
 
 ### Pointing to an external repo
 
