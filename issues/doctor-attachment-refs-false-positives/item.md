@@ -3,8 +3,16 @@ created: 2026-06-03
 updated: 2026-06-03
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
+commits:
+- hash: e791e1a4c47a568aa0b5ffe52d18f91db634ac13
+  summary: 'fix(doctor): gate cross-file-pointer skip on `#L<n>` anchor shape'
+- hash: 72ed9e5425497def2e1ff1a3af08aad0d3ad5bc0
+  summary: 'fix(doctor): use CommonMark parser for broken_attachment_refs scan'
+- hash: 7b55b4489ff06d2607fdb999518ff1f257d58635
+  summary: 'issues(doctor-attachment-refs-false-positives): file bug'
+closed: 2026-06-03
 ---
 
 # doctor broken_attachment_refs heuristic produces false positives
