@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-06-03
+
+### Fixed
+- `doctor`'s `broken_attachment_refs` scan no longer flags
+  `![alt](path)` / `[text](path)` syntax that appears inside markdown
+  code spans or fenced code blocks (the author is naming a construct,
+  not using one). The scan now walks the issue body with a CommonMark
+  parser (`pulldown-cmark`) and only inspects link/image targets
+  emitted as real `Tag::Link` / `Tag::Image` events.
+- `doctor` also stops flagging repo-relative source-code cross-links
+  (e.g. `[foo.ts:87-98](../foo.ts#L87-L98)`) as broken attachments.
+  Targets whose path component contains `/` and whose fragment matches
+  the `#L<n>` / `#L<n>-L<m>` line-anchor shape are treated as
+  cross-file code pointers and skipped. Genuine sibling attachments
+  (`![screenshot](missing.png)`) still error as before.
+
 ## [0.6.3] - 2026-06-01
 
 ### Changed
