@@ -1292,20 +1292,25 @@ fn populate_attachment_health(scan: &ScanResult, repo_root: &Path, report: &mut 
         // Relative body references pointing inside the issue dir that no
         // longer resolve. Scan only the body — a YAML frontmatter value
         // can legitimately contain `[text](paren)` syntax, which would
-        // otherwise register as a phantom broken reference. Targets that
-        // resolve to an existing file at the repo root are cross-file
-        // code pointers (analogous to GitHub `path/file.ts#L10-L20`
-        // permalinks), not attachments — skip them.
+        // otherwise register as a phantom broken reference. A target
+        // carrying a GitHub-style `#L<n>` line anchor that also exists
+        // at the repo root is a cross-file code permalink, not an
+        // attachment — skip those. Crucially the skip is gated on the
+        // anchor shape so a bare `![logo](README.md)` referencing a
+        // missing sibling is NOT silently masked by an unrelated
+        // `README.md` at the repo root.
         if let Some(text) = &s.text {
             let body = crate::item_text::split(text).body;
             for r in crate::refs::extract_relative_body_refs(body) {
-                if s.dir_path.join(&r).exists() {
+                if s.dir_path.join(&r.path).exists() {
                     continue;
                 }
-                if repo_root.join(&r).exists() {
+                if r.has_line_anchor && repo_root.join(&r.path).exists() {
                     continue;
                 }
-                report.broken_attachment_refs.push((s.dir_name.clone(), r));
+                report
+                    .broken_attachment_refs
+                    .push((s.dir_name.clone(), r.path));
             }
         }
     }
@@ -6960,29 +6965,85 @@ mod tests {
         );
     }
 
-    /// Regression: a repo-relative code pointer like
-    /// `[foo.rs:10-20](../foo.rs#L10-L20)` is a cross-file link, not
-    /// an attachment — it must not be flagged as broken even though
-    /// the target is outside the issue dir. Class 2 of issue
-    /// @doctor-attachment-refs-false-positives.
+    /// Regression: a `..`-escaping link target (the path leaves the
+    /// issue dir) is already rejected by `normalize_relative_ref`'s
+    /// component check, regardless of the cross-file-pointer logic.
+    /// Pin that path explicitly so a future change to either layer
+    /// doesn't silently start flagging cross-dir links.
     #[test]
-    fn broken_refs_skips_repo_relative_code_link() {
+    fn broken_refs_skips_parent_dir_escape_link() {
         let tmp = fresh_repo();
-        // Drop a sibling repo file the link points at, to mirror the
-        // 3DBear monorepo shape from the bug report.
         fs::write(tmp.path().join("foo.ts"), b"// stub\n").unwrap();
         put_flat(
             &tmp,
-            "repo-relative-code-link",
+            "parent-dir-escape",
             "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n\n\
-             See [foo.ts:10-20](../foo.ts#L10-L20) and also \
-             [bar at repo root](foo.ts#L1).\n",
+             See [foo.ts:10-20](../foo.ts#L10-L20).\n",
         );
         let r = scan(tmp.path()).unwrap();
         assert!(
             r.broken_attachment_refs.is_empty(),
-            "repo-relative code pointer must not be flagged: {:?}",
+            "parent-dir escape must not surface as a broken ref: {:?}",
             r.broken_attachment_refs
+        );
+    }
+
+    /// Regression: a non-escaping repo-relative pointer with a
+    /// GitHub-style `#L<n>` line anchor — the actual Class-2 shape
+    /// from the 3DBear bug report. The path resolves under the issue
+    /// dir (not via `..`), so the heuristic that gates the repo-root
+    /// existence check on the anchor shape is what saves it.
+    #[test]
+    fn broken_refs_skips_repo_relative_code_pointer_with_line_anchor() {
+        let tmp = fresh_repo();
+        // Mirror the 3DBear shape: a real source file lives at the
+        // repo root and is referenced from the issue body with a
+        // `#L<n>` permalink fragment.
+        fs::create_dir_all(tmp.path().join("kurssi-ai-server/src/cli")).unwrap();
+        fs::write(
+            tmp.path().join("kurssi-ai-server/src/cli/sops.ts"),
+            b"// stub\n",
+        )
+        .unwrap();
+        put_flat(
+            &tmp,
+            "code-pointer-with-line-anchor",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n\n\
+             `loadMoodleAdminPassword()` in \
+             [sops.ts:87-98](kurssi-ai-server/src/cli/sops.ts#L87-L98).\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.broken_attachment_refs.is_empty(),
+            "GitHub-permalink-shaped code pointer must not be flagged: {:?}",
+            r.broken_attachment_refs
+        );
+    }
+
+    /// Regression for the silent-false-negative class identified in
+    /// review: a missing sibling attachment whose filename collides
+    /// with a repo-root file (`README.md`, `Cargo.toml`, …) must STILL
+    /// be flagged. The earlier "exists at repo root → skip" heuristic
+    /// silently masked these; the line-anchor gate is what keeps the
+    /// bare-filename case honest.
+    #[test]
+    fn broken_refs_still_flags_when_filename_collides_with_repo_root() {
+        let tmp = fresh_repo();
+        fs::write(tmp.path().join("README.md"), b"# repo readme\n").unwrap();
+        put_flat(
+            &tmp,
+            "collides-with-repo-root",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n\n\
+             ![logo](README.md)\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert_eq!(
+            r.broken_attachment_refs,
+            vec![(
+                "collides-with-repo-root".to_string(),
+                "README.md".to_string()
+            )],
+            "missing sibling attachment must not be masked by a repo-root collision"
         );
     }
 

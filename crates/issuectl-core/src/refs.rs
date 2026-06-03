@@ -120,6 +120,17 @@ fn rewrite_line_refs(line: &str, old: &str, new: &str, out: &mut String) -> usiz
     count
 }
 
+/// A repo-relative file reference extracted from a markdown body. The
+/// `path` is the issue-relative target; `has_line_anchor` is true when
+/// the original URL ended with a GitHub-style line anchor like
+/// `#L10-L20`. The consumer uses the anchor flag to disambiguate
+/// genuine missing attachments from cross-file code permalinks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodyRef {
+    pub path: String,
+    pub has_line_anchor: bool,
+}
+
 /// Extract repo-relative file references from a markdown body — the
 /// targets of inline images (`![alt](path)`) and links (`[text](path)`)
 /// that point at the issue's own files (typically under `attachments/`
@@ -130,16 +141,17 @@ fn rewrite_line_refs(line: &str, old: &str, new: &str, out: &mut String) -> usiz
 /// any `scheme://`), root-absolute paths (`/etc/...`), bare anchors
 /// (`#section`), and paths that escape the issue directory (`../`).
 /// A leading `./` is stripped. Targets are de-angle-bracketed
-/// (`<path>`) and any trailing `"title"` is dropped. Fenced code blocks
-/// are skipped so pasted command examples don't register as live
-/// references. Ordering and duplicates are preserved as they appear.
+/// (`<path>`) and any trailing `"title"` is dropped — both handled by
+/// the CommonMark parser, not this function. Fenced and indented code
+/// blocks plus code spans are skipped because pulldown-cmark never
+/// emits `Tag::Link`/`Tag::Image` inside them.
 ///
-/// Known limitations (acceptable because the consumer only emits a
-/// non-blocking warning): targets are matched up to the first `)` or
-/// whitespace, so filenames containing literal parentheses or spaces
-/// are truncated; reference-style links (`[a]: target`) and indented
-/// (4-space) code blocks are not handled.
-pub fn extract_relative_body_refs(body: &str) -> Vec<String> {
+/// Reference-style links (`[a][ref]` with `[ref]: target` defs) ARE
+/// followed by the parser and surface here — a behavior change versus
+/// the previous regex scan, which only matched inline `[text](url)`.
+/// Likewise CommonMark autolinks `<https://…>` are emitted as links
+/// and filtered out by the `scheme:` check.
+pub fn extract_relative_body_refs(body: &str) -> Vec<BodyRef> {
     use pulldown_cmark::{Event, Options, Parser, Tag};
 
     // A CommonMark event walk skips code spans and fenced/indented code
@@ -147,11 +159,12 @@ pub fn extract_relative_body_refs(body: &str) -> Vec<String> {
     // inside those, never `Tag::Link`/`Tag::Image`. This avoids the
     // class of false positives where prose describes link syntax inside
     // backticks (e.g. `` `![alt](path)` ``).
+    // Only `ENABLE_TABLES` is needed — links inside table cells produce
+    // `Tag::Link`. Footnote/strikethrough/tasklist extensions don't
+    // emit `Tag::Link` of their own, so leave them off to keep the
+    // parser surface minimal.
     let mut opts = Options::empty();
-    opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TABLES);
-    opts.insert(Options::ENABLE_FOOTNOTES);
-    opts.insert(Options::ENABLE_TASKLISTS);
 
     let mut out = Vec::new();
     for ev in Parser::new_ext(body, opts) {
@@ -160,17 +173,20 @@ pub fn extract_relative_body_refs(body: &str) -> Vec<String> {
             | Event::Start(Tag::Image { dest_url, .. }) => dest_url,
             _ => continue,
         };
-        if let Some(rel) = normalize_relative_ref(&dest) {
-            out.push(rel);
+        if let Some(r) = normalize_relative_ref(&dest) {
+            out.push(r);
         }
     }
     out
 }
 
-/// Normalize a raw markdown link target to a repo-relative path, or
-/// `None` if it is not an intra-issue relative reference (URL, anchor,
-/// absolute path, or a `../` escape).
-fn normalize_relative_ref(raw: &str) -> Option<String> {
+/// Normalize a raw markdown link target to a repo-relative `BodyRef`,
+/// or `None` if it is not an intra-issue relative reference (URL,
+/// anchor, absolute path, or a `../` escape). The fragment is only
+/// stripped from the path when it matches a GitHub-style line anchor
+/// (`L10` / `L10-L20`); other `#fragments` are left attached so files
+/// with literal `#` in the name survive the existence check unchanged.
+fn normalize_relative_ref(raw: &str) -> Option<BodyRef> {
     let t = raw.trim();
     if t.is_empty() || t.starts_with('#') || t.starts_with('/') {
         return None;
@@ -186,16 +202,18 @@ fn normalize_relative_ref(raw: &str) -> Option<String> {
     if t.contains('\\') {
         return None;
     }
-    // Strip URL fragment (e.g. `foo.ts#L10-L20`) — only the path
-    // portion is checked for existence as a sibling.
-    let t = match t.split_once('#') {
-        Some((path, _frag)) => path,
-        None => t,
+    // Strip a trailing GitHub-style line anchor (`#L10`, `#L10-L20`)
+    // because those are cross-file code permalinks, not part of the
+    // attachment filename. Any other `#…` is kept verbatim so a
+    // filename literally containing `#` is not silently rewritten.
+    let (path_part, has_line_anchor) = match t.split_once('#') {
+        Some((path, frag)) if is_line_anchor(frag) => (path, true),
+        _ => (t, false),
     };
-    if t.is_empty() {
+    if path_part.is_empty() {
         return None;
     }
-    let stripped = t.strip_prefix("./").unwrap_or(t);
+    let stripped = path_part.strip_prefix("./").unwrap_or(path_part);
     if stripped.is_empty() {
         return None;
     }
@@ -211,7 +229,31 @@ fn normalize_relative_ref(raw: &str) -> Option<String> {
     }) {
         return None;
     }
-    Some(stripped.to_string())
+    Some(BodyRef {
+        path: stripped.to_string(),
+        has_line_anchor,
+    })
+}
+
+/// `L10` or `L10-L20` — the shape GitHub permalinks use for line
+/// ranges. Used to decide whether a `#fragment` was a code anchor
+/// (strip + carry the flag) or part of the filename (leave alone).
+fn is_line_anchor(frag: &str) -> bool {
+    let Some(rest) = frag.strip_prefix('L') else {
+        return false;
+    };
+    if rest.is_empty() {
+        return false;
+    }
+    match rest.split_once("-L") {
+        Some((a, b)) => {
+            !a.is_empty()
+                && !b.is_empty()
+                && a.chars().all(|c| c.is_ascii_digit())
+                && b.chars().all(|c| c.is_ascii_digit())
+        }
+        None => rest.chars().all(|c| c.is_ascii_digit()),
+    }
 }
 
 #[cfg(test)]
@@ -332,11 +374,15 @@ mod tests {
         );
     }
 
+    fn paths(refs: Vec<BodyRef>) -> Vec<String> {
+        refs.into_iter().map(|r| r.path).collect()
+    }
+
     #[test]
     fn extract_relative_body_refs_picks_images_and_links() {
         let body = "See ![shot](attachments/shot.avif) and [log](./fixtures/run.log).";
         assert_eq!(
-            extract_relative_body_refs(body),
+            paths(extract_relative_body_refs(body)),
             vec![
                 "attachments/shot.avif".to_string(),
                 "fixtures/run.log".to_string()
@@ -358,7 +404,7 @@ mod tests {
         let body = "[a](..\\..\\secret) [b](attachments/../../etc/passwd) \
                     [c](attachments/./x.avif)";
         assert_eq!(
-            extract_relative_body_refs(body),
+            paths(extract_relative_body_refs(body)),
             vec!["attachments/./x.avif".to_string()]
         );
     }
@@ -367,7 +413,7 @@ mod tests {
     fn extract_relative_body_refs_strips_angle_brackets_and_titles() {
         let body = "![s](<attachments/a.avif> \"a title\")";
         assert_eq!(
-            extract_relative_body_refs(body),
+            paths(extract_relative_body_refs(body)),
             vec!["attachments/a.avif".to_string()]
         );
     }
@@ -376,9 +422,70 @@ mod tests {
     fn extract_relative_body_refs_ignores_fenced_code() {
         let body = "real ![x](attachments/x.avif)\n```\n![y](attachments/y.avif)\n```\n";
         assert_eq!(
-            extract_relative_body_refs(body),
+            paths(extract_relative_body_refs(body)),
             vec!["attachments/x.avif".to_string()]
         );
+    }
+
+    #[test]
+    fn extract_relative_body_refs_flags_github_line_anchor() {
+        // `#L10-L20` is recognised as a line anchor and stripped; the
+        // flag rides along so the consumer can treat the ref as a
+        // cross-file code pointer.
+        let refs = extract_relative_body_refs("see [x](foo.ts#L10-L20)");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].path, "foo.ts");
+        assert!(refs[0].has_line_anchor);
+
+        let refs = extract_relative_body_refs("[y](bar.rs#L42)");
+        assert_eq!(refs[0].path, "bar.rs");
+        assert!(refs[0].has_line_anchor);
+    }
+
+    #[test]
+    fn extract_relative_body_refs_preserves_literal_hash_in_filename() {
+        // A `#fragment` that does not look like a GitHub line anchor
+        // (e.g. `report#draft.pdf`) must NOT be stripped — otherwise a
+        // file literally named `report#draft.pdf` is reported as a
+        // broken ref to `report`, which is wrong on both ends.
+        let refs = extract_relative_body_refs("[r](report#draft.pdf)");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].path, "report#draft.pdf");
+        assert!(!refs[0].has_line_anchor);
+    }
+
+    #[test]
+    fn extract_relative_body_refs_reference_style_link_resolved() {
+        // pulldown-cmark follows reference-style links and emits the
+        // resolved target as a `Tag::Link`. Behavior change vs the old
+        // regex (which only matched inline `[text](url)`). Pin it.
+        let body = "see [doc][1]\n\n[1]: attachments/doc.pdf\n";
+        assert_eq!(
+            paths(extract_relative_body_refs(body)),
+            vec!["attachments/doc.pdf".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_relative_body_refs_autolink_url_is_filtered() {
+        // CommonMark autolinks `<https://…>` become Tag::Link in
+        // pulldown-cmark (another behavior change from the regex era).
+        // The `scheme:` check filters them; pin so a future relaxation
+        // doesn't quietly start probing the filesystem for hostnames.
+        let body = "ping <https://example.com> and <mailto:x@y.z>";
+        assert!(extract_relative_body_refs(body).is_empty());
+    }
+
+    #[test]
+    fn is_line_anchor_recognises_github_shapes() {
+        assert!(is_line_anchor("L10"));
+        assert!(is_line_anchor("L1-L99"));
+        assert!(!is_line_anchor(""));
+        assert!(!is_line_anchor("L"));
+        assert!(!is_line_anchor("L10-"));
+        assert!(!is_line_anchor("section"));
+        assert!(!is_line_anchor("Labc"));
+        assert!(!is_line_anchor("draft.pdf"));
     }
 
     #[test]
