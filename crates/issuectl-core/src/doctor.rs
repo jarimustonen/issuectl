@@ -1292,13 +1292,20 @@ fn populate_attachment_health(scan: &ScanResult, repo_root: &Path, report: &mut 
         // Relative body references pointing inside the issue dir that no
         // longer resolve. Scan only the body — a YAML frontmatter value
         // can legitimately contain `[text](paren)` syntax, which would
-        // otherwise register as a phantom broken reference.
+        // otherwise register as a phantom broken reference. Targets that
+        // resolve to an existing file at the repo root are cross-file
+        // code pointers (analogous to GitHub `path/file.ts#L10-L20`
+        // permalinks), not attachments — skip them.
         if let Some(text) = &s.text {
             let body = crate::item_text::split(text).body;
             for r in crate::refs::extract_relative_body_refs(body) {
-                if !s.dir_path.join(&r).exists() {
-                    report.broken_attachment_refs.push((s.dir_name.clone(), r));
+                if s.dir_path.join(&r).exists() {
+                    continue;
                 }
+                if repo_root.join(&r).exists() {
+                    continue;
+                }
+                report.broken_attachment_refs.push((s.dir_name.clone(), r));
             }
         }
     }
@@ -6929,6 +6936,94 @@ mod tests {
         let r = scan(tmp.path()).unwrap();
         assert!(r.non_avif_images.is_empty());
         assert!(r.large_binaries.is_empty());
+        assert!(r.broken_attachment_refs.is_empty());
+    }
+
+    /// Regression: `broken_attachment_refs` must not flag link/image
+    /// syntax that lives inside a backtick code span. The author is
+    /// describing the syntax, not using it. Class 1 of issue
+    /// @doctor-attachment-refs-false-positives.
+    #[test]
+    fn broken_refs_skips_link_syntax_inside_code_span() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "code-span-with-image-syntax",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n\n\
+             Use `![alt](path)` syntax for images, and `[text](url)` for links.\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.broken_attachment_refs.is_empty(),
+            "link syntax inside backticks must not be flagged: {:?}",
+            r.broken_attachment_refs
+        );
+    }
+
+    /// Regression: a repo-relative code pointer like
+    /// `[foo.rs:10-20](../foo.rs#L10-L20)` is a cross-file link, not
+    /// an attachment — it must not be flagged as broken even though
+    /// the target is outside the issue dir. Class 2 of issue
+    /// @doctor-attachment-refs-false-positives.
+    #[test]
+    fn broken_refs_skips_repo_relative_code_link() {
+        let tmp = fresh_repo();
+        // Drop a sibling repo file the link points at, to mirror the
+        // 3DBear monorepo shape from the bug report.
+        fs::write(tmp.path().join("foo.ts"), b"// stub\n").unwrap();
+        put_flat(
+            &tmp,
+            "repo-relative-code-link",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n\n\
+             See [foo.ts:10-20](../foo.ts#L10-L20) and also \
+             [bar at repo root](foo.ts#L1).\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.broken_attachment_refs.is_empty(),
+            "repo-relative code pointer must not be flagged: {:?}",
+            r.broken_attachment_refs
+        );
+    }
+
+    /// Positive case: a genuinely missing sibling attachment must
+    /// still be flagged after the parser/scope refactor.
+    #[test]
+    fn broken_refs_flags_legit_missing_sibling_attachment() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "legit-missing-attachment",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n\n\
+             ![screenshot](missing.png)\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert_eq!(
+            r.broken_attachment_refs,
+            vec![(
+                "legit-missing-attachment".to_string(),
+                "missing.png".to_string()
+            )]
+        );
+    }
+
+    /// Sibling attachment that exists must not be flagged.
+    #[test]
+    fn broken_refs_clean_for_existing_sibling_attachment() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "legit-existing-attachment",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n# T\n\n\
+             ![ok](existing.avif)\n",
+        );
+        fs::write(
+            tmp.path()
+                .join("issues/legit-existing-attachment/existing.avif"),
+            b"x",
+        )
+        .unwrap();
+        let r = scan(tmp.path()).unwrap();
         assert!(r.broken_attachment_refs.is_empty());
     }
 

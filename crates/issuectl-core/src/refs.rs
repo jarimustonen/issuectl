@@ -3,10 +3,7 @@
 //! Used by `cmd_new` (CLI), `mutate::new_issue` (HTTP create), and
 //! `mutate::update_issue` (HTTP update + CLI update).
 
-use std::sync::OnceLock;
-
 use anyhow::{bail, Result};
-use regex::Regex;
 
 use crate::slug;
 
@@ -143,36 +140,28 @@ fn rewrite_line_refs(line: &str, old: &str, new: &str, out: &mut String) -> usiz
 /// are truncated; reference-style links (`[a]: target`) and indented
 /// (4-space) code blocks are not handled.
 pub fn extract_relative_body_refs(body: &str) -> Vec<String> {
-    use crate::body_sections::{closes_fence, opening_fence, Fence};
+    use pulldown_cmark::{Event, Options, Parser, Tag};
 
-    static RE: OnceLock<Regex> = OnceLock::new();
-    // `!?` — image or link; `\[[^\]]*\]` — the bracketed text;
-    // `\(\s*<?([^)>\s]+)>?` — the target, optionally angle-bracketed;
-    // `(?:\s+[^)]*)?\)` — an optional `"title"` then the close paren.
-    let re =
-        RE.get_or_init(|| Regex::new(r#"!?\[[^\]]*\]\(\s*<?([^)>\s]+)>?(?:\s+[^)]*)?\)"#).unwrap());
+    // A CommonMark event walk skips code spans and fenced/indented code
+    // blocks for free: pulldown-cmark only emits literal text events
+    // inside those, never `Tag::Link`/`Tag::Image`. This avoids the
+    // class of false positives where prose describes link syntax inside
+    // backticks (e.g. `` `![alt](path)` ``).
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_FOOTNOTES);
+    opts.insert(Options::ENABLE_TASKLISTS);
 
     let mut out = Vec::new();
-    let mut fence: Option<Fence> = None;
-    for line in body.lines() {
-        match fence {
-            Some(open) if closes_fence(line, open) => {
-                fence = None;
-                continue;
-            }
-            Some(_) => continue,
-            None => {
-                if let Some(o) = opening_fence(line) {
-                    fence = Some(o);
-                    continue;
-                }
-            }
-        }
-        for caps in re.captures_iter(line) {
-            let raw = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            if let Some(rel) = normalize_relative_ref(raw) {
-                out.push(rel);
-            }
+    for ev in Parser::new_ext(body, opts) {
+        let dest = match ev {
+            Event::Start(Tag::Link { dest_url, .. })
+            | Event::Start(Tag::Image { dest_url, .. }) => dest_url,
+            _ => continue,
+        };
+        if let Some(rel) = normalize_relative_ref(&dest) {
+            out.push(rel);
         }
     }
     out
@@ -195,6 +184,15 @@ fn normalize_relative_ref(raw: &str) -> Option<String> {
     // the component check below and let a body ref probe for files
     // outside the issue directory (an existence-check info leak).
     if t.contains('\\') {
+        return None;
+    }
+    // Strip URL fragment (e.g. `foo.ts#L10-L20`) — only the path
+    // portion is checked for existence as a sibling.
+    let t = match t.split_once('#') {
+        Some((path, _frag)) => path,
+        None => t,
+    };
+    if t.is_empty() {
         return None;
     }
     let stripped = t.strip_prefix("./").unwrap_or(t);
