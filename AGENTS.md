@@ -221,6 +221,20 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
   images, and unresolved relative body refs. The `issuectl attach
   <slug> <file>…` command copies files into `attachments/` (creates
   the dir on demand, handles name collisions).
+- **Body-ref extraction uses pulldown-cmark, not regex.** The CommonMark
+  parser never emits `Tag::Link` / `Tag::Image` inside code spans or
+  fenced/indented code blocks, so prose like `` `![alt](path)` `` is
+  filtered for free — do not "optimise" this back to a regex. The
+  extractor returns `BodyRef { path, has_line_anchor }`: the flag is
+  set when the original URL ended in a GitHub-style `#L<n>` /
+  `#L<n>-L<n>` fragment. `doctor`'s `broken_attachment_refs` check is
+  the only place that gates the "looks like a cross-file code
+  permalink → skip if it exists at the repo root" heuristic on that
+  flag. An earlier unconditional repo-root existence skip silently
+  masked any missing sibling attachment whose filename collided with a
+  repo-root file (`README.md`, `Cargo.toml`, …); the `#L<n>` gate is
+  what keeps bare filenames honest — pinned by
+  `broken_refs_still_flags_when_filename_collides_with_repo_root`.
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, repo layout,
   PR process, and commit-message conventions.
 - See [issues/AGENTS.md](issues/AGENTS.md) for how this project's own
