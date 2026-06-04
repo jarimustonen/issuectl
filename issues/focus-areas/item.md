@@ -102,9 +102,37 @@ sama tarve voisi koskea mitä tahansa tiimi-issuetrackingia, jossa:
 - Tiimi tekee säännöllisesti review-kierroksia ("missä mennään X:ssä")
   joissa tarvitsee aggregaatin teemoittain
 
+## Decision
+
+Top-level approach: **option (b) — focus areas modeled as a first-class
+`areas: []` list field in the schema, with element-wise validation
+against a definition block in `.schema.yaml` and AI-readable
+descriptions injected into the `/issue` skill template.** The labels
+mechanism is left untouched (open-set, descriptionless). The tiebreaker
+was the governance/lifecycle distinction between labels (open-set,
+accreting, ad-hoc) and areas (closed-set, team-negotiated, with
+descriptions): forcing both into one field would require either bimodal
+validation or constraining all labels — both worse than two
+lexically-distinct fields with non-overlapping semantics. The internal
+schema shape (generic `taxonomies` registry vs inline
+`fields.areas.enum_with_descriptions`) is deferred to the
+implementation ADR, as are the five open design questions above
+(validation strictness, sub-areas, config location, area-vs-epic
+distinction, sub-tag standardization).
+
+See [ADR 0001](../../docs/decisions/0001-focus-areas-top-level-approach.md)
+for the full reasoning, debate transcript, and constraints handed down
+to the implementation ADR.
+
 ## Konteksti
 
 - 3DBear-monorepon epic: `especially-brown-field` (plan-dokumentti
   siellä päässä menee yksityiskohtaisempaan toteutus-suunnitteluun).
 - Tech-team-palaute 2026-06-04 nosti tarpeen geneerisyyden tarkasteluun
   ("voisiko tämä olla issuectl:n ominaisuus eikä per-repo-konventio").
+
+## Decisions
+
+### 2026-06-04T11:09:33Z · @claude
+
+ADR 0001-focus-areas-top-level-approach records the top-level a/b/c decision: adopt option (b) — focus areas as a first-class areas field in the schema (labels untouched). Open design questions (validation strictness, sub-areas, config location, epic relation, sub-tags) plus the internal schema shape (taxonomies registry vs inline enum_with_descriptions) deferred to the implementation ADR.
