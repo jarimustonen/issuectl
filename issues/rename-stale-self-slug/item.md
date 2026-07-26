@@ -4,8 +4,9 @@ updated: 2026-07-26
 type: bug
 reporter: jari
 assignee: jari
-status: in-progress
+status: fixed
 priority: normal
+closed: 2026-07-26
 ---
 
 # rename leaves the renamed issue's own `slug:` frontmatter field stale
