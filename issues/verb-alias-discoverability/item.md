@@ -1,8 +1,8 @@
 ---
 created: 2026-07-24
-updated: 2026-07-24
+updated: 2026-07-26
 type: feature
-status: open
+status: in-progress
 priority: normal
 related: ['@assign-subcommand-alias']
 labels: [cli, ux]

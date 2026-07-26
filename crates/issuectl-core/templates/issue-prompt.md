@@ -65,13 +65,13 @@ first invocation in a session, run `issuectl --version` and compare:
   `cargo install issuectl --force`, or re-run the shell installer).
   Stop and wait — schema/CLI surface may have changed.
 - **Newer than `{{ISSUECTL_VERSION}}`**: the installed binary is ahead
-  of what this prompt was written for. Tell the user to refresh the
-  prompt so the instructions match the CLI surface they actually have:
-  `issuectl skill install --force --agent codex` (Codex; add
-  `--agent all` for the Claude Code skill too). Then run
-  `issuectl doctor` (or `issuectl doctor --fix`) — a newer binary
-  often ships schema rules or migrations the repo hasn't picked up
-  yet. Continue with the task once both are done.
+  of what this skill was written for. Tell the user to refresh the
+  skill so the instructions match the CLI surface they actually have:
+  `issuectl skill install --force` (Claude Code; add `--agent codex`
+  for Codex or `--agent all` for both). Then run `issuectl doctor`
+  (or `issuectl doctor --fix`) — a newer binary often ships schema
+  rules or migrations the repo hasn't picked up yet. Continue with
+  the task once both are done.
 - **Equal**: proceed normally.
 
 ## Identifiers
@@ -275,6 +275,12 @@ diff, no write).
   `--clear` to remove a (non-status) field. Reserved keys like
   `labels` / `related` / `type` / `title` error with a hint
   pointing at the right flag.
+- **`issuectl assign <slug> <user>`** — convenience wrapper for
+  `set <slug> assignee <user>`; routes through the identical typed
+  path, so validation, idempotency, and the
+  `--json`/`--expected-version` contract are the same. Use
+  `issuectl assign <slug> --clear` to unassign (mirrors
+  `set --clear`).
 - **`issuectl check <slug> "<task substring>"`** — toggle a
   unique `- [ ]` / `- [x]` line in the issue body. Errors when
   zero or multiple checkbox lines match the substring.
@@ -368,6 +374,11 @@ issuectl --json new \
     --source "frontend/login" \
     --description "Users get stuck in a 302 loop after SSO redirect."
 ```
+
+`create` is accepted as an alias for `new`, and `--body` as an alias
+for `--description`, so `issuectl --json create --type task --title X
+--body "…"` works identically — canonical forms stay `new` /
+`--description`.
 
 For epics, use `--owner` instead of `--reporter`/`--assignee`:
 

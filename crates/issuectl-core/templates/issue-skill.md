@@ -279,6 +279,12 @@ diff, no write).
   `--clear` to remove a (non-status) field. Reserved keys like
   `labels` / `related` / `type` / `title` error with a hint
   pointing at the right flag.
+- **`issuectl assign <slug> <user>`** — convenience wrapper for
+  `set <slug> assignee <user>`; routes through the identical typed
+  path, so validation, idempotency, and the
+  `--json`/`--expected-version` contract are the same. Use
+  `issuectl assign <slug> --clear` to unassign (mirrors
+  `set --clear`).
 - **`issuectl check <slug> "<task substring>"`** — toggle a
   unique `- [ ]` / `- [x]` line in the issue body. Errors when
   zero or multiple checkbox lines match the substring.
@@ -372,6 +378,11 @@ issuectl --json new \
     --source "frontend/login" \
     --description "Users get stuck in a 302 loop after SSO redirect."
 ```
+
+`create` is accepted as an alias for `new`, and `--body` as an alias
+for `--description`, so `issuectl --json create --type task --title X
+--body "…"` works identically — canonical forms stay `new` /
+`--description`.
 
 For epics, use `--owner` instead of `--reporter`/`--assignee`:
 

@@ -413,6 +413,7 @@ enum Command {
     },
 
     /// Create a new issue or epic. Pass `--slug <descriptive-2-3-word-kebab>` derived from the title; a random `intensifier-adjective-noun` slug is the fallback when `--slug` is omitted
+    #[command(visible_alias = "create")]
     New {
         /// Item type
         #[arg(short = 't', long = "type", value_parser = PossibleValuesParser::new(ISSUE_TYPES))]
@@ -464,8 +465,8 @@ enum Command {
         #[arg(long, value_parser = parse_non_empty)]
         source: Option<String>,
 
-        /// Description body (free text)
-        #[arg(long, value_parser = parse_non_empty)]
+        /// Description body (free text). `--body` is accepted as an alias.
+        #[arg(long, visible_alias = "body", value_parser = parse_non_empty)]
         description: Option<String>,
 
         /// Set a custom frontmatter field (repeatable). Format `key=value`.
@@ -706,6 +707,32 @@ enum Command {
 
         /// Remove the field instead of setting it. Conflicts with `value`.
         #[arg(long, conflicts_with = "value")]
+        clear: bool,
+
+        /// Plan only: print a unified diff and exit 0 without writing.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Optimistic-concurrency token; required with --json
+        #[arg(long = "expected-version", value_parser = parse_non_empty)]
+        expected_version: Option<String>,
+    },
+
+    /// Assign an issue to a user. Convenience wrapper around
+    /// `set <slug> --assignee <user>` — routes through the identical
+    /// typed update path, with the same validation and idempotency.
+    /// Use `--clear` (instead of a user) to unassign.
+    Assign {
+        /// Issue slug
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+
+        /// Username to assign. Required unless `--clear` is given.
+        #[arg(value_parser = parse_non_empty, required_unless_present = "clear")]
+        user: Option<String>,
+
+        /// Unassign the issue instead of setting an assignee.
+        #[arg(long, conflicts_with = "user")]
         clear: bool,
 
         /// Plan only: print a unified diff and exit 0 without writing.
@@ -1584,6 +1611,67 @@ fn fail(json: bool, code: i32, err_code: &str, message: &str, extra: serde_json:
     std::process::exit(code);
 }
 
+/// Convenience aliases we deliberately expose (or accept), mapped to the
+/// canonical subcommand they resolve to. Used to enrich clap's
+/// "unrecognized subcommand" errors: when a near-miss lands on one of
+/// these aliases, the tip names the canonical verb the user can rely on.
+const SUBCOMMAND_ALIASES: &[(&str, &str)] =
+    &[("create", "new"), ("ls", "list"), ("dups", "duplicates")];
+
+/// Build a routing tip for an `unrecognized subcommand` error, or `None`
+/// when the error is something else or no better form is known.
+///
+/// Two cases, in priority order:
+///   1. `body <slug>` — a bare slug passed where a `body` sub-subcommand
+///      is expected. `body` is a group; the op is `body set <slug>`.
+///   2. An alias near-miss — clap suggested (or the user typed) a known
+///      convenience alias; name the canonical subcommand it resolves to.
+///
+/// Pure over `(err, argv)` so it is unit-testable without spawning a
+/// process.
+fn subcommand_error_hint(err: &clap::Error, argv: &[String]) -> Option<String> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    if err.kind() != ErrorKind::InvalidSubcommand {
+        return None;
+    }
+
+    let invalid = match err.get(ContextKind::InvalidSubcommand) {
+        Some(ContextValue::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+
+    // Case 1: `body <invalid>` where <invalid> is a bare slug.
+    if let Some(inv) = &invalid {
+        if argv.windows(2).any(|w| w[0] == "body" && &w[1] == inv) {
+            return Some(format!(
+                "`body` is a subcommand group — did you mean `issuectl body set {inv}`?"
+            ));
+        }
+    }
+
+    // Case 2: a near-miss (or an exact alias) that maps to a canonical
+    // verb. clap may offer several suggestions (e.g. `creat` → 'rename',
+    // 'ready', 'create'); scan all of them, plus the invalid token itself,
+    // and prefer the one that resolves to a canonical subcommand.
+    let mut candidates: Vec<String> = Vec::new();
+    match err.get(ContextKind::SuggestedSubcommand) {
+        Some(ContextValue::String(s)) => candidates.push(s.clone()),
+        Some(ContextValue::Strings(v)) => candidates.extend(v.iter().cloned()),
+        _ => {}
+    }
+    if let Some(inv) = &invalid {
+        candidates.push(inv.clone());
+    }
+    for candidate in &candidates {
+        if let Some((alias, canonical)) = SUBCOMMAND_ALIASES.iter().find(|(a, _)| a == candidate) {
+            return Some(format!(
+                "`{alias}` is an alias for `{canonical}` — run `issuectl {canonical} …`."
+            ));
+        }
+    }
+    None
+}
+
 fn main() -> Result<()> {
     // Parse manually instead of `Cli::parse()` so clap's own usage
     // errors honour the `--json` contract too. By default clap prints
@@ -1598,7 +1686,13 @@ fn main() -> Result<()> {
         Ok(cli) => cli,
         Err(e) => {
             use clap::error::ErrorKind;
-            let wants_json = std::env::args().skip(1).any(|a| a == "--json");
+            let argv: Vec<String> = std::env::args().skip(1).collect();
+            let wants_json = argv.iter().any(|a| a == "--json");
+            // Route unrecognized-subcommand errors to a form the user can
+            // actually run (e.g. `body <slug>` → `body set <slug>`, or an
+            // alias near-miss → its canonical verb). See
+            // `subcommand_error_hint`.
+            let hint = subcommand_error_hint(&e, &argv);
             if wants_json
                 && !matches!(
                     e.kind(),
@@ -1607,12 +1701,21 @@ fn main() -> Result<()> {
                         | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
                 )
             {
-                emit_json_error(
-                    "usage-error",
-                    e.to_string().trim_end(),
-                    serde_json::Value::Null,
-                );
+                let mut message = e.to_string().trim_end().to_string();
+                if let Some(h) = &hint {
+                    message.push_str("\n\ntip: ");
+                    message.push_str(h);
+                }
+                emit_json_error("usage-error", &message, serde_json::Value::Null);
                 std::process::exit(1);
+            }
+            if let Some(h) = hint {
+                // Print clap's own rendered error first (preserving its
+                // usage block), then append our routing tip, and exit with
+                // clap's usage exit code so scripts see 2 as before.
+                let _ = e.print();
+                eprintln!("\ntip: {h}");
+                std::process::exit(2);
             }
             e.exit();
         }
@@ -1796,6 +1899,26 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             &slug,
             &field,
             value,
+            clear,
+            dry_run,
+            expected_version,
+        ),
+        // Convenience wrapper: `assign <slug> <user>` is exactly
+        // `set <slug> assignee <user>` (and `--clear` mirrors
+        // `set --clear`). Route through the same handler so validation,
+        // idempotency, and the `--json`/`--expected-version` contract are
+        // identical — no new mutation verb or storage semantics.
+        Command::Assign {
+            slug,
+            user,
+            clear,
+            dry_run,
+            expected_version,
+        } => cmd_set(
+            json_output,
+            &slug,
+            "assignee",
+            user,
             clear,
             dry_run,
             expected_version,
@@ -5087,6 +5210,92 @@ mod tests {
 
     fn read(path: &Path) -> String {
         fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn create_is_visible_alias_for_new() {
+        let cli =
+            Cli::try_parse_from(["issuectl", "create", "--type", "task", "--title", "x"]).unwrap();
+        assert!(matches!(cli.command, Command::New { .. }));
+    }
+
+    #[test]
+    fn body_flag_is_alias_for_description_on_new() {
+        let cli = Cli::try_parse_from([
+            "issuectl", "new", "--type", "task", "--title", "x", "--body", "hello",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::New { description, .. } => assert_eq!(description.as_deref(), Some("hello")),
+            _ => panic!("expected New"),
+        }
+    }
+
+    #[test]
+    fn assign_parses_user_and_clear() {
+        let cli = Cli::try_parse_from(["issuectl", "assign", "some-slug", "alice"]).unwrap();
+        match cli.command {
+            Command::Assign {
+                slug, user, clear, ..
+            } => {
+                assert_eq!(slug, "some-slug");
+                assert_eq!(user.as_deref(), Some("alice"));
+                assert!(!clear);
+            }
+            _ => panic!("expected Assign"),
+        }
+
+        let cli = Cli::try_parse_from(["issuectl", "assign", "some-slug", "--clear"]).unwrap();
+        match cli.command {
+            Command::Assign { user, clear, .. } => {
+                assert!(user.is_none());
+                assert!(clear);
+            }
+            _ => panic!("expected Assign"),
+        }
+
+        // A user is required unless --clear is given.
+        assert!(Cli::try_parse_from(["issuectl", "assign", "some-slug"]).is_err());
+        // --clear conflicts with an explicit user.
+        assert!(
+            Cli::try_parse_from(["issuectl", "assign", "some-slug", "alice", "--clear"]).is_err()
+        );
+    }
+
+    #[test]
+    fn body_slug_error_hints_body_set() {
+        let err = Cli::try_parse_from(["issuectl", "body", "some-slug"])
+            .err()
+            .expect("expected a parse error");
+        let argv = ["body".to_string(), "some-slug".to_string()];
+        let hint = subcommand_error_hint(&err, &argv).expect("expected a routing hint");
+        assert!(
+            hint.contains("body set some-slug"),
+            "hint should point at `body set`, was: {hint}"
+        );
+    }
+
+    #[test]
+    fn alias_near_miss_routes_to_canonical_verb() {
+        // `creat` is a near-miss for the `create` alias, which resolves to
+        // `new`. clap's suggestion heuristics may vary, so we only assert
+        // that *when* a hint fires it names the canonical verb `new`.
+        let err = Cli::try_parse_from(["issuectl", "creat"])
+            .err()
+            .expect("expected a parse error");
+        let argv = ["creat".to_string()];
+        if let Some(hint) = subcommand_error_hint(&err, &argv) {
+            assert!(hint.contains("new"), "hint should name `new`, was: {hint}");
+        }
+    }
+
+    #[test]
+    fn unrelated_bad_subcommand_has_no_hint() {
+        let err = Cli::try_parse_from(["issuectl", "zzzzzzzzzz"])
+            .err()
+            .expect("expected a parse error");
+        let argv = ["zzzzzzzzzz".to_string()];
+        assert!(subcommand_error_hint(&err, &argv).is_none());
     }
 
     #[test]
