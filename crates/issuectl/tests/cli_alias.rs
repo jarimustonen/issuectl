@@ -137,6 +137,86 @@ fn assign_clear_unassigns() {
     );
 }
 
+/// `assign --json <user> --expected-version <v>` succeeds and writes the
+/// assignee — proving the wrapper mirrors `set`'s full write contract, not
+/// only its rejection path.
+#[test]
+fn assign_json_success_with_expected_version() {
+    let tmp = fresh_repo();
+    seed_issue(tmp.path(), "ev-ok");
+    let show = run(tmp.path(), &["--json", "show", "ev-ok"]);
+    let version = stdout_json(&show)["version"]
+        .as_str()
+        .expect("version string")
+        .to_string();
+
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "assign",
+            "ev-ok",
+            "dave",
+            "--expected-version",
+            &version,
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+
+    let after = run(tmp.path(), &["--json", "show", "ev-ok"]);
+    assert_eq!(stdout_json(&after)["assignee"], "dave", "{}", dump(&after));
+}
+
+/// `assign` and `set <slug> assignee <user>` are behaviourally identical:
+/// run in two fresh repos, the resulting on-disk assignee matches.
+#[test]
+fn assign_matches_set_assignee_path() {
+    let via_assign = fresh_repo();
+    seed_issue(via_assign.path(), "parity-check");
+    assert_eq!(
+        run(via_assign.path(), &["assign", "parity-check", "erin"])
+            .status
+            .code(),
+        Some(0)
+    );
+
+    let via_set = fresh_repo();
+    seed_issue(via_set.path(), "parity-check");
+    assert_eq!(
+        run(via_set.path(), &["set", "parity-check", "assignee", "erin"])
+            .status
+            .code(),
+        Some(0)
+    );
+
+    let a = run(via_assign.path(), &["--json", "show", "parity-check"]);
+    let s = run(via_set.path(), &["--json", "show", "parity-check"]);
+    assert_eq!(
+        stdout_json(&a)["assignee"],
+        stdout_json(&s)["assignee"],
+        "assign and set assignee should yield the same assignee"
+    );
+    assert_eq!(stdout_json(&a)["assignee"], "erin");
+}
+
+/// `assign --dry-run` writes nothing (the assignee stays unset), matching
+/// `set`'s plan-only contract.
+#[test]
+fn assign_dry_run_writes_nothing() {
+    let tmp = fresh_repo();
+    seed_issue(tmp.path(), "dry-run-it");
+    let out = run(tmp.path(), &["assign", "dry-run-it", "frank", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+
+    let show = run(tmp.path(), &["--json", "show", "dry-run-it"]);
+    assert_eq!(
+        stdout_json(&show)["assignee"],
+        serde_json::Value::Null,
+        "dry-run must not persist the assignee: {}",
+        dump(&show)
+    );
+}
+
 /// `assign` honours the same `--json` optimistic-concurrency contract as
 /// `set`: without `--expected-version` it is refused.
 #[test]
@@ -198,5 +278,35 @@ fn body_slug_hint_json_envelope() {
             .contains("body set some-slug"),
         "{}",
         dump(&out)
+    );
+}
+
+/// A top-level near-miss for the `create` alias prints a routing tip
+/// naming the canonical `new` — plain path exits 2 with the tip on stderr,
+/// and `--json` folds it into the shared usage-error envelope (exit 1).
+#[test]
+fn near_miss_alias_hint_plain_and_json() {
+    let tmp = fresh_repo();
+
+    let plain = run(tmp.path(), &["creat"]);
+    assert_eq!(plain.status.code(), Some(2), "{}", dump(&plain));
+    let stderr = String::from_utf8_lossy(&plain.stderr);
+    assert!(
+        stderr.contains("alias for `new`"),
+        "plain stderr should route to `new`, got:\n{stderr}"
+    );
+
+    let json = run(tmp.path(), &["--json", "creat"]);
+    assert_eq!(json.status.code(), Some(1), "{}", dump(&json));
+    assert!(json.stdout.is_empty(), "{}", dump(&json));
+    let v: serde_json::Value = serde_json::from_slice(&json.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "usage-error", "{}", dump(&json));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("alias for `new`"),
+        "{}",
+        dump(&json)
     );
 }

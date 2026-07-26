@@ -719,9 +719,9 @@ enum Command {
     },
 
     /// Assign an issue to a user. Convenience wrapper around
-    /// `set <slug> --assignee <user>` — routes through the identical
-    /// typed update path, with the same validation and idempotency.
-    /// Use `--clear` (instead of a user) to unassign.
+    /// `set <slug> assignee <user>` — routes through the identical typed
+    /// update path, with the same validation and idempotency. Use
+    /// `--clear` (instead of a user) to unassign.
     Assign {
         /// Issue slug
         #[arg(value_parser = parse_slug_arg)]
@@ -1618,18 +1618,46 @@ fn fail(json: bool, code: i32, err_code: &str, message: &str, extra: serde_json:
 const SUBCOMMAND_ALIASES: &[(&str, &str)] =
     &[("create", "new"), ("ls", "list"), ("dups", "duplicates")];
 
+/// The subcommand path clap was parsing when it produced `err`, taken
+/// from the error's `Usage` context line (`Usage: <bin> <sub...>
+/// [OPTIONS] …`). Empty = top level; `["body"]` = inside the `body`
+/// group. Derived from clap's own usage rather than argv so it is
+/// immune to option-value ordering (`--root=body foo`) and to the binary
+/// being renamed.
+fn usage_command_path(err: &clap::Error) -> Vec<String> {
+    use clap::error::{ContextKind, ContextValue};
+    let usage = match err.get(ContextKind::Usage) {
+        Some(ContextValue::StyledStr(s)) => s.to_string(),
+        Some(ContextValue::String(s)) => s.clone(),
+        _ => return Vec::new(),
+    };
+    let line = usage.lines().next().unwrap_or("");
+    let after = line.trim().trim_start_matches("Usage:").trim();
+    let mut toks = after.split_whitespace();
+    let _bin = toks.next(); // program name
+                            // Subcommand chain runs until the first placeholder (`[OPTIONS]`,
+                            // `<COMMAND>`, `[ARGS]`, …).
+    toks.take_while(|t| !t.starts_with('[') && !t.starts_with('<'))
+        .map(str::to_string)
+        .collect()
+}
+
 /// Build a routing tip for an `unrecognized subcommand` error, or `None`
 /// when the error is something else or no better form is known.
 ///
 /// Two cases, in priority order:
 ///   1. `body <slug>` — a bare slug passed where a `body` sub-subcommand
-///      is expected. `body` is a group; the op is `body set <slug>`.
-///   2. An alias near-miss — clap suggested (or the user typed) a known
-///      convenience alias; name the canonical subcommand it resolves to.
+///      is expected. `body` is a group; the op is `body set <slug>`. Gated
+///      on the error actually originating under the `body` command (via
+///      `usage_command_path`), so an option value that happens to equal
+///      `body` (`--root=body foo`) never triggers it.
+///   2. A *top-level* alias near-miss — clap suggested (or the user typed)
+///      a known convenience alias; name the canonical subcommand it
+///      resolves to. Gated to the top level so an unknown token inside a
+///      subcommand (`body ls`) is never rerouted to a top-level verb.
 ///
-/// Pure over `(err, argv)` so it is unit-testable without spawning a
-/// process.
-fn subcommand_error_hint(err: &clap::Error, argv: &[String]) -> Option<String> {
+/// Pure over `err` so it is unit-testable without spawning a process.
+fn subcommand_error_hint(err: &clap::Error) -> Option<String> {
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     if err.kind() != ErrorKind::InvalidSubcommand {
         return None;
@@ -1639,34 +1667,40 @@ fn subcommand_error_hint(err: &clap::Error, argv: &[String]) -> Option<String> {
         Some(ContextValue::String(s)) => Some(s.clone()),
         _ => None,
     };
+    let path = usage_command_path(err);
 
     // Case 1: `body <invalid>` where <invalid> is a bare slug.
-    if let Some(inv) = &invalid {
-        if argv.windows(2).any(|w| w[0] == "body" && &w[1] == inv) {
+    if path == ["body"] {
+        if let Some(inv) = &invalid {
             return Some(format!(
                 "`body` is a subcommand group — did you mean `issuectl body set {inv}`?"
             ));
         }
     }
 
-    // Case 2: a near-miss (or an exact alias) that maps to a canonical
-    // verb. clap may offer several suggestions (e.g. `creat` → 'rename',
-    // 'ready', 'create'); scan all of them, plus the invalid token itself,
-    // and prefer the one that resolves to a canonical subcommand.
-    let mut candidates: Vec<String> = Vec::new();
-    match err.get(ContextKind::SuggestedSubcommand) {
-        Some(ContextValue::String(s)) => candidates.push(s.clone()),
-        Some(ContextValue::Strings(v)) => candidates.extend(v.iter().cloned()),
-        _ => {}
-    }
-    if let Some(inv) = &invalid {
-        candidates.push(inv.clone());
-    }
-    for candidate in &candidates {
-        if let Some((alias, canonical)) = SUBCOMMAND_ALIASES.iter().find(|(a, _)| a == candidate) {
-            return Some(format!(
-                "`{alias}` is an alias for `{canonical}` — run `issuectl {canonical} …`."
-            ));
+    // Case 2: a top-level near-miss (or exact alias) that maps to a
+    // canonical verb. clap may offer several suggestions (e.g. `creat` →
+    // 'rename', 'ready', 'create'); scan all of them, plus the invalid
+    // token itself, and prefer the one that resolves to a canonical
+    // subcommand.
+    if path.is_empty() {
+        let mut candidates: Vec<String> = Vec::new();
+        match err.get(ContextKind::SuggestedSubcommand) {
+            Some(ContextValue::String(s)) => candidates.push(s.clone()),
+            Some(ContextValue::Strings(v)) => candidates.extend(v.iter().cloned()),
+            _ => {}
+        }
+        if let Some(inv) = &invalid {
+            candidates.push(inv.clone());
+        }
+        for candidate in &candidates {
+            if let Some((alias, canonical)) =
+                SUBCOMMAND_ALIASES.iter().find(|(a, _)| a == candidate)
+            {
+                return Some(format!(
+                    "`{alias}` is an alias for `{canonical}` — run `issuectl {canonical} …`."
+                ));
+            }
         }
     }
     None
@@ -1686,13 +1720,12 @@ fn main() -> Result<()> {
         Ok(cli) => cli,
         Err(e) => {
             use clap::error::ErrorKind;
-            let argv: Vec<String> = std::env::args().skip(1).collect();
-            let wants_json = argv.iter().any(|a| a == "--json");
+            let wants_json = std::env::args().skip(1).any(|a| a == "--json");
             // Route unrecognized-subcommand errors to a form the user can
             // actually run (e.g. `body <slug>` → `body set <slug>`, or an
             // alias near-miss → its canonical verb). See
             // `subcommand_error_hint`.
-            let hint = subcommand_error_hint(&e, &argv);
+            let hint = subcommand_error_hint(&e);
             if wants_json
                 && !matches!(
                     e.kind(),
@@ -1711,11 +1744,13 @@ fn main() -> Result<()> {
             }
             if let Some(h) = hint {
                 // Print clap's own rendered error first (preserving its
-                // usage block), then append our routing tip, and exit with
-                // clap's usage exit code so scripts see 2 as before.
+                // usage block), then append our routing tip. `hint` is
+                // only ever `Some` for `InvalidSubcommand`, whose exit code
+                // is clap's usage code (2) — mirror `e.exit()` so scripts
+                // see the same code they did before the tip existed.
                 let _ = e.print();
                 eprintln!("\ntip: {h}");
-                std::process::exit(2);
+                std::process::exit(e.exit_code());
             }
             e.exit();
         }
@@ -5267,8 +5302,7 @@ mod tests {
         let err = Cli::try_parse_from(["issuectl", "body", "some-slug"])
             .err()
             .expect("expected a parse error");
-        let argv = ["body".to_string(), "some-slug".to_string()];
-        let hint = subcommand_error_hint(&err, &argv).expect("expected a routing hint");
+        let hint = subcommand_error_hint(&err).expect("expected a routing hint");
         assert!(
             hint.contains("body set some-slug"),
             "hint should point at `body set`, was: {hint}"
@@ -5276,17 +5310,68 @@ mod tests {
     }
 
     #[test]
+    fn body_hint_survives_interleaved_global_flag() {
+        // `body --json some-slug`: the global `--json` sits between the
+        // subcommand and the bad token. A raw argv-adjacency scan would
+        // miss it; the usage-context path still fires because clap reports
+        // the error as originating under `body`.
+        let err = Cli::try_parse_from(["issuectl", "body", "--json", "some-slug"])
+            .err()
+            .expect("expected a parse error");
+        let hint = subcommand_error_hint(&err).expect("expected a routing hint");
+        assert!(
+            hint.contains("body set some-slug"),
+            "hint should point at `body set`, was: {hint}"
+        );
+    }
+
+    #[test]
+    fn body_hint_not_triggered_by_option_value() {
+        // `--root=body some-slug`: here `body` is the *value* of `--root`
+        // and `some-slug` is the (unknown) top-level subcommand. The hint
+        // must NOT claim this is the `body` group — an argv-adjacency scan
+        // would have false-positived here.
+        let err = Cli::try_parse_from(["issuectl", "--root=body", "some-slug"])
+            .err()
+            .expect("expected a parse error");
+        let hint = subcommand_error_hint(&err);
+        assert!(
+            hint.as_deref()
+                .map(|h| !h.contains("body set"))
+                .unwrap_or(true),
+            "must not emit a body-set hint for a `--root` value, was: {hint:?}"
+        );
+    }
+
+    #[test]
+    fn near_miss_inside_subcommand_is_not_rerouted() {
+        // `body ls`: `ls` is unknown *under* `body`. It must not be
+        // rerouted to the top-level `list` alias — that would discard the
+        // user's `body` context.
+        let err = Cli::try_parse_from(["issuectl", "body", "ls"])
+            .err()
+            .expect("expected a parse error");
+        let hint = subcommand_error_hint(&err);
+        assert!(
+            hint.as_deref()
+                .map(|h| !h.contains("is an alias"))
+                .unwrap_or(true),
+            "must not reroute an in-`body` token to a top-level alias, was: {hint:?}"
+        );
+    }
+
+    #[test]
     fn alias_near_miss_routes_to_canonical_verb() {
         // `creat` is a near-miss for the `create` alias, which resolves to
-        // `new`. clap's suggestion heuristics may vary, so we only assert
-        // that *when* a hint fires it names the canonical verb `new`.
+        // `new`. clap 4.6 (pinned in Cargo.lock) deterministically offers
+        // `create` among its suggestions, so the hint must fire and name
+        // the canonical verb.
         let err = Cli::try_parse_from(["issuectl", "creat"])
             .err()
             .expect("expected a parse error");
-        let argv = ["creat".to_string()];
-        if let Some(hint) = subcommand_error_hint(&err, &argv) {
-            assert!(hint.contains("new"), "hint should name `new`, was: {hint}");
-        }
+        let hint = subcommand_error_hint(&err)
+            .expect("`creat` should route through the `create` alias to `new`");
+        assert!(hint.contains("new"), "hint should name `new`, was: {hint}");
     }
 
     #[test]
@@ -5294,8 +5379,28 @@ mod tests {
         let err = Cli::try_parse_from(["issuectl", "zzzzzzzzzz"])
             .err()
             .expect("expected a parse error");
-        let argv = ["zzzzzzzzzz".to_string()];
-        assert!(subcommand_error_hint(&err, &argv).is_none());
+        assert!(subcommand_error_hint(&err).is_none());
+    }
+
+    /// Guards against `SUBCOMMAND_ALIASES` drifting from the actual clap
+    /// wiring: every entry must be a real alias (visible or hidden) of its
+    /// named canonical subcommand. Without this, the near-miss tip could
+    /// advertise an alias the CLI does not actually accept.
+    #[test]
+    fn subcommand_aliases_are_all_wired() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        for (alias, canonical) in SUBCOMMAND_ALIASES {
+            let sub = cmd
+                .get_subcommands()
+                .find(|s| s.get_name() == *canonical)
+                .unwrap_or_else(|| panic!("no subcommand named `{canonical}`"));
+            let wired = sub.get_all_aliases().any(|a| a == *alias);
+            assert!(
+                wired,
+                "`{alias}` is listed in SUBCOMMAND_ALIASES → `{canonical}` but is not a clap alias of it"
+            );
+        }
     }
 
     #[test]
