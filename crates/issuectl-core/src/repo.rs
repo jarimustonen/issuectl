@@ -1032,7 +1032,22 @@ pub fn rename_issue(
                 continue;
             }
         };
-        let fm_changes = rewrite_frontmatter_refs(&mut item.frontmatter, old, new);
+        let mut fm_changes = rewrite_frontmatter_refs(&mut item.frontmatter, old, new);
+        // The renamed issue's own `slug:` frontmatter field names *this*
+        // issue, not a cross-reference, so `rewrite_frontmatter_refs` (which
+        // only touches `epic`/`related`/`blocked_by`) leaves it alone. Update
+        // it here so the moved item.md doesn't keep a stale self-slug.
+        // Freshly `new`-created issues carry no `slug:` field; `doctor --fix`
+        // stamps one, which is when the mismatch would otherwise appear.
+        if slug == old
+            && matches!(
+                item.frontmatter.get(serde_yaml::Value::String("slug".into())),
+                Some(serde_yaml::Value::String(s)) if s == old
+            )
+        {
+            crate::write::set_string(&mut item.frontmatter, "slug", new);
+            fm_changes.push(("slug".to_string(), 1));
+        }
         let (new_body, body_n) = crate::refs::rewrite_body_refs(&item.body, old, new);
         let touched = !fm_changes.is_empty() || body_n > 0;
         if !touched {
@@ -1385,6 +1400,47 @@ mod tests {
         // the longer, unrelated slug is untouched
         assert!(peer.contains("@old-tame-fox-cub"));
         assert!(!peer.contains("new-wild-stag"));
+    }
+
+    #[test]
+    fn rename_updates_own_stale_self_slug() {
+        // Regression: `rename` renamed the dir and rewrote cross-refs but
+        // left the renamed issue's own `slug:` frontmatter pointing at the
+        // old slug (the mismatch surfaces once `doctor --fix` stamps `slug:`).
+        let tmp = fresh_repo();
+        seed_with(&tmp, "old-tame-fox", "slug: old-tame-fox\n", "# old\n");
+        let out = rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", false).unwrap();
+        let moved = fs::read_to_string(out.new_dir.join("item.md")).unwrap();
+        assert!(
+            moved.contains("slug: new-wild-stag"),
+            "self-slug should be updated: {moved}"
+        );
+        assert!(
+            !moved.contains("slug: old-tame-fox"),
+            "stale self-slug should be gone: {moved}"
+        );
+        // The self-slug change is reported like any other field change.
+        assert!(
+            out.changes
+                .iter()
+                .any(|c| c.slug == "new-wild-stag" && c.field == "slug"),
+            "self-slug change should be reported: {:?}",
+            out.changes
+        );
+    }
+
+    #[test]
+    fn rename_dry_run_reports_self_slug_without_writing() {
+        let tmp = fresh_repo();
+        seed_with(&tmp, "old-tame-fox", "slug: old-tame-fox\n", "# old\n");
+        let out = rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", true).unwrap();
+        assert!(out
+            .changes
+            .iter()
+            .any(|c| c.slug == "new-wild-stag" && c.field == "slug"));
+        // Dry-run leaves the file untouched.
+        let original = fs::read_to_string(tmp.path().join("issues/old-tame-fox/item.md")).unwrap();
+        assert!(original.contains("slug: old-tame-fox"));
     }
 
     #[test]
