@@ -1,11 +1,12 @@
 ---
 created: 2026-05-06
-updated: 2026-05-09
+updated: 2026-07-26
 type: epic
-status: open
+status: obsolete
 priority: normal
 owner: jari
 labels: [backlog, release-v0.6.0]
+closed: 2026-07-26
 ---
 
 # v0.6.0: Backlog candidates (rank when v0.6.0 starts)
@@ -86,3 +87,9 @@ When v0.6.0 planning starts:
 - Several candidates explicitly build on v0.5.0 issues; their shape and
   feasibility depend on v0.5.0 outcomes — re-evaluate then.
 - Brainstorm synthesis: `history/plan-feature-brainstorm.md` (gitignored).
+
+## Comments
+
+### 2026-07-26T07:36:41Z · @jari
+
+Suljettu obsolete: epicin premissi ('rank when v0.6.0 starts') on ohitettu — v0.6.0…v0.6.4 jo julkaistu. Lapsi-issuet jäävät auki omina issueinaan; triagetaan tarvittaessa uuteen v0.7.0-epiciin. Osa kandidaateista on jo shipattu 0.6.x:ssä.

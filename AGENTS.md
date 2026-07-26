@@ -240,6 +240,41 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
 - See [issues/AGENTS.md](issues/AGENTS.md) for how this project's own
   issue tracker is organized.
 
+## Operating facts (for /stint)
+
+Facts a `/stint` orchestrator needs. The work queue and session handoff
+live in [TODO.md](TODO.md); this section is the project's operating
+policy.
+
+- **What "deploy" means here.** This is a Rust CLI, not a server. A
+  release is: bump `version` in `Cargo.toml`, move `CHANGELOG.md`
+  `[Unreleased]` items to a dated `[X.Y.Z]` section, `git commit -am
+  "release: X.Y.Z"`, then `git tag -a vX.Y.Z -m "Release X.Y.Z" &&
+  git push --follow-tags`. The tag triggers `cargo-dist`
+  (`.github/workflows/release.yml`) → GitHub Release with binaries +
+  shell installer, Homebrew formula pushed to
+  `jarimustonen/homebrew-issuectl`, and crates.io publish
+  (`publish-crates.yml`). Full steps: [CONTRIBUTING.md](CONTRIBUTING.md)
+  "Per-release steps".
+- **Deploy/release autonomy: go/no-go required.** The conductor may
+  **recommend** a release but must **not** tag/publish without the
+  user's explicit approval on that request.
+- **Live-version check.** Shipped: `git tag --sort=-creatordate | head
+  -1` and `grep '^version' Cargo.toml`. Published: crates.io / the
+  Homebrew tap. Compare against `main` before recommending a release.
+- **Green gate (must pass before recommending a release).** `cargo
+  test` (unit + integration), `cargo clippy --all-targets` (no new
+  warnings), `cargo fmt --all --check`. CI (`.github/workflows/ci.yml`)
+  runs the same on every PR.
+- **Hot files (sequence, do not parallelise).** `crates/issuectl/src/main.rs`
+  (all `cmd_*` handlers + clap structs), `crates/issuectl-core/src/mutate/`
+  (every write path routes here), `crates/issuectl-core/src/schema.rs`,
+  and the skill templates (`templates/issue-skill.md` +
+  `templates/issue-prompt.md`, kept in sync per the rule above).
+  Two worktrees editing any one of these will collide on rebase.
+- **Test-account reset: n/a.** No external services or test accounts;
+  tests are hermetic (`cargo test` uses tempdirs). No reset step.
+
 ## When in doubt
 
 Run `issuectl --help` and `issuectl <subcommand> --help`. The CLI
