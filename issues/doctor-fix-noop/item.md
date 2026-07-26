@@ -1,10 +1,10 @@
 ---
 created: 2026-06-01
-updated: 2026-06-01
+updated: 2026-07-26
 type: bug
 reporter: jari
 assignee: jari
-status: in-progress
+status: fixed
 priority: high
 commits:
 - hash: 438d22f
@@ -13,6 +13,7 @@ commits:
   summary: address multi-LLM review findings
 - hash: 5a49a14
   summary: document narrowed doctor preflight scope
+closed: 2026-07-26
 ---
 
 # doctor --fix silently no-ops on alias coercions and AGENTS.md drift
