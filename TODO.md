@@ -13,15 +13,20 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-07-26):** `main` puhdas, julkaistu versio **v0.6.4**.
-Backlog käyty läpi ja tieroitettu (alla). Vanhentunut v0.6.0-kandidaatti-epic
-`@hugely-exciting-spiders` suljettu `obsolete`-statuksella (sen lapsi-issuet
-jäivät auki omina issueinaan).
+**Tila (2026-07-26):** `main`:issa **3 julkaisematonta yksikköä** viimeisimmän
+tagin (`v0.6.4`) päällä — CLI-alias-nippu (create/new-alias, `--body`, body-hint,
+`assign`), rename self-slug -fix, ja doctor-fix-noop-siivous. Kaikki vihreitä
+(fmt, clippy **0 uutta varoitusta**, koko testisuite läpi). **v0.6.5-julkaisu
+odottaa käyttäjän go/no-go:ta** (release-autonomia = go/no-go required).
 
-**Seuraava askel:** aloita **Tier 1**:stä. Luontevin ensimmäinen rupeama on
-bugi-nippu + halvat agenttiergonomia-voitot — ne ovat pieniä, selkeitä ja
-puhtaita worktree-paloja. `@doctor-fix-noop` on jo `in-progress`, joten
-tarkista sen tila ensin.
+**Tässä rupeamassa landattu (2026-07-26):** @verb-alias-discoverability +
+@assign-subcommand-alias (yhtenä CLI-alias-nippuna) ja @rename-stale-self-slug.
+Suljettu jo-valmiina: @doctor-fix-noop (fix oli landannut jo aiemmin commiteissa
+438d22f/1573d2a/5a49a14, issue vain jäänyt merkkaamatta).
+
+**Seuraava askel:** ks. **Seuraavat — DAG** alla. `@fiercely-colossal-rabbits`
+on **READY** (rename-fix vapautti `repo.rs`:n, ei enää törmää).
+`@json-close-requires-expected-version` on **BLOCKED** design-päätöksen taakse.
 
 **Avoin päätös ennen Tier 2:ta:** `@intensely-teeny-ink` (custom boards) syö
 scopessaan useita Tier 3:n kanban-kandidaatteja (multiple boards, priority-sort,
@@ -29,29 +34,51 @@ card fields). Päätä sen rajaus ennen rakentamista, ettei tehdä päällekkäi
 
 ---
 
+## Seuraavat — DAG (riippuvuudet)
+
+Ne kaksi seuraavaksi otettavaa issueta ja mistä ne riippuvat. Ylhäältä alas =
+"vapauttaa / portittaa". `✅` = landattu, `⬜` = tekemättä, `⛔` = blokattu.
+
+```
+@rename-stale-self-slug  ✅ landattu (repo.rs)
+        │
+        │  vapauttaa — sama hot file repo.rs, ei enää rebase-törmäystä
+        ▼
+@fiercely-colossal-rabbits  ⬜ READY  ── chore/high. Cachaa canonical_hash
+                                         /api/issues:lle. Ota tämä ensin.
+
+[design-päätös: --json close/update -symmetria non-JSON-polun kanssa
+ vs. D4=B:n (strict --expected-version) säilyttäminen]   ⛔ avoin (käyttäjän call)
+        │
+        │  portittaa — käytös on tietoinen valinta, ei laastari
+        ▼
+@json-close-requires-expected-version  ⬜ BLOCKED ── ei rakenneta ennen päätöstä
+```
+
+Kaari-lyhyesti: rename-fix jo poisti ainoan riippuvuuden canonical-cachelta →
+**se on nyt vapaa otettavaksi**. json-close taas odottaa suunta­päätöstä
+(symmetria vs. strict), ei koodia.
+
+---
+
 ## Tier 1 — tee heti (bugit + halvat agenttivoitot)
 
 Pieniä, korkean vipuvaikutuksen paloja. Sopivat itsenäisiksi worktreiksi.
+Kierroksen 2026-07-26 jälkeen jäljellä on enää DAG:n kaksi solmua (ks. yllä).
 
-- [ ] **@doctor-fix-noop** — `bug`, **high**, *in-progress*. `doctor --fix`
-      exittaa 1 mutta ei tee raportoimiaan korjauksia (alias-koersiot,
-      AGENTS.md-drift). Tarkista työn tila ennen uuden worktreen spawnaamista.
-- [ ] **@rename-stale-self-slug** — `bug`. `rename` ei päivitä issuen omaa
-      `slug:`-kenttää; `doctor --fix` leimaa slugin → ei enää latentti. Pieni.
-- [ ] **@json-close-requires-expected-version** — `bug`. `--json` muuttaa
-      *vaadittujen argumenttien* pintaa, ei pelkkää output-formaattia → agentti-
-      callerit kaatuvat. ⚠️ Ei triviaali: nykyinen käytös on tietoinen valinta
-      (virheteksti *"per design D4=B"*), joten korjaus on **design-käännös**, ei
-      laastari. Päätä ensin: symmetria non-JSON-polun kanssa vs. D4=B:n peruminen.
-- [ ] **@verb-alias-discoverability** — `feature`. Nippu error-hint/alias-fixejä:
-      `create`→`new`-alias, `--body` `new`:lle, `body <slug>`-virheen vihje
-      `body set`:iin. Halpaa; säästää jokaisen agentin arvaus-korjaus-kierrokset.
-- [ ] **@assign-subcommand-alias** — `feature`. Lisää `assign`-alias
-      `set --assignee`:lle. Triviaali; luonteva pari edellisen kanssa (voi tehdä
-      samassa worktreessä "CLI-alias-nippuna").
-- [ ] **@fiercely-colossal-rabbits** — `chore`, **high**. Cachaa `canonical_hash`
-      (nyt lasketaan joka `/api/issues`-kutsulla per issue). Aito perf-ongelma
-      isoilla repoilla; selkeä fix (cache mtime+size-avaimella AppStateen).
+- [x] **@doctor-fix-noop** — suljettu `fixed`; fix oli landannut jo aiemmin.
+- [x] **@rename-stale-self-slug** — landattu 2026-07-26. `rename` päivittää nyt
+      issuen oman `slug:`-kentän + regressiotesti.
+- [x] **@verb-alias-discoverability** — landattu 2026-07-26 (CLI-alias-nippu).
+- [x] **@assign-subcommand-alias** — landattu 2026-07-26 (CLI-alias-nippu).
+- [ ] **@fiercely-colossal-rabbits** — `chore`, **high**, **READY** (ks. DAG).
+      Cachaa `canonical_hash` (nyt lasketaan joka `/api/issues`-kutsulla per
+      issue). Aito perf-ongelma isoilla repoilla; cache mtime+size-avaimella
+      AppStateen. **Seuraavan rupeaman luontevin ensimmäinen pala.**
+- [ ] **@json-close-requires-expected-version** — `bug`, **BLOCKED** (ks. DAG).
+      `--json` muuttaa *vaadittujen argumenttien* pintaa → agentti-callerit
+      kaatuvat. ⚠️ Design-käännös, ei laastari. Päätä ensin: symmetria
+      non-JSON-polun kanssa vs. D4=B:n (strict `--expected-version`) säilytys.
 
 ## Tier 2 — seuraavaksi (yksi meaty feature, aito lähitarve)
 
