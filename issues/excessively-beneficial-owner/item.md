@@ -1,14 +1,15 @@
 ---
 created: 2026-05-06
-updated: 2026-05-31
+updated: 2026-07-26
 type: task
-status: open
+status: obsolete
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
 related: ['@fiercely-juicy-kettle', '@entirely-cowardly-aftermath']
 labels: [kanban, research, web-ui, backlog]
+closed: 2026-07-26
 ---
 
 # Investigate launching Claude Code with a prompt for 'start implementation' button on cards
@@ -43,3 +44,8 @@ been through two multi-LLM review rounds and an empirical
 `/assess-findings` pass. Implementation ticket comes next per
 §12 of the design note; that ticket will be the one that finally
 closes this issue with a `Source:` line.
+
+### 2026-07-26T08:06:05Z · @jari
+
+Suljettu obsolete: tutkimuksen scope korvattu valmistuneella @entirely-cowardly-aftermath -designilla (docs/design/web-control-surface.md).
+

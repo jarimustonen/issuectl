@@ -82,14 +82,15 @@ aikatauluta kun on tilaa.
 `@somewhat-heady-zephyr` (events.jsonl — vain jos git-metriikat ei riitä),
 `@practically-truculent-music` (watcher-race-observability — matala kiire).
 
-## Siivous (harkittavaksi)
+## Siivous — tehty (2026-07-26)
 
-- [ ] **@excessively-beneficial-owner** — `task`. "Claude Code launch button"
-      -tutkimus, jonka scope on jo korvattu valmistuneella
-      `@entirely-cowardly-aftermath`-designilla. **Suositus: sulje** `obsolete`.
-- [ ] Suljetun epicin `@hugely-exciting-spiders` lapsi-issuet: käy läpi mitkä
-      kandidaatit on jo shipattu 0.6.x:ssä ja sulje ne; loput → mahdollinen
-      v0.7.0-epic.
+- [x] **@excessively-beneficial-owner** suljettu `obsolete` (scope korvattu
+      valmistuneella `@entirely-cowardly-aftermath`-designilla).
+- [x] Suljetun epicin `@hugely-exciting-spiders` lapset käyty läpi: kaikki
+      tosiasiassa 0.6.x:ssä shipatut kandidaatit oli jo suljettu `done`:ksi
+      (~20 kpl). Auki jäi 10 kanban/board-kiillotuskandidaattia — ne **eivät**
+      ole shipattu (varmistettu CHANGELOGista) ja elävät nyt Tier 3:ssa yllä.
+      Mahdollinen v0.7.0-epic voidaan koota niistä myöhemmin.
 
 ---
 
