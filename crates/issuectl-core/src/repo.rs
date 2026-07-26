@@ -1035,18 +1035,27 @@ pub fn rename_issue(
         let mut fm_changes = rewrite_frontmatter_refs(&mut item.frontmatter, old, new);
         // The renamed issue's own `slug:` frontmatter field names *this*
         // issue, not a cross-reference, so `rewrite_frontmatter_refs` (which
-        // only touches `epic`/`related`/`blocked_by`) leaves it alone. Update
-        // it here so the moved item.md doesn't keep a stale self-slug.
-        // Freshly `new`-created issues carry no `slug:` field; `doctor --fix`
+        // only touches `epic`/`related`/`blocked_by`) leaves it alone. `rename`
+        // owns the issue's identity, so whenever the field is present we stamp
+        // it to `new`: this repairs the reported stale `slug: <old>` and also
+        // any mismatched or non-string value (a half-finished rename, a
+        // hand-edit, a copy-paste) that would otherwise leave `slug:`
+        // disagreeing with the directory name. An absent field stays absent —
+        // freshly `new`-created issues carry no `slug:`; only `doctor --fix`
         // stamps one, which is when the mismatch would otherwise appear.
-        if slug == old
-            && matches!(
-                item.frontmatter.get(serde_yaml::Value::String("slug".into())),
-                Some(serde_yaml::Value::String(s)) if s == old
-            )
-        {
-            crate::write::set_string(&mut item.frontmatter, "slug", new);
-            fm_changes.push(("slug".to_string(), 1));
+        if slug == old {
+            let slug_key = serde_yaml::Value::String("slug".into());
+            match item.frontmatter.get(&slug_key) {
+                // Already canonical: no write, no reported change.
+                Some(serde_yaml::Value::String(s)) if s == new => {}
+                // Present but stale / mismatched / non-string → stamp `new`.
+                Some(_) => {
+                    crate::write::set_string(&mut item.frontmatter, "slug", new);
+                    fm_changes.push(("slug".to_string(), 1));
+                }
+                // Absent → leave absent (matches `new`-created issues).
+                None => {}
+            }
         }
         let (new_body, body_n) = crate::refs::rewrite_body_refs(&item.body, old, new);
         let touched = !fm_changes.is_empty() || body_n > 0;
@@ -1419,14 +1428,93 @@ mod tests {
             !moved.contains("slug: old-tame-fox"),
             "stale self-slug should be gone: {moved}"
         );
-        // The self-slug change is reported like any other field change.
-        assert!(
+        // The self-slug change is reported exactly once, under the new slug
+        // (guards against double-counting if `rewrite_frontmatter_refs` ever
+        // starts touching `slug`).
+        assert_eq!(
             out.changes
                 .iter()
-                .any(|c| c.slug == "new-wild-stag" && c.field == "slug"),
-            "self-slug change should be reported: {:?}",
+                .filter(|c| c.slug == "new-wild-stag" && c.field == "slug")
+                .count(),
+            1,
+            "self-slug change should be reported exactly once: {:?}",
             out.changes
         );
+    }
+
+    #[test]
+    fn rename_leaves_absent_self_slug_absent() {
+        // An issue with no `slug:` field (the `new`-created shape) must not
+        // gain one — that stays `doctor --fix`'s job, not `rename`'s.
+        let tmp = fresh_repo();
+        seed_flat(&tmp, "old-tame-fox", "open");
+        let out = rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", false).unwrap();
+        let moved = fs::read_to_string(out.new_dir.join("item.md")).unwrap();
+        assert!(!moved.contains("slug:"), "no slug field expected: {moved}");
+        assert!(
+            !out.changes.iter().any(|c| c.field == "slug"),
+            "no slug change should be reported: {:?}",
+            out.changes
+        );
+    }
+
+    #[test]
+    fn rename_leaves_already_canonical_self_slug_untouched() {
+        // Field already equals the target: no write, no reported change.
+        let tmp = fresh_repo();
+        seed_with(&tmp, "old-tame-fox", "slug: new-wild-stag\n", "# old\n");
+        let out = rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", false).unwrap();
+        let moved = fs::read_to_string(out.new_dir.join("item.md")).unwrap();
+        assert!(moved.contains("slug: new-wild-stag"));
+        assert!(
+            !out.changes.iter().any(|c| c.field == "slug"),
+            "no slug change should be reported for an already-canonical slug: {:?}",
+            out.changes
+        );
+    }
+
+    #[test]
+    fn rename_repairs_mismatched_self_slug() {
+        // A `slug:` holding a third value (half-finished rename, hand-edit,
+        // copy-paste) disagrees with the directory name; `rename` owns the
+        // identity and normalizes it to the new slug.
+        let tmp = fresh_repo();
+        seed_with(&tmp, "old-tame-fox", "slug: some-third-thing\n", "# old\n");
+        let out = rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", false).unwrap();
+        let moved = fs::read_to_string(out.new_dir.join("item.md")).unwrap();
+        assert!(moved.contains("slug: new-wild-stag"), "{moved}");
+        assert!(!moved.contains("some-third-thing"), "{moved}");
+        assert!(out.changes.iter().any(|c| c.field == "slug"));
+    }
+
+    #[test]
+    fn rename_repairs_non_string_self_slug() {
+        // A non-string `slug:` (here null) is still normalized to the new slug
+        // rather than silently carried across the rename.
+        let tmp = fresh_repo();
+        seed_with(&tmp, "old-tame-fox", "slug: null\n", "# old\n");
+        let out = rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", false).unwrap();
+        let moved = fs::read_to_string(out.new_dir.join("item.md")).unwrap();
+        assert!(moved.contains("slug: new-wild-stag"), "{moved}");
+        assert!(out.changes.iter().any(|c| c.field == "slug"));
+    }
+
+    #[test]
+    fn rename_updates_self_slug_for_legacy_source() {
+        // Layout coverage: a legacy-layout source migrates to the flat root
+        // *and* has its self-slug stamped in the same pass.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues").join("open").join("old-tame-fox");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\nstatus: open\nslug: old-tame-fox\n---\n\n# old\n",
+        )
+        .unwrap();
+        let out = rename_issue(tmp.path(), "old-tame-fox", "new-wild-stag", false).unwrap();
+        assert!(!tmp.path().join("issues/open/old-tame-fox").exists());
+        let moved = fs::read_to_string(out.new_dir.join("item.md")).unwrap();
+        assert!(moved.contains("slug: new-wild-stag"), "{moved}");
     }
 
     #[test]
