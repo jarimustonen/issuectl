@@ -13,15 +13,15 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-07-26):** `main`:issa **3 julkaisematonta yksikköä** viimeisimmän
-tagin (`v0.6.4`) päällä — CLI-alias-nippu (create/new-alias, `--body`, body-hint,
-`assign`), rename self-slug -fix, ja doctor-fix-noop-siivous. Kaikki vihreitä
-(fmt, clippy **0 uutta varoitusta**, koko testisuite läpi). **v0.6.5-julkaisu
-odottaa käyttäjän go/no-go:ta** (release-autonomia = go/no-go required).
+**Tila (2026-07-27):** `main` == **v0.6.5**, juuri julkaistu (tag `v0.6.5`
+pushattu; cargo-dist + crates.io + Homebrew-pipeline käynnissä GitHubissa).
+Työpuu puhdas. Kaikki vihreää (fmt, clippy **0 uutta varoitusta**, testisuite läpi).
 
-**Tässä rupeamassa landattu (2026-07-26):** @verb-alias-discoverability +
-@assign-subcommand-alias (yhtenä CLI-alias-nippuna) ja @rename-stale-self-slug.
-Suljettu jo-valmiina: @doctor-fix-noop (fix oli landannut jo aiemmin commiteissa
+**Rupeamassa 2026-07-26 landattu ja julkaistu v0.6.5:ssä:**
+@verb-alias-discoverability + @assign-subcommand-alias (yhtenä CLI-alias-nippuna,
+`create`/`new`-alias + `--body` + `body <slug>`-hint + `assign`-subkomento) ja
+@rename-stale-self-slug (rename päivittää nyt oman `slug:`-kentän). Suljettu
+jo-valmiina: @doctor-fix-noop (fix oli landannut jo commiteissa
 438d22f/1573d2a/5a49a14, issue vain jäänyt merkkaamatta).
 
 **Seuraava askel:** ks. **Seuraavat — DAG** alla. `@fiercely-colossal-rabbits`
