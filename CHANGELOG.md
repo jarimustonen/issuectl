@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-07-27
+
+### Added
+- `assign <slug> <user>` subcommand — a convenience wrapper that routes
+  through the existing typed `set --assignee` path (identical validation
+  and idempotency, no new storage semantics). Use `assign <slug> --clear`
+  to unassign. (issue: `@assign-subcommand-alias`)
+- `create` is now accepted as an alias for `new`, matching the near-
+  universal "create" verb (git / gh / kubectl / docker). (issue:
+  `@verb-alias-discoverability`)
+- `new` now accepts `--body` as an alias for `--description`.
+  (issue: `@verb-alias-discoverability`)
+- Running `issuectl body <slug>` (a bare slug where the `body` subcommand
+  group expects a sub-subcommand) now emits a hint pointing at
+  `body set <slug>` instead of a bare "unrecognized subcommand" error.
+  (issue: `@verb-alias-discoverability`)
+
+### Fixed
+- `rename <old> <new>` now updates the renamed issue's own `slug:`
+  frontmatter field, not just the directory name and inbound
+  cross-references. Previously a renamed issue that carried a `slug:`
+  field (e.g. one stamped by `doctor --fix`) was left holding the old
+  slug, silently out of sync with its directory. (issue:
+  `@rename-stale-self-slug`)
+
 ## [0.6.4] - 2026-06-03
 
 ### Fixed
