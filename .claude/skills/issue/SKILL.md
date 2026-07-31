@@ -382,7 +382,9 @@ issuectl --json new \
 `create` is accepted as an alias for `new`, and `--body` as an alias
 for `--description`, so `issuectl --json create --type task --title X
 --body "…"` works identically — canonical forms stay `new` /
-`--description`.
+`--description`. The title may also be passed positionally
+(`issuectl new "Login redirect loops" --type bug`) instead of via
+`--title`; pass exactly one of the two (both/neither is an error).
 
 For epics, use `--owner` instead of `--reporter`/`--assignee`:
 

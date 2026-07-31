@@ -180,8 +180,14 @@ pub const RESERVED_CUSTOM_FIELD_KEYS: &[(&str, &str)] = &[
     ("owner", "--owner"),
     ("priority", "--priority"),
     ("epic", "--epic"),
-    ("labels", "--label (repeatable)"),
-    ("related", "--related (repeatable)"),
+    (
+        "labels",
+        "use `--label` on `new`, or `update --add-label` / `--remove-label`",
+    ),
+    (
+        "related",
+        "use `--related` on `new`, or `update --add-related` / `--remove-related`",
+    ),
     (
         "blocked_by",
         "use `issuectl depend add/remove <slug> --blocked-by <other>`",

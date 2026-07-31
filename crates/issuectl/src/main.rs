@@ -414,14 +414,22 @@ enum Command {
 
     /// Create a new issue or epic. Pass `--slug <descriptive-2-3-word-kebab>` derived from the title; a random `intensifier-adjective-noun` slug is the fallback when `--slug` is omitted
     #[command(visible_alias = "create")]
+    #[command(group(clap::ArgGroup::new("title_input").required(true).args(["title_pos", "title_flag"])))]
     New {
         /// Item type
         #[arg(short = 't', long = "type", value_parser = PossibleValuesParser::new(ISSUE_TYPES))]
         issue_type: String,
 
-        /// Item title (markdown heading)
-        #[arg(long, value_parser = parse_non_empty)]
-        title: String,
+        /// Item title (markdown heading), as a positional argument —
+        /// e.g. `new "Login loops" --type bug`. Mutually exclusive with
+        /// `--title`; exactly one of the two is required.
+        #[arg(value_name = "TITLE", value_parser = parse_non_empty)]
+        title_pos: Option<String>,
+
+        /// Item title (markdown heading), canonical flag form. Mutually
+        /// exclusive with the positional `TITLE`; exactly one is required.
+        #[arg(long = "title", value_name = "TITLE", value_parser = parse_non_empty)]
+        title_flag: Option<String>,
 
         /// Descriptive 2-3 word kebab-case slug derived from the title (e.g. `login-redirect-loops`). Omit to fall back to a random `intensifier-adjective-noun` slug — only do that when no obvious short slug exists or the title would leak sensitive data
         #[arg(long, value_parser = parse_non_empty)]
@@ -1812,7 +1820,8 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
         } => cmd_duplicates(json_output, slug.as_deref(), threshold, all),
         Command::New {
             issue_type,
-            title,
+            title_pos,
+            title_flag,
             slug,
             reporter,
             assignee,
@@ -1830,7 +1839,11 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             json_output,
             NewArgs {
                 issue_type,
-                title,
+                // Exactly one of the two is guaranteed by the clap
+                // `title_input` group (required + mutually exclusive).
+                title: title_pos
+                    .or(title_flag)
+                    .expect("clap group guarantees one title source"),
                 slug,
                 reporter,
                 assignee,
