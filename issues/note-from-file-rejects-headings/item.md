@@ -2,8 +2,9 @@
 created: 2026-07-30
 updated: 2026-07-31
 type: feature
-status: in-progress
+status: fixed
 priority: normal
+closed: 2026-07-31
 ---
 
 # issuectl note --from-file should not reject legitimate ## / ### headings
