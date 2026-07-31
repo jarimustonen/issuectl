@@ -414,7 +414,7 @@ enum Command {
 
     /// Create a new issue or epic. Pass `--slug <descriptive-2-3-word-kebab>` derived from the title; a random `intensifier-adjective-noun` slug is the fallback when `--slug` is omitted
     #[command(visible_alias = "create")]
-    #[command(group(clap::ArgGroup::new("title_input").required(true).args(["title_pos", "title_flag"])))]
+    #[command(group(clap::ArgGroup::new("title_input").required(true).multiple(false).args(["title_pos", "title_flag"])))]
     New {
         /// Item type
         #[arg(short = 't', long = "type", value_parser = PossibleValuesParser::new(ISSUE_TYPES))]
@@ -1839,11 +1839,17 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             json_output,
             NewArgs {
                 issue_type,
-                // Exactly one of the two is guaranteed by the clap
-                // `title_input` group (required + mutually exclusive).
-                title: title_pos
-                    .or(title_flag)
-                    .expect("clap group guarantees one title source"),
+                // The clap `title_input` group (required + mutually
+                // exclusive) guarantees exactly one of these at parse
+                // time; the `ok_or_else` is a defensive net so a future
+                // group-wiring regression surfaces as an error, not a
+                // panic (the `Cli::command().debug_assert()` test also
+                // guards the wiring at build time).
+                title: title_pos.or(title_flag).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "internal: clap `title_input` group did not enforce a title source"
+                    )
+                })?,
                 slug,
                 reporter,
                 assignee,
@@ -2430,9 +2436,9 @@ fn cmd_show(json: bool, slug: &str) -> Result<()> {
         Ok(s) => s,
         Err(e) => {
             // Ambiguous prefix — surface the error to the user under the
-            // unified output contract. `fail` diverges (`-> !`), so it is
-            // the tail expression of this arm; no `return` (that would be
-            // an unreachable expression).
+            // unified output contract. `fail` diverges (`-> !`), so it can
+            // be this arm's tail expression (a `return` around it trips
+            // the unreachable-expression lint).
             fail(
                 json,
                 1,
@@ -5416,6 +5422,49 @@ mod tests {
                 "`{alias}` is listed in SUBCOMMAND_ALIASES → `{canonical}` but is not a clap alias of it"
             );
         }
+    }
+
+    /// clap's own internal-consistency check: catches invalid arg IDs,
+    /// duplicate names, and — critically for `new` — a `title_input`
+    /// group that references a renamed/removed field. This is the
+    /// build-time backstop for the `dispatch` arm that merges
+    /// `title_pos`/`title_flag` and errors if neither is present.
+    #[test]
+    fn cli_definition_is_internally_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    /// The `new` title group must stay `required` (so "neither" is
+    /// rejected) and mutually exclusive (so "both" is rejected). A
+    /// refactor that drops `.required(true)` would compile and pass the
+    /// happy-path tests while letting a title-less `new` reach the
+    /// `dispatch` merge; this pins the wiring the merge relies on.
+    #[test]
+    fn new_title_input_group_is_required_and_exclusive() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let new_sub = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "new")
+            .expect("`new` subcommand present");
+        // `is_multiple` is a `&mut self` builder getter, so work on an
+        // owned clone.
+        let mut group = new_sub
+            .get_groups()
+            .find(|g| g.get_id() == "title_input")
+            .expect("`title_input` group present")
+            .clone();
+        assert!(group.is_required_set(), "title_input must be required");
+        assert!(
+            !group.is_multiple(),
+            "title_input must be mutually exclusive (multiple=false)"
+        );
+        let members: Vec<_> = group.get_args().map(|id| id.as_str()).collect();
+        assert!(
+            members.contains(&"title_pos") && members.contains(&"title_flag"),
+            "title_input must contain both title_pos and title_flag; got {members:?}"
+        );
     }
 
     #[test]

@@ -26,12 +26,29 @@ fn run(root: &std::path::Path, args: &[&str]) -> Output {
         .env_remove("RUST_LIB_BACKTRACE")
         .env("LC_ALL", "C")
         .env("LANG", "C")
+        // Keep clap's stderr free of ANSI colour codes so the substring
+        // assertions below match the plain flag/arg names.
+        .env("NO_COLOR", "1")
         .current_dir(root)
         .arg("--root")
         .arg(root)
         .args(args)
         .output()
         .expect("spawn issuectl")
+}
+
+/// `run` that asserts the command succeeded — used for test *setup* so a
+/// broken seed fails loudly at its own call site instead of surfacing as
+/// a confusing assertion failure later.
+fn run_ok(root: &std::path::Path, args: &[&str]) -> Output {
+    let out = run(root, args);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "setup command failed; {}",
+        dump(&out)
+    );
+    out
 }
 
 fn dump(out: &Output) -> String {
@@ -113,11 +130,15 @@ fn new_rejects_both_positional_and_flag_title() {
         tmp.path(),
         &["new", "Positional", "--title", "Flag", "--type", "bug"],
     );
+    // Exit code (clap usage error) is the behavioural contract; we also
+    // check both title spellings appear, but deliberately do NOT assert
+    // on clap's connecting grammar ("cannot be used with"), which is
+    // rendering text that can change across clap versions.
     assert_eq!(out.status.code(), Some(2), "{}", dump(&out));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("cannot be used with") && stderr.contains("--title"),
-        "expected conflict error naming --title; got:\n{stderr}"
+        stderr.contains("--title") && stderr.contains("TITLE"),
+        "conflict error should name both title forms; got:\n{stderr}"
     );
 }
 
@@ -135,6 +156,97 @@ fn new_rejects_missing_title() {
     );
 }
 
+/// The positional title is order-insensitive relative to flags: giving
+/// it *after* `--type`/`--slug` works just as well as before.
+#[test]
+fn new_positional_title_after_flags() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &[
+            "new",
+            "--type",
+            "bug",
+            "--slug",
+            "order-x",
+            "Trailing title",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    assert_eq!(show_field(tmp.path(), "order-x", "title"), "Trailing title");
+}
+
+/// The `create` visible alias accepts the positional title too — it
+/// resolves to the same `New` variant, so the ergonomic form must work
+/// on both spellings of the verb.
+#[test]
+fn create_alias_accepts_positional_title() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &[
+            "create",
+            "Via create",
+            "--type",
+            "bug",
+            "--slug",
+            "via-create",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    assert_eq!(show_field(tmp.path(), "via-create", "title"), "Via create");
+}
+
+/// A bare positional title beginning with `-` is (intentionally) NOT
+/// accepted: `allow_hyphen_values` is left off so a mistyped flag like
+/// `new -p high` yields a clean "title required" error instead of being
+/// swallowed as a title. The escape hatches for a genuinely
+/// hyphen-leading title are `--title=<...>` and the `--` separator; both
+/// are pinned here so a future `allow_hyphen_values` flip is a conscious
+/// choice, not a silent regression.
+#[test]
+fn new_leading_hyphen_title_needs_an_escape() {
+    let tmp = fresh_repo();
+
+    // Bare positional starting with `-` is a clap usage error.
+    let out = run(
+        tmp.path(),
+        &["new", "-Fix login", "--type", "bug", "--slug", "hy-bare"],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", dump(&out));
+
+    // `--title=<value>` escapes it.
+    let out = run(
+        tmp.path(),
+        &[
+            "new",
+            "--title=-Fix login",
+            "--type",
+            "bug",
+            "--slug",
+            "hy-eq",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    assert_eq!(show_field(tmp.path(), "hy-eq", "title"), "-Fix login");
+
+    // The `--` separator escapes it positionally.
+    let out = run(
+        tmp.path(),
+        &[
+            "new",
+            "--type",
+            "bug",
+            "--slug",
+            "hy-dd",
+            "--",
+            "-Fix login",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    assert_eq!(show_field(tmp.path(), "hy-dd", "title"), "-Fix login");
+}
+
 // --- #3: built-in list-field hint on `set` -----------------------------
 
 /// `set <slug> related <ref>` for a built-in *list* field must not
@@ -143,11 +255,11 @@ fn new_rejects_missing_title() {
 #[test]
 fn set_related_hint_names_working_flags() {
     let tmp = fresh_repo();
-    run(
+    run_ok(
         tmp.path(),
         &["new", "Anchor", "--type", "bug", "--slug", "an-chor"],
     );
-    run(
+    run_ok(
         tmp.path(),
         &["new", "Other", "--type", "bug", "--slug", "oth-er"],
     );
@@ -165,10 +277,16 @@ fn set_related_hint_names_working_flags() {
         "hint must not name the non-working `--related (repeatable)`; got:\n{stderr}"
     );
 
-    // The named flag works verbatim from the same slug.
+    // BOTH named flags work verbatim from the same slug — execute add
+    // then remove, so a typo in either flag name fails the test.
     let out = run(
         tmp.path(),
         &["update", "an-chor", "--add-related", "oth-er"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let out = run(
+        tmp.path(),
+        &["update", "an-chor", "--remove-related", "oth-er"],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
 }
@@ -177,7 +295,7 @@ fn set_related_hint_names_working_flags() {
 #[test]
 fn set_labels_hint_names_working_flags() {
     let tmp = fresh_repo();
-    run(
+    run_ok(
         tmp.path(),
         &["new", "Anchor", "--type", "bug", "--slug", "an-chor"],
     );
@@ -196,6 +314,11 @@ fn set_labels_hint_names_working_flags() {
 
     let out = run(tmp.path(), &["update", "an-chor", "--add-label", "urgent"]);
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let out = run(
+        tmp.path(),
+        &["update", "an-chor", "--remove-label", "urgent"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
 }
 
 // --- #5: `note` flag ordering + required `--as` ------------------------
@@ -205,7 +328,7 @@ fn set_labels_hint_names_working_flags() {
 #[test]
 fn note_flag_order_is_insensitive() {
     let tmp = fresh_repo();
-    run(
+    run_ok(
         tmp.path(),
         &["new", "Anchor", "--type", "bug", "--slug", "an-chor"],
     );
@@ -238,7 +361,7 @@ fn note_flag_order_is_insensitive() {
 #[test]
 fn note_missing_as_names_the_flag() {
     let tmp = fresh_repo();
-    run(
+    run_ok(
         tmp.path(),
         &["new", "Anchor", "--type", "bug", "--slug", "an-chor"],
     );

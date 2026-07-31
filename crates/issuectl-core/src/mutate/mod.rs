@@ -180,13 +180,18 @@ pub const RESERVED_CUSTOM_FIELD_KEYS: &[(&str, &str)] = &[
     ("owner", "--owner"),
     ("priority", "--priority"),
     ("epic", "--epic"),
+    // List-typed built-ins. The hint leads with the mutate-existing
+    // flags (`--add-*`/`--remove-*`, exposed by `update`/`bulk`) because
+    // the failing paths are `set`/`update` on an existing issue; the
+    // create-time `--label`/`--related` form is named second. Both forms
+    // are real flags that work verbatim in their stated context.
     (
         "labels",
-        "use `--label` on `new`, or `update --add-label` / `--remove-label`",
+        "list-typed: use `update --add-label` / `--remove-label` (or `--label` at `new`)",
     ),
     (
         "related",
-        "use `--related` on `new`, or `update --add-related` / `--remove-related`",
+        "list-typed: use `update --add-related` / `--remove-related` (or `--related` at `new`)",
     ),
     (
         "blocked_by",
