@@ -87,15 +87,24 @@ pub fn validate_message(message: &str) -> Result<()> {
 /// becomes `##### …` — both pushed to H4+, i.e. strictly deeper than
 /// the H3 block heading and the H2 section heading, so the writer /
 /// reader fence-aware scanners never misread them as a `## <section>`
-/// boundary or a new block. Adding a fixed two `#` levels preserves
-/// the user's relative heading hierarchy.
+/// boundary or a new block. The fixed two-level shift keeps a demoted
+/// `##` above a demoted `###`; it does not touch H1 or existing H4+
+/// headings, so a note that mixes those levels can see its rendered
+/// hierarchy flattened — the guarantee here is structural safety, not
+/// faithful heading nesting.
 ///
 /// Headings inside a fenced code block are content and pass through
-/// verbatim — the parser is fence-aware, so they can't break out.
+/// verbatim — the scanner is fence-aware, so they can't break out.
 /// This replaces the old hard rejection of unfenced H2/H3 (callers
 /// used to pre-demote or fence such lines by hand); structured notes
 /// with markdown subheadings now round-trip intact.
-pub fn demote_managed_headings(message: &str) -> String {
+///
+/// Callers must pass a message that already cleared [`validate_message`]
+/// (as [`render_note_block`] does): an unclosed fence would leave the
+/// tail of the message flagged as fenced content here, so a later
+/// `## …` outside the intended fence would not be demoted. Kept
+/// `pub(crate)` so no out-of-crate caller can skip that guard.
+pub(crate) fn demote_managed_headings(message: &str) -> String {
     let lines: Vec<&str> = message.split('\n').collect();
     let mut out = String::with_capacity(message.len() + 16);
     let mut fence: Option<Fence> = None;
@@ -930,6 +939,47 @@ mod tests {
         // Nothing left at H2 or H3 outside the fence.
         assert!(!is_any_h2("#### Section"));
         assert!(!is_h3("##### Sub"));
+    }
+
+    #[test]
+    fn demoted_message_never_leaves_an_outside_fence_boundary() {
+        // The core invariant: for any message that clears
+        // `validate_message`, no line of `demote_managed_headings`
+        // outside a fence may be seen by the writer/reader scanners as
+        // a `## <section>` or `### <ts> · @<author>` boundary. Swept
+        // across CRLF, tilde fences, indentation, multi-heading, and
+        // already-deep inputs — the shapes the LLM review probed.
+        let inputs = [
+            "## X",
+            "### X",
+            "#### X",
+            "##### X",
+            "## X\r",
+            "### X\r\n\r\nbody",
+            "## X\n### Y\n## Z",
+            "text\n## A\ntext\n### B\n",
+            "```\n## in fence\n```\n## outside",
+            "~~~\n### in tilde\n~~~\n### outside",
+            "```rust\ncode\n````\n## after longer close",
+            "  ## indented-two-spaces",
+            "   ### indented-three-spaces",
+            "##  double-space",
+            "## Section\n\n#### already-h4\n\n### Sub",
+        ];
+        for msg in inputs {
+            if validate_message(msg).is_err() {
+                continue;
+            }
+            let out = demote_managed_headings(msg);
+            let lines: Vec<&str> = out.split('\n').collect();
+            scan_outside_fences(&lines, |i, l| {
+                assert!(
+                    !is_any_h2(l) && !is_h3(l),
+                    "demoted {msg:?} left a boundary at line {i}: {l:?}"
+                );
+                false
+            });
+        }
     }
 
     #[test]
