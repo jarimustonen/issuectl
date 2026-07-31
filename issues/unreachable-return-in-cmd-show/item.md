@@ -2,8 +2,9 @@
 created: 2026-07-28
 updated: 2026-07-31
 type: chore
-status: in-progress
+status: fixed
 priority: normal
+closed: 2026-07-31
 ---
 
 # unreachable-expression warning: return fail(...) in cmd_show
