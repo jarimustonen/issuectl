@@ -2430,14 +2430,16 @@ fn cmd_show(json: bool, slug: &str) -> Result<()> {
         Ok(s) => s,
         Err(e) => {
             // Ambiguous prefix — surface the error to the user under the
-            // unified output contract.
-            return fail(
+            // unified output contract. `fail` diverges (`-> !`), so it is
+            // the tail expression of this arm; no `return` (that would be
+            // an unreachable expression).
+            fail(
                 json,
                 1,
                 "ambiguous-slug",
                 &format!("{e:#}"),
                 serde_json::Value::Null,
-            );
+            )
         }
     };
     let issue = issues.iter().find(|i| i.slug == resolved);
