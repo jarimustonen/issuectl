@@ -59,31 +59,19 @@ pub fn validate_author(author: &str) -> Result<()> {
     Ok(())
 }
 
-/// Reject messages that would inject section / block headings. A
-/// legitimate user can still discuss headings by quoting them inside
-/// a fenced code block — the parser is fence-aware. Round-2 finding
-/// O10: an unclosed fence would silently swallow later blocks once
-/// appended, so we reject those too.
+/// Reject messages that cannot be safely appended. Unfenced `## `/
+/// `### ` heading lines are *not* rejected here — they are legitimate
+/// note content and are demoted to H4+ by [`demote_managed_headings`]
+/// at render time so they cannot be mistaken for a managed section /
+/// block boundary. The one structural hazard demotion can't fix is an
+/// unclosed fence (round-2 finding O10): it would silently swallow
+/// later blocks once appended, so we still reject those.
 pub fn validate_message(message: &str) -> Result<()> {
     if message.trim().is_empty() {
         bail!("message cannot be empty");
     }
     let lines: Vec<&str> = message.split('\n').collect();
-    let mut injected: Option<String> = None;
-    let trailing_fence = scan_with_fence_state(&lines, |_, l| {
-        if injected.is_some() {
-            return;
-        }
-        if is_any_h2(l) || is_h3(l) {
-            injected = Some(l.to_string());
-        }
-    });
-    if let Some(line) = injected {
-        bail!(
-            "message line {line:?} begins with `## ` or `### ` outside a code fence; \
-             this would break out of the comment block — wrap it in a code fence"
-        );
-    }
+    let trailing_fence = scan_with_fence_state(&lines, |_, _| {});
     if trailing_fence.is_some() {
         bail!(
             "message contains an unclosed fenced code block; close it before appending \
@@ -91,6 +79,52 @@ pub fn validate_message(message: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Demote every unfenced `## …` / `### …` heading in a note message so
+/// it cannot collide with the reserved section model once embedded in
+/// a `### <ts> · @<author>` block. `## …` becomes `#### …` and `### …`
+/// becomes `##### …` — both pushed to H4+, i.e. strictly deeper than
+/// the H3 block heading and the H2 section heading, so the writer /
+/// reader fence-aware scanners never misread them as a `## <section>`
+/// boundary or a new block. Adding a fixed two `#` levels preserves
+/// the user's relative heading hierarchy.
+///
+/// Headings inside a fenced code block are content and pass through
+/// verbatim — the parser is fence-aware, so they can't break out.
+/// This replaces the old hard rejection of unfenced H2/H3 (callers
+/// used to pre-demote or fence such lines by hand); structured notes
+/// with markdown subheadings now round-trip intact.
+pub fn demote_managed_headings(message: &str) -> String {
+    let lines: Vec<&str> = message.split('\n').collect();
+    let mut out = String::with_capacity(message.len() + 16);
+    let mut fence: Option<Fence> = None;
+    for (i, l) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        match fence {
+            Some(open) => {
+                if closes_fence(l, open) {
+                    fence = None;
+                }
+                out.push_str(l);
+            }
+            None => {
+                if let Some(o) = opening_fence(l) {
+                    fence = Some(o);
+                    out.push_str(l);
+                } else if is_any_h2(l) || is_h3(l) {
+                    // `## X` → `#### X`, `### X` → `##### X`.
+                    out.push_str("##");
+                    out.push_str(l);
+                } else {
+                    out.push_str(l);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Render a block heading + body for a `Comments`-style section.
@@ -101,9 +135,10 @@ pub fn validate_message(message: &str) -> Result<()> {
 pub fn render_note_block(ts: &str, author: &str, message: &str) -> Result<String> {
     validate_author(author)?;
     validate_message(message)?;
+    let demoted = demote_managed_headings(message);
     Ok(format!(
         "### {ts} · @{author}\n\n{}\n",
-        message.trim_end_matches('\n')
+        demoted.trim_end_matches('\n')
     ))
 }
 
@@ -868,16 +903,89 @@ mod tests {
     }
 
     #[test]
-    fn validate_message_rejects_unfenced_h2_h3() {
+    fn validate_message_accepts_unfenced_h2_h3() {
         assert!(validate_message("plain text").is_ok());
         assert!(validate_message("multi\nline\n").is_ok());
-        // C2: forging headings outside a fence is rejected.
-        assert!(validate_message("normal\n\n## Decisions\n\nfake").is_err());
-        assert!(validate_message("### 2020-01-01 · @evil\n\nforged").is_err());
-        // Quoting the same content inside a fence is fine — the
-        // parser is fence-aware so the content cannot break out.
+        // Legitimate structured notes with markdown subheadings are
+        // accepted now — they are demoted at render time rather than
+        // rejected (note-from-file-rejects-headings).
+        assert!(validate_message("normal\n\n## Section\n\nbody").is_ok());
+        assert!(validate_message("### Subheading\n\nbody").is_ok());
+        // Quoting heading-shaped content inside a fence is fine too.
         assert!(validate_message("see this:\n```\n## bash comment\n```\nok").is_ok());
+        // Empty and unclosed fences are still rejected.
         assert!(validate_message("").is_err());
+        assert!(validate_message("```rust\nunclosed").is_err());
+    }
+
+    #[test]
+    fn demote_managed_headings_pushes_h2_h3_below_block_level() {
+        // Unfenced H2/H3 gain two levels; fenced content is untouched.
+        let msg = "## Section\n\ntext\n\n### Sub\n\n```\n## in-fence\n### also-in-fence\n```\n";
+        let out = demote_managed_headings(msg);
+        assert!(out.contains("#### Section"));
+        assert!(out.contains("##### Sub"));
+        // In-fence heading-shaped lines pass through verbatim.
+        assert!(out.contains("```\n## in-fence\n### also-in-fence\n```"));
+        // Nothing left at H2 or H3 outside the fence.
+        assert!(!is_any_h2("#### Section"));
+        assert!(!is_h3("##### Sub"));
+    }
+
+    #[test]
+    fn render_note_block_demotes_user_headings() {
+        // A structured note with `##`/`###` renders without error and
+        // the headings land at H4+ so they can't be a section boundary.
+        let b = render_note_block(
+            "2026-05-07T12:00:00Z",
+            "alice",
+            "## Findings\n\ndetail\n\n### Detail\n\nmore\n",
+        )
+        .unwrap();
+        assert!(b.starts_with("### 2026-05-07T12:00:00Z · @alice\n\n"));
+        assert!(b.contains("#### Findings"));
+        assert!(b.contains("##### Detail"));
+        assert!(!b.contains("\n## Findings"));
+        assert!(!b.contains("\n### Detail"));
+    }
+
+    #[test]
+    fn note_with_user_headings_round_trips_and_preserves_section() {
+        // Regression for note-from-file-rejects-headings: appending a
+        // note whose body contains `##`/`###` headings must not corrupt
+        // the reserved `## Comments` section — the block still parses
+        // back intact, and a following managed section is untouched.
+        let body = "\n# T\n\n## Comments\n\n\
+            ### 2026-05-01T00:00:00Z · @bob\n\nfirst\n\n## Decisions\n\n\
+            ### 2026-05-02T00:00:00Z · @cara\n\npicked X\n";
+        let block = render_note_block(
+            "2026-05-07T12:00:00Z",
+            "alice",
+            "## Section\n\nbody line\n\n### Subsection\n\nmore body\n",
+        )
+        .unwrap();
+        let out = append_block(body, COMMENTS, &block);
+
+        // Exactly one Comments and one Decisions section — the user
+        // headings did not mint new H2 boundaries.
+        assert_eq!(out.matches("\n## Comments").count(), 1, "body:\n{out}");
+        assert_eq!(out.matches("\n## Decisions").count(), 1, "body:\n{out}");
+
+        // Comments re-parses to two blocks (bob, then alice), with the
+        // demoted headings preserved inside alice's body.
+        let coms = parse_section(&out, COMMENTS);
+        assert!(coms.warnings.is_empty(), "warnings={:?}", coms.warnings);
+        assert_eq!(coms.blocks.len(), 2);
+        assert_eq!(coms.blocks[0].author, "bob");
+        assert_eq!(coms.blocks[1].author, "alice");
+        assert!(coms.blocks[1].body.contains("#### Section"));
+        assert!(coms.blocks[1].body.contains("##### Subsection"));
+        assert!(coms.blocks[1].body.contains("body line"));
+
+        // Decisions still parses independently and intact.
+        let decs = parse_section(&out, DECISIONS);
+        assert_eq!(decs.blocks.len(), 1);
+        assert_eq!(decs.blocks[0].author, "cara");
     }
 
     // ── parser ──────────────────────────────────────────────────────
@@ -953,7 +1061,11 @@ mod tests {
         // validators reject so callers can't emit malformed
         // headings by going around them.
         assert!(render_note_block("ts", " alice ", "x").is_err());
-        assert!(render_note_block("ts", "alice", "## Decisions\n").is_err());
+        // An unfenced `## …` in the message is no longer rejected — it
+        // is demoted to `#### …` (note-from-file-rejects-headings).
+        assert!(render_note_block("ts", "alice", "## Decisions\n").is_ok());
+        // An unclosed fence is still rejected.
+        assert!(render_note_block("ts", "alice", "```rust\nunclosed").is_err());
         assert!(render_note_block("ts", "alice\n## Pwned", "x").is_err());
     }
 

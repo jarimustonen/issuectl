@@ -101,9 +101,17 @@ shape be fabricated:
 - `author` cannot contain whitespace, control characters, `@`, or the
   middle-dot separator. Without this, `--as $'alice\n## Pwned'`
   would mint a fake H2 section.
-- `message` cannot contain a line beginning with `## ` or `### `
-  outside a fenced code block. Quoting the same content inside a
-  fence is fine because the parser is fence-aware.
+- `message` cannot contain an unclosed fenced code block — it would
+  swallow every block appended after it.
+
+Legitimate `## `/`### ` heading lines in a message are **not**
+rejected: `render_note_block` demotes each unfenced heading two
+levels (`## …` → `#### …`, `### …` → `##### …`, via
+`demote_managed_headings`) so it lands at H4+, strictly deeper than
+the H3 block heading and H2 section heading. Structured notes with
+markdown subheadings round-trip intact and cannot mint a fake
+`## <section>` boundary. Headings inside a fence are content and pass
+through verbatim.
 
 Heading detection in both the writer (`append_block`,
 `insert_block_in_section`) and the reader (`parse_section`) tracks
