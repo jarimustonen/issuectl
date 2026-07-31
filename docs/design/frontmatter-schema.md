@@ -72,28 +72,30 @@ rejected (mutations) or reported (doctor).
   Failing at load time gives the user the error when they edit
   `.schema.yaml`, not later when an unrelated mutation fails.
 
-- **Priority enum is two-valued: `normal` and `high`.** Deliberately
-  not the conventional `low | medium | high | critical` (or
-  `low | normal | high`) ladder. Rationale:
-  - **Triage cost.** Every extra rung is another judgement call at
-    file-time and another argument at standup. With two values the
-    only question is *"does this jump the queue?"* — `high` means
-    yes, `normal` means no. There is no `medium` to negotiate over.
-  - **`low` is just `normal` you won't do.** Issues nobody intends to
-    work on belong in a `wontfix`/`obsolete` close or in a backlog
-    label — not encoded as a priority that pretends they're still in
-    the queue.
+- **Priority enum is three-valued: `low`, `normal`, `high`.**
+  Deliberately not the conventional `low | medium | high | critical`
+  ladder. `normal` stays the default. Rationale:
+  - **Triage cost stays low.** Every extra rung is another judgement
+    call at file-time. Three values keep the questions crisp: `high`
+    means *"jumps the queue"*, `normal` is the default, `low` means
+    *"real, but can wait"*. There is no `medium` to negotiate over.
+  - **`low` earns its place.** An issue that is genuinely worth
+    keeping but not worth prioritising is not the same as a
+    `wontfix`/`obsolete` close — it stays in the queue, just below
+    `normal`. Encoding that explicitly beats overloading a backlog
+    label. (This supersedes the earlier two-valued decision, which
+    folded `low` into `normal`.)
   - **`critical` is just `high` with adrenaline.** Real incidents are
     handled out-of-band (paging, hotfix branches); a frontmatter
     enum value doesn't change response time. Collapsing
     `critical → high` keeps the schema honest about what the field
     actually controls (queue order), not how the team feels about it.
-  - **Sort ordering stays trivial.** Two values means a stable
-    `high` / `normal` split in `ls` output without per-team tuning
-    of where `medium` belongs.
+  - **No ordering is implied.** The `[low, normal, high]` order is
+    presentation only — there is no priority-based rank/sort function
+    today (that is tracked separately as `@truly-somber-payment`).
   Repos that genuinely need finer-grained priority can redeclare
   the field in `issues/.schema.yaml` with a wider `enum`; the
-  built-in default stays narrow on purpose.
+  built-in default stays intentionally narrow.
 
 - **API surface for custom fields.** Both `issuectl new --field
   key=value` (CLI) and `POST /api/issues` with `"custom_fields":

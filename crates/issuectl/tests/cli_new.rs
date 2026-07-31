@@ -120,14 +120,32 @@ fn new_json_success_prints_expected_payload() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
 }
 
+/// Reads `field` from an `issuectl --json show <slug>` payload.
+fn show_field(root: &std::path::Path, slug: &str, field: &str) -> String {
+    let show = run(root, &["--json", "show", slug]);
+    assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
+    serde_json::from_slice::<serde_json::Value>(&show.stdout).expect("show stdout should be JSON")
+        [field]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "show payload missing string field {field:?}; {}",
+                dump(&show)
+            )
+        })
+        .to_string()
+}
+
 /// `low` is the lowest priority value: accepted on `new`, `ls -p`, and
 /// `update`, while the default stays `normal`. Guards the widened
-/// `PRIORITIES` set against a regression back to two-valued.
+/// `PRIORITIES` set against a regression back to two-valued (and against
+/// the default silently shifting off `normal`).
 #[test]
 fn priority_low_is_accepted_end_to_end() {
     let tmp = fresh_repo();
 
-    // `new --priority low` succeeds and persists the field.
+    // `new --priority low` succeeds and persists the field (verified
+    // through the machine-facing `show` payload, not raw file text).
     let out = run(
         tmp.path(),
         &[
@@ -143,14 +161,22 @@ fn priority_low_is_accepted_end_to_end() {
         ],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
-    let item = std::fs::read_to_string(tmp.path().join("issues/lo-one/item.md"))
-        .expect("item.md should exist");
-    assert!(
-        item.contains("priority: low"),
-        "expected `priority: low` in frontmatter; got:\n{item}"
-    );
+    assert_eq!(show_field(tmp.path(), "lo-one", "priority"), "low");
 
-    // `ls -p low` filters to the low-priority issue.
+    // A second issue with the default priority proves `-p low` actually
+    // filters — without it, `ls -p low` returning `[lo-one]` would pass
+    // even if the filter were ignored. It also asserts the default is
+    // still `normal`, not `low`.
+    let out = run(
+        tmp.path(),
+        &[
+            "new", "--type", "task", "--title", "Bump me", "--slug", "bu-mp",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    assert_eq!(show_field(tmp.path(), "bu-mp", "priority"), "normal");
+
+    // `ls -p low` returns only the low issue, excluding the normal one.
     let out = run(tmp.path(), &["--json", "ls", "-p", "low"]);
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     let v: serde_json::Value =
@@ -163,20 +189,8 @@ fn priority_low_is_accepted_end_to_end() {
         .collect();
     assert_eq!(slugs, vec!["lo-one"], "{}", dump(&out));
 
-    // `update --priority low` is accepted on an existing issue.
-    let out = run(
-        tmp.path(),
-        &[
-            "new", "--type", "task", "--title", "Bump me", "--slug", "bu-mp",
-        ],
-    );
-    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
-    let show = run(tmp.path(), &["--json", "show", "bu-mp"]);
-    let version = serde_json::from_slice::<serde_json::Value>(&show.stdout)
-        .expect("show stdout should be JSON")["version"]
-        .as_str()
-        .expect("version string")
-        .to_string();
+    // `update --priority low` is accepted and changes the persisted value.
+    let version = show_field(tmp.path(), "bu-mp", "version");
     let out = run(
         tmp.path(),
         &[
@@ -190,11 +204,36 @@ fn priority_low_is_accepted_end_to_end() {
         ],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
-    let item = std::fs::read_to_string(tmp.path().join("issues/bu-mp/item.md"))
-        .expect("item.md should exist");
+    assert_eq!(show_field(tmp.path(), "bu-mp", "priority"), "low");
+}
+
+/// A priority outside the widened set is still rejected, and the clap
+/// usage error advertises exactly `[low, normal, high]`. Guards against
+/// the parser being loosened (e.g. swapped to a bare `String`) when the
+/// accepted set changed.
+#[test]
+fn priority_outside_set_is_rejected_with_possible_values() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &[
+            "new",
+            "--type",
+            "task",
+            "--title",
+            "Nope",
+            "--slug",
+            "no-pe",
+            "--priority",
+            "medium",
+        ],
+    );
+    // clap usage errors exit 2 (not the app's 1).
+    assert_eq!(out.status.code(), Some(2), "{}", dump(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        item.contains("priority: low"),
-        "expected `priority: low` after update; got:\n{item}"
+        stderr.contains("[possible values: low, normal, high]"),
+        "expected possible-values list in usage error; got:\n{stderr}"
     );
 }
 

@@ -933,6 +933,36 @@ mod tests {
         assert!(allowed.iter().any(|a| a == "bug"));
     }
 
+    /// `DEFAULT_SCHEMA_YAML` embeds the priority enum as a hand-written
+    /// YAML literal (a static string cannot reference `PRIORITIES` at
+    /// compile time), so nothing but this test keeps the two in step.
+    /// Without it, the CLI parser and mutation prevalidation — which do
+    /// derive from `PRIORITIES` — could accept a value the shipped
+    /// default schema then rejects. Same guard for `type`.
+    #[test]
+    fn default_schema_enums_match_field_consts() {
+        let s = default_schema();
+        let enum_of = |field: &str| -> Vec<&str> {
+            s.fields[field]
+                .allowed
+                .as_ref()
+                .unwrap_or_else(|| panic!("{field} field should declare an enum"))
+                .iter()
+                .map(String::as_str)
+                .collect()
+        };
+        assert_eq!(
+            enum_of("priority").as_slice(),
+            crate::issue_fields::PRIORITIES,
+            "DEFAULT_SCHEMA_YAML priority enum drifted from PRIORITIES"
+        );
+        assert_eq!(
+            enum_of("type").as_slice(),
+            crate::issue_fields::ISSUE_TYPES,
+            "DEFAULT_SCHEMA_YAML type enum drifted from ISSUE_TYPES"
+        );
+    }
+
     #[test]
     fn ensure_default_written_creates_file() {
         let tmp = TempDir::new().unwrap();

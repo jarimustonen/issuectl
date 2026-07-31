@@ -198,6 +198,7 @@ button.card { font: inherit; text-align: left; width: 100%; }
 .tag-type-chore { background: var(--gp-surface-alt); color: var(--gp-text-muted); }
 .tag-type-epic { background: #ede9fe; color: #5b21b6; }
 .tag-priority-high { background: #fee2e2; color: #991b1b; }
+.tag-priority-low { background: var(--gp-surface-alt); color: var(--gp-text-muted); }
 [data-theme="dark"] .tag-type-bug,
 [data-theme="dark"] .tag-priority-high { background: rgba(248, 113, 113, 0.18); color: #fca5a5; }
 [data-theme="dark"] .tag-type-feature { background: rgba(52, 211, 153, 0.18); color: #6ee7b7; }

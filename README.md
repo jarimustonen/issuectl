@@ -648,7 +648,7 @@ fields:
     enum: [open, in-progress, testing, done, fixed, wontfix, duplicate, cannot-reproduce, obsolete]
   priority:
     required: true
-    enum: [normal, high]
+    enum: [low, normal, high]
 
 # A closing status implies the closed: date is set.
 required_when:
