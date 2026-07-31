@@ -102,7 +102,7 @@ Use the CLI rather than greppa hakemistoa. The CLI knows the frontmatter schema.
 - List open issues: `issuectl --json ls`
 - Filter via flags: `issuectl --json ls -t bug -p high -a alice`
   - `-t/--type`: bug, task, feature, improvement, chore, epic
-  - `-p/--priority`: normal, high
+  - `-p/--priority`: low, normal, high
   - `-s/--status`: open, in-progress, testing, done, fixed, wontfix, duplicate, cannot-reproduce, obsolete
   - `-a/--assignee USERNAME` (matches `assignee` for issues, `owner` for epics)
   - `-l/--label LABEL`
@@ -199,7 +199,7 @@ Common flags:
 - `--status STATUS` (active or closing)
 - `-t/--type TYPE` (bug, task, feature, improvement, chore, epic, or any value the repo's `.schema.yaml` adds to `fields.type.enum` — rejected with `SchemaViolation` if the new type's required body sections are missing, with a list of `## <Section>` headings to add first; rejected if combined with a close→open reopen on the same call; rejected if the resulting type+`assignee`/`owner`/`reporter` combination violates the epic↔non-epic invariants `new` enforces)
 - `--assignee USER` / `--owner USER` (epics)
-- `--priority normal|high`
+- `--priority low|normal|high`
 - `--epic <slug>` / `--no-epic`
 - `--add-label LABEL` / `--remove-label LABEL` (repeatable)
 - `--add-related "@<slug>"` / `--remove-related "@<slug>"` (repeatable; bare slug also accepted)
@@ -343,7 +343,7 @@ Possible questions:
 - **How to reproduce?** — bugs only; goes into the body `## Reproduction` section
 - **Reporter** — `whoami` or ask
 - **Assignee** — ask if not known
-- **Priority** — normal or high (default normal)
+- **Priority** — low, normal, or high (default normal)
 - **Epic** — does this belong to an existing epic? Check with `issuectl --json ls -t epic`
 
 **Epic suggestion**: if the user describes a multi-week, 3+ task initiative,

@@ -6,12 +6,14 @@
 //! root.
 
 pub const ISSUE_TYPES: &[&str] = &["bug", "task", "feature", "improvement", "chore", "epic"];
-/// Intentionally two-valued: `high` = jumps the queue, `normal` = everything
-/// else. The schema does NOT ship `low`/`medium`/`critical`; see the
-/// "Priority enum is two-valued" decision in
-/// `docs/design/frontmatter-schema.md`. Repos that need more gradations can
-/// widen the enum in their `issues/.schema.yaml`.
-pub const PRIORITIES: &[&str] = &["normal", "high"];
+/// Three-valued, ascending: `low` = can wait, `normal` = the default,
+/// `high` = jumps the queue. The schema does NOT ship `medium`/`critical`;
+/// see `docs/design/frontmatter-schema.md`. Repos that need more gradations
+/// can widen the enum in their `issues/.schema.yaml`. This list is the
+/// single source of truth: the CLI's `--priority` parser and the mutation
+/// validators both derive their accepted set from it. Order is presentation
+/// only — no priority-based ranking/sorting is implied.
+pub const PRIORITIES: &[&str] = &["low", "normal", "high"];
 pub const ACTIVE_STATUSES: &[&str] = &["open", "in-progress", "testing"];
 pub const CLOSING_STATUSES: &[&str] = &[
     "done",

@@ -120,6 +120,84 @@ fn new_json_success_prints_expected_payload() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
 }
 
+/// `low` is the lowest priority value: accepted on `new`, `ls -p`, and
+/// `update`, while the default stays `normal`. Guards the widened
+/// `PRIORITIES` set against a regression back to two-valued.
+#[test]
+fn priority_low_is_accepted_end_to_end() {
+    let tmp = fresh_repo();
+
+    // `new --priority low` succeeds and persists the field.
+    let out = run(
+        tmp.path(),
+        &[
+            "new",
+            "--type",
+            "bug",
+            "--title",
+            "Low one",
+            "--slug",
+            "lo-one",
+            "--priority",
+            "low",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let item = std::fs::read_to_string(tmp.path().join("issues/lo-one/item.md"))
+        .expect("item.md should exist");
+    assert!(
+        item.contains("priority: low"),
+        "expected `priority: low` in frontmatter; got:\n{item}"
+    );
+
+    // `ls -p low` filters to the low-priority issue.
+    let out = run(tmp.path(), &["--json", "ls", "-p", "low"]);
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("ls stdout should be JSON");
+    let slugs: Vec<&str> = v
+        .as_array()
+        .expect("ls returns an array")
+        .iter()
+        .map(|i| i["slug"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(slugs, vec!["lo-one"], "{}", dump(&out));
+
+    // `update --priority low` is accepted on an existing issue.
+    let out = run(
+        tmp.path(),
+        &[
+            "new", "--type", "task", "--title", "Bump me", "--slug", "bu-mp",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let show = run(tmp.path(), &["--json", "show", "bu-mp"]);
+    let version = serde_json::from_slice::<serde_json::Value>(&show.stdout)
+        .expect("show stdout should be JSON")["version"]
+        .as_str()
+        .expect("version string")
+        .to_string();
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "update",
+            "bu-mp",
+            "--priority",
+            "low",
+            "--expected-version",
+            &version,
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let item = std::fs::read_to_string(tmp.path().join("issues/bu-mp/item.md"))
+        .expect("item.md should exist");
+    assert!(
+        item.contains("priority: low"),
+        "expected `priority: low` after update; got:\n{item}"
+    );
+}
+
 /// The unified `--json` error contract: a failing command under `--json`
 /// emits `{"error":{"code","message"}}` to stderr (not the bare
 /// `Error: …` line) and leaves stdout empty.

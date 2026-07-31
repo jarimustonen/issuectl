@@ -211,7 +211,7 @@ fields:
       - obsolete
   priority:
     required: true
-    enum: [normal, high]
+    enum: [low, normal, high]
   created:
     required: false
   updated:
