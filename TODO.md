@@ -52,25 +52,29 @@ Scheduling PLAN — source of truth for lane + order; issuectl is authoritative 
 `after <slug> (needs …)` = logical blocked_by mirror. `collision: <file>` = touches a
 second lane's hot file (spawn-time exclusion).
 
-Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers),
-`mutate/` (write paths), `schema.rs`, skill templates.
+Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
+`fn main` error rendering + `parse_apply_patch`), `mutate/` (write paths),
+`schema.rs`, skill templates, `hooks.rs`/`git_trailers.rs` (commit-hook).
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: refs-issue-hint-false-fire   ← start here on resume
-LANE A — crates/issuectl/src/main.rs (clap + cmd_* handlers + error hints)
+GLOBAL HEAD-OF-LINE: mutation-not-found-classification   ← main.rs head; refs-issue-hint runs in parallel (hooks.rs)
+LANE A — crates/issuectl/src/main.rs (clap + cmd_* handlers + fn main error rendering + parse_apply_patch)
+  ▶ mutation-not-found-classification         (main.rs:1786 error render; reads mutate/mod.rs MutateError)
+    new-body-flag                             (only --body-file/stdin remains; --body shipped v0.6.5; also mutate/new_issue.rs)
+    apply-json-expected-version-consistency   DECISION: option 1 (consistent) vs option 2 (strict) — needs user call
+LANE C — crates/issuectl-core/src/hooks.rs + git_trailers.rs (commit-hook Refs-Issue hint)
   ▶ refs-issue-hint-false-fire
-    new-body-flag                            (only --body-file remains; --body shipped v0.6.5)
-    apply-json-expected-version-consistency  collision: crates/issuectl-core/src/mutate/
-LANE B — crates/issuectl-core/src/mutate/ (write paths)
-  ▶ mutation-not-found-classification
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: kaikki neljä ovat pieniä CLI-korrektius/ergonomiafiksejä. LANE A ja LANE B
-ovat disjointit (main.rs vs mutate/) → ajettavissa rinnan; LANE A:n sisällä sekvenssi.
-`apply-json-expected-version-consistency` voi koskea myös `mutate/`:a (collision-tag) → jos
-se ja LANE B:n solmu ovat yhtä aikaa live, sekvensoi.
+Kaari-lyhyesti: kaikki neljä ovat pieniä CLI-korrektius/ergonomiafiksejä. **Lane-korjaus
+2026-08-04:** todelliset footprintit tarkistettu — `refs-issue-hint-false-fire` on
+`hooks.rs`:ssä (EI main.rs), `mutation-not-found-classification` koskee `main.rs`:n
+`fn main`-virherenderöintiä (EI vain mutate/). Niinpä kolme neljästä (mutation-not-found,
+new-body-flag, apply-json) osuvat `main.rs`-kuumatiedostoon → **sekvensoitava** LANE A:ssa;
+vain `refs-issue-hint` (LANE C, hooks.rs) on turvallisesti rinnakkainen. `apply-json` on
+aito päätöskysymys (make-consistent vs keep-strict) → nostettu käyttäjälle, ei autonomisesti.
 
 ---
 
