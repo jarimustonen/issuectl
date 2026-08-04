@@ -75,3 +75,9 @@ is reviewed and approved.**
 - Existing `issuectl` lifecycle: `status` + `status_classes` (active/closing) in
   `crates/issuectl-core/src/schema.rs`; labels (`via:telegram`, `needs-triage`);
   `type` enum (bug/task/feature/improvement/chore/epic).
+
+## Comments
+
+### 2026-08-04T12:19:40Z · @jari
+
+Design APPROVED by user 2026-08-04. Decisions: (1) reuse type enum, no kind; (2) skills renamed /file-intake→/issue-new, /intake→/issue-intake (replaces /triage-bugs); (3) take recommended option for every OD EXCEPT concurrency — OD-12 dropped, OD-2 stripped of lease/owner fields, no concurrency info stored in any issue. See docs/design/intake-flow.md → Approved decisions.
