@@ -1499,9 +1499,21 @@ threads):
   silently mandating an extra required argument was a DX trap that left
   tracking issues un-closed; `flock` covers corruption regardless of
   mode; and callers who want the concurrency guard still get it by
-  passing the token. The requirement is dropped, the CAS is not. (The
-  transactional `apply` patch keeps its own `expected_version:`
-  requirement under `--json` — out of scope here.)
+  passing the token. The requirement is dropped, the CAS is not.
+  **Trade-off (stated plainly):** dropping the *requirement* re-admits
+  lost-update risk between concurrent CLI writers — two agents that each
+  read v1 and write tokenless will not conflict; the later write wins and
+  the earlier one is silently lost. `flock` serializes cooperating local
+  writers and keeps the file from tearing, but it does **not** detect a
+  stale read, and it does not cover non-`issuectl` writers (editors, git,
+  the web process, another host). This is accepted because the AI-first
+  common case is a single agent scripting the CLI; multi-writer flows are
+  expected to opt into CAS by passing the token. If the web board (or any
+  second concurrent writer) is re-enabled, revisit whether the machine
+  path should default back to fail-closed. (The transactional `apply`
+  patch keeps its own `expected_version:` requirement under `--json` —
+  out of scope here; a multi-field patch assembled from an earlier `show`
+  is the read-modify-write shape most exposed to lost updates.)
 - **D5 (PATCH array semantics)** = **A**: keep `add_*`/`remove_*` for
   CLI parity; specify edge cases (duplicate add+remove → 400; absent
   remove → no-op).

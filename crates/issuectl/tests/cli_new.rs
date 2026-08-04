@@ -382,7 +382,10 @@ fn json_write_wrong_expected_version_still_conflicts() {
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
 
-    // Wrong token → conflict (exit 1), write refused.
+    // Wrong token → conflict (exit 1), write refused. Asserting the
+    // error envelope (not merely exit 1) proves the CAS comparison
+    // actually ran: a mismatch surfaces as `command-failed` carrying the
+    // `version mismatch` message, not some incidental failure.
     let out = run(
         tmp.path(),
         &[
@@ -396,6 +399,18 @@ fn json_write_wrong_expected_version_still_conflicts() {
         ],
     );
     assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    assert!(out.stdout.is_empty(), "{}", dump(&out));
+    let err: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("conflict stderr should be JSON");
+    assert_eq!(err["error"]["code"], "command-failed", "{}", dump(&out));
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("version mismatch"),
+        "conflict must report a version mismatch; {}",
+        dump(&out)
+    );
     assert_eq!(show_field(tmp.path(), "ca-sw", "priority"), "normal");
 
     // Correct token → success.
@@ -414,6 +429,127 @@ fn json_write_wrong_expected_version_still_conflicts() {
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     assert_eq!(show_field(tmp.path(), "ca-sw", "priority"), "high");
+}
+
+/// The requirement was dropped from *eight* command handlers, each with
+/// its own argument parsing and mutation helper. `update`/`close`/`assign`
+/// are covered above; this exercises the remaining machine-write verbs
+/// (`set`, `note`, `label`, `depend`, `body set`) so a stray `bail!`
+/// reintroduced into any one of them fails a test. Each: a `--json` write
+/// WITHOUT a token succeeds and its result carries the top-level `version`
+/// matching `show --json`.
+#[test]
+fn json_remaining_verbs_tokenless_writes_succeed_with_version() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &[
+            "new", "--type", "task", "--title", "Verbs", "--slug", "ve-rb",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    // A second issue to serve as a `depend` blocker.
+    let out = run(
+        tmp.path(),
+        &[
+            "new", "--type", "task", "--title", "Block", "--slug", "bl-ok",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+
+    // Each entry is a tokenless `--json` write. `body` is the only two-word
+    // verb; the rest are single subcommands.
+    let writes: &[&[&str]] = &[
+        &["--json", "set", "ve-rb", "priority", "high"],
+        &["--json", "note", "ve-rb", "--as", "tester", "a note"],
+        &["--json", "label", "ve-rb", "add", "backend"],
+        &["--json", "depend", "add", "ve-rb", "--blocked-by", "bl-ok"],
+    ];
+    for args in writes {
+        let out = run(tmp.path(), args);
+        assert_eq!(out.status.code(), Some(0), "args {args:?}: {}", dump(&out));
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|_| panic!("stdout should be JSON for {args:?}: {}", dump(&out)));
+        assert_eq!(
+            v["version"].as_str().unwrap_or_default(),
+            show_field(tmp.path(), "ve-rb", "version"),
+            "args {args:?} must report the persisted top-level version; {}",
+            dump(&out)
+        );
+    }
+
+    // `body set` reads from stdin, so it takes a separate path.
+    let out = Command::new(env!("CARGO_BIN_EXE_issuectl"))
+        .env_remove("RUST_BACKTRACE")
+        .env("LC_ALL", "C")
+        .current_dir(tmp.path())
+        .arg("--root")
+        .arg(tmp.path())
+        .args(["--json", "body", "set", "ve-rb", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"# Verbs\n\nrewritten body\n")?;
+            child.wait_with_output()
+        })
+        .expect("spawn body set");
+    assert_eq!(out.status.code(), Some(0), "body set: {}", dump(&out));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("body set stdout should be JSON");
+    assert_eq!(
+        v["version"].as_str().unwrap_or_default(),
+        show_field(tmp.path(), "ve-rb", "version"),
+        "body set must report the persisted top-level version; {}",
+        dump(&out)
+    );
+
+    // `check` needs a checkbox in the body; the `body set` above installed
+    // none, so add one, then toggle it tokenless.
+    let out = Command::new(env!("CARGO_BIN_EXE_issuectl"))
+        .env_remove("RUST_BACKTRACE")
+        .env("LC_ALL", "C")
+        .current_dir(tmp.path())
+        .arg("--root")
+        .arg(tmp.path())
+        .args(["--json", "body", "set", "ve-rb", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"# Verbs\n\n- [ ] finish the task\n")?;
+            child.wait_with_output()
+        })
+        .expect("spawn body set for checkbox");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "body set checkbox: {}",
+        dump(&out)
+    );
+
+    let out = run(tmp.path(), &["--json", "check", "ve-rb", "finish the task"]);
+    assert_eq!(out.status.code(), Some(0), "check: {}", dump(&out));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("check stdout should be JSON");
+    assert_eq!(
+        v["version"].as_str().unwrap_or_default(),
+        show_field(tmp.path(), "ve-rb", "version"),
+        "check must report the persisted top-level version; {}",
+        dump(&out)
+    );
 }
 
 #[test]

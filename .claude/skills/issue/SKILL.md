@@ -246,9 +246,14 @@ as `update`; body-only mutation.
 - `--agent-run` appends to `## Agent Runs` instead.
 - `--dry-run` prints a unified diff and exits 0 without writing.
 - `--expected-version <token>` is **optional** on `--json` (opt-in
-  compare-and-swap): pass it only when you want the write to fail on a
-  version mismatch; it is enforced when passed. Fetch the token via
-  `show --json`. Omit it for a plain last-writer-wins write.
+  compare-and-swap): when passed, the write fails on a version mismatch;
+  it is enforced whenever passed. **Pass it** when your flow is
+  read-then-write and another writer could interleave (multiple agents,
+  human + agent, CLI + web board) — fetch the token from `show --json`
+  and pass it back unchanged. Omit it only when you are the sole writer;
+  omitting it is an unguarded write (a concurrent update can be lost —
+  `flock` still prevents a corrupt/torn file, but it does not detect a
+  stale read).
 - Transition-rule mismatches detected by `note` and `check` are
   emitted as warnings (stderr; `warnings` array in `--json`) — the
   write goes through. The unified `apply` path keeps rule violations

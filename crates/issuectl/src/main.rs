@@ -807,6 +807,13 @@ enum Command {
     /// fields, `custom_fields:`, label/related list ops, commits,
     /// and `body_ops:` (toggle_checkbox / append_note) — all
     /// applied under one flock with one schema-validation pass.
+    ///
+    /// UNLIKE the single-field verbs (`update`/`set`/`note`/…), where
+    /// `--expected-version` is optional under `--json`, this
+    /// transactional patch still requires a non-empty `expected_version:`
+    /// in the patch file when invoked with `--json`: a multi-field
+    /// transaction assembled from an earlier `show` is exactly the
+    /// read-modify-write shape a stale token protects.
     Apply {
         /// Path to the YAML patch file
         #[arg(value_name = "PATCH")]

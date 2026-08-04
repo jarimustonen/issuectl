@@ -255,6 +255,16 @@ fn assign_json_expected_version_is_optional() {
         ],
     );
     assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    let err: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("conflict stderr should be JSON");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("version mismatch"),
+        "conflict must report a version mismatch (proves CAS ran); {}",
+        dump(&out)
+    );
     assert_eq!(
         stdout_json(&run(tmp.path(), &["--json", "show", "needs-ev"]))["assignee"],
         "carol",
