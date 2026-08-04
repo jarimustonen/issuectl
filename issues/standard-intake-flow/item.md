@@ -11,6 +11,16 @@ priority: high
 _Filed 2026-08-04 (high priority). **Design-first** — no implementation until the
 design below is written and approved by the user._
 
+## Design
+
+📄 **[docs/design/intake-flow.md](../../docs/design/intake-flow.md)** — the
+comprehensive design document (the deliverable for this issue). Covers the intake
+model, lifecycle state machine, CLI + skill surface, responsibility split,
+migration, and **13 open decisions for the user to resolve on review** (OD-1..OD-13).
+Drafted, then revised after a four-model `/llm-review` (report:
+`history/review-intake-flow.md`). Awaiting user review — implementation stays out
+of scope until the open decisions are settled.
+
 ## Motivation
 
 We currently have a **couple of ad-hoc issue-intake structures** bolted on
