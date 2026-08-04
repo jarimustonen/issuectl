@@ -1,11 +1,45 @@
 # Standard intake flow (design)
 
-> **Status: DESIGN — awaiting user review.** No implementation lands until the
-> [open decisions](#7-open-decisions) are settled and the user approves. This
-> document is the deliverable for issue `standard-intake-flow`. It was revised
-> after a four-model critique (`history/review-intake-flow.md`); the confirmed
-> findings are folded in, and the choices reviewers disagreed on are surfaced as
-> open decisions rather than silently picked.
+> **Status: APPROVED (2026-08-04).** The user reviewed this design and settled
+> every open decision — see [Approved decisions](#approved-decisions-2026-08-04)
+> immediately below, which is now authoritative where it differs from a section's
+> in-body recommendation. Implementation may proceed against the approved shape.
+> This document is the deliverable for issue `standard-intake-flow`. It was
+> revised after a four-model critique (`history/review-intake-flow.md`); the
+> confirmed findings are folded in, and the choices reviewers disagreed on were
+> surfaced as open decisions rather than silently picked.
+
+## Approved decisions (2026-08-04)
+
+The user's calls, authoritative over any differing in-body recommendation:
+
+- **Intake model — reuse the existing `type` enum; do NOT add a `kind`.**
+  A bug vs a feature-request is `type: bug` vs `type: feature`. (§1 as written.)
+- **Skill names use an `issue-` prefix for clarity:**
+  - filing-side `/file-intake` → **`/issue-new`**;
+  - processing-side `/intake` → **`/issue-intake`** (this is the one that
+    **replaces `/triage-bugs`** and drives `/worktree-bug-analysis`).
+  Rename every reference in §4 and elsewhere accordingly.
+- **Take the recommended option for every open decision — with ONE exception:
+  concurrency is out of scope.** Rationale (the user's): the agentic framework
+  that does this work owns its own changes and commits them through git, and the
+  calling agent guarantees **each issue travels its own clean path**. There is no
+  concurrency problem for the tool to solve, so **no concurrency information is
+  stored in any issue**. Concretely:
+  - **OD-12 (concurrency — leases & optimistic writes): DROPPED.** No analysis
+    lease, no `--expected-version`/CAS requirement on intake writes. The repo-wide
+    `flock` that every mutate path already takes remains the only write-safety
+    mechanism; that is sufficient.
+  - **OD-2 (analysis state): adopt the concurrency-free form.** No `analysis:`
+    lease object, **no `owner` / `started` / `lease_until` fields** — those are
+    exactly the "concurrency info in the issue" the user rules out. Analysis is a
+    **read-only, append-only `## Triage analysis` body section**; any
+    "being/has-been analysed" visibility must be *derived* (e.g. presence of that
+    section) or omitted, never stored as a lease. If a queryable analysis state is
+    still wanted later, it may be a plain status with **no** ownership/lease
+    fields — but the default is: no stored analysis state.
+  - Every **other** OD (OD-1, OD-3..OD-11, OD-13) → its **recommended option (A)**
+    as written in §7.
 
 `issuectl` should own **one** first-class intake flow that handles both **bug
 reports** and **feature requests**, filed by a **reporting agent** (or human)
