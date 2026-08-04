@@ -1,10 +1,11 @@
 ---
 created: 2026-07-29
-updated: 2026-07-29
+updated: 2026-08-04
 type: feature
 reporter: jari
-status: open
+status: fixed
 priority: normal
+closed: 2026-08-04
 ---
 
 # scripted --json update: --expected-version round-trip is unobvious

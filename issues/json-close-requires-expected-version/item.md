@@ -3,8 +3,9 @@ created: 2026-07-26
 updated: 2026-08-04
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
+closed: 2026-08-04
 ---
 
 # `--json close/update` requires --expected-version but the non-JSON path does not (output-format flag silently changes required args)
