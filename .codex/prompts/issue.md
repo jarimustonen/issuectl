@@ -241,8 +241,10 @@ as `update`; body-only mutation.
 - `--decision` appends to `## Decisions` instead.
 - `--agent-run` appends to `## Agent Runs` instead.
 - `--dry-run` prints a unified diff and exits 0 without writing.
-- `--expected-version <token>` is required with `--json` (fetch via
-  `show --json`).
+- `--expected-version <token>` is **optional** on `--json` (opt-in
+  compare-and-swap): pass it only when you want the write to fail on a
+  version mismatch; it is enforced when passed. Fetch the token via
+  `show --json`. Omit it for a plain last-writer-wins write.
 - Transition-rule mismatches detected by `note` and `check` are
   emitted as warnings (stderr; `warnings` array in `--json`) — the
   write goes through. The unified `apply` path keeps rule violations
@@ -264,9 +266,12 @@ write — no extra CLI step is needed.
 
 These wrap `update` for the common single-field and body-toggle
 cases agents reach for. They share `update`'s flock + optimistic
-concurrency contract — `--expected-version` is required with
-`--json`, and every verb supports `--dry-run` (prints a unified
-diff, no write).
+concurrency contract — `--expected-version` is **optional** on
+`--json` (opt-in compare-and-swap, enforced when passed), and every
+verb supports `--dry-run` (prints a unified diff, no write). The one
+exception is `apply`: its patch file must still declare a non-empty
+`expected_version:` when invoked with `--json` (the transactional
+multi-field patch keeps its own concurrency contract).
 
 - **`issuectl set <slug> <field> <value>`** — set a single
   frontmatter field. Built-in keys (`status`, `priority`,

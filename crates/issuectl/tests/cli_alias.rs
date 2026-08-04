@@ -218,22 +218,47 @@ fn assign_dry_run_writes_nothing() {
 }
 
 /// `assign` honours the same `--json` optimistic-concurrency contract as
-/// `set`: without `--expected-version` it is refused.
+/// `set`: `--expected-version` is opt-in, so `--json assign` without a
+/// token SUCCEEDS (superseding design D4=B) and its result carries a
+/// top-level `version`. When a token IS passed it is still enforced.
 #[test]
-fn assign_json_requires_expected_version() {
+fn assign_json_expected_version_is_optional() {
     let tmp = fresh_repo();
     seed_issue(tmp.path(), "needs-ev");
+
+    // No token → succeeds, result carries a top-level `version`.
     let out = run(tmp.path(), &["--json", "assign", "needs-ev", "carol"]);
-    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
-    assert!(out.stdout.is_empty(), "{}", dump(&out));
-    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
-    assert_eq!(v["error"]["code"], "command-failed", "{}", dump(&out));
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let v = stdout_json(&out);
     assert!(
-        v["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("--expected-version"),
+        v["version"].as_str().is_some_and(|s| !s.is_empty()),
+        "assign result should carry a top-level `version`; {}",
+        dump(&out)
+    );
+    assert_eq!(
+        stdout_json(&run(tmp.path(), &["--json", "show", "needs-ev"]))["assignee"],
+        "carol",
         "{}",
+        dump(&out)
+    );
+
+    // Wrong token → still refused (CAS honored when passed).
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "assign",
+            "needs-ev",
+            "dave",
+            "--expected-version",
+            "sha256:v1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    assert_eq!(
+        stdout_json(&run(tmp.path(), &["--json", "show", "needs-ev"]))["assignee"],
+        "carol",
+        "wrong token must not persist the change: {}",
         dump(&out)
     );
 }

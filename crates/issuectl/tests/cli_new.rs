@@ -270,15 +270,22 @@ fn json_error_contract_wraps_clap_usage_errors() {
 }
 
 /// A bubble-up anyhow error under `--json` is rendered with the shared
-/// envelope and the generic `command-failed` code.
+/// envelope and the generic `command-failed` code. `update` on a slug
+/// that does not exist bubbles a plain anyhow error from the command
+/// body (as opposed to the explicit `not-found` classification the read
+/// paths emit).
 #[test]
 fn json_error_contract_wraps_bubbled_errors() {
     let tmp = fresh_repo();
-    // `update --json` without `--expected-version` is a D4=B violation
-    // that bubbles up as an anyhow error from the command body.
     let out = run(
         tmp.path(),
-        &["--json", "update", "ab-cd", "--status", "in-progress"],
+        &[
+            "--json",
+            "update",
+            "no-such-issue",
+            "--status",
+            "in-progress",
+        ],
     );
     assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
     assert!(out.stdout.is_empty(), "{}", dump(&out));
@@ -288,10 +295,125 @@ fn json_error_contract_wraps_bubbled_errors() {
         v["error"]["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("--expected-version"),
+            .contains("not found"),
         "{}",
         dump(&out)
     );
+}
+
+/// `--expected-version` is OPTIONAL on `--json` writes (opt-in
+/// compare-and-swap, superseding design D4=B). A `--json` `update`
+/// without a token now SUCCEEDS — symmetric with the human path — and
+/// its result carries the new canonical `version` at the top level,
+/// matching `show --json`. Guards against a regression back to the
+/// mandatory-token surface that tripped agent callers who added `--json`
+/// only for parseable output.
+#[test]
+fn json_update_without_expected_version_succeeds() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &[
+            "new", "--type", "task", "--title", "Optional", "--slug", "op-ti",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+
+    let out = run(
+        tmp.path(),
+        &["--json", "update", "op-ti", "--priority", "low"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("update stdout should be JSON");
+    assert!(
+        v["version"].as_str().is_some_and(|s| !s.is_empty()),
+        "update result should carry a top-level `version`; {}",
+        dump(&out)
+    );
+    assert_eq!(show_field(tmp.path(), "op-ti", "priority"), "low");
+    // The reported version matches the persisted canonical version.
+    assert_eq!(
+        v["version"].as_str().unwrap(),
+        show_field(tmp.path(), "op-ti", "version"),
+        "{}",
+        dump(&out)
+    );
+}
+
+/// `--json` `close` without `--expected-version` succeeds and carries a
+/// top-level `version`, the same top-level key `show --json` exposes.
+#[test]
+fn json_close_without_expected_version_succeeds() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &[
+            "new", "--type", "bug", "--title", "Closes", "--slug", "cl-os",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+
+    let out = run(
+        tmp.path(),
+        &["--json", "close", "cl-os", "--status", "fixed"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("close stdout should be JSON");
+    assert!(
+        v["version"].as_str().is_some_and(|s| !s.is_empty()),
+        "close result should carry a top-level `version`; {}",
+        dump(&out)
+    );
+    assert_eq!(v["moved_to_closed"], true, "{}", dump(&out));
+}
+
+/// The compare-and-swap remains fully honored when a token IS passed
+/// (opt-in): a WRONG `--expected-version` still fails the conflict path
+/// (exit 1), while the CORRECT token succeeds. Removing the *requirement*
+/// to pass a token must not remove the CAS check itself.
+#[test]
+fn json_write_wrong_expected_version_still_conflicts() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &["new", "--type", "task", "--title", "Cas", "--slug", "ca-sw"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+
+    // Wrong token → conflict (exit 1), write refused.
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "update",
+            "ca-sw",
+            "--priority",
+            "high",
+            "--expected-version",
+            "sha256:v1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    assert_eq!(show_field(tmp.path(), "ca-sw", "priority"), "normal");
+
+    // Correct token → success.
+    let version = show_field(tmp.path(), "ca-sw", "version");
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "update",
+            "ca-sw",
+            "--priority",
+            "high",
+            "--expected-version",
+            &version,
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    assert_eq!(show_field(tmp.path(), "ca-sw", "priority"), "high");
 }
 
 #[test]

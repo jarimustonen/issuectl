@@ -1,9 +1,9 @@
 ---
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-08-04
 type: bug
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 ---
 

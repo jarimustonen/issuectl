@@ -576,9 +576,9 @@ enum Command {
         clear_fields: Vec<String>,
 
         /// Optimistic-concurrency token from a prior `show`/`list --json`.
-        /// Required when `--json` is in effect (the `--json` channel is the
-        /// AI-agent surface, where blind clobber is unacceptable). Optional
-        /// for human invocations — `flock` still prevents corruption.
+        /// Optional in both modes (opt-in compare-and-swap): pass it only
+        /// when you want the write to fail on a version mismatch; it is
+        /// enforced when passed. `flock` prevents corruption regardless.
         #[arg(long = "expected-version", value_parser = parse_non_empty)]
         expected_version: Option<String>,
     },
@@ -689,7 +689,7 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
 
-        /// Optimistic-concurrency token; required with --json
+        /// Optimistic-concurrency token; optional (opt-in compare-and-swap)
         #[arg(long = "expected-version", value_parser = parse_non_empty)]
         expected_version: Option<String>,
     },
@@ -721,7 +721,7 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
 
-        /// Optimistic-concurrency token; required with --json
+        /// Optimistic-concurrency token; optional (opt-in compare-and-swap)
         #[arg(long = "expected-version", value_parser = parse_non_empty)]
         expected_version: Option<String>,
     },
@@ -747,7 +747,7 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
 
-        /// Optimistic-concurrency token; required with --json
+        /// Optimistic-concurrency token; optional (opt-in compare-and-swap)
         #[arg(long = "expected-version", value_parser = parse_non_empty)]
         expected_version: Option<String>,
     },
@@ -769,7 +769,7 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
 
-        /// Optimistic-concurrency token; required with --json
+        /// Optimistic-concurrency token; optional (opt-in compare-and-swap)
         #[arg(long = "expected-version", value_parser = parse_non_empty)]
         expected_version: Option<String>,
     },
@@ -797,7 +797,7 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
 
-        /// Optimistic-concurrency token; required with --json
+        /// Optimistic-concurrency token; optional (opt-in compare-and-swap)
         #[arg(long = "expected-version", value_parser = parse_non_empty)]
         expected_version: Option<String>,
     },
@@ -1328,7 +1328,7 @@ enum DependAction {
         #[arg(long = "blocked-by", value_parser = parse_non_empty, required = true)]
         blocked_by: Vec<String>,
 
-        /// Optimistic-concurrency token; required with --json.
+        /// Optimistic-concurrency token; optional (opt-in compare-and-swap).
         #[arg(long = "expected-version", value_parser = parse_non_empty)]
         expected_version: Option<String>,
     },
@@ -1345,7 +1345,7 @@ enum DependAction {
         #[arg(long = "blocked-by", value_parser = parse_non_empty, required = true)]
         blocked_by: Vec<String>,
 
-        /// Optimistic-concurrency token; required with --json.
+        /// Optimistic-concurrency token; optional (opt-in compare-and-swap).
         #[arg(long = "expected-version", value_parser = parse_non_empty)]
         expected_version: Option<String>,
     },
@@ -1500,9 +1500,10 @@ impl From<AgentArg> for init_cmd::AgentSelection {
 #[derive(Subcommand)]
 enum BodyAction {
     /// Replace the markdown body of an issue. Read content from stdin
-    /// (`--stdin`) or a file (`--from-file PATH`). With `--json`,
-    /// `--expected-version` is required (D4=B). Without `--json`,
-    /// `flock` still prevents corruption but blind clobber is allowed.
+    /// (`--stdin`) or a file (`--from-file PATH`). `--expected-version`
+    /// is optional in both modes: pass it only when you want a
+    /// compare-and-swap (it is enforced when passed). `flock` prevents
+    /// corruption regardless; without a token, blind clobber is allowed.
     Set {
         /// Issue slug
         #[arg(value_parser = parse_slug_arg)]
@@ -1517,7 +1518,7 @@ enum BodyAction {
         #[arg(long = "from-file", value_name = "PATH", conflicts_with = "stdin")]
         from_file: Option<PathBuf>,
 
-        /// Optimistic-concurrency token; required with --json
+        /// Optimistic-concurrency token; optional (opt-in compare-and-swap)
         #[arg(long = "expected-version", value_parser = parse_non_empty)]
         expected_version: Option<String>,
     },
@@ -3453,9 +3454,6 @@ pub(crate) struct UpdateOutcome {
 }
 
 fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
-    if json && args.expected_version.is_none() {
-        bail!("--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`");
-    }
     let root = find_root();
     let slug = args.slug.clone();
     let out = do_update(&root, args)?;
@@ -3566,9 +3564,6 @@ fn cmd_close(
     commits: Vec<String>,
     expected_version: Option<String>,
 ) -> Result<()> {
-    if json && expected_version.is_none() {
-        bail!("--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`");
-    }
     let root = find_root();
     let out = do_close(&root, slug, status, commits, expected_version)?;
     if json {
@@ -3943,11 +3938,6 @@ fn cmd_note(
     dry_run: bool,
     expected_version: Option<String>,
 ) -> Result<()> {
-    if json && expected_version.is_none() {
-        bail!(
-            "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
-        );
-    }
     let message = read_message_arg(message, stdin, from_file)?;
     let message = message.as_str();
     let section = if decision {
@@ -3982,11 +3972,6 @@ fn cmd_set(
     dry_run: bool,
     expected_version: Option<String>,
 ) -> Result<()> {
-    if json && expected_version.is_none() {
-        bail!(
-            "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
-        );
-    }
     use mutate::Patch;
     let mut req = mutate::UpdateIssueRequest {
         expected_version,
@@ -4027,11 +4012,6 @@ fn cmd_check(
     dry_run: bool,
     expected_version: Option<String>,
 ) -> Result<()> {
-    if json && expected_version.is_none() {
-        bail!(
-            "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
-        );
-    }
     let root = find_root();
     let outcome = mutate::toggle_checkbox(
         &root,
@@ -4054,11 +4034,6 @@ fn cmd_label(
     dry_run: bool,
     expected_version: Option<String>,
 ) -> Result<()> {
-    if json && expected_version.is_none() {
-        bail!(
-            "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
-        );
-    }
     let mut req = mutate::UpdateIssueRequest {
         expected_version,
         dry_run,
@@ -4081,11 +4056,6 @@ fn cmd_depend(
     add: bool,
     expected_version: Option<String>,
 ) -> Result<()> {
-    if json && expected_version.is_none() {
-        bail!(
-            "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
-        );
-    }
     let mut req = mutate::UpdateIssueRequest {
         expected_version,
         ..Default::default()
@@ -4474,11 +4444,6 @@ fn cmd_body_set(
     from_file: Option<PathBuf>,
     expected_version: Option<String>,
 ) -> Result<()> {
-    if json && expected_version.is_none() {
-        bail!(
-            "--expected-version is required with --json (per design D4=B); fetch with `issuectl show <slug> --json`"
-        );
-    }
     let body = if let Some(path) = from_file {
         read_capped_file(&path, "body")?
     } else if stdin {

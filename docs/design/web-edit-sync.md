@@ -1489,8 +1489,19 @@ Resolved discussion items (numbered against the original review
 threads):
 
 - **D3 (body autosave)** = **C**: 5 s debounce + `localStorage` + manual save.
-- **D4 (CLI `--expected-version`)** = **B**: required when `--json`,
-  optional otherwise. `flock` covers corruption either way.
+- **D4 (CLI `--expected-version`)** = originally **B**: required when
+  `--json`, optional otherwise. `flock` covers corruption either way.
+  **Superseded 2026-08-04** — now **opt-in**: `--expected-version` is
+  optional on `--json` too, and honored (compare-and-swap) whenever it
+  is passed, in both machine and human modes. Rationale: the primary
+  concurrent writer (the web board) is dormant; the AI-first common
+  case is a single agent scripting the CLI, where an output-format flag
+  silently mandating an extra required argument was a DX trap that left
+  tracking issues un-closed; `flock` covers corruption regardless of
+  mode; and callers who want the concurrency guard still get it by
+  passing the token. The requirement is dropped, the CAS is not. (The
+  transactional `apply` patch keeps its own `expected_version:`
+  requirement under `--json` — out of scope here.)
 - **D5 (PATCH array semantics)** = **A**: keep `add_*`/`remove_*` for
   CLI parity; specify edge cases (duplicate add+remove → 400; absent
   remove → no-op).
