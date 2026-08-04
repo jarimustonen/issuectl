@@ -13,34 +13,53 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-04):** `main` == **v0.6.6**, juuri julkaistu (tag `v0.6.6`
-pushattu; cargo-dist + crates.io + Homebrew-pipeline käynnistetty GitHubissa).
-Työpuu puhdas. Vihreä (fmt, clippy **63 = ei uusia varoituksia**, testisuite läpi).
+**Tila (2026-08-04):** `main` == **v0.6.6** (EI uutta releasea tässä rupeamassa —
+kolme fixiä landasi mainiin mutta ne ratsastavat vasta seuraavaan releaseen). Työpuu
+puhdas.
 
-**Tässä sessiossa landattu ja julkaistu v0.6.6:ssa:**
-- **@add-low-priority-value** — `--priority` hyväksyy nyt `low`/`normal`/`high`.
-- **@cli-ux-subcommand-friction** (#2/#3/#5) + **@unreachable-return-in-cmd-show** —
-  positional title `new`:lle, actionable `set`-listakenttävihje, `note --as`/argjärjestys,
-  build-hygienia (`cmd_show`).
-- **@note-from-file-rejects-headings** — `note --from-file` hyväksyy `##`/`###`-otsikot
-  (demote managed-sectionin alla).
-- **@json-close-requires-expected-version** + **@json-update-expected-version-ergonomics** —
-  `--expected-version` on nyt **opt-in** `--json`-kirjoituksissa (D4=B superseded);
-  `version`-avain top-levelissä myös write-tuloksissa.
+**Tässä rupeamassa landattu mainiin (ei vielä releasessa):**
+- **@refs-issue-hint-false-fire** — Refs-Issue-muistutus siirretty pre-commitistä
+  **commit-msg**-hookiin, joka lukee lopullisen viestin `git interpret-trailers`illa →
+  ei enää false-fire `-F`/stdin-committeihin.
+- **@mutation-not-found-classification** — write-verbit (`update`/`close`/`set`/…)
+  palauttavat nyt vakaan `error.code: "not-found"` `--json`:issa geneerisen
+  `command-failed`in sijaan (kaikki 8 verbiä testattu).
+- **@new-body-flag** — `issuectl new --body-file <path>` (+ `-` = stdin) asettaa
+  alkubodyn; skill-templatet synkassa. (`--body`-inline shippasi jo v0.6.5:ssä.)
 
-**OSS-init adoptoitu:** `OSS-RELEASE.md` on **approved** (maturity `mvp`). cargo-dist
-säilyy release-engineinä — `/oss-release-cut` EI saa regeneroida `release.yml`:ää.
-Kaksi ossctl-havaintoa filattu **ossctl-repoon** (ei tänne): pre-1.0-maturity-gate +
-cargo-dist-release-mallinnus.
+**Päätökset tässä rupeamassa:**
+- **@apply-json-expected-version-consistency → DECIDED keep-strict** (option 2).
+  `apply --json` pitää `expected_version`:n **pakollisena** (deliberate exception:
+  multi-field patch = read-modify-write, altistunein lost-update:lle). Kirjattu
+  **D4a**:ksi `docs/design/web-edit-sync.md`:hen; issue suljettu `wontfix` (ei koodimuutosta).
+- **@standard-intake-flow (HIGH) → design APPROVED.** `docs/design/intake-flow.md`
+  → *"Approved decisions (2026-08-04)"* (authoritative). Päätökset: **reuse `type`**
+  (ei `kind`); skillit **`/issue-new`** (filing) + **`/issue-intake`** (processing,
+  korvaa `/triage-bugs`, ajaa `/worktree-bug-analysis`); **concurrency OUT** — OD-12
+  dropped, OD-2 lease-free, **ei concurrency-tietoa issueihin**; muut ODt = suositus A;
+  `deferred` pysyy `active`-luokassa.
 
-**Iso linjaus:** **kanban/web-board on holdissa** (kukaan ei käytä sitä nyt). Kaikki
-kanban/web-issuet + build-only-if + `@focus-areas` labeloitu `deferred` → **Adjacent
-backlog** (alla, DAG:n ulkopuolella). Fokus on **CLI-työkalussa**.
+**🚧 ISO KÄYNNISSÄ OLEVA — intake-toteutuksen `/orchestrate`-kampanja.**
+Run **`01kz6c65y5kns14ce2rwm7tbxx`** (`intake-flow-build`), omalla
+integraatiobranchillaan (**main koskematon** kunnes katselmoit + mergeät). Rakentaa
+4 riippuvuusjärjestettyä yksikköä approved-designia vasten: **schema → `intake`-komennot
+→ `/issue-new`+`/issue-intake`-skillit + `/triage-bugs` eläkkeelle → migraatio**.
+**SEURAAVA AGENTTI:** tarkista tila `orchestratectl run show 01kz6c65y5kns14ce2rwm7tbxx`
+(+ `run list` child-yksiköille). Kun valmis: katselmoi integraatiobranch ja mergeä
+mainiin. Kampanja voi filata **uusia child-issueita** (schema-foundation,
+intake-commands, …) — **merge ne DAG:iin seuraavassa `/stint-start`issa** (drift-check
+nostaa ne). Kampanja pausettaa (äänimerkki) vain kovaan forkkiin.
 
-**Seuraava askel:** ks. **Execution DAG**. GLOBAL HEAD-OF-LINE = **@refs-issue-hint-false-fire**.
-Aktiivisia CLI-issueita jäljellä 4 (2 bugia, 1 feature, 1 improvement). Huom:
-`@new-body-flag`:n `--body`-alias shipattiin jo v0.6.5:ssä — jäljellä oleva scope on vain
-`--body-file`; trimmaa issue ennen rakentamista.
+**OSS-init (ennallaan):** `OSS-RELEASE.md` **approved** (`mvp`). cargo-dist pysyy
+release-engineinä — `/oss-release-cut` EI regeneroi `release.yml`:ää.
+
+**Iso linjaus (ennallaan):** **kanban/web-board holdissa**. Kaikki kanban/web-issuet +
+build-only-if + `@focus-areas` `deferred` → **Adjacent backlog**. Fokus CLI:ssä.
+
+**Seuraava askel:** odota/katselmoi intake-kampanja (yllä). Kaikki muut lanet
+tyhjentyivät tässä rupeamassa (3 fixiä landasi, 2 päätöstä suljettu). GLOBAL
+HEAD-OF-LINE = **@standard-intake-flow** (in-campaign — kampanja omistaa, ei
+itsenäisesti spawnattavissa).
 
 ---
 
@@ -58,25 +77,19 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: mutation-not-found-classification   ← main.rs head; refs-issue-hint runs in parallel (hooks.rs)
-LANE A — crates/issuectl/src/main.rs (clap + cmd_* handlers + fn main error rendering + parse_apply_patch)
-  ▶ mutation-not-found-classification         (main.rs:1786 error render; reads mutate/mod.rs MutateError)
-    new-body-flag                             (only --body-file/stdin remains; --body shipped v0.6.5; also mutate/new_issue.rs)
-    apply-json-expected-version-consistency   DECISION: option 1 (consistent) vs option 2 (strict) — needs user call
-LANE C — crates/issuectl-core/src/hooks.rs + git_trailers.rs (commit-hook Refs-Issue hint)
-  ▶ refs-issue-hint-false-fire
-LANE D — intake flow (design→docs/ now; later schema.rs + main.rs + skill templates)
-  ▶ standard-intake-flow   HIGH · DESIGN-FIRST — design doc only (docs/, parallel-safe); NO impl until user approves
+GLOBAL HEAD-OF-LINE: standard-intake-flow   ← in-flight /orchestrate campaign (run 01kz6c65y5kns14ce2rwm7tbxx); NOT independently spawnable — campaign owns it
+LANE D — intake flow (schema.rs + main.rs + mutate/ + skill templates)
+  ▶ standard-intake-flow   HIGH · design APPROVED (docs/design/intake-flow.md); implementation running as /orchestrate campaign on its own integration branch
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: kaikki neljä ovat pieniä CLI-korrektius/ergonomiafiksejä. **Lane-korjaus
-2026-08-04:** todelliset footprintit tarkistettu — `refs-issue-hint-false-fire` on
-`hooks.rs`:ssä (EI main.rs), `mutation-not-found-classification` koskee `main.rs`:n
-`fn main`-virherenderöintiä (EI vain mutate/). Niinpä kolme neljästä (mutation-not-found,
-new-body-flag, apply-json) osuvat `main.rs`-kuumatiedostoon → **sekvensoitava** LANE A:ssa;
-vain `refs-issue-hint` (LANE C, hooks.rs) on turvallisesti rinnakkainen. `apply-json` on
-aito päätöskysymys (make-consistent vs keep-strict) → nostettu käyttäjälle, ei autonomisesti.
+Kaari-lyhyesti: rupeaman kaikki 4 pientä CLI-yksikköä terminoituivat (3 fixiä landasi:
+`refs-issue-hint-false-fire`, `mutation-not-found-classification`, `new-body-flag`;
+`apply-json-expected-version-consistency` suljettu `wontfix` = päätetty keep-strict) →
+pudotettu DAG:sta. Jäljellä vain **LANE D `standard-intake-flow`**, jonka toteutus on nyt
+`/orchestrate`-kampanjassa (run `01kz6c65y5kns14ce2rwm7tbxx`) omalla integraatiobranchillaan.
+Kampanja voi filata child-issueita — seuraava `/stint-start` mergeää ne uusiksi laneiksi
+(schema → intake-komennot → skillit → migraatio) drift-checkin nostamana.
 
 ---
 
