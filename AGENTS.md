@@ -66,8 +66,11 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
     keys inside `error` (e.g. `matches`), and **empty stdout**. The
     bubble-up path in `fn main` wraps a generic `anyhow` error as
     `code:"command-failed"`, but downcasts a mutate-layer `NotFound`
-    (raised by every write verb on a missing slug) to `code:"not-found"`
-    so writes classify a missing issue exactly like the read paths;
+    (raised on a missing slug by the mutate-layer write verbs —
+    `update`/`close`/`set`/`note`/`check`/`label`/`depend`/`body set`) to
+    `code:"not-found"` so those writes classify a missing issue exactly
+    like the read paths (verbs that resolve the slug earlier at the repo
+    layer, e.g. `triage`, still report `command-failed`);
     explicit `process::exit` sites use the shared `fail()` helper; clap
     usage errors are caught in `fn main` and re-emitted as
     `code:"usage-error"` (exit 1) — all so the one error shape holds

@@ -1606,15 +1606,26 @@ fn json_error_value(code: &str, message: &str, extra: serde_json::Value) -> serd
 
 /// Classify an anyhow error that bubbled up to `main` into a stable
 /// `--json` envelope error code. Most failures are opaque and render as
-/// the generic `command-failed`, but a mutate-layer `NotFound` — the
-/// error every write verb (`update`/`close`/`set`/`note`/`check`/
-/// `label`/`depend`/`body set`) raises on a missing slug — is threaded
-/// through as the typed `MutateError` (see the `.map_err` sites that call
-/// `anyhow::Error::new`) so it maps to the same `not-found` code the read
-/// paths emit. Agents branch on the code instead of string-matching
-/// "not found" on a generic `command-failed`.
+/// the generic `command-failed`, but a mutate-layer `NotFound` — raised
+/// on a missing slug by the eight mutate-layer write verbs (`update`,
+/// `close`, `set`, `note`, `check`, `label`, `depend`, `body set`) — is
+/// threaded through as the typed `MutateError` (see the `.map_err` sites
+/// that call `anyhow::Error::new`) so it maps to the same `not-found`
+/// code the read paths emit. Agents branch on the code instead of
+/// string-matching "not found" on a generic `command-failed`. Note this
+/// covers only verbs whose target is resolved in the mutate layer; verbs
+/// that resolve the slug earlier at the repo layer (e.g. `triage`) still
+/// surface a missing slug as `command-failed`.
+///
+/// We scan the whole `.chain()` rather than only the outermost error:
+/// `anyhow`'s own `.context()` wrappers already preserve downcasting, but
+/// searching the chain also survives an intervening non-`anyhow` wrapper
+/// and states the intent — find this type anywhere it appears.
 fn bubbled_error_code(e: &anyhow::Error) -> &'static str {
-    match e.downcast_ref::<mutate::MutateError>() {
+    match e
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<mutate::MutateError>())
+    {
         Some(mutate::MutateError::NotFound) => "not-found",
         _ => "command-failed",
     }

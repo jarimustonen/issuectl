@@ -304,6 +304,117 @@ fn json_error_contract_classifies_write_not_found() {
     );
 }
 
+/// Every mutate-layer write verb — not just `update` — must classify a
+/// missing slug as `not-found`, and the `--json` `message` must be the
+/// exact `MutateError::NotFound` Display string (`issue not found`). The
+/// eight verbs route through distinct mutate functions
+/// (`update_issue`/`close_issue`/`toggle_checkbox`/`update_body`/note
+/// append), so a single site regressing to a string-flattened
+/// `anyhow!("{e}")` would silently escape classification back to
+/// `command-failed`. Pinning the exact message also guards the byte
+/// parity that holds only because `MutateError` exposes no `source()`.
+/// `body set` reads stdin, so it takes a separate spawn path.
+#[test]
+fn json_all_write_verbs_classify_missing_issue_as_not_found() {
+    // (label, argv) for the seven verbs that need no stdin. A missing
+    // slug must reach the mutate layer and bubble `NotFound`.
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "update",
+            &[
+                "--json",
+                "update",
+                "no-such-issue",
+                "--status",
+                "in-progress",
+            ],
+        ),
+        (
+            "close",
+            &["--json", "close", "no-such-issue", "--status", "fixed"],
+        ),
+        (
+            "set",
+            &["--json", "set", "no-such-issue", "priority", "high"],
+        ),
+        (
+            "note",
+            &[
+                "--json",
+                "note",
+                "no-such-issue",
+                "--as",
+                "tester",
+                "a note",
+            ],
+        ),
+        ("check", &["--json", "check", "no-such-issue", "a task"]),
+        (
+            "label",
+            &["--json", "label", "no-such-issue", "add", "mylabel"],
+        ),
+        (
+            "depend",
+            &[
+                "--json",
+                "depend",
+                "add",
+                "no-such-issue",
+                "--blocked-by",
+                "other-issue",
+            ],
+        ),
+    ];
+    for (label, args) in cases {
+        let tmp = fresh_repo();
+        let out = run(tmp.path(), args);
+        assert_eq!(out.status.code(), Some(1), "{label}: {}", dump(&out));
+        assert!(out.stdout.is_empty(), "{label}: {}", dump(&out));
+        let v: serde_json::Value = serde_json::from_slice(&out.stderr)
+            .unwrap_or_else(|_| panic!("{label}: stderr should be JSON:\n{}", dump(&out)));
+        assert_eq!(v["error"]["code"], "not-found", "{label}: {}", dump(&out));
+        assert_eq!(
+            v["error"]["message"],
+            "issue not found",
+            "{label}: {}",
+            dump(&out)
+        );
+    }
+
+    // `body set` reads the new body from stdin, so it can't go through
+    // `run`. The missing slug still bubbles `NotFound` after the body is
+    // read.
+    let tmp = fresh_repo();
+    let out = Command::new(env!("CARGO_BIN_EXE_issuectl"))
+        .env_remove("RUST_BACKTRACE")
+        .env("LC_ALL", "C")
+        .current_dir(tmp.path())
+        .arg("--root")
+        .arg(tmp.path())
+        .args(["--json", "body", "set", "no-such-issue", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(b"# rewritten\n")?;
+            child.wait_with_output()
+        })
+        .expect("spawn body set");
+    assert_eq!(out.status.code(), Some(1), "body set: {}", dump(&out));
+    assert!(out.stdout.is_empty(), "body set: {}", dump(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr)
+        .unwrap_or_else(|_| panic!("body set: stderr should be JSON:\n{}", dump(&out)));
+    assert_eq!(v["error"]["code"], "not-found", "body set: {}", dump(&out));
+    assert_eq!(
+        v["error"]["message"],
+        "issue not found",
+        "body set: {}",
+        dump(&out)
+    );
+}
+
 /// `--expected-version` is OPTIONAL on `--json` writes (opt-in
 /// compare-and-swap, superseding design D4=B). A `--json` `update`
 /// without a token now SUCCEEDS — symmetric with the human path — and
