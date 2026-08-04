@@ -1604,6 +1604,22 @@ fn json_error_value(code: &str, message: &str, extra: serde_json::Value) -> serd
     serde_json::json!({ "error": serde_json::Value::Object(err) })
 }
 
+/// Classify an anyhow error that bubbled up to `main` into a stable
+/// `--json` envelope error code. Most failures are opaque and render as
+/// the generic `command-failed`, but a mutate-layer `NotFound` — the
+/// error every write verb (`update`/`close`/`set`/`note`/`check`/
+/// `label`/`depend`/`body set`) raises on a missing slug — is threaded
+/// through as the typed `MutateError` (see the `.map_err` sites that call
+/// `anyhow::Error::new`) so it maps to the same `not-found` code the read
+/// paths emit. Agents branch on the code instead of string-matching
+/// "not found" on a generic `command-failed`.
+fn bubbled_error_code(e: &anyhow::Error) -> &'static str {
+    match e.downcast_ref::<mutate::MutateError>() {
+        Some(mutate::MutateError::NotFound) => "not-found",
+        _ => "command-failed",
+    }
+}
+
 /// Print the shared `--json` error object to stderr.
 fn emit_json_error(code: &str, message: &str, extra: serde_json::Value) {
     eprintln!(
@@ -1783,7 +1799,11 @@ fn main() -> Result<()> {
     let result = dispatch(cli.command, json_output);
     if json_output {
         if let Err(e) = result {
-            emit_json_error("command-failed", &format!("{e:#}"), serde_json::Value::Null);
+            emit_json_error(
+                bubbled_error_code(&e),
+                &format!("{e:#}"),
+                serde_json::Value::Null,
+            );
             std::process::exit(1);
         }
         return Ok(());
@@ -3555,7 +3575,7 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
     }
 
     let outcome = mutate::update_issue(root, &args.slug, req, None, &UncachedConfig)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(anyhow::Error::new)?;
     Ok(UpdateOutcome {
         final_dir: outcome.issue_dir,
         moved_to_closed: outcome.moved_to_closed,
@@ -3618,7 +3638,7 @@ pub(crate) fn do_close(
         None,
         &UncachedConfig,
     )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    .map_err(anyhow::Error::new)?;
     Ok(UpdateOutcome {
         final_dir: outcome.issue_dir,
         moved_to_closed: outcome.moved_to_closed,
@@ -3696,7 +3716,7 @@ fn cmd_stale(json: bool, days: i64) -> Result<()> {
 fn cmd_archive(json: bool, older_than: i64, dry_run: bool) -> Result<()> {
     let root = find_root();
     let report = mutate::archive::archive_closed(&root, older_than, dry_run, &UncachedConfig)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(anyhow::Error::new)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -3966,7 +3986,7 @@ fn cmd_note(
         dry_run,
         &UncachedConfig,
     )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    .map_err(anyhow::Error::new)?;
     finish_mutation(json, slug, &outcome, dry_run, "Appended note to")
 }
 
@@ -4008,7 +4028,7 @@ fn cmd_set(
     }
     let root = find_root();
     let outcome = mutate::update_issue(&root, slug, req, None, &UncachedConfig)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(anyhow::Error::new)?;
     finish_mutation(json, slug, &outcome, dry_run, "Updated")
 }
 
@@ -4029,7 +4049,7 @@ fn cmd_check(
         dry_run,
         &UncachedConfig,
     )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    .map_err(anyhow::Error::new)?;
     finish_mutation(json, slug, &outcome, dry_run, "Toggled checkbox in")
 }
 
@@ -4052,7 +4072,7 @@ fn cmd_label(
     }
     let root = find_root();
     let outcome = mutate::update_issue(&root, slug, req, None, &UncachedConfig)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(anyhow::Error::new)?;
     finish_mutation(json, slug, &outcome, dry_run, "Updated labels for")
 }
 
@@ -4074,7 +4094,7 @@ fn cmd_depend(
     }
     let root = find_root();
     let outcome = mutate::update_issue(&root, slug, req, None, &UncachedConfig)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(anyhow::Error::new)?;
     let verb = if add {
         "Added blockers for"
     } else {
@@ -4091,7 +4111,7 @@ fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
     req.dry_run = dry_run;
     let root = find_root();
     let outcome = mutate::update_issue(&root, &slug, req, None, &UncachedConfig)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(anyhow::Error::new)?;
     finish_mutation(json, &slug, &outcome, dry_run, "Applied patch to")
 }
 
@@ -4230,7 +4250,7 @@ pub(crate) fn bulk_apply(
         None,
         &UncachedConfig,
     )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    .map_err(anyhow::Error::new)?;
 
     let results = slugs
         .into_iter()
@@ -4477,7 +4497,7 @@ fn cmd_body_set(
         false,
         &UncachedConfig,
     )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    .map_err(anyhow::Error::new)?;
     if json {
         let report = serde_json::json!({
             "slug": slug,
@@ -4545,8 +4565,7 @@ fn cmd_triage(json: bool, slug: Option<String>) -> Result<()> {
             // through the central resolver so `triage extrem` works.
             let resolved =
                 repo::resolve_slug_input(&root, &slug).map_err(|e| anyhow::anyhow!("{e:#}"))?;
-            let out =
-                mutate::triage::triage(&root, &resolved).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let out = mutate::triage::triage(&root, &resolved).map_err(anyhow::Error::new)?;
             if json {
                 println!(
                     "{}",

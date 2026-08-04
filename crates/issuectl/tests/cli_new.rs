@@ -269,13 +269,16 @@ fn json_error_contract_wraps_clap_usage_errors() {
     assert_eq!(v["error"]["code"], "usage-error", "{}", dump(&out));
 }
 
-/// A bubble-up anyhow error under `--json` is rendered with the shared
-/// envelope and the generic `command-failed` code. `update` on a slug
-/// that does not exist bubbles a plain anyhow error from the command
-/// body (as opposed to the explicit `not-found` classification the read
-/// paths emit).
+/// A bubble-up `MutateError::NotFound` under `--json` is classified with
+/// the stable `not-found` code — the same code the read paths emit — not
+/// the generic `command-failed`. Every write verb (`update`/`close`/
+/// `set`/`note`/`check`/`label`/`depend`/`body set`) raises `NotFound` on
+/// a missing slug; `main` downcasts the typed error rather than
+/// string-matching flattened anyhow text, so an agent branches on the
+/// code instead of grepping the message. Reserve `command-failed` for a
+/// genuinely opaque failure — see `json_write_wrong_expected_version_still_conflicts`.
 #[test]
-fn json_error_contract_wraps_bubbled_errors() {
+fn json_error_contract_classifies_write_not_found() {
     let tmp = fresh_repo();
     let out = run(
         tmp.path(),
@@ -290,7 +293,7 @@ fn json_error_contract_wraps_bubbled_errors() {
     assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
     assert!(out.stdout.is_empty(), "{}", dump(&out));
     let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr should be JSON");
-    assert_eq!(v["error"]["code"], "command-failed", "{}", dump(&out));
+    assert_eq!(v["error"]["code"], "not-found", "{}", dump(&out));
     assert!(
         v["error"]["message"]
             .as_str()

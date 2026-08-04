@@ -64,11 +64,14 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
   - **Error (exit ≠ 0, nothing produced)** → one object on **stderr**:
     `{"error":{"code":"<kebab>","message":"…"}}`, with optional extra
     keys inside `error` (e.g. `matches`), and **empty stdout**. The
-    bubble-up path in `fn main` wraps any `anyhow` error as
-    `code:"command-failed"`; explicit `process::exit` sites use the
-    shared `fail()` helper; clap usage errors are caught in `fn main`
-    and re-emitted as `code:"usage-error"` (exit 1) — all so the one
-    error shape holds regardless of where the failure originates.
+    bubble-up path in `fn main` wraps a generic `anyhow` error as
+    `code:"command-failed"`, but downcasts a mutate-layer `NotFound`
+    (raised by every write verb on a missing slug) to `code:"not-found"`
+    so writes classify a missing issue exactly like the read paths;
+    explicit `process::exit` sites use the shared `fail()` helper; clap
+    usage errors are caught in `fn main` and re-emitted as
+    `code:"usage-error"` (exit 1) — all so the one error shape holds
+    regardless of where the failure originates.
   - **Partial success (exit ≠ 0, work landed)** → the command still
     prints its normal **result object on stdout** (e.g. `import` with
     `created`/`failed`), not the error envelope. The non-zero exit is
