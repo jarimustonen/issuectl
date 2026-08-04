@@ -1,10 +1,10 @@
 ---
 created: 2026-05-11
-updated: 2026-05-11
+updated: 2026-08-04
 type: chore
 status: open
 priority: normal
-labels: [monitoring, web-edit-sync]
+labels: [monitoring, web-edit-sync, deferred]
 related: ['@incredibly-real-hour']
 ---
 

@@ -1,9 +1,10 @@
 ---
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-08-04
 type: feature
 status: open
 priority: normal
+labels: [deferred]
 ---
 
 # Floating Undo for kanban drag-and-drop moves

@@ -2,9 +2,9 @@
 
 Työjono ja handoff `/stint`-työrupeamille. Tämä tiedosto on
 `/stint`:n käynnistyspiste: lue ensin alla oleva handoff-block, sitten
-työjono. Issue-viittaukset ovat `@slug`-muodossa — koko backlog elää
-`issuectl`:ssä (`issuectl list`), tämä tiedosto on vain kuratoitu
-näkymä "mitä kannattaa tehdä ja missä järjestyksessä".
+Execution DAG. Issue-viittaukset ovat `@slug`-muodossa — koko backlog elää
+`issuectl`:ssä (`issuectl list`), tämä tiedosto on vain kuratoitu näkymä
+"mitä kannattaa tehdä ja missä järjestyksessä".
 
 Operating-faktat (deploy, green gate, hot files) ovat
 [AGENTS.md](AGENTS.md#operating-facts-for-stint):ssä.
@@ -13,117 +13,97 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-07-27):** `main` == **v0.6.5**, juuri julkaistu (tag `v0.6.5`
-pushattu; cargo-dist + crates.io + Homebrew-pipeline käynnissä GitHubissa).
-Työpuu puhdas. Kaikki vihreää (fmt, clippy **0 uutta varoitusta**, testisuite läpi).
+**Tila (2026-08-04):** `main` == **v0.6.6**, juuri julkaistu (tag `v0.6.6`
+pushattu; cargo-dist + crates.io + Homebrew-pipeline käynnistetty GitHubissa).
+Työpuu puhdas. Vihreä (fmt, clippy **63 = ei uusia varoituksia**, testisuite läpi).
 
-**Rupeamassa 2026-07-26 landattu ja julkaistu v0.6.5:ssä:**
-@verb-alias-discoverability + @assign-subcommand-alias (yhtenä CLI-alias-nippuna,
-`create`/`new`-alias + `--body` + `body <slug>`-hint + `assign`-subkomento) ja
-@rename-stale-self-slug (rename päivittää nyt oman `slug:`-kentän). Suljettu
-jo-valmiina: @doctor-fix-noop (fix oli landannut jo commiteissa
-438d22f/1573d2a/5a49a14, issue vain jäänyt merkkaamatta).
+**Tässä sessiossa landattu ja julkaistu v0.6.6:ssa:**
+- **@add-low-priority-value** — `--priority` hyväksyy nyt `low`/`normal`/`high`.
+- **@cli-ux-subcommand-friction** (#2/#3/#5) + **@unreachable-return-in-cmd-show** —
+  positional title `new`:lle, actionable `set`-listakenttävihje, `note --as`/argjärjestys,
+  build-hygienia (`cmd_show`).
+- **@note-from-file-rejects-headings** — `note --from-file` hyväksyy `##`/`###`-otsikot
+  (demote managed-sectionin alla).
+- **@json-close-requires-expected-version** + **@json-update-expected-version-ergonomics** —
+  `--expected-version` on nyt **opt-in** `--json`-kirjoituksissa (D4=B superseded);
+  `version`-avain top-levelissä myös write-tuloksissa.
 
-**Seuraava askel:** ks. **Seuraavat — DAG** alla. `@fiercely-colossal-rabbits`
-on **READY** (rename-fix vapautti `repo.rs`:n, ei enää törmää).
-`@json-close-requires-expected-version` on **BLOCKED** design-päätöksen taakse.
+**OSS-init adoptoitu:** `OSS-RELEASE.md` on **approved** (maturity `mvp`). cargo-dist
+säilyy release-engineinä — `/oss-release-cut` EI saa regeneroida `release.yml`:ää.
+Kaksi ossctl-havaintoa filattu **ossctl-repoon** (ei tänne): pre-1.0-maturity-gate +
+cargo-dist-release-mallinnus.
 
-**Avoin päätös ennen Tier 2:ta:** `@intensely-teeny-ink` (custom boards) syö
-scopessaan useita Tier 3:n kanban-kandidaatteja (multiple boards, priority-sort,
-card fields). Päätä sen rajaus ennen rakentamista, ettei tehdä päällekkäistä työtä.
+**Iso linjaus:** **kanban/web-board on holdissa** (kukaan ei käytä sitä nyt). Kaikki
+kanban/web-issuet + build-only-if + `@focus-areas` labeloitu `deferred` → **Adjacent
+backlog** (alla, DAG:n ulkopuolella). Fokus on **CLI-työkalussa**.
 
----
-
-## Seuraavat — DAG (riippuvuudet)
-
-Ne kaksi seuraavaksi otettavaa issueta ja mistä ne riippuvat. Ylhäältä alas =
-"vapauttaa / portittaa". `✅` = landattu, `⬜` = tekemättä, `⛔` = blokattu.
-
-```
-@rename-stale-self-slug  ✅ landattu (repo.rs)
-        │
-        │  vapauttaa — sama hot file repo.rs, ei enää rebase-törmäystä
-        ▼
-@fiercely-colossal-rabbits  ⬜ READY  ── chore/high. Cachaa canonical_hash
-                                         /api/issues:lle. Ota tämä ensin.
-
-[design-päätös: --json close/update -symmetria non-JSON-polun kanssa
- vs. D4=B:n (strict --expected-version) säilyttäminen]   ⛔ avoin (käyttäjän call)
-        │
-        │  portittaa — käytös on tietoinen valinta, ei laastari
-        ▼
-@json-close-requires-expected-version  ⬜ BLOCKED ── ei rakenneta ennen päätöstä
-```
-
-Kaari-lyhyesti: rename-fix jo poisti ainoan riippuvuuden canonical-cachelta →
-**se on nyt vapaa otettavaksi**. json-close taas odottaa suunta­päätöstä
-(symmetria vs. strict), ei koodia.
+**Seuraava askel:** ks. **Execution DAG**. GLOBAL HEAD-OF-LINE = **@refs-issue-hint-false-fire**.
+Aktiivisia CLI-issueita jäljellä 4 (2 bugia, 1 feature, 1 improvement). Huom:
+`@new-body-flag`:n `--body`-alias shipattiin jo v0.6.5:ssä — jäljellä oleva scope on vain
+`--body-file`; trimmaa issue ennen rakentamista.
 
 ---
 
-## Tier 1 — tee heti (bugit + halvat agenttivoitot)
+## Execution DAG (2026-08-04)
 
-Pieniä, korkean vipuvaikutuksen paloja. Sopivat itsenäisiksi worktreiksi.
-Kierroksen 2026-07-26 jälkeen jäljellä on enää DAG:n kaksi solmua (ks. yllä).
+Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
+(never copied here). Merge each round (drop landed, add active, keep existing order).
+`▶` = head-of-line snapshot — RE-COMPUTE from issuectl at pick time.
+`after <slug> (needs …)` = logical blocked_by mirror. `collision: <file>` = touches a
+second lane's hot file (spawn-time exclusion).
 
-- [x] **@doctor-fix-noop** — suljettu `fixed`; fix oli landannut jo aiemmin.
-- [x] **@rename-stale-self-slug** — landattu 2026-07-26. `rename` päivittää nyt
-      issuen oman `slug:`-kentän + regressiotesti.
-- [x] **@verb-alias-discoverability** — landattu 2026-07-26 (CLI-alias-nippu).
-- [x] **@assign-subcommand-alias** — landattu 2026-07-26 (CLI-alias-nippu).
-- [ ] **@fiercely-colossal-rabbits** — `chore`, **high**, **READY** (ks. DAG).
-      Cachaa `canonical_hash` (nyt lasketaan joka `/api/issues`-kutsulla per
-      issue). Aito perf-ongelma isoilla repoilla; cache mtime+size-avaimella
-      AppStateen. **Seuraavan rupeaman luontevin ensimmäinen pala.**
-- [ ] **@json-close-requires-expected-version** — `bug`, **BLOCKED** (ks. DAG).
-      `--json` muuttaa *vaadittujen argumenttien* pintaa → agentti-callerit
-      kaatuvat. ⚠️ Design-käännös, ei laastari. Päätä ensin: symmetria
-      non-JSON-polun kanssa vs. D4=B:n (strict `--expected-version`) säilytys.
+Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers),
+`mutate/` (write paths), `schema.rs`, skill templates.
 
-## Tier 2 — seuraavaksi (yksi meaty feature, aito lähitarve)
+<!-- execution-dag:begin -->
+```
+GLOBAL HEAD-OF-LINE: refs-issue-hint-false-fire   ← start here on resume
+LANE A — crates/issuectl/src/main.rs (clap + cmd_* handlers + error hints)
+  ▶ refs-issue-hint-false-fire
+    new-body-flag                            (only --body-file remains; --body shipped v0.6.5)
+    apply-json-expected-version-consistency  collision: crates/issuectl-core/src/mutate/
+LANE B — crates/issuectl-core/src/mutate/ (write paths)
+  ▶ mutation-not-found-classification
+```
+<!-- execution-dag:end -->
 
-- [ ] **@intensely-teeny-ink** — `feature`, **high**. Custom boards:
-      käyttäjän määrittelemät sarakkeet (group_by epic/label/kenttä). Konkreettinen
-      lähitarve: raahaa issuet 0.6/future-ämpäreihin ilman `item.md`-editointia.
-      **Päätä scope ensin** — subsumoi osan Tier 3:sta.
+Kaari-lyhyesti: kaikki neljä ovat pieniä CLI-korrektius/ergonomiafiksejä. LANE A ja LANE B
+ovat disjointit (main.rs vs mutate/) → ajettavissa rinnan; LANE A:n sisällä sekvenssi.
+`apply-json-expected-version-consistency` voi koskea myös `mutate/`:a (collision-tag) → jos
+se ja LANE B:n solmu ovat yhtä aikaa live, sekvensoi.
 
-## Tier 3 — defer / discuss (ei nyt)
+---
 
-**Kanban/web-board -kiillotus** (harkitse niputtamista custom-boards-työn jälkeen):
-`@genuinely-cloistered-current` (multiple boards), `@truly-somber-payment`
-(priority-sort), `@needlessly-flimsy-scarecrow` (card fields + värit),
-`@partially-nasty-sack` (WIP-limit), `@fiercely-juicy-kettle` (copy-buttonit),
+## Adjacent backlog (deferred — DAG:n ulkopuolella, ei ajossa)
+
+Kaikki alla on labeloitu `deferred` issuectl:ssä (2026-08-04), joten ne eivät ole DAG-lanella
+eivätkä laukaise drift-checkiä. Poista `deferred`-label kun otat takaisin peliin.
+
+**Kanban / web-board (HOLD — ei käyttäjiä nyt):**
+`@intensely-teeny-ink` (custom boards, oli high), `@genuinely-cloistered-current`
+(multiple boards), `@truly-somber-payment` (priority-sort), `@needlessly-flimsy-scarecrow`
+(card fields), `@partially-nasty-sack` (WIP-limit), `@fiercely-juicy-kettle` (copy-buttonit),
 `@almost-homely-decision` (per-user view state), `@somewhat-flawless-letter`
-(uncommitted-indikaattori), `@perfectly-white-linen` (undo),
-`@needlessly-mysterious-volcano` (näppäimistö-a11y).
-
-**Isommat visualisoinnit:** `@massively-periodic-surprise` (dependency graph),
-`@needlessly-slippery-pan` (epic-puu).
-
-**Strateginen:** `@focus-areas` — päätös tehty (ADR 0001: `areas: []`
-skeemakenttä), valmis implementaatio-ADR:ää + rakentamista varten. Iso pala;
-aikatauluta kun on tilaa.
+(uncommitted-indikaattori), `@perfectly-white-linen` (undo), `@needlessly-mysterious-volcano`
+(näppäimistö-a11y), `@massively-periodic-surprise` (dependency graph),
+`@needlessly-slippery-pan` (epic-puu; CLI-osa relevantti jos kanban palaa),
+`@fiercely-colossal-rabbits` (canonical_hash-cache — vain `/api/issues`-web-boardin perf).
 
 **Build-only-if (älä rakenna ennen kuin tarve todistuu):**
 `@supremely-accurate-body` (field-merge — vain jos 409-kitka todistuu),
 `@somewhat-heady-zephyr` (events.jsonl — vain jos git-metriikat ei riitä),
 `@practically-truculent-music` (watcher-race-observability — matala kiire).
 
-## Siivous — tehty (2026-07-26)
-
-- [x] **@excessively-beneficial-owner** suljettu `obsolete` (scope korvattu
-      valmistuneella `@entirely-cowardly-aftermath`-designilla).
-- [x] Suljetun epicin `@hugely-exciting-spiders` lapset käyty läpi: kaikki
-      tosiasiassa 0.6.x:ssä shipatut kandidaatit oli jo suljettu `done`:ksi
-      (~20 kpl). Auki jäi 10 kanban/board-kiillotuskandidaattia — ne **eivät**
-      ole shipattu (varmistettu CHANGELOGista) ja elävät nyt Tier 3:ssa yllä.
-      Mahdollinen v0.7.0-epic voidaan koota niistä myöhemmin.
+**Strateginen (iso, aikatauluta kun on tilaa):**
+`@focus-areas` — päätös tehty (ADR 0001: `areas: []` skeemakenttä), valmis
+implementaatio-ADR:ää + rakentamista varten. Koskee `schema.rs`:ää.
 
 ---
 
 ## Handoff-protokolla
 
-`/stint` päivittää yllä olevan **🔄 Continue here** -blockin rupeaman lopussa
-ja committaa sen omana committinaan (`git add TODO.md && git commit`) ennen
-muuta työtä — näin tuore agentti voi jatkaa `jatketaan @TODO.md`:sta. Pidä
-`main` puhtaana rinnakkaisten worktreiden takia (ks. globaali CLAUDE.md).
+`/stint-handoff` päivittää yllä olevan **🔄 Continue here** -blockin JA mergeää
+Execution DAG:n (drop landed, add active, keep order) rupeaman lopussa, ja committaa ne
+omana committinaan (`git add TODO.md issues/ && git commit`) ennen `/wrap-up`:ia — näin
+tuore agentti voi jatkaa `jatketaan @TODO.md`:sta. Pidä `main` puhtaana rinnakkaisten
+worktreiden takia (ks. globaali CLAUDE.md).

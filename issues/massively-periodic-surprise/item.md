@@ -1,13 +1,13 @@
 ---
 created: 2026-05-06
-updated: 2026-05-07
+updated: 2026-08-04
 type: feature
 status: open
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
-labels: [v0.6.0-candidate, visualization]
+labels: [v0.6.0-candidate, visualization, deferred]
 ---
 
 # Issue graph view — multiple lenses on one tool

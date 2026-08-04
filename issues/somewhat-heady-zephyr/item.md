@@ -1,13 +1,13 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-08-04
 type: improvement
 status: open
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
-labels: [discuss, reporting, v0.6.0-candidate]
+labels: [discuss, reporting, v0.6.0-candidate, deferred]
 ---
 
 # Per-issue events.jsonl log (alternative to git history for metrics)

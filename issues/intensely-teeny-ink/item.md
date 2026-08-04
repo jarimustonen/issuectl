@@ -1,12 +1,13 @@
 ---
 created: 2026-05-10
-updated: 2026-05-10
+updated: 2026-08-04
 type: feature
 reporter: jari
 assignee: jari
 status: open
 priority: high
 epic: hugely-exciting-spiders
+labels: [deferred]
 ---
 
 # Custom boards: user-defined views with configurable column grouping (epic, label, custom field) for triage and planning

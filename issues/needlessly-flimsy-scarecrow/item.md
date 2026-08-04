@@ -1,13 +1,13 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-08-04
 type: feature
 status: open
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
-labels: [kanban, v0.6.0-candidate, web-ui]
+labels: [kanban, v0.6.0-candidate, web-ui, deferred]
 ---
 
 # Customizable kanban card fields + color coding by priority/label

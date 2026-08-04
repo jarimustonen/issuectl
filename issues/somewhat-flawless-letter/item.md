@@ -1,13 +1,13 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-08-04
 type: feature
 status: open
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
-labels: [git-native, v0.6.0-candidate, web-ui]
+labels: [git-native, v0.6.0-candidate, web-ui, deferred]
 ---
 
 # Web board: uncommitted-state indicator on cards

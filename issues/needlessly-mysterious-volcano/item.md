@@ -1,9 +1,10 @@
 ---
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-08-04
 type: feature
 status: open
 priority: normal
+labels: [deferred]
 ---
 
 # Keyboard accessibility for kanban status changes

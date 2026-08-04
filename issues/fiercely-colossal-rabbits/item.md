@@ -1,9 +1,10 @@
 ---
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-08-04
 type: chore
 status: open
 priority: high
+labels: [deferred]
 ---
 
 # Cache canonical_hash to avoid recomputing on every /api/issues call

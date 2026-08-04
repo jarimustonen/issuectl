@@ -1,10 +1,11 @@
 ---
 created: 2026-06-04
-updated: 2026-06-04
+updated: 2026-08-04
 type: feature
 reporter: jari
 status: open
 priority: normal
+labels: [deferred]
 ---
 
 # Focus areas: validoidut pitkäkestoiset teemat issue-hallintaan

@@ -1,9 +1,10 @@
 ---
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-08-04
 type: improvement
 status: open
 priority: normal
+labels: [deferred]
 ---
 
 # Field-level merge for commuting metadata PATCHes (build only if M2 shows real 409 friction)
