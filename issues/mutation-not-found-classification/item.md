@@ -2,8 +2,9 @@
 created: 2026-08-04
 updated: 2026-08-04
 type: bug
-status: open
+status: fixed
 priority: normal
+closed: 2026-08-04
 ---
 
 # Write-verb errors on a missing slug bubble as `command-failed`, not `not-found`
