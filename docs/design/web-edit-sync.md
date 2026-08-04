@@ -1512,8 +1512,22 @@ threads):
   second concurrent writer) is re-enabled, revisit whether the machine
   path should default back to fail-closed. (The transactional `apply`
   patch keeps its own `expected_version:` requirement under `--json` —
-  out of scope here; a multi-field patch assembled from an earlier `show`
-  is the read-modify-write shape most exposed to lost updates.)
+  a multi-field patch assembled from an earlier `show` is the
+  read-modify-write shape most exposed to lost updates; see **D4a**.)
+- **D4a (`apply --json` expected_version)** = **decided 2026-08-04:
+  KEEP STRICT** (option 2 of issue `apply-json-expected-version-consistency`;
+  all four review models had flagged the inconsistency with D4's relaxation).
+  `apply --json` **still requires a non-empty `expected_version:`** in the
+  patch, even though the single-field verbs (`update`/`close`/`set`/`note`/…)
+  made it opt-in under D4. This is a **deliberate exception, not an
+  oversight**, justified by a reason distinct from the (now-rejected) D4=B
+  "output flag shouldn't mandate an arg" reasoning: a multi-field `apply`
+  patch is the read-modify-write shape *most* exposed to lost updates — it is
+  assembled from an earlier `show`, so a stale base is both likely and
+  costly. The exception is signposted in `apply --help` and the `/issue`
+  skill template, so callers aren't surprised. No code change: this records
+  the existing behaviour as intentional and closes the open question.
+  Enforced by `parse_apply_patch_rejects_{missing,null,empty}_expected_version_under_json`.
 - **D5 (PATCH array semantics)** = **A**: keep `add_*`/`remove_*` for
   CLI parity; specify edge cases (duplicate add+remove → 400; absent
   remove → no-op).

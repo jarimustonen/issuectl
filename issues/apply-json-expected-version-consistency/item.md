@@ -2,8 +2,9 @@
 created: 2026-08-04
 updated: 2026-08-04
 type: improvement
-status: open
+status: wontfix
 priority: normal
+closed: 2026-08-04
 ---
 
 # Decide whether `apply --json` should join the opt-in --expected-version model
@@ -38,3 +39,9 @@ Pick one and record it in `docs/design/web-edit-sync.md` (the D4 entry):
 The change already signposts the exception in `apply --help` and the skill
 template, so callers aren't surprised — but the underlying inconsistency stands
 until this is decided.
+
+## Comments
+
+### 2026-08-04T14:35:03Z · @jari
+
+DECIDED 2026-08-04: option 2 (keep apply --json strict). apply still requires non-empty expected_version — deliberate exception to D4's opt-in relaxation, justified because a multi-field apply patch (assembled from an earlier show) is the read-modify-write shape most exposed to lost updates. No code change; behaviour already correct + signposted in apply --help and the skill template. Recorded as D4a in docs/design/web-edit-sync.md. Closing wontfix = decided not to make apply consistent.
