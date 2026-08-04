@@ -477,6 +477,13 @@ enum Command {
         #[arg(long, visible_alias = "body", value_parser = parse_non_empty)]
         description: Option<String>,
 
+        /// Read the initial body from a file, written below the
+        /// `# <title>` heading. Pass `-` to read stdin (use `./-` for a
+        /// file literally named `-`). Mutually exclusive with
+        /// `--description`/`--body`.
+        #[arg(long = "body-file", conflicts_with = "description")]
+        body_file: Option<PathBuf>,
+
         /// Set a custom frontmatter field (repeatable). Format `key=value`.
         /// Use this for fields the schema declares but no built-in flag
         /// covers (e.g. `--field team=payments`). Built-in fields use
@@ -1871,39 +1878,52 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             related,
             source,
             description,
+            body_file,
             custom_fields,
             check_duplicates,
             inbox,
-        } => cmd_new(
-            json_output,
-            NewArgs {
-                issue_type,
-                // The clap `title_input` group (required + mutually
-                // exclusive) guarantees exactly one of these at parse
-                // time; the `ok_or_else` is a defensive net so a future
-                // group-wiring regression surfaces as an error, not a
-                // panic (the `Cli::command().debug_assert()` test also
-                // guards the wiring at build time).
-                title: title_pos.or(title_flag).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "internal: clap `title_input` group did not enforce a title source"
-                    )
-                })?,
-                slug,
-                reporter,
-                assignee,
-                owner,
-                priority,
-                epic,
-                labels,
-                related,
-                source,
-                description,
-                custom_fields,
-                inbox,
-            },
-            check_duplicates,
-        ),
+        } => {
+            // `--body-file` is a body source that conflicts with
+            // `--description`/`--body` at the clap layer, so at most one
+            // is set. Reading the file (or stdin for `-`) here — before
+            // `do_new` — keeps all I/O + the input cap in the CLI layer
+            // and lets the resolved markdown flow through the same
+            // flock/schema write path as an inline `--description`.
+            let description = match body_file {
+                Some(path) => Some(read_body_file_arg(&path)?),
+                None => description,
+            };
+            cmd_new(
+                json_output,
+                NewArgs {
+                    issue_type,
+                    // The clap `title_input` group (required + mutually
+                    // exclusive) guarantees exactly one of these at parse
+                    // time; the `ok_or_else` is a defensive net so a future
+                    // group-wiring regression surfaces as an error, not a
+                    // panic (the `Cli::command().debug_assert()` test also
+                    // guards the wiring at build time).
+                    title: title_pos.or(title_flag).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "internal: clap `title_input` group did not enforce a title source"
+                        )
+                    })?,
+                    slug,
+                    reporter,
+                    assignee,
+                    owner,
+                    priority,
+                    epic,
+                    labels,
+                    related,
+                    source,
+                    description,
+                    custom_fields,
+                    inbox,
+                },
+                check_duplicates,
+            )
+        }
         Command::Update {
             slug,
             status,
@@ -3963,6 +3983,30 @@ fn read_capped_file(path: &Path, what: &str) -> Result<String> {
     read_capped(file, MAX_INPUT_BYTES, what, path.display())
 }
 
+/// Read the initial issue body for `issuectl new --body-file PATH`.
+/// A path of `-` means stdin (via [`read_capped_file`]'s convention),
+/// capped at [`MAX_INPUT_BYTES`].
+///
+/// Strips only *trailing* whitespace, not leading — a body is a whole
+/// document whose leading content is the user's intent (a file may open
+/// with a 4-space indented code block that a full `trim()` would
+/// silently corrupt), while a stray final newline from an editor or
+/// `echo … |` shouldn't bloat the stored body. This mirrors
+/// `cmd_body_set`'s `body set --from-file` convention exactly, and is
+/// idempotent with `render_new_item_from_fm`'s own `trim_end` of the
+/// description. An empty (or whitespace-only) body is rejected as a
+/// validation error so `--body-file` matches the non-empty contract of
+/// the inline `--description`/`--body` flag rather than silently
+/// creating an issue with a blank body.
+fn read_body_file_arg(path: &Path) -> Result<String> {
+    let body = read_capped_file(path, "body")?;
+    let body = body.trim_end();
+    if body.is_empty() {
+        bail!("--body-file {} is empty", path.display());
+    }
+    Ok(body.to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_note(
     json: bool,
@@ -5287,6 +5331,138 @@ mod tests {
             Command::New { description, .. } => assert_eq!(description.as_deref(), Some("hello")),
             _ => panic!("expected New"),
         }
+    }
+
+    #[test]
+    fn body_file_flag_parses_into_body_file_on_new() {
+        let cli = Cli::try_parse_from([
+            "issuectl",
+            "new",
+            "--type",
+            "task",
+            "--title",
+            "x",
+            "--body-file",
+            "notes.md",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::New {
+                body_file,
+                description,
+                ..
+            } => {
+                assert_eq!(body_file.as_deref(), Some(Path::new("notes.md")));
+                assert_eq!(description, None);
+            }
+            _ => panic!("expected New"),
+        }
+    }
+
+    #[test]
+    fn body_file_accepts_stdin_dash() {
+        let cli = Cli::try_parse_from([
+            "issuectl",
+            "new",
+            "--type",
+            "task",
+            "--title",
+            "x",
+            "--body-file",
+            "-",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::New { body_file, .. } => {
+                assert_eq!(body_file.as_deref(), Some(Path::new("-")));
+            }
+            _ => panic!("expected New"),
+        }
+    }
+
+    #[test]
+    fn body_file_conflicts_with_description() {
+        // Mutual exclusion is a clap `conflicts_with`, so combining the two
+        // body sources is a usage error caught before any I/O (it maps to
+        // the `usage-error` envelope in `fn main`).
+        let err = Cli::try_parse_from([
+            "issuectl",
+            "new",
+            "--type",
+            "task",
+            "--title",
+            "x",
+            "--body-file",
+            "notes.md",
+            "--description",
+            "inline",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn body_file_conflicts_with_body_alias() {
+        // The `--body` visible alias shares `description`'s arg id, so the
+        // conflict fires against it too.
+        let err = Cli::try_parse_from([
+            "issuectl",
+            "new",
+            "--type",
+            "task",
+            "--title",
+            "x",
+            "--body-file",
+            "notes.md",
+            "--body",
+            "inline",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn read_body_file_arg_strips_only_trailing_whitespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("notes.md");
+        fs::write(&path, "## Notes\n\nsome markdown body\n\n").unwrap();
+        let got = read_body_file_arg(&path).unwrap();
+        // Trailing newlines gone, no other change.
+        assert_eq!(got, "## Notes\n\nsome markdown body");
+    }
+
+    #[test]
+    fn read_body_file_arg_preserves_leading_whitespace() {
+        // A body is a whole document: a file that opens with a 4-space
+        // indented code block must survive verbatim (only trailing
+        // whitespace is stripped), matching `body set --from-file` and
+        // NOT the leading-and-trailing `trim()` the first draft used.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("code.md");
+        fs::write(&path, "    let x = 1;\n\nprose\n").unwrap();
+        let got = read_body_file_arg(&path).unwrap();
+        assert_eq!(got, "    let x = 1;\n\nprose");
+    }
+
+    #[test]
+    fn read_body_file_arg_rejects_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("blank.md");
+        fs::write(&path, "\n\n  \n").unwrap();
+        let err = read_body_file_arg(&path).unwrap_err();
+        assert!(err.to_string().contains("empty"), "got: {err}");
+    }
+
+    #[test]
+    fn read_body_file_arg_missing_path_errors_cleanly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("nope.md");
+        // A missing path must surface as a clean error (not a panic); the
+        // envelope classifies it downstream.
+        let err = read_body_file_arg(&missing).unwrap_err();
+        assert!(err.to_string().contains("cannot read body"), "got: {err}");
     }
 
     #[test]

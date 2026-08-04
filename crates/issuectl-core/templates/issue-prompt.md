@@ -388,7 +388,19 @@ issuectl --json new \
 `create` is accepted as an alias for `new`, and `--body` as an alias
 for `--description`, so `issuectl --json create --type task --title X
 --body "…"` works identically — canonical forms stay `new` /
-`--description`. The title may also be passed positionally
+`--description`. To set the initial body from a file instead of inline
+text, use `--body-file <path>` (mutually exclusive with
+`--description`/`--body` — combining them is a usage error); pass `-`
+to read the body from stdin (use `./-` for a file literally named `-`).
+The file's markdown is written below the `# <title>` heading, so a
+fully-formed issue can be filed in one argv:
+
+```
+issuectl --json new --type feature --title "Bulk export" --body-file notes.md
+printf '## Context\n\nPiped body.\n' | issuectl --json new --type task --title X --body-file -
+```
+
+The title may also be passed positionally
 (`issuectl new "Login redirect loops" --type bug`) instead of via
 `--title`; pass exactly one of the two (both/neither is an error).
 

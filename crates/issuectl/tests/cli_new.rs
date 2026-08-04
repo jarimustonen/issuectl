@@ -840,3 +840,246 @@ fn new_io_failure_chmod_readonly_fails() {
         "stderr should end with newline, got {stderr:?}"
     );
 }
+
+/// Reads the `body` field from an `issuectl --json show <slug>` payload.
+fn show_body(root: &std::path::Path, slug: &str) -> String {
+    let show = run(root, &["--json", "show", slug]);
+    assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
+    serde_json::from_slice::<serde_json::Value>(&show.stdout).expect("show stdout should be JSON")
+        ["body"]
+        .as_str()
+        .expect("body field")
+        .to_string()
+}
+
+#[test]
+fn new_body_file_writes_markdown_below_heading() {
+    let tmp = fresh_repo();
+    let notes = tmp.path().join("notes.md");
+    std::fs::write(&notes, "First paragraph.\n\nSecond paragraph.\n").expect("write notes");
+    let out = run(
+        tmp.path(),
+        &[
+            "new",
+            "--type",
+            "feature",
+            "--title",
+            "From a file",
+            "--slug",
+            "bf-file",
+            "--body-file",
+            notes.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let body = show_body(tmp.path(), "bf-file");
+    // Structural, not just substring: the file markdown must land below
+    // the `# <title>` heading, under the `## Description` section the
+    // shared renderer emits, in order — proving it flowed through the
+    // same write path as an inline `--description` rather than being
+    // dropped into frontmatter or before the title.
+    let title = body.find("# From a file").expect("title heading");
+    let desc = body.find("## Description").expect("description heading");
+    let first = body.find("First paragraph.").expect("first paragraph");
+    let second = body.find("Second paragraph.").expect("second paragraph");
+    assert!(
+        title < desc && desc < first && first < second,
+        "body out of order: {body:?}"
+    );
+}
+
+#[test]
+fn new_body_file_preserves_leading_indentation() {
+    // End-to-end guard for the trim_end (not trim) contract: a file that
+    // opens with a 4-space indented code block must survive into the
+    // stored body verbatim, so the rendered issue is a valid Markdown
+    // code block — the leading whitespace is the author's intent.
+    let tmp = fresh_repo();
+    let notes = tmp.path().join("code.md");
+    std::fs::write(&notes, "    let x = 1;\n\nprose after.\n").expect("write notes");
+    let out = run(
+        tmp.path(),
+        &[
+            "new",
+            "--type",
+            "feature",
+            "--title",
+            "Indented",
+            "--slug",
+            "bf-indent",
+            "--body-file",
+            notes.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let body = show_body(tmp.path(), "bf-indent");
+    assert!(
+        body.contains("    let x = 1;"),
+        "leading indentation lost: {body:?}"
+    );
+}
+
+#[test]
+fn new_body_file_dash_reads_stdin() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let tmp = fresh_repo();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_issuectl"))
+        .env_remove("RUST_BACKTRACE")
+        .env_remove("RUST_LIB_BACKTRACE")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .current_dir(tmp.path())
+        .arg("--root")
+        .arg(tmp.path())
+        .args([
+            "new",
+            "--type",
+            "feature",
+            "--title",
+            "From stdin",
+            "--slug",
+            "bf-stdin",
+            "--body-file",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn issuectl");
+    child
+        .stdin
+        .take()
+        .expect("stdin handle")
+        .write_all(b"Body piped in via stdin.\n")
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("wait");
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let body = show_body(tmp.path(), "bf-stdin");
+    assert!(body.contains("# From stdin"), "body was: {body:?}");
+    assert!(
+        body.contains("Body piped in via stdin."),
+        "body was: {body:?}"
+    );
+}
+
+#[test]
+fn new_body_file_conflicts_with_body_plain_is_clap_usage_error() {
+    let tmp = fresh_repo();
+    let notes = tmp.path().join("notes.md");
+    std::fs::write(&notes, "x\n").expect("write notes");
+    let out = run(
+        tmp.path(),
+        &[
+            "new",
+            "--type",
+            "feature",
+            "--title",
+            "Conflict",
+            "--body-file",
+            notes.to_str().unwrap(),
+            "--body",
+            "inline",
+        ],
+    );
+    // clap conflict → clap's own usage error, its default exit code 2,
+    // nothing created.
+    assert_eq!(out.status.code(), Some(2), "{}", dump(&out));
+    assert!(out.stdout.is_empty(), "{}", dump(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "stderr was: {stderr:?}"
+    );
+}
+
+#[test]
+fn new_body_file_conflicts_with_body_json_is_usage_error_envelope() {
+    let tmp = fresh_repo();
+    let notes = tmp.path().join("notes.md");
+    std::fs::write(&notes, "x\n").expect("write notes");
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "new",
+            "--type",
+            "feature",
+            "--title",
+            "Conflict",
+            "--body-file",
+            notes.to_str().unwrap(),
+            "--body",
+            "inline",
+        ],
+    );
+    // Under `--json` the conflict is re-emitted as the shared
+    // `usage-error` envelope on stderr at exit 1 (AGENTS.md contract).
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    assert!(out.stdout.is_empty(), "{}", dump(&out));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("stderr should be a JSON error envelope");
+    assert_eq!(v["error"]["code"], "usage-error", "{}", dump(&out));
+}
+
+#[test]
+fn new_body_file_missing_path_errors_cleanly() {
+    let tmp = fresh_repo();
+    let missing = tmp.path().join("does-not-exist.md");
+    let out = run(
+        tmp.path(),
+        &[
+            "new",
+            "--type",
+            "feature",
+            "--title",
+            "Missing",
+            "--body-file",
+            missing.to_str().unwrap(),
+        ],
+    );
+    // A missing body file is a clean error envelope, not a panic.
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot read body"),
+        "stderr was: {stderr:?}"
+    );
+}
+
+#[test]
+fn new_body_file_missing_path_json_is_clean_envelope() {
+    // The AI-first `--json` contract: a missing body file must produce
+    // the shared error envelope on stderr with empty stdout and a stable
+    // string `code`, so an agent branches on the envelope rather than
+    // crashing. (A missing input file classifies as `command-failed`,
+    // like `note --from-file`; the point tested here is a well-formed
+    // envelope, not the specific code.)
+    let tmp = fresh_repo();
+    let missing = tmp.path().join("does-not-exist.md");
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "new",
+            "--type",
+            "feature",
+            "--title",
+            "Missing",
+            "--slug",
+            "bf-missing",
+            "--body-file",
+            missing.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    assert!(out.stdout.is_empty(), "{}", dump(&out));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("stderr should be a JSON error envelope");
+    assert!(v["error"]["code"].is_string(), "{}", dump(&out));
+    // No partial issue was created.
+    let show = run(tmp.path(), &["--json", "show", "bf-missing"]);
+    assert_ne!(show.status.code(), Some(0), "{}", dump(&show));
+}

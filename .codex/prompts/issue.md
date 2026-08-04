@@ -51,7 +51,7 @@ same way:
 
 ## Install or upgrade `issuectl`
 
-This skill was installed for `issuectl 0.6.5`. On the
+This skill was installed for `issuectl 0.6.6`. On the
 first invocation in a session, run `issuectl --version` and compare:
 
 - **Missing**: install one of:
@@ -59,12 +59,12 @@ first invocation in a session, run `issuectl --version` and compare:
   - **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
   - **Shell installer** (no toolchain):
     `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
-- **Older than `0.6.5`**: tell the user the skill expects
-  `0.6.5` and suggest upgrading via the same channel
+- **Older than `0.6.6`**: tell the user the skill expects
+  `0.6.6` and suggest upgrading via the same channel
   they originally used (`brew upgrade jarimustonen/issuectl/issuectl`,
   `cargo install issuectl --force`, or re-run the shell installer).
   Stop and wait — schema/CLI surface may have changed.
-- **Newer than `0.6.5`**: the installed binary is ahead
+- **Newer than `0.6.6`**: the installed binary is ahead
   of what this skill was written for. Tell the user to refresh the
   skill so the instructions match the CLI surface they actually have:
   `issuectl skill install --force` (Claude Code; add `--agent codex`
@@ -388,7 +388,19 @@ issuectl --json new \
 `create` is accepted as an alias for `new`, and `--body` as an alias
 for `--description`, so `issuectl --json create --type task --title X
 --body "…"` works identically — canonical forms stay `new` /
-`--description`. The title may also be passed positionally
+`--description`. To set the initial body from a file instead of inline
+text, use `--body-file <path>` (mutually exclusive with
+`--description`/`--body` — combining them is a usage error); pass `-`
+to read the body from stdin (use `./-` for a file literally named `-`).
+The file's markdown is written below the `# <title>` heading, so a
+fully-formed issue can be filed in one argv:
+
+```
+issuectl --json new --type feature --title "Bulk export" --body-file notes.md
+printf '## Context\n\nPiped body.\n' | issuectl --json new --type task --title X --body-file -
+```
+
+The title may also be passed positionally
 (`issuectl new "Login redirect loops" --type bug`) instead of via
 `--title`; pass exactly one of the two (both/neither is an error).
 

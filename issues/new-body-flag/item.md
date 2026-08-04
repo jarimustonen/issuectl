@@ -2,8 +2,9 @@
 created: 2026-08-01
 updated: 2026-08-04
 type: feature
-status: open
+status: fixed
 priority: normal
+closed: 2026-08-04
 ---
 
 # issuectl new: accept --body/--body-file to set the initial issue body
