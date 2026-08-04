@@ -1,12 +1,24 @@
 ---
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-04
 type: feature
 status: open
 priority: normal
 ---
 
 # issuectl new: accept --body/--body-file to set the initial issue body
+
+## Status (trimmed 2026-08-04)
+
+**`--body` (inline text) already shipped in v0.6.5** as an alias for
+`--description` on `new` (the CLI-alias nippu, `@verb-alias-discoverability`), so
+`issuectl new "Title" --type feature --body "…markdown…"` works today. The
+**remaining scope** is only:
+- `--body-file <path>` — read the body from a file, and
+- accept `-` for **stdin**.
+
+The `## Observed` block below predates v0.6.5 and is stale for `--body`. Build
+just the file/stdin variants.
 
 ## Description
 

@@ -98,6 +98,14 @@ eivätkä laukaise drift-checkiä. Poista `deferred`-label kun otat takaisin pel
 `@focus-areas` — päätös tehty (ADR 0001: `areas: []` skeemakenttä), valmis
 implementaatio-ADR:ää + rakentamista varten. Koskee `schema.rs`:ää.
 
+**Blocked on tooling (ei voi tehdä ennen kuin ossctl valmis):**
+`@wire-oss-release-as-release-path` — siirrä julkaisu `/oss-release`-polulle
+(ossctl release-engine + cargo-dist backend, `publish-crates.yml` eläkkeelle).
+Odottaa upstream-ossctl-muutoksia (työn alla). Sivutulos: paljasti että
+crates.io-auto-julkaisu on nyt rikki (`GITHUB_TOKEN` ei laukaise
+`publish-crates.yml`:ää) → crates.io vaatii manuaalisen triggerin joka releasessa
+kunnes tämä tehty.
+
 ---
 
 ## Handoff-protokolla
