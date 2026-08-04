@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-08-04
+
+### Added
+- `low` priority value — `--priority` now accepts `low`, `normal`, `high`
+  (default still `normal`). Ordering is presentation-only; no priority
+  ranking is implied. Repos needing finer gradations still widen the enum
+  per-repo via `issues/.schema.yaml`. (issue: `@add-low-priority-value`)
+- `issuectl new` accepts a **positional title** — `issuectl new "Some title"
+  --type feature` now works, matching how `note` / `search` take positional
+  text. `--title` remains the canonical flag; passing both or neither errors
+  clearly. (issue: `@cli-ux-subcommand-friction`)
+
+### Changed
+- **`--expected-version` is now optional (opt-in) on `--json` writes.** The
+  mutating verbs (`update`, `close`, `set`, `note`, `body set`, …) with
+  `--json` no longer *require* `--expected-version`; the write proceeds
+  without it, symmetric with the non-`--json` path (`flock` still prevents
+  corruption in both). When `--expected-version` **is** passed it is still
+  enforced as a compare-and-swap — a stale/mismatched token still fails —
+  so callers that want lost-update protection opt in. Write result objects
+  now carry the new canonical `version` at a stable top-level key, matching
+  `show --json`, so the read-back round-trip is unambiguous. This supersedes
+  design decision D4=B. (issues: `@json-close-requires-expected-version`,
+  `@json-update-expected-version-ergonomics`)
+- `issuectl note` flags are order-insensitive, and omitting a required
+  `--as` now produces a targeted error naming `--as` instead of a generic
+  usage error. (issue: `@cli-ux-subcommand-friction`)
+- Passing a built-in list field positionally to `set` (e.g. `set <slug>
+  related <ref>`) now errors with a hint naming the flags that actually work
+  (`update --add-related` / `--remove-related`) instead of the
+  self-contradicting `--related (repeatable)`. (issue:
+  `@cli-ux-subcommand-friction`)
+
+### Fixed
+- `issuectl note --from-file` no longer rejects legitimate `##` / `###`
+  Markdown headings outside code fences. Such headings are demoted
+  (`##`→`####`, `###`→`#####`) when appended under the managed `## Comments`
+  section, so structured note content is preserved without corrupting
+  section parsing. (issue: `@note-from-file-rejects-headings`)
+
 ## [0.6.5] - 2026-07-27
 
 ### Added
