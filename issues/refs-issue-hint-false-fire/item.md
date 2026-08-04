@@ -1,10 +1,11 @@
 ---
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-04
 type: bug
 reporter: jari
-status: open
+status: fixed
 priority: normal
+closed: 2026-08-04
 ---
 
 # Refs-Issue hint false-fires when trailer supplied via git commit -F/stdin
