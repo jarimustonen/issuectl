@@ -65,6 +65,8 @@ LANE A — crates/issuectl/src/main.rs (clap + cmd_* handlers + fn main error re
     apply-json-expected-version-consistency   DECISION: option 1 (consistent) vs option 2 (strict) — needs user call
 LANE C — crates/issuectl-core/src/hooks.rs + git_trailers.rs (commit-hook Refs-Issue hint)
   ▶ refs-issue-hint-false-fire
+LANE D — intake flow (design→docs/ now; later schema.rs + main.rs + skill templates)
+  ▶ standard-intake-flow   HIGH · DESIGN-FIRST — design doc only (docs/, parallel-safe); NO impl until user approves
 ```
 <!-- execution-dag:end -->
 
