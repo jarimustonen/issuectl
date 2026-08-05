@@ -2,8 +2,10 @@
 created: 2026-08-05
 updated: 2026-08-05
 type: bug
-status: open
+status: wontfix
 priority: low
+closed: 2026-08-05
+closed_by: jari
 ---
 
 # show --json omits closed_by though it is persisted
@@ -30,3 +32,9 @@ attribution added by `@close-as-flag-asymmetry` is readable, not write-only.
 
 Low — the data is persisted; only the `show` projection drops it. Likely a
 missing field in the `show` serializer.
+
+## Comments
+
+### 2026-08-05T08:00:59Z · @jari
+
+Not a bug: closed_by IS surfaced by show --json under .extra.closed_by (verified = 'jari'). I originally queried top-level .closed_by. The enhancement to promote it to a typed top-level field + human output is already tracked by intensely-blushing-galley.

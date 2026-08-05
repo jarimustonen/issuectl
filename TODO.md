@@ -13,42 +13,30 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-04):** `main` == **v0.6.6** (EI uutta releasea tässä rupeamassa —
-kolme fixiä landasi mainiin mutta ne ratsastavat vasta seuraavaan releaseen). Työpuu
-puhdas.
+**Tila (2026-08-05):** `main` == **v0.7.0** (RELEASED — tag pushattu, cargo-dist +
+CI-workflowt ajossa). Työpuu puhdas, integraatiobranch mergetty + siivottu.
 
-**Tässä rupeamassa landattu mainiin (ei vielä releasessa):**
-- **@refs-issue-hint-false-fire** — Refs-Issue-muistutus siirretty pre-commitistä
-  **commit-msg**-hookiin, joka lukee lopullisen viestin `git interpret-trailers`illa →
-  ei enää false-fire `-F`/stdin-committeihin.
-- **@mutation-not-found-classification** — write-verbit (`update`/`close`/`set`/…)
-  palauttavat nyt vakaan `error.code: "not-found"` `--json`:issa geneerisen
-  `command-failed`in sijaan (kaikki 8 verbiä testattu).
-- **@new-body-flag** — `issuectl new --body-file <path>` (+ `-` = stdin) asettaa
-  alkubodyn; skill-templatet synkassa. (`--body`-inline shippasi jo v0.6.5:ssä.)
+**0.7.0:ssa shipannut (CHANGELOG täydellinen):**
+- **@standard-intake-flow (HIGH)** — koko `issuectl intake`-komentoryhmä (file/queue/
+  show/accept/defer/need-info/reject/cannot-reproduce/duplicate/obsolete/retype/reopen/
+  withdraw) + statukset `untriaged`/`deferred`/`needs-info` + kentät (provenance/
+  disposition_reason/duplicate_of/source_ref/deferred_until) + `intake migrate`
+  (dry-run-first) + intrinsic invariantit + type×status-check + täysi transitions-matriisi.
+  Skillit **`/issue-new`** + **`/issue-intake`** (korvaa `/triage-bugs` → thin alias).
+  Rakennettiin `/orchestrate`-kampanjana (4 yksikköä, kukin 4-malli-review). Toteutus =
+  approved `docs/design/intake-flow.md`.
+- **@close-as-flag-asymmetry** — `close --as <author>` → `closed_by` (näkyy `show --json`
+  `.extra`:ssa). + edellisen rupeaman 3 fixiä (refs-issue-hint, mutation-not-found,
+  new-body-flag) jotka odottivat releasea.
 
-**Päätökset tässä rupeamassa:**
-- **@apply-json-expected-version-consistency → DECIDED keep-strict** (option 2).
-  `apply --json` pitää `expected_version`:n **pakollisena** (deliberate exception:
-  multi-field patch = read-modify-write, altistunein lost-update:lle). Kirjattu
-  **D4a**:ksi `docs/design/web-edit-sync.md`:hen; issue suljettu `wontfix` (ei koodimuutosta).
-- **@standard-intake-flow (HIGH) → design APPROVED.** `docs/design/intake-flow.md`
-  → *"Approved decisions (2026-08-04)"* (authoritative). Päätökset: **reuse `type`**
-  (ei `kind`); skillit **`/issue-new`** (filing) + **`/issue-intake`** (processing,
-  korvaa `/triage-bugs`, ajaa `/worktree-bug-analysis`); **concurrency OUT** — OD-12
-  dropped, OD-2 lease-free, **ei concurrency-tietoa issueihin**; muut ODt = suositus A;
-  `deferred` pysyy `active`-luokassa.
+**⚠️ crates.io-caveat (ennallaan):** tag-push laukaisee cargo-dist (GitHub Release +
+Homebrew) mutta **crates.io-julkaisu vaatii manuaalisen triggerin** (`Publish to crates.io`
+workflow_dispatch) — `GITHUB_TOKEN` ei laukaise `publish-crates.yml`:ää. Tee se kun
+0.7.0-release-workflow on valmis. (Korjaus tähän odottaa `@wire-oss-release-as-release-path`ia.)
 
-**🚧 ISO KÄYNNISSÄ OLEVA — intake-toteutuksen `/orchestrate`-kampanja.**
-Run **`01kz6c65y5kns14ce2rwm7tbxx`** (`intake-flow-build`), omalla
-integraatiobranchillaan (**main koskematon** kunnes katselmoit + mergeät). Rakentaa
-4 riippuvuusjärjestettyä yksikköä approved-designia vasten: **schema → `intake`-komennot
-→ `/issue-new`+`/issue-intake`-skillit + `/triage-bugs` eläkkeelle → migraatio**.
-**SEURAAVA AGENTTI:** tarkista tila `orchestratectl run show 01kz6c65y5kns14ce2rwm7tbxx`
-(+ `run list` child-yksiköille). Kun valmis: katselmoi integraatiobranch ja mergeä
-mainiin. Kampanja voi filata **uusia child-issueita** (schema-foundation,
-intake-commands, …) — **merge ne DAG:iin seuraavassa `/stint-start`issa** (drift-check
-nostaa ne). Kampanja pausettaa (äänimerkki) vain kovaan forkkiin.
+**Dogfood NYT:** PATH:in `issuectl` on vielä Homebrew 0.6.6. Heti käyttöön joko
+`cargo install --path crates/issuectl` (rakentaa 0.7.0 lokaalisti nyt) tai `brew upgrade`
+kun Release-workflow valmistuu.
 
 **OSS-init (ennallaan):** `OSS-RELEASE.md` **approved** (`mvp`). cargo-dist pysyy
 release-engineinä — `/oss-release-cut` EI regeneroi `release.yml`:ää.
@@ -56,10 +44,9 @@ release-engineinä — `/oss-release-cut` EI regeneroi `release.yml`:ää.
 **Iso linjaus (ennallaan):** **kanban/web-board holdissa**. Kaikki kanban/web-issuet +
 build-only-if + `@focus-areas` `deferred` → **Adjacent backlog**. Fokus CLI:ssä.
 
-**Seuraava askel:** odota/katselmoi intake-kampanja (yllä). Kaikki muut lanet
-tyhjentyivät tässä rupeamassa (3 fixiä landasi, 2 päätöstä suljettu). GLOBAL
-HEAD-OF-LINE = **@standard-intake-flow** (in-campaign — kampanja omistaa, ei
-itsenäisesti spawnattavissa).
+**Seuraava askel:** aja crates.io-triggeri kun release-workflow valmis; muuten kaikki
+lanet tyhjenivät. GLOBAL HEAD-OF-LINE = **@intensely-blushing-galley** (low prio,
+closed_by → typed field; ei kiireä).
 
 ---
 
@@ -77,20 +64,16 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: standard-intake-flow   ← /orchestrate campaign (run 01kz6c65y5kns14ce2rwm7tbxx) is DEAD (never dispatched — see 2026-08-05 note); needs relaunch, then campaign owns it
-LANE A — main.rs (cmd_* handlers)
-  ▶ close-as-flag-asymmetry   low · improvement; `close` should accept `--as <author>` like `note` does. collision: main.rs (shared with LANE D campaign's integration branch — reconcile at campaign merge)
-LANE D — intake flow (schema.rs + main.rs + mutate/ + skill templates)
-  ▶ standard-intake-flow   HIGH · design APPROVED (docs/design/intake-flow.md); campaign run 01kz6c65y5kns14ce2rwm7tbxx never started (zombie supervisor) — must be relaunched
+GLOBAL HEAD-OF-LINE: intensely-blushing-galley   ← ainoa aktiivinen ei-deferred issue; low-prio nice-to-have
+LANE A — main.rs (show/close handlers) + schema/issue_fields
+  ▶ intensely-blushing-galley   low · improvement; promote closed_by → typed Issue field (top-level in show) + doctor heal + human close output. Follow-up llm-reviewsta close-as-flag-asymmetrylle.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: rupeaman kaikki 4 pientä CLI-yksikköä terminoituivat (3 fixiä landasi:
-`refs-issue-hint-false-fire`, `mutation-not-found-classification`, `new-body-flag`;
-`apply-json-expected-version-consistency` suljettu `wontfix` = päätetty keep-strict) →
-pudotettu DAG:sta. Jäljellä vain **LANE D `standard-intake-flow`**, jonka toteutus on nyt
-`/orchestrate`-kampanjassa (run `01kz6c65y5kns14ce2rwm7tbxx`) omalla integraatiobranchillaan.
-Kampanja voi filata child-issueita — seuraava `/stint-start` mergeää ne uusiksi laneiksi
+Kaari-lyhyesti: intake-kampanja + close-as-flag landasivat ja **shippasivat 0.7.0:ssa**;
+`standard-intake-flow` (done) ja `close-as-flag-asymmetry` (fixed) pudotettu DAG:sta.
+`particularly-tart-spade` suljettu `wontfix` (väärä hälytys — closed_by ON show --json:issa
+`.extra`:n alla). Jäljellä vain **`intensely-blushing-galley`** — matala prio, ei kiireä.
 (schema → intake-komennot → skillit → migraatio) drift-checkin nostamana.
 
 ---
