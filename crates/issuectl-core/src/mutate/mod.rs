@@ -1058,6 +1058,13 @@ fn update_issue_under_lock(
             }
         } else {
             write::remove_key(&mut item.frontmatter, "closed");
+            // Closer attribution is close-time provenance; on reopen it
+            // is stale, so drop it in lockstep with `closed:`. (Only the
+            // `close` verb ever sets `closed_by`, but clearing it here —
+            // on the shared active-edge — keeps the two fields consistent
+            // no matter which write path reopens the issue.)
+            write::remove_key(&mut item.frontmatter, "closed_by");
+            written.insert("closed_by".into());
             if prev_closing {
                 moved_to_open = true;
             }
@@ -1374,6 +1381,7 @@ pub fn close_issue(
     root: &Path,
     slug: &str,
     status_override: Option<String>,
+    closed_by: Option<String>,
     commits: Vec<CommitSpec>,
     expected_version: Option<String>,
     hub: Option<&Arc<EventHub>>,
@@ -1383,6 +1391,16 @@ pub fn close_issue(
         return Err(MutateError::Validation(format!(
             "invalid slug shape: {slug:?}"
         )));
+    }
+    // `--as` is optional on `close` (unlike `note`, where it is
+    // required), but when present it must satisfy the same author
+    // grammar `note` uses so the closer attribution is a well-formed,
+    // hash-stable token in the same vocabulary. Recorded as the
+    // `closed_by:` frontmatter field alongside the auto-stamped
+    // `closed:` date — see the status branch in `update_issue_under_lock`.
+    if let Some(author) = &closed_by {
+        crate::body_sections::validate_author(author)
+            .map_err(|e| MutateError::Validation(e.to_string()))?;
     }
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
@@ -1425,12 +1443,21 @@ pub fn close_issue(
         }
     });
 
-    let req = UpdateIssueRequest {
+    let mut req = UpdateIssueRequest {
         expected_version,
         status: Patch::Set(resolved_status),
         add_commits: commits,
         ..Default::default()
     };
+    // Attribute the closer as the `closed_by:` custom field. It rides
+    // the same under-lock write as the status flip, surfaces in
+    // `show --json` via `Issue::extra`, and is folded into the version
+    // hash. The reopen (closing→active) edge clears it alongside
+    // `closed:` so a reopened issue never carries a stale closer.
+    if let Some(author) = closed_by {
+        req.custom_fields
+            .insert("closed_by".into(), Patch::Set(author));
+    }
     // _lock drops at end-of-scope after the locked update path returns.
     // We call the under-lock helper directly so we don't double-acquire
     // (fs2 advisory flock is per-fd; nested `WriteLock::acquire` would
@@ -5004,6 +5031,7 @@ mod tests {
             tmp.path(),
             "close-publish-flock",
             None,
+            None,
             Vec::new(),
             Some(v0),
             Some(&hub),
@@ -5012,6 +5040,121 @@ mod tests {
         .unwrap();
 
         assert_probe_saw_held(&observed, "close_issue");
+    }
+
+    #[test]
+    fn close_with_as_records_closer_in_frontmatter() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "close-attributed", "open");
+
+        close_issue(
+            tmp.path(),
+            "close-attributed",
+            Some("wontfix".into()),
+            Some("jari".into()),
+            Vec::new(),
+            None,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
+
+        let after = fs::read_to_string(tmp.path().join("issues/close-attributed/item.md")).unwrap();
+        assert!(after.contains("status: wontfix"), "{after}");
+        assert!(after.contains("closed_by: jari"), "{after}");
+        // The closer surfaces as first-class JSON via `Issue::extra`.
+        let parsed = crate::parser::parse_item_md_with_warnings(
+            &tmp.path().join("issues/close-attributed/item.md"),
+            "close-attributed",
+            "open",
+        );
+        assert_eq!(
+            parsed.issue.extra.get("closed_by").and_then(|v| v.as_str()),
+            Some("jari")
+        );
+    }
+
+    #[test]
+    fn close_without_as_writes_no_closed_by() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "close-anon", "open");
+
+        close_issue(
+            tmp.path(),
+            "close-anon",
+            Some("done".into()),
+            None,
+            Vec::new(),
+            None,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
+
+        let after = fs::read_to_string(tmp.path().join("issues/close-anon/item.md")).unwrap();
+        assert!(after.contains("status: done"), "{after}");
+        assert!(!after.contains("closed_by"), "{after}");
+    }
+
+    #[test]
+    fn close_rejects_malformed_as_author() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "close-bad-author", "open");
+
+        let err = close_issue(
+            tmp.path(),
+            "close-bad-author",
+            Some("wontfix".into()),
+            Some("has space".into()),
+            Vec::new(),
+            None,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap_err();
+        assert!(matches!(err, MutateError::Validation(_)), "{err:?}");
+        // Validation fires before any write — the issue stays open.
+        let after = fs::read_to_string(tmp.path().join("issues/close-bad-author/item.md")).unwrap();
+        assert!(after.contains("status: open"), "{after}");
+    }
+
+    #[test]
+    fn reopen_clears_closer_attribution() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "reopen-clears-closer", "open");
+
+        close_issue(
+            tmp.path(),
+            "reopen-clears-closer",
+            Some("wontfix".into()),
+            Some("jari".into()),
+            Vec::new(),
+            None,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
+
+        // Reopen through the general update path; `closed_by` must drop
+        // in lockstep with `closed:` so a reopened issue carries neither.
+        let req = UpdateIssueRequest {
+            status: Patch::Set("open".into()),
+            ..Default::default()
+        };
+        update_issue(
+            tmp.path(),
+            "reopen-clears-closer",
+            req,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
+
+        let after =
+            fs::read_to_string(tmp.path().join("issues/reopen-clears-closer/item.md")).unwrap();
+        assert!(after.contains("status: open"), "{after}");
+        assert!(!after.contains("closed_by"), "{after}");
+        assert!(!after.contains("closed:"), "{after}");
     }
 
     #[test]

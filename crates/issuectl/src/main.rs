@@ -604,6 +604,13 @@ enum Command {
         #[arg(short = 's', long, value_parser = parse_non_empty)]
         status: Option<String>,
 
+        /// Optional closer attribution, recorded as the `closed_by:`
+        /// frontmatter field (e.g. `alice` or `agent-name`). Same author
+        /// grammar as `note --as`, but optional here — omit it to close
+        /// without recording who made the call.
+        #[arg(long = "as", value_parser = parse_non_empty)]
+        author: Option<String>,
+
         /// Record a commit, format HASH:summary (repeatable)
         #[arg(long = "commit", value_parser = parse_non_empty)]
         commits: Vec<String>,
@@ -1965,9 +1972,17 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
         Command::Close {
             slug,
             status,
+            author,
             commits,
             expected_version,
-        } => cmd_close(json_output, &slug, status, commits, expected_version),
+        } => cmd_close(
+            json_output,
+            &slug,
+            status,
+            author,
+            commits,
+            expected_version,
+        ),
         Command::Rename {
             old_slug,
             new_slug,
@@ -3619,18 +3634,23 @@ fn cmd_close(
     json: bool,
     slug: &str,
     status: Option<String>,
+    author: Option<String>,
     commits: Vec<String>,
     expected_version: Option<String>,
 ) -> Result<()> {
     let root = find_root();
-    let out = do_close(&root, slug, status, commits, expected_version)?;
+    let closed_by = author.clone();
+    let out = do_close(&root, slug, status, author, commits, expected_version)?;
     if json {
-        let report = serde_json::json!({
+        let mut report = serde_json::json!({
             "slug": slug,
             "dir": out.final_dir.to_string_lossy(),
             "moved_to_closed": out.moved_to_closed,
             "version": out.version,
         });
+        if let Some(by) = closed_by {
+            report["closed_by"] = serde_json::Value::String(by);
+        }
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
@@ -3646,6 +3666,7 @@ pub(crate) fn do_close(
     root: &Path,
     slug: &str,
     status: Option<String>,
+    author: Option<String>,
     commits: Vec<String>,
     expected_version: Option<String>,
 ) -> Result<UpdateOutcome> {
@@ -3664,6 +3685,7 @@ pub(crate) fn do_close(
         root,
         slug,
         status,
+        author,
         commit_specs,
         expected_version,
         None,
@@ -5769,7 +5791,7 @@ mod tests {
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
         let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
-        let outcome = do_close(tmp.path(), &n.slug, None, vec![], None).unwrap();
+        let outcome = do_close(tmp.path(), &n.slug, None, None, vec![], None).unwrap();
         assert!(outcome.moved_to_closed);
         let content = read(&outcome.final_dir.join("item.md"));
         assert!(content.contains("status: fixed"));
@@ -5783,7 +5805,7 @@ mod tests {
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
         let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
-        let outcome = do_close(tmp.path(), &n.slug, None, vec![], None).unwrap();
+        let outcome = do_close(tmp.path(), &n.slug, None, None, vec![], None).unwrap();
         let content = read(&outcome.final_dir.join("item.md"));
         assert!(content.contains("status: done"));
     }
@@ -5796,8 +5818,8 @@ mod tests {
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
         let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
-        do_close(tmp.path(), &n.slug, None, vec![], None).unwrap();
-        assert!(do_close(tmp.path(), &n.slug, None, vec![], None).is_err());
+        do_close(tmp.path(), &n.slug, None, None, vec![], None).unwrap();
+        assert!(do_close(tmp.path(), &n.slug, None, None, vec![], None).is_err());
     }
 
     #[test]

@@ -163,15 +163,18 @@ The CLI does both atomically — never `git mv` by hand.
 
 - `issuectl --json close <slug>` — defaults to `fixed` for bugs, `done` otherwise
 - `issuectl --json close <slug> --status wontfix` — explicit closing status
+- `issuectl --json close <slug> --as <user>` — record the closer as the `closed_by:` frontmatter field (optional; same author grammar as `note --as`)
 - `issuectl --json close <slug> --commit HASH:summary` — also record a commit (repeatable)
 
-Output shape:
+Output shape (`closed_by` present only when `--as` is passed):
 
 ```json
 { "slug": "extremely-quiet-otter",
   "dir": "/abs/path/issues/closed/extremely-quiet-otter",
-  "moved_to_closed": true, "version": "sha256:..." }
+  "moved_to_closed": true, "version": "sha256:...", "closed_by": "jari" }
 ```
+
+Reopening (`update --status <active>`) clears `closed_by` alongside `closed:`.
 
 **Closing statuses** (any of these triggers move to `closed/`):
 
@@ -184,7 +187,7 @@ Output shape:
 
 **Steps**:
 1. Determine the appropriate closing status from the user's message
-2. Run `issuectl --json close <slug> [--status X] [--commit HASH:summary]`
+2. Run `issuectl --json close <slug> [--status X] [--as <user>] [--commit HASH:summary]`
 3. **If closing an epic**: update the `## Issues` list in the epic's item.md with final statuses of all child issues (the CLI does not edit body markdown)
 4. **If the issue belongs to an epic** (has `epic:` in frontmatter): update the parent epic's `## Issues` list to reflect the closed status
 5. Confirm to user with the slug, title, closing status, and new location
