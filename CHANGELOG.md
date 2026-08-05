@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-05
+
+### Added
+- **Standard intake flow for bugs and feature-requests.** A first-class
+  `issuectl intake` command group replaces the ad-hoc, label-encoded
+  Telegram bug path. Filing side: `intake file` (guarded surface, idempotent
+  on `(provenance, source_ref)`) and `intake withdraw`. Processing side:
+  `intake queue` / `intake show`, and the disposition verbs `accept`,
+  `defer`, `need-info`, `reject`, `cannot-reproduce`, `duplicate`,
+  `obsolete`, `retype`, `reopen` — each a first-class domain mutation that
+  validates its source state (intrinsic invariants that hold with or without
+  `transitions.yaml`). New statuses `untriaged`, `deferred`, `needs-info`
+  (all `active` class); new fields `provenance` (repo-configurable value
+  set), `disposition_reason`, `duplicate_of`, `source_ref`, `deferred_until`.
+  A complete default intake transition matrix plus a code-level type×status
+  compatibility check (a bug completes as `fixed`, non-bug work as `done`).
+  New `--json` error codes: `transition-illegal`, `duplicate-source-ref`,
+  `protected-field`. (issue: `@standard-intake-flow`)
+- **`issuectl intake migrate`** — a dedicated, dry-run-first, idempotent,
+  per-issue-atomic pass that migrates legacy `needs-triage` / `deferred` /
+  `via:telegram` label-encoded state onto the new statuses/fields, refusing
+  ambiguity rather than guessing and never regressing closed or in-flight
+  items. `intake queue` surfaces recognised legacy items (`legacy: true`)
+  until migration completes. (issue: `@standard-intake-flow`)
+- **`/issue-new` and `/issue-intake` skills.** `/issue-new` files a report
+  with one validated CLI call; `/issue-intake` works the queue (drives
+  `/worktree-bug-analysis` as its read-only analysis engine) and **replaces
+  `/triage-bugs`**, which becomes a thin deprecating alias. (issue:
+  `@standard-intake-flow`)
+- `issuectl close` accepts an optional `--as <author>`, recording the closer
+  as a first-class managed `closed_by` field — mirroring how `note`
+  attributes an author, so lifecycle transitions can carry attribution.
+  (issue: `@close-as-flag-asymmetry`)
+- `issuectl new --body-file <path>` (with `-` for stdin) sets the initial
+  body. (issue: `@new-body-flag`)
+
+### Fixed
+- Write verbs (`update` / `close` / `set` / `note` / `check` / `label` /
+  `depend` / `body set`) now return a stable `error.code: "not-found"` in
+  their `--json` envelope on a missing slug, instead of the generic
+  `command-failed`, matching the read paths. (issue:
+  `@mutation-not-found-classification`)
+- The Refs-Issue reminder moved from the pre-commit hook to the commit-msg
+  hook, so it reads the final message via `git interpret-trailers` and no
+  longer false-fires on `-F` / stdin commits. (issue:
+  `@refs-issue-hint-false-fire`)
+
 ## [0.6.6] - 2026-08-04
 
 ### Added
