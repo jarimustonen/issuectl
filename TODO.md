@@ -13,8 +13,10 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-05):** `main` == **v0.7.0** (RELEASED — tag pushattu, cargo-dist +
-CI-workflowt ajossa). Työpuu puhdas, integraatiobranch mergetty + siivottu.
+**Tila (2026-08-05):** `main` == **v0.7.0** — TÄYSIN JULKAISTU: GitHub Release live,
+Homebrew-tap päivitetty, **crates.io `0.7.0` indeksissä** (varmistettu), CI vihreä. Työpuu
+puhdas, integraatiobranch mergetty + siivottu. (Huom: rinnakkaissessio filasi `close-comment`in
+mainiin tämän rupeaman jälkeen — mergetty DAG:iin alle.)
 
 **0.7.0:ssa shipannut (CHANGELOG täydellinen):**
 - **@standard-intake-flow (HIGH)** — koko `issuectl intake`-komentoryhmä (file/queue/
@@ -29,14 +31,15 @@ CI-workflowt ajossa). Työpuu puhdas, integraatiobranch mergetty + siivottu.
   `.extra`:ssa). + edellisen rupeaman 3 fixiä (refs-issue-hint, mutation-not-found,
   new-body-flag) jotka odottivat releasea.
 
-**⚠️ crates.io-caveat (ennallaan):** tag-push laukaisee cargo-dist (GitHub Release +
-Homebrew) mutta **crates.io-julkaisu vaatii manuaalisen triggerin** (`Publish to crates.io`
-workflow_dispatch) — `GITHUB_TOKEN` ei laukaise `publish-crates.yml`:ää. Tee se kun
-0.7.0-release-workflow on valmis. (Korjaus tähän odottaa `@wire-oss-release-as-release-path`ia.)
+**⚠️ crates.io-caveat (ennallaan, muista JOKA release):** tag-push laukaisee cargo-dist
+(GitHub Release + Homebrew) mutta **crates.io-julkaisu vaatii manuaalisen triggerin**
+(`gh workflow run "Publish to crates.io"`) — `GITHUB_TOKEN` ei laukaise `publish-crates.yml`:ää.
+0.7.0:ssa se ajettiin käsin ja onnistui. (Korjaus odottaa `@wire-oss-release-as-release-path`ia.)
 
-**Dogfood NYT:** PATH:in `issuectl` on vielä Homebrew 0.6.6. Heti käyttöön joko
-`cargo install --path crates/issuectl` (rakentaa 0.7.0 lokaalisti nyt) tai `brew upgrade`
-kun Release-workflow valmistuu.
+**Dogfood:** Käyttäjä dogfoodaa 0.7.0:aa omissa projekteissaan. Asennus: `cargo install issuectl`
+(crates.io), `brew upgrade jarimustonen/issuectl/issuectl`, tai `cargo install --path crates/issuectl`.
+Uudet skillit `/issue-new` + `/issue-intake` asennettuina; bugit/feature-pyynnöt sisään
+`issuectl intake file`lla, `/issue-intake` (tai `/stint-start`) nostaa jonon seuraavan kerran.
 
 **OSS-init (ennallaan):** `OSS-RELEASE.md` **approved** (`mvp`). cargo-dist pysyy
 release-engineinä — `/oss-release-cut` EI regeneroi `release.yml`:ää.
@@ -44,9 +47,11 @@ release-engineinä — `/oss-release-cut` EI regeneroi `release.yml`:ää.
 **Iso linjaus (ennallaan):** **kanban/web-board holdissa**. Kaikki kanban/web-issuet +
 build-only-if + `@focus-areas` `deferred` → **Adjacent backlog**. Fokus CLI:ssä.
 
-**Seuraava askel:** aja crates.io-triggeri kun release-workflow valmis; muuten kaikki
-lanet tyhjenivät. GLOBAL HEAD-OF-LINE = **@intensely-blushing-galley** (low prio,
-closed_by → typed field; ei kiireä).
+**Seuraava askel:** 0.7.0 ulkona ja dogfoodissa — odota käyttäjän palautetta
+dogfoodauksesta. DAG:issa vain 2 low-prio LANE A -riviä (molemmat `close`-polkua):
+**@intensely-blushing-galley** (closed_by → typed field) ja **@close-comment**
+(`close --comment`). GLOBAL HEAD-OF-LINE = **@intensely-blushing-galley**. Ei kiireä
+kumpikaan; feedback-issuet menevät edelle jos niitä tulee.
 
 ---
 
@@ -64,17 +69,18 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: intensely-blushing-galley   ← ainoa aktiivinen ei-deferred issue; low-prio nice-to-have
-LANE A — main.rs (show/close handlers) + schema/issue_fields
+GLOBAL HEAD-OF-LINE: intensely-blushing-galley   ← molemmat LANE A -riviä ovat low-prio nice-to-have; ei kiireä
+LANE A — main.rs (show/close handlers) + mutate/ close path + schema/issue_fields  (sequenced — molemmat koskevat cmd_close/close_issue)
   ▶ intensely-blushing-galley   low · improvement; promote closed_by → typed Issue field (top-level in show) + doctor heal + human close output. Follow-up llm-reviewsta close-as-flag-asymmetrylle.
+    close-comment                low · feature; `close` hyväksyy `--comment/--note` → kirjaa sulkemisen perustelun samassa stepissä (nyt manuaalinen 2-vaihe). Filattu rinnakkaissessiosta.
 ```
 <!-- execution-dag:end -->
 
 Kaari-lyhyesti: intake-kampanja + close-as-flag landasivat ja **shippasivat 0.7.0:ssa**;
 `standard-intake-flow` (done) ja `close-as-flag-asymmetry` (fixed) pudotettu DAG:sta.
 `particularly-tart-spade` suljettu `wontfix` (väärä hälytys — closed_by ON show --json:issa
-`.extra`:n alla). Jäljellä vain **`intensely-blushing-galley`** — matala prio, ei kiireä.
-(schema → intake-komennot → skillit → migraatio) drift-checkin nostamana.
+`.extra`:n alla). Jäljellä 2 low-prio LANE A -riviä: **`intensely-blushing-galley`** +
+**`close-comment`** (rinnakkaissessiosta, drift-checkin nostama). Ei kiireä kumpikaan.
 
 ---
 
