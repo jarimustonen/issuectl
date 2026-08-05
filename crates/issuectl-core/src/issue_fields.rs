@@ -14,7 +14,19 @@ pub const ISSUE_TYPES: &[&str] = &["bug", "task", "feature", "improvement", "cho
 /// validators both derive their accepted set from it. Order is presentation
 /// only — no priority-based ranking/sorting is implied.
 pub const PRIORITIES: &[&str] = &["low", "normal", "high"];
-pub const ACTIVE_STATUSES: &[&str] = &["open", "in-progress", "testing"];
+/// Active-class statuses. `untriaged` (reception queue), `deferred`
+/// (parked but still active — the binary has no separate "parked"
+/// class, per the intake-flow design), and `needs-info` (awaiting
+/// reporter input) are the intake-flow additions; they classify as
+/// active because they are not closing (see `is_closing_status`).
+pub const ACTIVE_STATUSES: &[&str] = &[
+    "open",
+    "in-progress",
+    "testing",
+    "untriaged",
+    "deferred",
+    "needs-info",
+];
 pub const CLOSING_STATUSES: &[&str] = &[
     "done",
     "fixed",
@@ -30,6 +42,9 @@ pub const ALL_STATUSES: &[&str] = &[
     "open",
     "in-progress",
     "testing",
+    "untriaged",
+    "deferred",
+    "needs-info",
     "done",
     "fixed",
     "wontfix",

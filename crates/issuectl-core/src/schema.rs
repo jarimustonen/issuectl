@@ -203,6 +203,12 @@ fields:
       - open
       - in-progress
       - testing
+      # Intake-flow reception/holding states. All active-class: the
+      # binary has only `active | closing`, and the design keeps
+      # `deferred` active rather than adding a `parked` class.
+      - untriaged
+      - deferred
+      - needs-info
       - done
       - fixed
       - wontfix
@@ -261,14 +267,58 @@ fields:
       status_class: closing
   slug:
     required: false
+  # --- Intake-flow fields -------------------------------------------
+  # NOTE: the v1 schema validates each field in isolation — it cannot
+  # express cross-field invariants. So these declarations do NOT enforce
+  # that `deferred_until`/`duplicate_of`/`disposition_reason` line up
+  # with `status` (e.g. `duplicate_of` only on a `duplicate` item,
+  # `disposition_reason` only on a closing status, `deferred_until` only
+  # while `deferred`), nor date/slug *formats* (dates ride as strings,
+  # exactly like `closed:`). Those invariants are the intake mutation
+  # commands' job in a later unit; this unit only declares the fields
+  # exist and constrains the one closed enum (`disposition_reason`).
+  #
+  # Where the report came from. First-class field (distinct from the
+  # body `--source` line). The accepted value set is CONFIGURABLE PER
+  # REPO: no `enum:` ships by default, so any source string is accepted
+  # until a repo narrows it — declare an `enum:` here (e.g.
+  # `[telegram, email, github, other]`) to constrain and validate it.
+  # Pair with `provenance_detail` free text for the open-ended `other`
+  # case.
+  provenance:
+    required: false
+  provenance_detail:
+    required: false
+  # Structured reason for a closing disposition, so "by-design rate"
+  # vs "resource starvation" is queryable rather than buried in prose.
+  # Extend the enum per repo as new reasons appear; pair with the
+  # free-text `disposition_note` for specifics.
+  disposition_reason:
+    required: false
+    enum: [by-design, out-of-scope, wontfix, withdrawn, superseded]
+  disposition_note:
+    required: false
+  # Directed link to the canonical item for a `duplicate` disposition
+  # (a slug reference).
+  duplicate_of:
+    required: false
+  # External identity of the source report (e.g. `chat:123/message:456`),
+  # the idempotency key for filing.
+  source_ref:
+    required: false
+  # Wake-up date for a `deferred` item so parked work is not a
+  # graveyard. Stored as a string date, like `closed:`.
+  deferred_until:
+    required: false
   # `commits` is intentionally not declared: it is a list of mapping
   # entries (`{hash, summary}`), which the v1 schema's scalar/list-of-
   # string model cannot describe. Unknown fields are allowed, so it
   # passes validation either way.
 
 # Lifecycle classification for status values. Built-in statuses
-# (`open`, `in-progress`, `testing` → active; `done`, `fixed`, `wontfix`,
-# `duplicate`, `cannot-reproduce`, `obsolete` → closing) are classified
+# (`open`, `in-progress`, `testing`, `untriaged`, `deferred`,
+# `needs-info` → active; `done`, `fixed`, `wontfix`, `duplicate`,
+# `cannot-reproduce`, `obsolete` → closing) are classified
 # automatically. Add a status's class here to extend the taxonomy with
 # a custom status (e.g. `archived`), or to *override* a built-in
 # (e.g. `done: active` if your workflow treats `done` as in-progress).
@@ -960,6 +1010,216 @@ mod tests {
             enum_of("type").as_slice(),
             crate::issue_fields::ISSUE_TYPES,
             "DEFAULT_SCHEMA_YAML type enum drifted from ISSUE_TYPES"
+        );
+        // Same guard for `status`: the hand-written YAML enum must stay
+        // in lockstep (values AND order) with `ALL_STATUSES`, the code
+        // source of truth the fallback/universe helpers derive from.
+        assert_eq!(
+            enum_of("status").as_slice(),
+            crate::issue_fields::ALL_STATUSES,
+            "DEFAULT_SCHEMA_YAML status enum drifted from ALL_STATUSES"
+        );
+    }
+
+    #[test]
+    fn intake_statuses_present_and_classify_active() {
+        // The three intake-flow statuses parse into the default schema's
+        // `status` enum and classify as active (the design keeps
+        // `deferred` active — there is no `parked` class).
+        let s = default_schema();
+        let status_enum = s.fields["status"].allowed.as_ref().unwrap();
+        for st in ["untriaged", "deferred", "needs-info"] {
+            assert!(
+                status_enum.iter().any(|v| v == st),
+                "status enum should contain {st:?}"
+            );
+            // Assert the *path*, not just the outcome: the status must be
+            // an explicit `ACTIVE_STATUSES` member and not classify as
+            // closing, so a regression that dropped it from the const
+            // array (leaving `status_class` to default to Active) is
+            // caught rather than masked.
+            assert!(
+                crate::issue_fields::ACTIVE_STATUSES.contains(&st),
+                "{st:?} must be an explicit ACTIVE_STATUSES member"
+            );
+            assert_eq!(
+                status_class(&s, st),
+                StatusClass::Active,
+                "{st:?} should classify as active"
+            );
+            assert!(!is_closing(&s, st), "{st:?} must not be closing");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_status_outside_default_enum() {
+        // A status not in the default enum (e.g. the `parked` class the
+        // design deliberately did NOT add) is rejected.
+        let schema = default_schema();
+        let fm: Mapping =
+            serde_yaml::from_str("type: bug\nstatus: parked\npriority: normal\n").unwrap();
+        assert!(
+            validate(&schema, &fm).iter().any(
+                |x| matches!(x, ViolationKind::InvalidEnum { field, .. } if field == "status")
+            ),
+            "an out-of-enum status must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_intake_statuses() {
+        let schema = default_schema();
+        for st in ["untriaged", "deferred", "needs-info"] {
+            let fm: Mapping =
+                serde_yaml::from_str(&format!("type: bug\nstatus: {st}\npriority: normal\n"))
+                    .unwrap();
+            let v = validate(&schema, &fm);
+            assert!(v.is_empty(), "status {st:?} should validate, got {v:?}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_intake_fields_in_coherent_combinations() {
+        // Each new field is exercised in a *semantically coherent* state
+        // rather than one contradictory fixture: v1 schema has no
+        // cross-field validation (see the `// Cross-field invariants`
+        // note beside the field declarations in DEFAULT_SCHEMA_YAML), so
+        // a single all-fields-at-once fixture would silently bless an
+        // impossible combination and make a later validation tightening
+        // look like a regression.
+        let schema = default_schema();
+
+        // Reception item with provenance + free-text detail.
+        let untriaged = "type: bug\nstatus: untriaged\npriority: normal\n\
+             provenance: telegram\nprovenance_detail: \"chat #ops\"\n\
+             source_ref: \"chat:123/message:456\"\n";
+        // Parked item with a wake-up date.
+        let deferred =
+            "type: feature\nstatus: deferred\npriority: low\ndeferred_until: 2026-12-01\n";
+        // Closed-as-duplicate item with a directed pointer.
+        let duplicate = "type: bug\nstatus: duplicate\npriority: normal\n\
+             closed: 2026-05-06\nduplicate_of: some-other-slug\n";
+        // Closed-as-wontfix item with a structured reason + note.
+        let wontfix = "type: bug\nstatus: wontfix\npriority: normal\n\
+             closed: 2026-05-06\ndisposition_reason: by-design\n\
+             disposition_note: \"working as intended\"\n";
+
+        for (label, fm) in [
+            ("untriaged", untriaged),
+            ("deferred", deferred),
+            ("duplicate", duplicate),
+            ("wontfix", wontfix),
+        ] {
+            let fm: Mapping = serde_yaml::from_str(fm).unwrap();
+            let v = validate(&schema, &fm);
+            assert!(
+                v.is_empty(),
+                "{label} intake fields should validate, got {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn disposition_reason_enum_is_enforced() {
+        let schema = default_schema();
+        let ok: Mapping = serde_yaml::from_str(
+            "type: bug\nstatus: wontfix\npriority: normal\nclosed: 2026-05-06\ndisposition_reason: by-design\n",
+        )
+        .unwrap();
+        assert!(
+            !validate(&schema, &ok)
+                .iter()
+                .any(|x| matches!(x, ViolationKind::InvalidEnum { field, .. } if field == "disposition_reason")),
+            "an in-enum disposition_reason must be accepted"
+        );
+        let bad: Mapping = serde_yaml::from_str(
+            "type: bug\nstatus: wontfix\npriority: normal\nclosed: 2026-05-06\ndisposition_reason: because-i-said-so\n",
+        )
+        .unwrap();
+        assert!(
+            validate(&schema, &bad)
+                .iter()
+                .any(|x| matches!(x, ViolationKind::InvalidEnum { field, .. } if field == "disposition_reason")),
+            "an out-of-enum disposition_reason must be rejected"
+        );
+    }
+
+    #[test]
+    fn provenance_is_open_by_default() {
+        // The default schema ships no `provenance` enum — the value set
+        // is configurable per repo, so any source string passes until a
+        // repo narrows it.
+        let schema = default_schema();
+        assert!(
+            schema
+                .fields
+                .get("provenance")
+                .expect("provenance field must exist in the default schema")
+                .allowed
+                .is_none(),
+            "default provenance must not ship a closed enum"
+        );
+        let fm: Mapping = serde_yaml::from_str(
+            "type: bug\nstatus: untriaged\npriority: normal\nprovenance: some-brand-new-source\n",
+        )
+        .unwrap();
+        assert!(
+            validate(&schema, &fm).is_empty(),
+            "any provenance value must pass while the field is unconstrained"
+        );
+    }
+
+    #[test]
+    fn provenance_value_set_is_configurable_per_repo() {
+        // A repo declares its own provenance value set; a declared value
+        // is accepted, an undeclared one is rejected with a helpful
+        // error that lists the accepted values.
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  provenance:\n    enum: [telegram, email, other]\n",
+        )
+        .unwrap();
+        let schema = load(tmp.path()).unwrap();
+
+        // The repo's enum must *replace* the default's absence (merge
+        // direction: repo wins, not union) — the whole point of a
+        // configurable value set.
+        assert_eq!(
+            schema
+                .fields
+                .get("provenance")
+                .and_then(|s| s.allowed.as_deref()),
+            Some(["telegram", "email", "other"].map(String::from).as_slice()),
+            "repo-declared provenance enum must override the open default"
+        );
+
+        let ok: Mapping = serde_yaml::from_str(
+            "type: bug\nstatus: untriaged\npriority: normal\nprovenance: telegram\n",
+        )
+        .unwrap();
+        assert!(
+            validate(&schema, &ok).is_empty(),
+            "a repo-declared provenance value must be accepted"
+        );
+
+        let bad: Mapping = serde_yaml::from_str(
+            "type: bug\nstatus: untriaged\npriority: normal\nprovenance: carrier-pigeon\n",
+        )
+        .unwrap();
+        let violations = validate(&schema, &bad);
+        let hit = violations.iter().find_map(|x| match x {
+            ViolationKind::InvalidEnum { field, .. } if field == "provenance" => Some(x),
+            _ => None,
+        });
+        let hit = hit.expect("undeclared provenance value must be rejected");
+        let msg = hit.message();
+        assert!(
+            msg.contains("provenance")
+                && msg.contains("telegram")
+                && msg.contains("carrier-pigeon"),
+            "error must name the field, the bad value, and the accepted set; got {msg:?}"
         );
     }
 
