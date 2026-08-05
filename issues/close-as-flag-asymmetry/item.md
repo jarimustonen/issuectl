@@ -2,11 +2,15 @@
 created: 2026-08-04
 updated: 2026-08-05
 type: improvement
-status: in-progress
+status: fixed
 priority: low
 commits:
 - hash: 4748dc8
   summary: 'feat(close): optional --as records closed_by; reopen clears it'
+- hash: 23d28bb
+  summary: 'refactor: closed_by first-class managed field per llm-review'
+closed: 2026-08-05
+closed_by: jari
 ---
 
 # `--as <author>` accepted by `note` but rejected by `close` (verb inconsistency)
