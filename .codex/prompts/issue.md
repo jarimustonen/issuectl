@@ -486,8 +486,9 @@ issuectl intake file --type bug --title "Login loops on Safari" \
 - **Idempotent on `(provenance, source-ref)`**: a retry returns the existing item
   with `"deduplicated": true` (exit 0) instead of creating a second issue.
 - Output: `{ "slug", "status": "untriaged", "dir", "version", "deduplicated" }`.
-- `issuectl intake withdraw <slug> --reason "…"` lets a reporter retract their own
-  untriaged report (`→ wontfix`).
+- `issuectl intake withdraw <slug> --reason "…"` retracts an untriaged report
+  (`→ wontfix` with `disposition_reason: withdrawn`) — by convention the reporter
+  uses it; the CLI does not enforce reporter identity.
 
 The `/issue-new` skill wraps this filing path faithfully (verbatim capture +
 `issuectl attach` for screenshots).
@@ -511,7 +512,7 @@ adds `attachments` (names) and `analysis` (the section text, or `null`).
 #### Dispositions (developer / PM — each a first-class transition)
 
 ```
-issuectl intake accept    <slug> [--assignee <who>] [--priority …]   --json  # → open
+issuectl intake accept    <slug> [--assignee <who>] [--priority low|normal|high] --json  # → open
 issuectl intake defer     <slug> --reason "…" [--until <date>]       --json  # → deferred
 issuectl intake need-info <slug> --reason "…"                        --json  # → needs-info
 issuectl intake reject    <slug> --reason "…" [--kind by-design|wontfix|out-of-scope] --json  # → wontfix + disposition_reason
@@ -525,6 +526,9 @@ issuectl intake reopen    <slug> [--to untriaged|open] --reason "…"  --json  #
 - `--reason` is **required** on `defer`, `need-info`, `reject`, `cannot-reproduce`,
   `obsolete`, `reopen`, `withdraw` — the *why* is captured structurally, not left
   in prose.
+- `reject --kind` **defaults to `wontfix`** when omitted; pass `by-design` /
+  `out-of-scope` explicitly for those. `reopen --to` defaults to `untriaged` when
+  omitted. `cannot-reproduce` is bug-only.
 - Each transition validates the source state intrinsically (you cannot `accept` a
   closed item, etc.) and returns `{ "slug", "status", "dir", "version" }`. Stable
   error codes include `transition-illegal`, `duplicate-source-ref`,

@@ -377,6 +377,71 @@ mod tests {
             "triage-bugs must stay a thin alias (is {} bytes)",
             triage.len()
         );
+
+        // Contract guard: the exact `intake` subcommand spellings the docs
+        // hand to a downstream agent must not silently drift from the CLI. A
+        // wrong spelling (`needs-info` instead of the `need-info` command, or
+        // `--source_ref` instead of `--source-ref`) would make the agent's
+        // command fail. Cross-check the load-bearing spellings against the
+        // dogfooded `/issue` reference skill (which mirrors the CLI surface).
+        let issue_ref = read("issue"); // .claude/skills/issue/SKILL.md
+
+        // Every intake verb the reference documents, spelled as the CLI expects.
+        for cmd in [
+            "file",
+            "queue",
+            "show",
+            "accept",
+            "defer",
+            "need-info",
+            "reject",
+            "cannot-reproduce",
+            "duplicate",
+            "obsolete",
+            "retype",
+            "reopen",
+            "withdraw",
+        ] {
+            let pattern = format!("intake {cmd}");
+            assert!(
+                issue_ref.contains(&pattern),
+                "/issue reference skill must document `issuectl {pattern}`"
+            );
+        }
+
+        // The command is `need-info`; the *status* is `needs-info`. The wrong
+        // command form (`intake needs-info`) must never appear — it is the most
+        // likely spelling slip and it would fail at the CLI.
+        for skill in [&issue_intake, &issue_ref, &issue_new] {
+            assert!(
+                !skill.contains("intake needs-info"),
+                "the intake command is `need-info`, not `needs-info`"
+            );
+        }
+
+        // Flag spelling: kebab-case, not snake_case.
+        assert!(
+            issue_new.contains("--source-ref") && !issue_new.contains("--source_ref"),
+            "issue-new must document `--source-ref` (kebab-case)"
+        );
+
+        // The intake statuses and the closed `disposition_reason` enum must
+        // stay listed in the reference so `-s/--status` filtering and reason
+        // vocabulary don't drift from the schema.
+        for token in [
+            "untriaged",
+            "needs-info",
+            "deferred",
+            "by-design",
+            "out-of-scope",
+            "withdrawn",
+            "superseded",
+        ] {
+            assert!(
+                issue_ref.contains(token),
+                "/issue reference skill must document intake token `{token}`"
+            );
+        }
     }
 
     #[test]
