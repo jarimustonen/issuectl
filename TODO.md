@@ -63,7 +63,7 @@ itsenäisesti spawnattavissa).
 
 ---
 
-## Execution DAG (2026-08-04)
+## Execution DAG (2026-08-05)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge each round (drop landed, add active, keep existing order).
@@ -77,9 +77,11 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: standard-intake-flow   ← in-flight /orchestrate campaign (run 01kz6c65y5kns14ce2rwm7tbxx); NOT independently spawnable — campaign owns it
+GLOBAL HEAD-OF-LINE: standard-intake-flow   ← /orchestrate campaign (run 01kz6c65y5kns14ce2rwm7tbxx) is DEAD (never dispatched — see 2026-08-05 note); needs relaunch, then campaign owns it
+LANE A — main.rs (cmd_* handlers)
+  ▶ close-as-flag-asymmetry   low · improvement; `close` should accept `--as <author>` like `note` does. collision: main.rs (shared with LANE D campaign's integration branch — reconcile at campaign merge)
 LANE D — intake flow (schema.rs + main.rs + mutate/ + skill templates)
-  ▶ standard-intake-flow   HIGH · design APPROVED (docs/design/intake-flow.md); implementation running as /orchestrate campaign on its own integration branch
+  ▶ standard-intake-flow   HIGH · design APPROVED (docs/design/intake-flow.md); campaign run 01kz6c65y5kns14ce2rwm7tbxx never started (zombie supervisor) — must be relaunched
 ```
 <!-- execution-dag:end -->
 
