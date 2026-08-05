@@ -5161,7 +5161,7 @@ mod tests {
         close_issue(
             tmp.path(),
             "close-anon",
-            Some("done".into()),
+            Some("fixed".into()),
             None,
             Vec::new(),
             None,
@@ -5171,7 +5171,7 @@ mod tests {
         .unwrap();
 
         let after = fs::read_to_string(tmp.path().join("issues/close-anon/item.md")).unwrap();
-        assert!(after.contains("status: done"), "{after}");
+        assert!(after.contains("status: fixed"), "{after}");
         assert!(!after.contains("closed_by"), "{after}");
     }
 
@@ -5358,7 +5358,7 @@ mod tests {
         close_issue(
             tmp.path(),
             "anon-scrub",
-            Some("done".into()),
+            Some("fixed".into()),
             None,
             Vec::new(),
             None,
@@ -5367,7 +5367,7 @@ mod tests {
         )
         .unwrap();
         let after = fs::read_to_string(dir.join("item.md")).unwrap();
-        assert!(after.contains("status: done"), "{after}");
+        assert!(after.contains("status: fixed"), "{after}");
         assert!(!after.contains("closed_by"), "{after}");
     }
 
