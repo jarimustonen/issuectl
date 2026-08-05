@@ -1,9 +1,11 @@
 ---
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-08-05
 type: feature
-status: open
+status: done
 priority: high
+closed: 2026-08-05
+closed_by: jari
 ---
 
 # Standard intake flow for bugs and feature-requests
