@@ -109,6 +109,16 @@ pub struct UpdateIssueRequest {
     pub owner: Patch<String>,
     #[serde(default)]
     pub epic: Patch<String>,
+    /// Closer attribution, managed in lockstep with `closed:`. `Set`
+    /// stamps `closed_by:` on the active→closing edge (and re-attributes
+    /// on a closing→closing re-status); reopening (closing→active) clears
+    /// it. Populated by `close --as <author>`; a raw PATCH may also set it
+    /// on a closing transition. Not writable through `custom_fields` — the
+    /// key is reserved (see [`RESERVED_CUSTOM_FIELD_KEYS`]) so the only
+    /// way in is this validated slot, which enforces the same author
+    /// grammar as `note --as`.
+    #[serde(default)]
+    pub closed_by: Patch<String>,
     #[serde(default)]
     pub add_labels: Vec<String>,
     #[serde(default)]
@@ -196,6 +206,10 @@ pub const RESERVED_CUSTOM_FIELD_KEYS: &[(&str, &str)] = &[
     (
         "blocked_by",
         "use `issuectl depend add/remove <slug> --blocked-by <other>`",
+    ),
+    (
+        "closed_by",
+        "set automatically by `close --as <author>`; cleared on reopen",
     ),
     ("status", "set automatically by `new` (always `open`)"),
     ("created", "set automatically by `new` (today)"),
@@ -423,6 +437,7 @@ impl UpdateIssueRequest {
             && matches!(self.assignee, Patch::Unspecified)
             && matches!(self.owner, Patch::Unspecified)
             && matches!(self.epic, Patch::Unspecified)
+            && matches!(self.closed_by, Patch::Unspecified)
             && self.add_labels.is_empty()
             && self.remove_labels.is_empty()
             && self.add_related.is_empty()
@@ -468,6 +483,15 @@ impl UpdateIssueRequest {
         check_set_nonempty("assignee", &self.assignee)?;
         check_set_nonempty("owner", &self.owner)?;
         check_set_nonempty("epic", &self.epic)?;
+        check_set_nonempty("closed_by", &self.closed_by)?;
+        // Closer attribution follows the same author grammar as
+        // `note --as`, so the recorded value is a well-formed,
+        // hash-stable token regardless of entry point (CLI `close --as`
+        // or a raw PATCH populating the slot).
+        if let Patch::Set(author) = &self.closed_by {
+            crate::body_sections::validate_author(author)
+                .map_err(|e| MutateError::Validation(format!("closed_by: {e}")))?;
+        }
 
         // No built-in `all_statuses()` membership check here, mirroring
         // the `type` policy above: the schema (`fields.status.enum`) is
@@ -1034,10 +1058,12 @@ fn update_issue_under_lock(
     // active↔closing transition for messaging parity with the old API.
     if let Patch::Set(s) = &req.status {
         write::set_string(&mut item.frontmatter, "status", s);
-        // The status branch always (re)evaluates `closed:` — it stamps,
-        // backfills, or removes it — so both keys count as written.
+        // The status branch always (re)evaluates the two close-lifecycle
+        // fields — `closed:` and `closed_by:` — stamping, backfilling, or
+        // removing each, so all three keys count as written.
         written.insert("status".into());
         written.insert("closed".into());
+        written.insert("closed_by".into());
         let prev_closing = crate::schema::is_closing(schema, &prev_status);
         let new_closing = crate::schema::is_closing(schema, s);
         if new_closing {
@@ -1053,18 +1079,35 @@ fn update_issue_under_lock(
             if !prev_closing || !has_closed {
                 write::set_string(&mut item.frontmatter, "closed", &write::today());
             }
+            // `closed_by:` tracks `closed:`. An explicit attribution
+            // (`close --as`, or a PATCH populating the slot) is written /
+            // re-attributed. Without one, the active→closing edge scrubs
+            // any stray value so an anonymous close never inherits a
+            // stale closer, while a closing→closing re-status preserves
+            // the recorded closer for the same provenance reason as the
+            // `closed:` date above.
+            match &req.closed_by {
+                Patch::Set(author) => write::set_string(&mut item.frontmatter, "closed_by", author),
+                Patch::Clear => write::remove_key(&mut item.frontmatter, "closed_by"),
+                Patch::Unspecified => {
+                    if !prev_closing {
+                        write::remove_key(&mut item.frontmatter, "closed_by");
+                    }
+                }
+            }
             if !prev_closing {
                 moved_to_closed = true;
             }
         } else {
             write::remove_key(&mut item.frontmatter, "closed");
-            // Closer attribution is close-time provenance; on reopen it
-            // is stale, so drop it in lockstep with `closed:`. (Only the
-            // `close` verb ever sets `closed_by`, but clearing it here —
-            // on the shared active-edge — keeps the two fields consistent
-            // no matter which write path reopens the issue.)
+            // Closer attribution is close-time provenance; on reopen (or
+            // any active status) it is stale, so drop it in lockstep with
+            // `closed:`. Because `closed_by` is a reserved key, the only
+            // writers are this lifecycle branch and the validated
+            // request slot — so clearing here on the shared active edge
+            // is authoritative and can't be re-added by a later
+            // custom-field patch in the same call.
             write::remove_key(&mut item.frontmatter, "closed_by");
-            written.insert("closed_by".into());
             if prev_closing {
                 moved_to_open = true;
             }
@@ -1442,22 +1485,35 @@ pub fn close_issue(
             "done".to_string()
         }
     });
+    // `close` must land on a *closing* status. Schema validation under
+    // lock only checks that the value is in the `status` enum, not that
+    // it closes the issue — so without this guard `close --status open`
+    // (or a schema that reclassifies `fixed` as active) would run the
+    // reopen branch, leaving the issue active. Combined with `--as` that
+    // produced an active issue carrying `closed_by`. Reject early.
+    if !crate::schema::is_closing(&schema, &resolved_status) {
+        return Err(MutateError::Validation(format!(
+            "close status {resolved_status:?} is not a closing status; \
+             use `update --status` to move an issue between active states"
+        )));
+    }
 
-    let mut req = UpdateIssueRequest {
+    let req = UpdateIssueRequest {
         expected_version,
         status: Patch::Set(resolved_status),
+        // Closer attribution rides the same under-lock write as the
+        // status flip via the first-class `closed_by` slot (NOT a custom
+        // field): it is validated in `UpdateIssueRequest::validate`,
+        // stamped alongside `closed:` in the status branch, surfaces in
+        // `show --json` via `Issue::extra`, and is folded into the
+        // version hash. Reopening clears it in lockstep with `closed:`.
+        closed_by: match closed_by {
+            Some(author) => Patch::Set(author),
+            None => Patch::Unspecified,
+        },
         add_commits: commits,
         ..Default::default()
     };
-    // Attribute the closer as the `closed_by:` custom field. It rides
-    // the same under-lock write as the status flip, surfaces in
-    // `show --json` via `Issue::extra`, and is folded into the version
-    // hash. The reopen (closing→active) edge clears it alongside
-    // `closed:` so a reopened issue never carries a stale closer.
-    if let Some(author) = closed_by {
-        req.custom_fields
-            .insert("closed_by".into(), Patch::Set(author));
-    }
     // _lock drops at end-of-scope after the locked update path returns.
     // We call the under-lock helper directly so we don't double-acquire
     // (fs2 advisory flock is per-fd; nested `WriteLock::acquire` would
@@ -5155,6 +5211,141 @@ mod tests {
         assert!(after.contains("status: open"), "{after}");
         assert!(!after.contains("closed_by"), "{after}");
         assert!(!after.contains("closed:"), "{after}");
+    }
+
+    #[test]
+    fn close_rejects_non_closing_status_override() {
+        // `close --status open` must be refused: it is not a closing
+        // status, so honoring it would leave the issue active — and with
+        // `--as`, would strand a `closed_by` on an open issue.
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "close-to-open", "open");
+
+        let err = close_issue(
+            tmp.path(),
+            "close-to-open",
+            Some("open".into()),
+            Some("jari".into()),
+            Vec::new(),
+            None,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap_err();
+        assert!(matches!(err, MutateError::Validation(_)), "{err:?}");
+        let after = fs::read_to_string(tmp.path().join("issues/close-to-open/item.md")).unwrap();
+        assert!(after.contains("status: open"), "{after}");
+        assert!(!after.contains("closed_by"), "{after}");
+    }
+
+    #[test]
+    fn reopen_with_custom_field_closed_by_is_rejected() {
+        // The reopen-clears invariant must be un-defeatable: a request
+        // that reopens *and* smuggles `closed_by` through `custom_fields`
+        // in the same call is rejected at validation, because `closed_by`
+        // is a reserved key. Previously this ordering let the custom-field
+        // loop re-add the closer the status branch had just cleared.
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "reopen-smuggle", "open");
+        close_issue(
+            tmp.path(),
+            "reopen-smuggle",
+            Some("wontfix".into()),
+            Some("jari".into()),
+            Vec::new(),
+            None,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
+
+        let mut req = UpdateIssueRequest {
+            status: Patch::Set("open".into()),
+            ..Default::default()
+        };
+        req.custom_fields
+            .insert("closed_by".into(), Patch::Set("mallory".into()));
+        let err =
+            update_issue(tmp.path(), "reopen-smuggle", req, None, &UncachedConfig).unwrap_err();
+        assert!(matches!(err, MutateError::Validation(_)), "{err:?}");
+    }
+
+    #[test]
+    fn set_closed_by_via_custom_field_is_rejected() {
+        // `closed_by` is reserved, so it cannot be planted on an open
+        // issue through the generic custom-field surface (`set` / `update
+        // --field`). That keeps the field trustworthy: the only writer is
+        // the validated lifecycle slot.
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "plant-closer", "open");
+
+        let mut req = UpdateIssueRequest::default();
+        req.custom_fields
+            .insert("closed_by".into(), Patch::Set("mallory".into()));
+        let err = update_issue(tmp.path(), "plant-closer", req, None, &UncachedConfig).unwrap_err();
+        assert!(matches!(err, MutateError::Validation(_)), "{err:?}");
+        let after = fs::read_to_string(tmp.path().join("issues/plant-closer/item.md")).unwrap();
+        assert!(!after.contains("closed_by"), "{after}");
+    }
+
+    #[test]
+    fn restatus_between_closing_values_preserves_closer() {
+        // fixed → wontfix must keep the recorded closer (and close date)
+        // — a re-disposition is not a new close, so provenance survives.
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "restatus-closer", "open");
+        close_issue(
+            tmp.path(),
+            "restatus-closer",
+            Some("fixed".into()),
+            Some("jari".into()),
+            Vec::new(),
+            None,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
+
+        let req = UpdateIssueRequest {
+            status: Patch::Set("wontfix".into()),
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "restatus-closer", req, None, &UncachedConfig).unwrap();
+
+        let after = fs::read_to_string(tmp.path().join("issues/restatus-closer/item.md")).unwrap();
+        assert!(after.contains("status: wontfix"), "{after}");
+        assert!(after.contains("closed_by: jari"), "{after}");
+    }
+
+    #[test]
+    fn anonymous_close_scrubs_preexisting_closer() {
+        // If a stray `closed_by` exists on an active issue (e.g. a manual
+        // hand-edit of the frontmatter), an anonymous close must not
+        // inherit it as false attribution — the active→closing edge
+        // scrubs any stale value when no `--as` is given.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/anon-scrub");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\ncreated: 2026-05-06\nstatus: open\npriority: normal\nclosed_by: ghost\n---\n\n# Title\n",
+        )
+        .unwrap();
+
+        close_issue(
+            tmp.path(),
+            "anon-scrub",
+            Some("done".into()),
+            None,
+            Vec::new(),
+            None,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
+        let after = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert!(after.contains("status: done"), "{after}");
+        assert!(!after.contains("closed_by"), "{after}");
     }
 
     #[test]

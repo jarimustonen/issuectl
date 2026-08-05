@@ -4,6 +4,9 @@ updated: 2026-08-05
 type: improvement
 status: in-progress
 priority: low
+commits:
+- hash: 4748dc8
+  summary: 'feat(close): optional --as records closed_by; reopen clears it'
 ---
 
 # `--as <author>` accepted by `note` but rejected by `close` (verb inconsistency)
