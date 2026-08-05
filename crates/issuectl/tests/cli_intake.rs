@@ -262,14 +262,15 @@ fn show_reports_analysis_and_attachments_keys() {
 fn generic_set_status_cannot_bypass_intrinsic_invariant() {
     // `set status in-progress` on an untriaged item must be blocked by
     // the same validator the intake verbs use, classified
-    // `transition-illegal`.
+    // `transition-illegal` and — like the intake surface — exit 2
+    // (refused-but-actionable), regardless of entry point.
     let tmp = fresh_repo();
     file_bug(tmp.path(), "no-bypass");
     let out = run(
         tmp.path(),
         &["--json", "set", "no-bypass", "status", "in-progress"],
     );
-    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    assert_eq!(out.status.code(), Some(2), "{}", dump(&out));
     assert_eq!(json_stderr(&out)["error"]["code"], "transition-illegal");
 }
 

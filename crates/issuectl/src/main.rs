@@ -1758,7 +1758,7 @@ enum IntakeAction {
     Retype {
         #[arg(value_parser = parse_slug_arg)]
         slug: String,
-        #[arg(long = "to", value_parser = parse_non_empty)]
+        #[arg(long = "to", value_parser = PossibleValuesParser::new(ISSUE_TYPES))]
         to: String,
     },
     /// Reopen a closed item (`→ untriaged` by default, or `open`)
@@ -1831,6 +1831,22 @@ fn bubbled_error_code(e: &anyhow::Error) -> &'static str {
         // the refused-but-actionable case to exit 2 itself.)
         Some(mutate::MutateError::TransitionViolation(_)) => "transition-illegal",
         _ => "command-failed",
+    }
+}
+
+/// Process exit code for an error bubbling to `main` under `--json`. A
+/// transition violation is refused-but-actionable → `2`, matching the
+/// first-class `intake` verbs; everything else is `1`. Keeps the same
+/// error (e.g. an intrinsic intake invariant) from reporting a different
+/// exit status depending on whether it was reached via `intake …` or a
+/// generic `set`/`update --status`.
+fn bubbled_exit_code(e: &anyhow::Error) -> i32 {
+    match e
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<mutate::MutateError>())
+    {
+        Some(mutate::MutateError::TransitionViolation(_)) => 2,
+        _ => 1,
     }
 }
 
@@ -2018,7 +2034,7 @@ fn main() -> Result<()> {
                 &format!("{e:#}"),
                 serde_json::Value::Null,
             );
-            std::process::exit(1);
+            std::process::exit(bubbled_exit_code(&e));
         }
         return Ok(());
     }

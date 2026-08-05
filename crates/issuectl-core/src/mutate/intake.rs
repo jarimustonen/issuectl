@@ -61,7 +61,19 @@ const PROTECTED_FILE_FIELDS: &[&str] = &[
     "updated",
     "version",
     "reporter",
+    // `provenance` / `source_ref` have dedicated flags and drive dedup;
+    // letting them through `--field` (e.g. `--source-ref A --field
+    // source_ref=B`) would corrupt the idempotency key. The disposition /
+    // lifecycle fields are tool-managed by the triage verbs, never set at
+    // filing time.
     "provenance",
+    "provenance_detail",
+    "source_ref",
+    "disposition_reason",
+    "disposition_note",
+    "duplicate_of",
+    "deferred_until",
+    "superseded_by",
 ];
 
 /// Active intake/holding states an item can be dispositioned *from*.
@@ -367,13 +379,32 @@ struct Plan {
     assignee: Option<String>,
     priority: Option<String>,
     set_fields: Vec<(String, String)>,
-    clear_fields: Vec<String>,
     note: Option<String>,
-    /// Source states this verb accepts. Empty ⇒ any state.
+    /// Source states this verb accepts. Empty ⇒ any state (subject to
+    /// `require_closing`).
     allowed_source: &'static [&'static str],
+    /// When true, the source-state precondition is "currently a closing
+    /// status" per the *schema's* lifecycle classification (so a repo's
+    /// custom closing status is reopenable, and a built-in reclassified
+    /// active is not). Used by `reopen`; supersedes `allowed_source`.
+    require_closing: bool,
 }
 
-/// Execute a planned intake transition under one flock.
+/// Lifecycle metadata whose validity is tied to a specific state. On a
+/// status-changing transition, any of these NOT written by the verb is
+/// cleared, so a re-disposition (e.g. defer → reject → reopen) never
+/// leaves contradictory fields like a dangling `deferred_until` on an
+/// `open` item. Verbs that don't change status (`retype`) skip this so
+/// they preserve the holding state's fields.
+const LIFECYCLE_FIELDS: &[&str] = &[
+    F_DISPOSITION_REASON,
+    F_DISPOSITION_NOTE,
+    F_DUPLICATE_OF,
+    F_DEFERRED_UNTIL,
+    F_SUPERSEDED_BY,
+];
+
+/// Execute a planned intake transition, acquiring the flock.
 fn apply(
     root: &Path,
     slug: &str,
@@ -383,14 +414,29 @@ fn apply(
     if !crate::slug::is_valid(slug) {
         return Err(MutateError::Validation(format!("invalid slug shape: {slug:?}")).into());
     }
-    let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
+    let lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
+    let schema = config
+        .schema(root)
+        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    apply_locked(&lock, root, slug, plan, config, &schema)
+}
+
+/// Body of [`apply`] with the flock already held. Split out so verbs that
+/// must read repo-wide state as part of validation (`duplicate`, whose
+/// cycle check reads the whole `duplicate_of` graph) can do that read
+/// under the *same* flock as the write — no time-of-check/time-of-use gap.
+fn apply_locked(
+    _lock: &WriteLock,
+    root: &Path,
+    slug: &str,
+    plan: Plan,
+    config: &dyn ConfigSource,
+    schema: &crate::schema::Schema,
+) -> Result<UpdateOutcome, IntakeError> {
     // Read-only locate first so a precondition failure leaves no repo
     // side effects (mirrors `close_issue`).
     let item_path = super::locate_for_dry_run(root, slug).map_err(IntakeError::from)?;
     let item = write::read_item(&item_path).map_err(MutateError::Io)?;
-    let schema = config
-        .schema(root)
-        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let cur_status = item
         .frontmatter
         .get(serde_yaml::Value::String("status".into()))
@@ -398,8 +444,18 @@ fn apply(
         .unwrap_or("open")
         .to_string();
 
-    if !plan.allowed_source.is_empty() && !plan.allowed_source.contains(&cur_status.as_str()) {
-        // Refused-but-actionable: legal item, wrong state.
+    // Source-state precondition (refused-but-actionable: legal item,
+    // wrong state).
+    if plan.require_closing {
+        if !crate::schema::is_closing(schema, &cur_status) {
+            return Err(MutateError::TransitionViolation(format!(
+                "cannot {} {slug}: it is {cur_status:?}, which is not a closing status",
+                plan.verb
+            ))
+            .into());
+        }
+    } else if !plan.allowed_source.is_empty() && !plan.allowed_source.contains(&cur_status.as_str())
+    {
         return Err(MutateError::TransitionViolation(format!(
             "cannot {} {slug}: it is {cur_status:?}; {} applies to an item in [{}]",
             plan.verb,
@@ -410,6 +466,7 @@ fn apply(
     }
 
     let mut req = UpdateIssueRequest::default();
+    let changes_status = plan.new_status.is_some();
     if let Some(s) = plan.new_status {
         req.status = Patch::Set(s);
     }
@@ -425,8 +482,15 @@ fn apply(
     for (k, v) in plan.set_fields {
         req.custom_fields.insert(k, Patch::Set(v));
     }
-    for k in plan.clear_fields {
-        req.custom_fields.insert(k, Patch::Clear);
+    // Normalize stale lifecycle metadata: on a status change, clear every
+    // lifecycle field the target state does not own (i.e. that this verb
+    // did not just set).
+    if changes_status {
+        for field in LIFECYCLE_FIELDS {
+            req.custom_fields
+                .entry(field.to_string())
+                .or_insert(Patch::Clear);
+        }
     }
     if let Some(msg) = plan.note {
         req.body_ops.push(BodyOp::AppendNote(AppendNoteOp {
@@ -436,8 +500,8 @@ fn apply(
         }));
     }
     req.validate().map_err(IntakeError::from)?;
-    let rules = super::load_validated_rules(root, &schema, config).map_err(IntakeError::from)?;
-    super::update_issue_under_lock(root, slug, item_path, req, None, &schema, &rules)
+    let rules = super::load_validated_rules(root, schema, config).map_err(IntakeError::from)?;
+    super::update_issue_under_lock(root, slug, item_path, req, None, schema, &rules)
         .map_err(IntakeError::from)
 }
 
@@ -560,7 +624,17 @@ pub fn reject(
                 kind.as_reason(),
                 reason.trim()
             )),
-            allowed_source: &["untriaged", "deferred", "needs-info", "open"],
+            // In-flight work can also be dropped (matches the default
+            // matrix's `wontfix.allowed_from`), so first-class `reject`
+            // and generic `set status wontfix` stay consistent.
+            allowed_source: &[
+                "untriaged",
+                "deferred",
+                "needs-info",
+                "open",
+                "in-progress",
+                "testing",
+            ],
             ..Default::default()
         },
         config,
@@ -601,8 +675,17 @@ pub fn duplicate(
     if of == slug {
         return Err(IntakeError::DuplicateSelf(slug.to_string()));
     }
-    // Build the duplicate_of graph from existing issues to check
-    // existence + cycles before mutating.
+    if !crate::slug::is_valid(slug) {
+        return Err(MutateError::Validation(format!("invalid slug shape: {slug:?}")).into());
+    }
+    // Acquire the flock BEFORE loading the graph so the existence + cycle
+    // check and the write happen under one lock — no time-of-check /
+    // time-of-use gap where a concurrent writer could insert an edge that
+    // makes this one cyclic.
+    let lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
+    let schema = config
+        .schema(root)
+        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let issues = crate::repo::load_issues_with_config(root, config);
     if !issues.iter().any(|i| i.slug == of) {
         return Err(IntakeError::DuplicateTargetMissing(of.to_string()));
@@ -629,7 +712,8 @@ pub fn duplicate(
         chain.push((*next).to_string());
         cursor = next;
     }
-    apply(
+    apply_locked(
+        &lock,
         root,
         slug,
         Plan {
@@ -641,6 +725,7 @@ pub fn duplicate(
             ..Default::default()
         },
         config,
+        &schema,
     )
 }
 
@@ -675,13 +760,20 @@ pub fn obsolete(
 }
 
 /// Reclassify `type` (OD-13). Valid only while the item is in an intake
-/// state; no status change.
+/// state; no status change. Rejects `epic` — an epic is planning
+/// scaffolding, not a triageable report (mirrors [`file`]).
 pub fn retype(
     root: &Path,
     slug: &str,
     to: &str,
     config: &dyn ConfigSource,
 ) -> Result<UpdateOutcome, IntakeError> {
+    if to == "epic" {
+        return Err(MutateError::Validation(
+            "cannot retype an intake item to 'epic' — an epic is not a report".into(),
+        )
+        .into());
+    }
     apply(
         root,
         slug,
@@ -697,7 +789,10 @@ pub fn retype(
 }
 
 /// Reopen a closed item back into an active state (`untriaged` by
-/// default, or `open`). Clears the stale disposition fields.
+/// default, or `open`). The `changes_status` normalization in
+/// [`apply_locked`] clears every stale lifecycle field; the reason lives
+/// only in the audit note (and the `## Reopen Notes` section the shared
+/// path appends), not in a dangling `disposition_note`.
 pub fn reopen(
     root: &Path,
     slug: &str,
@@ -712,10 +807,11 @@ pub fn reopen(
         Plan {
             verb: "reopen",
             new_status: Some(target),
-            set_fields: vec![(F_DISPOSITION_NOTE.to_string(), reason.trim().to_string())],
-            clear_fields: vec![F_DISPOSITION_REASON.to_string(), F_DUPLICATE_OF.to_string()],
             note: Some(format!("Reopened: {}", reason.trim())),
-            allowed_source: crate::issue_fields::CLOSING_STATUSES,
+            // Source must currently be a closing status per the schema's
+            // lifecycle classification (honours custom / reclassified
+            // statuses, unlike a hard-coded list).
+            require_closing: true,
             ..Default::default()
         },
         config,
@@ -1071,6 +1167,86 @@ mod tests {
         assert_eq!(status_of(tmp.path(), "regressed-bug"), "untriaged");
         let body = read_body(tmp.path(), "regressed-bug");
         assert!(!body.contains("disposition_reason:"), "cleared; {body}");
+    }
+
+    #[test]
+    fn transitions_clear_stale_lifecycle_metadata() {
+        // defer (sets deferred_until) → accept (→ open) must not leave a
+        // dangling deferred_until, and a later reject must not carry it
+        // either. Guards against contradictory frontmatter.
+        let tmp = fresh_repo();
+        file_bug(tmp.path(), "Parked", "parked-item");
+        defer(
+            tmp.path(),
+            "parked-item",
+            "later",
+            Some("2026-12-01".into()),
+            &UncachedConfig,
+        )
+        .unwrap();
+        assert!(read_body(tmp.path(), "parked-item").contains("deferred_until:"));
+
+        accept(tmp.path(), "parked-item", None, None, &UncachedConfig).unwrap();
+        let body = read_body(tmp.path(), "parked-item");
+        assert!(
+            !body.contains("deferred_until:"),
+            "accept must clear the wake-up date; {body}"
+        );
+    }
+
+    #[test]
+    fn retype_preserves_holding_state_fields() {
+        // retype does not change status, so it must NOT wipe a deferred
+        // item's wake-up date.
+        let tmp = fresh_repo();
+        file_bug(tmp.path(), "Reclass", "reclass-item");
+        defer(
+            tmp.path(),
+            "reclass-item",
+            "later",
+            Some("2026-12-01".into()),
+            &UncachedConfig,
+        )
+        .unwrap();
+        retype(tmp.path(), "reclass-item", "feature", &UncachedConfig).unwrap();
+        let body = read_body(tmp.path(), "reclass-item");
+        assert!(
+            body.contains("deferred_until:"),
+            "retype must preserve; {body}"
+        );
+        assert!(body.contains("type: feature"), "{body}");
+    }
+
+    #[test]
+    fn file_rejects_protected_source_ref_via_field() {
+        let tmp = fresh_repo();
+        let err = file(
+            tmp.path(),
+            FileRequest {
+                issue_type: "bug".into(),
+                title: "Sneaky".into(),
+                body: Some("x".into()),
+                reporter: None,
+                provenance: "telegram".into(),
+                provenance_detail: None,
+                source_ref: Some("A".into()),
+                priority: None,
+                slug: Some("sneaky-ref".into()),
+                labels: vec![],
+                fields: vec![("source_ref".into(), "B".into())],
+            },
+            &UncachedConfig,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "protected-field");
+    }
+
+    #[test]
+    fn retype_rejects_epic() {
+        let tmp = fresh_repo();
+        file_bug(tmp.path(), "NotAnEpic", "not-an-epic");
+        let err = retype(tmp.path(), "not-an-epic", "epic", &UncachedConfig).unwrap_err();
+        assert_eq!(err.code(), "validation");
     }
 
     #[test]
