@@ -103,7 +103,7 @@ Use the CLI rather than greppa hakemistoa. The CLI knows the frontmatter schema.
 - Filter via flags: `issuectl --json ls -t bug -p high -a alice`
   - `-t/--type`: bug, task, feature, improvement, chore, epic
   - `-p/--priority`: low, normal, high
-  - `-s/--status`: open, in-progress, testing, done, fixed, wontfix, duplicate, cannot-reproduce, obsolete
+  - `-s/--status`: untriaged, open, in-progress, testing, needs-info, deferred, done, fixed, wontfix, duplicate, cannot-reproduce, obsolete (the `untriaged` / `needs-info` / `deferred` active states come from the standard intake flow — see "Action: Intake")
   - `-a/--assignee USERNAME` (matches `assignee` for issues, `owner` for epics)
   - `-l/--label LABEL`
   - `-e/--epic <slug>` (children of an epic)
@@ -447,6 +447,96 @@ into the issue directory. Reference them in item.md with relative paths.
 
 Show the created issue/epic path and a brief summary.
 
+### Action: Intake (standard intake flow)
+
+`issuectl intake` is the first-class flow for **filing and triaging** incoming
+bug reports and feature requests, replacing the old ad-hoc label scheme
+(`via:telegram` + `needs-triage`). Intake *state* lives in `status`, not in
+labels. See `docs/design/intake-flow.md`. Two audiences share one namespace: a
+**reporting agent** files; a **developer / product-manager** dispositions.
+
+The flow adds three **active** statuses and a set of intake fields:
+
+- **Statuses**: `untriaged` (filed, awaiting a triage decision — the reception
+  state), `needs-info` (filed but un-actionable pending reporter input),
+  `deferred` (worthwhile but intentionally not scheduled now). All three are
+  *active* (not closing); they show up in `ls`/queries like any active issue.
+- **Fields**: `provenance` (where it came from — telegram/email/github/…; a
+  first-class field distinct from the body `--source` line, open-valued unless a
+  repo declares an `enum:`), `provenance_detail` (free text for the `other`
+  case), `source_ref` (external message id, the idempotency key),
+  `disposition_reason` (enum `by-design | out-of-scope | wontfix | withdrawn |
+  superseded` — the structured *why* for a closing disposition), `disposition_note`
+  (free-text specifics), `duplicate_of` (directed slug link for a `duplicate`),
+  `deferred_until` (wake-up date for a parked item).
+
+#### Filing (reporting agent)
+
+```
+issuectl intake file --type bug --title "Login loops on Safari" \
+  --body-file report.md --reporter alice \
+  --provenance telegram --source-ref "chat:123/message:456" \
+  [--provenance-detail "…"] [--priority high] [--slug login-loops] [--label …] --json
+```
+
+- Lands the item directly in `untriaged`; the filer never names the entry state.
+- Takes any non-`epic` type. `--body-file -` reads stdin; `--body "<text>"` for a
+  one-liner. Protected keys (`status`, `type`, `reporter`, `provenance`, …) are
+  rejected via `--field` — use the dedicated flags.
+- **Idempotent on `(provenance, source-ref)`**: a retry returns the existing item
+  with `"deduplicated": true` (exit 0) instead of creating a second issue.
+- Output: `{ "slug", "status": "untriaged", "dir", "version", "deduplicated" }`.
+- `issuectl intake withdraw <slug> --reason "…"` lets a reporter retract their own
+  untriaged report (`→ wontfix`).
+
+The `/issue-new` skill wraps this filing path faithfully (verbatim capture +
+`issuectl attach` for screenshots).
+
+#### Inspecting the queue (developer / PM)
+
+```
+issuectl intake queue --json                     # default: untriaged, oldest first
+issuectl intake queue --json --needs-analysis    # only items lacking a ## Triage analysis section
+issuectl intake queue --json --state deferred    # a non-default view (deferred|needs-info)
+issuectl intake queue --json --type bug --provenance telegram
+issuectl intake show <slug> --json               # item + attachments + analysis section
+```
+
+`queue` is a stable projection of the actionable `untriaged` set (both bugs and
+feature requests, every provenance). `deferred`/`needs-info` are excluded from
+the default view. Each row carries `needs_analysis` (derived from the presence of
+a `## Triage analysis` body section — there is no stored analysis state). `show`
+adds `attachments` (names) and `analysis` (the section text, or `null`).
+
+#### Dispositions (developer / PM — each a first-class transition)
+
+```
+issuectl intake accept    <slug> [--assignee <who>] [--priority …]   --json  # → open
+issuectl intake defer     <slug> --reason "…" [--until <date>]       --json  # → deferred
+issuectl intake need-info <slug> --reason "…"                        --json  # → needs-info
+issuectl intake reject    <slug> --reason "…" [--kind by-design|wontfix|out-of-scope] --json  # → wontfix + disposition_reason
+issuectl intake cannot-reproduce <slug> --reason "…"                 --json  # → cannot-reproduce (bug-only)
+issuectl intake duplicate <slug> --of <canonical-slug>               --json  # → duplicate + duplicate_of
+issuectl intake obsolete  <slug> --reason "…" [--superseded-by <slug>] --json  # → obsolete
+issuectl intake retype    <slug> --to <type>                         --json  # reclassify the type hint
+issuectl intake reopen    <slug> [--to untriaged|open] --reason "…"  --json  # closing → active
+```
+
+- `--reason` is **required** on `defer`, `need-info`, `reject`, `cannot-reproduce`,
+  `obsolete`, `reopen`, `withdraw` — the *why* is captured structurally, not left
+  in prose.
+- Each transition validates the source state intrinsically (you cannot `accept` a
+  closed item, etc.) and returns `{ "slug", "status", "dir", "version" }`. Stable
+  error codes include `transition-illegal`, `duplicate-source-ref`,
+  `protected-field`.
+
+**Never file a reception item with plain `new`** — `new` fixes the creation
+status at `open`. Reception filing goes through `issuectl intake file`.
+
+The `/issue-intake` skill drives the developer/PM side (queue → drive
+`/worktree-bug-analysis` on unclear items → PO briefing → stop; the disposition
+is the user's).
+
 ### Action: View visually (kanban board)
 
 If the user wants to **see** issues — "show me the board", "open the
@@ -525,7 +615,13 @@ On `--fix`, the JSON envelope carries an `apply_outcome` object with a
 - **Today's date** is set automatically by the CLI for `created`/`updated`
 - Write issue content in English; Finnish text is fine in the body
 - Prefer a descriptive 2-3 word `--slug` derived from the title (see Create → step 2); fall back to the random `intensifier-adjective-noun` slug only when no obvious short slug exists
-- Default priority is `normal`; default status is `open`
+- Default priority is `normal`; default status is `open` (except the intake
+  flow, which files into `untriaged` via `issuectl intake file` — see "Action:
+  Intake")
+- **Intake flow**: incoming bug reports / feature requests are filed and triaged
+  through the `issuectl intake` command group (statuses `untriaged` / `needs-info`
+  / `deferred`; fields `provenance` / `source_ref` / `disposition_reason` /
+  `duplicate_of` / `deferred_until`). See "Action: Intake".
 - There is no default type — always pass `--type`
 - All images must be AVIF — convert PNG/JPG/WebP first
 - **Epic linkage**: prefer the `epic:` frontmatter field, value is the parent epic's slug

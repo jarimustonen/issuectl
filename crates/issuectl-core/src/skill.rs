@@ -276,6 +276,109 @@ mod tests {
         }
     }
 
+    /// The standalone intake skills (`/issue-new`, `/issue-intake`, and the
+    /// `/triage-bugs` deprecation alias) are dogfooded as repo-local
+    /// `.claude/skills/*/SKILL.md` files rather than installed by the binary
+    /// (they orchestrate the `/worktree-*` family, so they are not pushed to
+    /// arbitrary consumer repos). They still need a guard so they don't rot:
+    /// this test pins their frontmatter and the load-bearing filing/processing
+    /// split. Skipped outside the workspace (a packaged crate has no repo-root
+    /// copies), matching `dogfooded_copies_match_templates`.
+    #[test]
+    fn standalone_intake_skills_are_wellformed() {
+        let skills_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(".claude/skills");
+        if !skills_dir.join("issue/SKILL.md").exists() {
+            return; // packaged/standalone crate — no repo-root copies
+        }
+
+        let read = |name: &str| {
+            let p = skills_dir.join(name).join("SKILL.md");
+            std::fs::read_to_string(&p)
+                .unwrap_or_else(|_| panic!("standalone skill missing at {}", p.display()))
+        };
+
+        // Every standalone skill carries valid frontmatter naming itself.
+        for name in ["issue-new", "issue-intake", "triage-bugs"] {
+            let body = read(name);
+            let after = body
+                .strip_prefix("---\n")
+                .unwrap_or_else(|| panic!("{name} must open with YAML frontmatter"));
+            let (front, _) = after
+                .split_once("\n---")
+                .unwrap_or_else(|| panic!("{name} frontmatter must close with ---"));
+            assert!(
+                front.contains(&format!("name: {name}")),
+                "{name} frontmatter must set `name: {name}`"
+            );
+            assert!(
+                front.contains("description:"),
+                "{name} frontmatter must carry a description"
+            );
+        }
+
+        // `/issue-new` is the FILING half: it files (and attaches), and does
+        // not process the queue — that is `/issue-intake`'s job.
+        let issue_new = read("issue-new");
+        assert!(
+            issue_new.contains("issuectl intake file"),
+            "issue-new must file via `issuectl intake file`"
+        );
+        assert!(
+            issue_new.contains("issuectl attach"),
+            "issue-new must attach screenshots via `issuectl attach`"
+        );
+        assert!(
+            !issue_new.contains("issuectl intake queue"),
+            "issue-new must NOT process the queue — that belongs to /issue-intake"
+        );
+
+        // `/issue-intake` is the PROCESSING half: it reads the queue, drives the
+        // read-only analysis engine (never reimplementing it), and documents
+        // that it replaces `/triage-bugs`.
+        let issue_intake = read("issue-intake");
+        assert!(
+            issue_intake.contains("issuectl intake queue"),
+            "issue-intake must read the queue via `issuectl intake queue`"
+        );
+        assert!(
+            issue_intake.contains("/worktree-bug-analysis"),
+            "issue-intake must drive /worktree-bug-analysis as the analysis engine"
+        );
+        assert!(
+            issue_intake.contains("## Triage analysis"),
+            "issue-intake must reference the append-only ## Triage analysis section"
+        );
+        assert!(
+            issue_intake.to_lowercase().contains("replaces")
+                && issue_intake.contains("/triage-bugs"),
+            "issue-intake must document that it replaces /triage-bugs"
+        );
+
+        // `/triage-bugs` is a THIN deprecation alias delegating to
+        // `/issue-intake`; it must not reimplement any triage logic.
+        let triage = read("triage-bugs");
+        assert!(
+            triage.contains("/issue-intake"),
+            "triage-bugs alias must delegate to /issue-intake"
+        );
+        assert!(
+            triage.to_uppercase().contains("DEPRECATED")
+                || triage.to_lowercase().contains("renamed"),
+            "triage-bugs alias must announce the rename/deprecation"
+        );
+        assert!(
+            !triage.contains("issuectl intake queue"),
+            "triage-bugs alias must NOT reimplement the queue read"
+        );
+        assert!(
+            triage.len() < 3000,
+            "triage-bugs must stay a thin alias (is {} bytes)",
+            triage.len()
+        );
+    }
+
     #[test]
     fn templates_differ_between_agents() {
         let claude = Agent::Claude.template();
