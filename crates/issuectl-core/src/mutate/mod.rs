@@ -21,6 +21,7 @@
 pub mod archive;
 pub mod attach;
 pub mod intake;
+pub mod intake_migrate;
 pub mod new_issue;
 pub mod triage;
 

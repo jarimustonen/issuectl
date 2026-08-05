@@ -1777,6 +1777,15 @@ enum IntakeAction {
         #[arg(long, value_parser = parse_non_empty)]
         reason: String,
     },
+    /// Migrate legacy label-encoded intake state to the new
+    /// statuses/fields. **Dry-run by default** — reports what it would do;
+    /// re-run with `--apply` to write. Idempotent and per-issue atomic;
+    /// refuses ambiguous items rather than guessing.
+    Migrate {
+        /// Perform the migration (default is a dry-run report only)
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 /// Build the shared `--json` error object: `{"error":{"code","message"[,…]}}`.
@@ -2545,6 +2554,7 @@ fn dispatch_intake(json: bool, action: IntakeAction) -> Result<()> {
             &slug,
             mutate::intake::withdraw(&find_root(), &slug, &reason, &UncachedConfig),
         ),
+        IntakeAction::Migrate { apply } => cmd_intake_migrate(json, apply),
     }
 }
 
@@ -2613,6 +2623,99 @@ fn cmd_intake_file(json: bool, req: mutate::intake::FileRequest) -> Result<()> {
     }
 }
 
+/// Run the legacy-intake data migration (§6). Dry-run by default; `apply`
+/// commits. The `--json` output is a single result object (never an error
+/// envelope on success — conflicts are reported in-band as skipped
+/// actions, so the pass introduces no new error code). Exit 0 on success.
+fn cmd_intake_migrate(json: bool, apply: bool) -> Result<()> {
+    let report = match mutate::intake_migrate::migrate(&find_root(), apply, &UncachedConfig) {
+        Ok(r) => r,
+        Err(e) => fail(
+            json,
+            e.exit_code(),
+            e.code(),
+            &format!("{e}"),
+            serde_json::Value::Null,
+        ),
+    };
+
+    if json {
+        let actions: Vec<serde_json::Value> = report
+            .actions
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "slug": a.slug,
+                    "action": if a.conflict.is_some() { "skip" } else { "migrate" },
+                    "conflict": a.conflict,
+                    "status_change": a.status_change.as_ref().map(|(from, to)| {
+                        serde_json::json!({ "from": from, "to": to })
+                    }),
+                    "dropped_labels": a.dropped_labels,
+                    "set_provenance": a.set_provenance,
+                    "warnings": a.warnings,
+                    "applied": a.applied,
+                })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "applied": report.applied,
+            "summary": {
+                "total": report.actions.len(),
+                "migrated": report.migrated_count(),
+                "skipped": report.skipped_count(),
+            },
+            "actions": actions,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    let mode = if report.applied {
+        "applied"
+    } else {
+        "dry-run (nothing written)"
+    };
+    if report.actions.is_empty() {
+        println!("Intake migration — {mode}: no legacy items to migrate.");
+        return Ok(());
+    }
+    println!(
+        "Intake migration — {mode}: {} to migrate, {} skipped (conflict):",
+        report.migrated_count(),
+        report.skipped_count()
+    );
+    for a in &report.actions {
+        if let Some(reason) = &a.conflict {
+            println!("  SKIP  {}  — {reason}", a.slug);
+            continue;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if let Some((from, to)) = &a.status_change {
+            parts.push(format!("status {from} → {to}"));
+        }
+        if !a.dropped_labels.is_empty() {
+            parts.push(format!("drop label(s) {}", a.dropped_labels.join(", ")));
+        }
+        if let Some(p) = &a.set_provenance {
+            parts.push(format!("provenance → {p}"));
+        }
+        println!(
+            "  {}  {}  {}",
+            if a.applied { "DONE" } else { "PLAN" },
+            a.slug,
+            parts.join("; ")
+        );
+        for w in &a.warnings {
+            println!("        warn: {w}");
+        }
+    }
+    if !report.applied {
+        println!("\nRe-run with `issuectl intake migrate --apply` to write these changes.");
+    }
+    Ok(())
+}
+
 /// Name of the body section a read-only analysis worker appends to. Its
 /// presence is the *derived* "has been analysed" signal — there is no
 /// stored analysis state / lease (design OD-2).
@@ -2626,6 +2729,18 @@ fn intake_provenance(issue: &models::Issue) -> Option<&str> {
     issue.extra.get("provenance").and_then(|v| v.as_str())
 }
 
+/// The legacy reception form the migration (§6) has not yet converted: an
+/// `open` item still carrying the old `needs-triage` label. Surfacing it in
+/// the default queue keeps the pre-migration population from being silently
+/// abandoned.
+fn is_legacy_untriaged(issue: &models::Issue) -> bool {
+    issue.status == "open"
+        && issue
+            .labels
+            .as_ref()
+            .is_some_and(|ls| ls.iter().any(|l| l == "needs-triage"))
+}
+
 fn cmd_intake_queue(
     json: bool,
     issue_type: Option<String>,
@@ -2636,30 +2751,44 @@ fn cmd_intake_queue(
     // Default view is the actionable reception queue; `deferred` /
     // `needs-info` are excluded unless explicitly requested via --state.
     let target = state.as_deref().unwrap_or("untriaged");
+    // Legacy surfacing applies only to the default (`untriaged`) view —
+    // an explicit `--state deferred|needs-info` is a precise projection.
+    let surface_legacy = state.is_none();
     let issues = load();
-    let mut rows: Vec<&models::Issue> = issues
+    // A row is either a real `untriaged` item (`legacy = false`) or a
+    // recognised legacy form (`open + needs-triage`, `legacy = true`) that
+    // the migration will convert.
+    let mut rows: Vec<(&models::Issue, bool)> = issues
         .iter()
-        .filter(|i| i.status == target)
-        .filter(|i| issue_type.as_deref().is_none_or(|t| i.issue_type == t))
-        .filter(|i| {
+        .filter_map(|i| {
+            let legacy = surface_legacy && is_legacy_untriaged(i);
+            if i.status == target || legacy {
+                Some((i, legacy))
+            } else {
+                None
+            }
+        })
+        .filter(|(i, _)| issue_type.as_deref().is_none_or(|t| i.issue_type == t))
+        .filter(|(i, _)| {
             provenance
                 .as_deref()
                 .is_none_or(|p| intake_provenance(i) == Some(p))
         })
-        .filter(|i| !needs_analysis || !has_triage_analysis(&i.body))
+        .filter(|(i, _)| !needs_analysis || !has_triage_analysis(&i.body))
         .collect();
     // Stable order: oldest `created` first (items lacking a date sort
     // last), slug as the deterministic tiebreak.
-    rows.sort_by(|a, b| {
+    rows.sort_by(|(a, _), (b, _)| {
         let ka = (a.created.is_none(), a.created.clone(), a.slug.clone());
         let kb = (b.created.is_none(), b.created.clone(), b.slug.clone());
         ka.cmp(&kb)
     });
+    let legacy_count = rows.iter().filter(|(_, legacy)| *legacy).count();
 
     if json {
         let arr: Vec<serde_json::Value> = rows
             .iter()
-            .map(|i| {
+            .map(|(i, legacy)| {
                 serde_json::json!({
                     "slug": i.slug,
                     "type": i.issue_type,
@@ -2670,14 +2799,18 @@ fn cmd_intake_queue(
                     "reporter": i.reporter,
                     "title": i.title,
                     "needs_analysis": !has_triage_analysis(&i.body),
+                    "legacy": legacy,
                     "version": canonical::canonical_hash(i),
                 })
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({ "state": target, "items": arr }))?
-        );
+        let mut obj = serde_json::json!({ "state": target, "items": arr });
+        if legacy_count > 0 {
+            obj["legacy_pending"] = serde_json::json!(legacy_count);
+            obj["migration_hint"] =
+                serde_json::json!("run `issuectl intake migrate` to migrate legacy items");
+        }
+        println!("{}", serde_json::to_string_pretty(&obj)?);
         return Ok(());
     }
 
@@ -2689,13 +2822,15 @@ fn cmd_intake_queue(
         "Intake queue ({target}) — {} item(s), oldest first:",
         rows.len()
     );
-    for i in &rows {
+    for (i, legacy) in &rows {
         let prov = intake_provenance(i).unwrap_or("-");
-        let flag = if has_triage_analysis(&i.body) {
-            ""
-        } else {
-            "  [needs-analysis]"
-        };
+        let mut flag = String::new();
+        if !has_triage_analysis(&i.body) {
+            flag.push_str("  [needs-analysis]");
+        }
+        if *legacy {
+            flag.push_str("  [legacy]");
+        }
         println!(
             "  {}  {}  {}  ({})  {}{}",
             i.created.as_deref().unwrap_or("????-??-??"),
@@ -2704,6 +2839,11 @@ fn cmd_intake_queue(
             prov,
             i.title,
             flag
+        );
+    }
+    if legacy_count > 0 {
+        println!(
+            "\nNote: {legacy_count} legacy item(s) shown [legacy] (open + needs-triage) — run `issuectl intake migrate` to migrate them."
         );
     }
     Ok(())

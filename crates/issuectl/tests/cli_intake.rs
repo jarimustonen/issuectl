@@ -274,6 +274,114 @@ fn generic_set_status_cannot_bypass_intrinsic_invariant() {
     assert_eq!(json_stderr(&out)["error"]["code"], "transition-illegal");
 }
 
+/// Hand-write a legacy label-encoded issue (the ad-hoc Telegram path's
+/// on-disk shape) that the intake filer would refuse to produce. Injects
+/// the schema-required `priority`/`created` fields.
+fn write_legacy(root: &std::path::Path, slug: &str, frontmatter: &str) {
+    let dir = root.join("issues").join(slug);
+    std::fs::create_dir_all(&dir).expect("mkdir slug");
+    let body = format!(
+        "---\npriority: normal\ncreated: 2026-01-01\ntype: bug\nstatus: open\n{frontmatter}---\n\n# {slug}\n\nlegacy body\n"
+    );
+    std::fs::write(dir.join("item.md"), body).expect("write item.md");
+}
+
+#[test]
+fn migrate_dry_run_then_apply_is_idempotent() {
+    let tmp = fresh_repo();
+    write_legacy(
+        tmp.path(),
+        "legacy-bug-one",
+        "labels: [needs-triage, via:telegram]\n",
+    );
+
+    // Dry-run: reports the plan, writes nothing.
+    let dry = run(tmp.path(), &["--json", "intake", "migrate"]);
+    assert_eq!(dry.status.code(), Some(0), "{}", dump(&dry));
+    let dv = json_stdout(&dry);
+    assert_eq!(dv["applied"], false);
+    assert_eq!(dv["summary"]["migrated"], 1);
+    assert_eq!(dv["actions"][0]["action"], "migrate");
+    assert_eq!(dv["actions"][0]["status_change"]["to"], "untriaged");
+    assert_eq!(dv["actions"][0]["applied"], false);
+    // The queue still shows it as a legacy form (nothing migrated yet).
+    let q = json_stdout(&run(tmp.path(), &["--json", "intake", "queue"]));
+    assert_eq!(q["legacy_pending"], 1, "still legacy pre-apply");
+
+    // Apply: writes the change.
+    let apply = run(tmp.path(), &["--json", "intake", "migrate", "--apply"]);
+    assert_eq!(apply.status.code(), Some(0), "{}", dump(&apply));
+    let av = json_stdout(&apply);
+    assert_eq!(av["applied"], true);
+    assert_eq!(av["actions"][0]["applied"], true);
+
+    // Now a first-class untriaged item with provenance set, no legacy flag.
+    let q2 = json_stdout(&run(tmp.path(), &["--json", "intake", "queue"]));
+    assert!(q2.get("legacy_pending").is_none(), "no legacy left: {q2}");
+    let items = q2["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["slug"], "legacy-bug-one");
+    assert_eq!(items[0]["status"], "untriaged");
+    assert_eq!(items[0]["provenance"], "telegram");
+    assert_eq!(items[0]["legacy"], false);
+
+    // Second apply is a no-op.
+    let again = json_stdout(&run(
+        tmp.path(),
+        &["--json", "intake", "migrate", "--apply"],
+    ));
+    assert_eq!(again["summary"]["total"], 0, "idempotent: {again}");
+}
+
+#[test]
+fn migrate_reports_conflict_as_skip_without_writing() {
+    let tmp = fresh_repo();
+    write_legacy(
+        tmp.path(),
+        "ambiguous-legacy",
+        "labels: [needs-triage, deferred]\n",
+    );
+    let out = run(tmp.path(), &["--json", "intake", "migrate", "--apply"]);
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let v = json_stdout(&out);
+    assert_eq!(v["summary"]["skipped"], 1);
+    assert_eq!(v["actions"][0]["action"], "skip");
+    assert!(v["actions"][0]["conflict"].is_string());
+    assert_eq!(v["actions"][0]["applied"], false);
+    // Unchanged on disk: still open with both labels.
+    let list = json_stdout(&run(tmp.path(), &["--json", "show", "ambiguous-legacy"]));
+    assert_eq!(list["status"], "open");
+}
+
+#[test]
+fn queue_surfaces_legacy_form_with_flag_and_nudge() {
+    let tmp = fresh_repo();
+    // A first-class untriaged item and a legacy open+needs-triage item.
+    file_bug(tmp.path(), "modern-one");
+    write_legacy(tmp.path(), "legacy-one", "labels: [needs-triage]\n");
+
+    let out = run(tmp.path(), &["--json", "intake", "queue"]);
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let v = json_stdout(&out);
+    assert_eq!(v["legacy_pending"], 1);
+    assert!(v["migration_hint"].as_str().unwrap().contains("migrate"));
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "both surfaced: {}", dump(&out));
+    let legacy: Vec<_> = items.iter().filter(|i| i["legacy"] == true).collect();
+    assert_eq!(legacy.len(), 1);
+    assert_eq!(legacy[0]["slug"], "legacy-one");
+    assert_eq!(legacy[0]["status"], "open");
+
+    // A non-default --state view does NOT fold in legacy forms.
+    let deferred = run(
+        tmp.path(),
+        &["--json", "intake", "queue", "--state", "deferred"],
+    );
+    let dv = json_stdout(&deferred);
+    assert!(dv.get("legacy_pending").is_none(), "state view is precise");
+    assert!(dv["items"].as_array().unwrap().is_empty());
+}
+
 #[test]
 fn intake_file_rejects_epic() {
     let tmp = fresh_repo();
