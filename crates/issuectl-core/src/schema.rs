@@ -1209,10 +1209,9 @@ mod tests {
         )
         .unwrap();
         let violations = validate(&schema, &bad);
-        let hit = violations.iter().find_map(|x| match x {
-            ViolationKind::InvalidEnum { field, .. } if field == "provenance" => Some(x),
-            _ => None,
-        });
+        let hit = violations.iter().find(
+            |x| matches!(x, ViolationKind::InvalidEnum { field, .. } if field == "provenance"),
+        );
         let hit = hit.expect("undeclared provenance value must be rejected");
         let msg = hit.message();
         assert!(
@@ -1256,11 +1255,9 @@ mod tests {
         let fm: Mapping = serde_yaml::from_str("status: open\npriority: normal\n").unwrap();
         let v = validate(&schema, &fm);
         // Missing `type` (required by default schema).
-        assert!(matches!(
-            v.iter()
-                .find(|x| matches!(x, ViolationKind::MissingRequired { field } if field == "type")),
-            Some(_)
-        ));
+        assert!(v
+            .iter()
+            .any(|x| matches!(x, ViolationKind::MissingRequired { field } if field == "type")));
     }
 
     #[test]

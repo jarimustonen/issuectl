@@ -1627,6 +1627,10 @@ impl From<RejectKindArg> for mutate::intake::RejectKind {
     }
 }
 
+// Clap command enum: variants map 1:1 to subcommands and are parsed once, so
+// the size imbalance between the wide `File` variant and the small ones is
+// irrelevant — boxing here would only obscure the flat clap definition.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum IntakeAction {
     /// File a new intake item (reporting agent). Creates it directly in
