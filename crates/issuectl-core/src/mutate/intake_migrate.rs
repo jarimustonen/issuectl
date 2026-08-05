@@ -24,6 +24,13 @@
 //! - **Idempotent + per-issue atomic.** Each issue's write goes through the
 //!   shared [`super::update_issue_under_lock`] (one tempfile-rename). A
 //!   second run finds the legacy labels already gone and is a no-op.
+//! - **Per-issue error isolation.** In `--apply`, a schema rejection or I/O
+//!   failure on one item records an `error` on that action and leaves it
+//!   untouched; the pass continues so every other legacy item still
+//!   migrates. The full [`MigrateReport`] is always returned (never an
+//!   opaque early abort), and a failed write makes the command exit
+//!   non-zero. Because each write is atomic and the plan idempotent, a
+//!   re-run retries only the still-unmigrated items.
 //!
 //! ### Why the graph rules are bypassed (but not the invariants)
 //!
@@ -80,6 +87,10 @@ pub struct MigrateAction {
     /// True once the write has actually happened (apply mode). Always
     /// false for a conflict and for a dry run.
     pub applied: bool,
+    /// Set when this item was planned but its `--apply` write **failed**
+    /// (schema rejection, I/O error). The plan is sound but the item was
+    /// left untouched; other items still migrate. A re-run retries it.
+    pub error: Option<String>,
 }
 
 impl MigrateAction {
@@ -110,11 +121,22 @@ pub struct MigrateReport {
 }
 
 impl MigrateReport {
+    /// Non-conflict, non-error actions: in dry-run these are *planned*, in
+    /// apply they are the ones that succeeded (`error` is `None`).
     pub fn migrated_count(&self) -> usize {
-        self.actions.iter().filter(|a| a.conflict.is_none()).count()
+        self.actions
+            .iter()
+            .filter(|a| a.conflict.is_none() && a.error.is_none())
+            .count()
     }
     pub fn skipped_count(&self) -> usize {
         self.actions.iter().filter(|a| a.conflict.is_some()).count()
+    }
+    /// Items whose `--apply` write failed (apply mode only). Non-zero here
+    /// means the command must exit non-zero even though conflicts alone do
+    /// not — a failed write is an error, an ambiguous item is expected.
+    pub fn failed_count(&self) -> usize {
+        self.actions.iter().filter(|a| a.error.is_some()).count()
     }
 }
 
@@ -125,8 +147,22 @@ fn has_label(issue: &Issue, label: &str) -> bool {
         .is_some_and(|ls| ls.iter().any(|l| l == label))
 }
 
-fn provenance_of(issue: &Issue) -> Option<&str> {
-    issue.extra.get(F_PROVENANCE).and_then(|v| v.as_str())
+/// How an existing `provenance` frontmatter value classifies. Distinguishes
+/// "absent" (safe to set from `via:telegram`) from "present but not a
+/// string" (an object/number/etc. a later tool or schema wrote) — the
+/// latter must never be silently overwritten.
+enum ExistingProvenance<'a> {
+    Absent,
+    Str(&'a str),
+    NonString,
+}
+
+fn provenance_of(issue: &Issue) -> ExistingProvenance<'_> {
+    match issue.extra.get(F_PROVENANCE) {
+        None | Some(serde_json::Value::Null) => ExistingProvenance::Absent,
+        Some(serde_json::Value::String(s)) => ExistingProvenance::Str(s),
+        Some(_) => ExistingProvenance::NonString,
+    }
 }
 
 /// Compute the migration plan for one issue against `schema` (needed to
@@ -158,10 +194,13 @@ pub(crate) fn plan_issue(issue: &Issue, schema: &Schema) -> Option<MigrateAction
             "carries both `needs-triage` and `deferred` labels — ambiguous target status; migrate by hand",
         ));
     }
-    // via:telegram against a *different* already-set provenance.
+    // via:telegram against an already-set provenance that is not a matching
+    // string. A *different* string is a conflicting source; a *non-string*
+    // value (object/number/…) some other tool wrote must never be silently
+    // overwritten with `"telegram"` — both are skipped for manual review.
     if via_telegram {
-        if let Some(p) = provenance {
-            if p != PROV_TELEGRAM {
+        match provenance {
+            ExistingProvenance::Str(p) if p != PROV_TELEGRAM => {
                 return Some(MigrateAction::conflict(
                     &issue.slug,
                     format!(
@@ -169,6 +208,13 @@ pub(crate) fn plan_issue(issue: &Issue, schema: &Schema) -> Option<MigrateAction
                     ),
                 ));
             }
+            ExistingProvenance::NonString => {
+                return Some(MigrateAction::conflict(
+                    &issue.slug,
+                    "`via:telegram` label but provenance is already set to a non-string value — migrate by hand",
+                ));
+            }
+            _ => {}
         }
     }
 
@@ -190,9 +236,17 @@ pub(crate) fn plan_issue(issue: &Issue, schema: &Schema) -> Option<MigrateAction
             action.warnings.push(format!(
                 "dropped stale `needs-triage` — item is closed (`{status}`); not reopened"
             ));
+        } else if status == "untriaged" || status == "needs-info" {
+            // Already in an intake state — the label is redundant; drop it
+            // quietly (idempotent cleanup), no status change.
+        } else {
+            // Some other active status (a project-defined one). Never
+            // regress it, but do not drop the label silently — warn so the
+            // mis-encoded item is auditable, mirroring the `deferred` branch.
+            action.warnings.push(format!(
+                "dropped `needs-triage` — item is `{status}` (no status change)"
+            ));
         }
-        // else: already `untriaged`/`needs-info`/other active — just drop
-        // the redundant label (idempotent cleanup), no status change.
     }
 
     // ── deferred → deferred (only from `open`) ───────────────────────────
@@ -219,9 +273,11 @@ pub(crate) fn plan_issue(issue: &Issue, schema: &Schema) -> Option<MigrateAction
     }
 
     // ── via:telegram → provenance:telegram (drop label) ──────────────────
+    // A conflicting/non-string provenance already returned a conflict above,
+    // so here provenance is either absent or already the matching string.
     if via_telegram {
         action.dropped_labels.push(L_VIA_TELEGRAM.to_string());
-        if provenance.is_none() {
+        if matches!(provenance, ExistingProvenance::Absent) {
             action.set_provenance = Some(PROV_TELEGRAM.to_string());
         }
         // provenance already == telegram: label is redundant, just dropped.
@@ -267,28 +323,30 @@ pub fn migrate(
         let Some(mut action) = plan_issue(issue, &schema) else {
             continue;
         };
+        // Defensive: this pass bypasses the transition graph, so a planner
+        // bug that emitted anything other than `open → untriaged|deferred`
+        // would slip past the graph and rely solely on the intrinsic
+        // invariants. Assert the invariant the module docs promise, so such
+        // a bug fails loudly in tests/debug rather than mutating state.
+        debug_assert!(
+            match &action.status_change {
+                None => true,
+                Some((from, to)) => from == "open" && (to == "untriaged" || to == "deferred"),
+            },
+            "migration emitted an unexpected status change: {:?}",
+            action.status_change
+        );
         if apply && action.conflict.is_none() {
-            let mut req = UpdateIssueRequest::default();
-            if let Some((_, to)) = &action.status_change {
-                req.status = Patch::Set(to.clone());
+            // Per-issue error isolation: a schema rejection or I/O failure on
+            // one item records an `error` and leaves it untouched; the pass
+            // continues so every other legacy item still migrates. Each write
+            // is atomic and the plan is idempotent, so a re-run retries only
+            // the failed items. A whole-batch `?` would instead abandon the
+            // report after some items were already committed.
+            match apply_one(root, &action, &schema, &empty_rules) {
+                Ok(()) => action.applied = true,
+                Err(e) => action.error = Some(format!("{e}")),
             }
-            req.remove_labels = action.dropped_labels.clone();
-            if let Some(p) = &action.set_provenance {
-                req.custom_fields
-                    .insert(F_PROVENANCE.to_string(), Patch::Set(p.clone()));
-            }
-            req.validate()?;
-            let item_path = super::locate_for_dry_run(root, &issue.slug)?;
-            super::update_issue_under_lock(
-                root,
-                &issue.slug,
-                item_path,
-                req,
-                None,
-                &schema,
-                &empty_rules,
-            )?;
-            action.applied = true;
         }
         actions.push(action);
     }
@@ -297,6 +355,31 @@ pub fn migrate(
         applied: apply,
         actions,
     })
+}
+
+/// Write one planned action through the shared under-lock path with the
+/// flock already held by [`migrate`]. `rules` are empty (graph bypassed);
+/// intrinsic invariants + schema validation still run inside
+/// `update_issue_under_lock`.
+fn apply_one(
+    root: &Path,
+    action: &MigrateAction,
+    schema: &Schema,
+    rules: &TransitionRules,
+) -> Result<(), IntakeError> {
+    let mut req = UpdateIssueRequest::default();
+    if let Some((_, to)) = &action.status_change {
+        req.status = Patch::Set(to.clone());
+    }
+    req.remove_labels = action.dropped_labels.clone();
+    if let Some(p) = &action.set_provenance {
+        req.custom_fields
+            .insert(F_PROVENANCE.to_string(), Patch::Set(p.clone()));
+    }
+    req.validate()?;
+    let item_path = super::locate_for_dry_run(root, &action.slug)?;
+    super::update_issue_under_lock(root, &action.slug, item_path, req, None, schema, rules)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -342,6 +425,12 @@ mod tests {
 
     fn schema() -> std::sync::Arc<Schema> {
         UncachedConfig.schema(&std::env::temp_dir()).unwrap()
+    }
+
+    /// Load the schema a repo actually declares (for tests that write a
+    /// custom `.schema.yaml` — e.g. custom statuses / provenance enum).
+    fn schema_at(root: &Path) -> std::sync::Arc<Schema> {
+        UncachedConfig.schema(root).unwrap()
     }
 
     // ── plan_issue: one test per §6 table row ────────────────────────────
@@ -521,7 +610,10 @@ mod tests {
         assert_eq!(after.status, "untriaged", "open → untriaged");
         assert!(!has_label(&after, L_NEEDS_TRIAGE), "label dropped");
         assert!(!has_label(&after, L_VIA_TELEGRAM), "label dropped");
-        assert_eq!(provenance_of(&after), Some("telegram"), "provenance set");
+        assert!(
+            matches!(provenance_of(&after), ExistingProvenance::Str("telegram")),
+            "provenance set"
+        );
 
         // Second run: nothing left to do.
         let r2 = migrate(tmp.path(), true, &UncachedConfig).unwrap();
@@ -575,5 +667,98 @@ mod tests {
         let after = load(tmp.path(), "wip-item");
         assert_eq!(after.status, "in-progress", "no regression");
         assert!(!has_label(&after, L_NEEDS_TRIAGE), "stale label dropped");
+    }
+
+    #[test]
+    fn via_telegram_non_string_provenance_is_conflict() {
+        // A structured/non-string provenance must never be silently
+        // overwritten with "telegram" — it is a whole-issue conflict.
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "tg-structured",
+            "type: bug\nstatus: open\nprovenance:\n  system: telegram\n  account: foo\nlabels: [via:telegram]\n",
+        );
+        let a = plan_issue(&load(tmp.path(), "tg-structured"), &schema()).unwrap();
+        assert!(a.conflict.is_some(), "non-string provenance → conflict");
+        assert!(a.set_provenance.is_none(), "never overwrites");
+        assert!(a.dropped_labels.is_empty(), "conflict touches nothing");
+    }
+
+    #[test]
+    fn needs_triage_on_custom_active_status_warns() {
+        // A project-defined active status is not `open`; never regress it,
+        // but do not drop `needs-triage` silently — warn for auditability.
+        // `blocked` is not a built-in closing status, so the default schema
+        // classifies it active — no custom schema needed for plan-only.
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "blocked-item",
+            "type: bug\nstatus: blocked\nlabels: [needs-triage]\n",
+        );
+        let a = plan_issue(&load(tmp.path(), "blocked-item"), &schema()).unwrap();
+        assert!(a.status_change.is_none(), "custom active never regressed");
+        assert_eq!(a.dropped_labels, vec![L_NEEDS_TRIAGE]);
+        assert_eq!(a.warnings.len(), 1, "warns rather than dropping silently");
+    }
+
+    #[test]
+    fn needs_triage_on_custom_closing_status_is_schema_aware() {
+        // The closing classification is schema-driven: a custom closing
+        // status must be treated like a built-in one (drop label, warn, no
+        // reopen), proving `plan_issue` honours `status_classes`.
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nstatus_classes:\n  archived: closing\n",
+        )
+        .unwrap();
+        write_issue(
+            tmp.path(),
+            "archived-item",
+            "type: bug\nstatus: archived\nclosed: 2026-01-01\nlabels: [needs-triage]\n",
+        );
+        let a = plan_issue(&load(tmp.path(), "archived-item"), &schema_at(tmp.path())).unwrap();
+        assert!(a.status_change.is_none(), "closed item never reopened");
+        assert_eq!(a.dropped_labels, vec![L_NEEDS_TRIAGE]);
+        assert!(
+            a.warnings[0].contains("closed"),
+            "warns closed: {:?}",
+            a.warnings
+        );
+    }
+
+    #[test]
+    fn apply_isolates_a_failing_write_and_migrates_the_rest() {
+        // A repo whose schema constrains `provenance` to an enum excluding
+        // `telegram`: the via:telegram write fails schema validation, but a
+        // sibling needs-triage item still migrates. The failure is reported
+        // on its own action, not raised as a whole-batch abort.
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  provenance:\n    enum: [email]\n",
+        )
+        .unwrap();
+        write_issue(
+            tmp.path(),
+            "good-item",
+            "type: bug\nstatus: open\nlabels: [needs-triage]\n",
+        );
+        write_issue(
+            tmp.path(),
+            "bad-item",
+            "type: bug\nstatus: open\nlabels: [via:telegram]\n",
+        );
+        let r = migrate(tmp.path(), true, &UncachedConfig).unwrap();
+        assert_eq!(r.failed_count(), 1, "the telegram write failed");
+        assert_eq!(r.migrated_count(), 1, "the other item still migrated");
+        // The good one is committed; the bad one is untouched (still open,
+        // label intact) so a re-run retries it.
+        assert_eq!(load(tmp.path(), "good-item").status, "untriaged");
+        let bad = load(tmp.path(), "bad-item");
+        assert_eq!(bad.status, "open");
+        assert!(has_label(&bad, L_VIA_TELEGRAM), "failed write left intact");
     }
 }

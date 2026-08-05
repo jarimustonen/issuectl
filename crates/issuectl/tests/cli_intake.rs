@@ -348,9 +348,43 @@ fn migrate_reports_conflict_as_skip_without_writing() {
     assert_eq!(v["actions"][0]["action"], "skip");
     assert!(v["actions"][0]["conflict"].is_string());
     assert_eq!(v["actions"][0]["applied"], false);
-    // Unchanged on disk: still open with both labels.
-    let list = json_stdout(&run(tmp.path(), &["--json", "show", "ambiguous-legacy"]));
-    assert_eq!(list["status"], "open");
+    // Unchanged on disk: still open with BOTH labels intact (a conflict
+    // touches nothing).
+    let body = std::fs::read_to_string(tmp.path().join("issues/ambiguous-legacy/item.md")).unwrap();
+    assert!(body.contains("status: open"), "{body}");
+    assert!(body.contains("needs-triage"), "{body}");
+    assert!(body.contains("deferred"), "{body}");
+}
+
+#[test]
+fn migrate_reports_write_failure_and_exits_nonzero_but_migrates_the_rest() {
+    // A repo whose schema constrains `provenance` to an enum excluding
+    // `telegram`: the via:telegram write fails, but a sibling needs-triage
+    // item still migrates. The command exits 1 (failed write ≠ conflict).
+    let tmp = fresh_repo();
+    std::fs::write(
+        tmp.path().join("issues/.schema.yaml"),
+        "version: 1\nfields:\n  provenance:\n    enum: [email]\n",
+    )
+    .unwrap();
+    write_legacy(tmp.path(), "good-legacy", "labels: [needs-triage]\n");
+    write_legacy(tmp.path(), "bad-legacy", "labels: [via:telegram]\n");
+
+    let out = run(tmp.path(), &["--json", "intake", "migrate", "--apply"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "failed write → exit 1: {}",
+        dump(&out)
+    );
+    let v = json_stdout(&out);
+    assert_eq!(v["summary"]["failed"], 1);
+    assert_eq!(v["summary"]["migrated"], 1);
+    // The good one committed; the bad one untouched (retryable).
+    let good = json_stdout(&run(tmp.path(), &["--json", "show", "good-legacy"]));
+    assert_eq!(good["status"], "untriaged");
+    let bad = json_stdout(&run(tmp.path(), &["--json", "show", "bad-legacy"]));
+    assert_eq!(bad["status"], "open");
 }
 
 #[test]
@@ -372,14 +406,72 @@ fn queue_surfaces_legacy_form_with_flag_and_nudge() {
     assert_eq!(legacy[0]["slug"], "legacy-one");
     assert_eq!(legacy[0]["status"], "open");
 
-    // A non-default --state view does NOT fold in legacy forms.
+    // The --state deferred view folds only legacy *deferred* forms; there
+    // are none here (this legacy item is a needs-triage form), so it stays
+    // empty.
     let deferred = run(
         tmp.path(),
         &["--json", "intake", "queue", "--state", "deferred"],
     );
     let dv = json_stdout(&deferred);
-    assert!(dv.get("legacy_pending").is_none(), "state view is precise");
+    assert!(
+        dv.get("legacy_pending").is_none(),
+        "no legacy deferred here"
+    );
     assert!(dv["items"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn queue_state_deferred_surfaces_legacy_deferred_form() {
+    // §6 also migrates `open + deferred` → `deferred`. Those items must be
+    // visible in the deferred view before migration, else they are silently
+    // abandoned (invisible in both the default and the deferred queue).
+    let tmp = fresh_repo();
+    write_legacy(tmp.path(), "parked-legacy", "labels: [deferred]\n");
+
+    // The default (untriaged) queue does NOT surface a deferred-only form.
+    let def_default = json_stdout(&run(tmp.path(), &["--json", "intake", "queue"]));
+    assert!(def_default.get("legacy_pending").is_none());
+    assert!(def_default["items"].as_array().unwrap().is_empty());
+
+    // The deferred view does.
+    let out = run(
+        tmp.path(),
+        &["--json", "intake", "queue", "--state", "deferred"],
+    );
+    let v = json_stdout(&out);
+    assert_eq!(v["legacy_pending"], 1, "{}", dump(&out));
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["slug"], "parked-legacy");
+    assert_eq!(items[0]["legacy"], true);
+    assert_eq!(items[0]["status"], "open");
+}
+
+#[test]
+fn queue_provenance_filter_surfaces_unmigrated_telegram_items() {
+    // `--provenance telegram` must still find a legacy item that encodes
+    // provenance via the `via:telegram` label (no `provenance` field yet),
+    // otherwise the transition filter hides exactly the population being
+    // migrated.
+    let tmp = fresh_repo();
+    write_legacy(
+        tmp.path(),
+        "tg-legacy",
+        "labels: [needs-triage, via:telegram]\n",
+    );
+    // A non-telegram legacy item that must be filtered OUT.
+    write_legacy(tmp.path(), "other-legacy", "labels: [needs-triage]\n");
+
+    let out = run(
+        tmp.path(),
+        &["--json", "intake", "queue", "--provenance", "telegram"],
+    );
+    let v = json_stdout(&out);
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "only the telegram item: {}", dump(&out));
+    assert_eq!(items[0]["slug"], "tg-legacy");
+    assert_eq!(items[0]["legacy"], true);
 }
 
 #[test]
