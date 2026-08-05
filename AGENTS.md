@@ -258,9 +258,13 @@ policy.
   "release: X.Y.Z"`, then `git tag -a vX.Y.Z -m "Release X.Y.Z" &&
   git push --follow-tags`. The tag triggers `cargo-dist`
   (`.github/workflows/release.yml`) → GitHub Release with binaries +
-  shell installer, Homebrew formula pushed to
-  `jarimustonen/homebrew-issuectl`, and crates.io publish
-  (`publish-crates.yml`). Full steps: [CONTRIBUTING.md](CONTRIBUTING.md)
+  shell installer, and the Homebrew formula pushed to
+  `jarimustonen/homebrew-issuectl`. **crates.io does NOT publish on the
+  tag** — `publish-crates.yml` is `workflow_dispatch`-only and
+  `GITHUB_TOKEN` does not fire it, so every release needs a **manual
+  trigger** (`gh workflow run "Publish to crates.io"`) once the release
+  workflow succeeds. (This is the gap `@wire-oss-release-as-release-path`
+  will close.) Full steps: [CONTRIBUTING.md](CONTRIBUTING.md)
   "Per-release steps".
 - **Deploy/release autonomy: go/no-go required.** The conductor may
   **recommend** a release but must **not** tag/publish without the

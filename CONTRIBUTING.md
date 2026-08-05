@@ -149,7 +149,13 @@ Release automation is handled by [`cargo-dist`](https://opensource.axo.dev/cargo
 
 1. Update `CHANGELOG.md`: move items from `## [Unreleased]` to a new
    `## [X.Y.Z]` section with the date.
-2. Update `version` in `Cargo.toml`.
+2. Update `version` in `Cargo.toml`. **When the bump crosses a caret
+   boundary** (e.g. `0.6.x` → `0.7.0`, or any major bump), also update the
+   internal `issuectl-core = { path = "../issuectl-core", version = "X.Y.Z" }`
+   requirement in `crates/issuectl/Cargo.toml` to the new version —
+   otherwise `cargo build` fails to select `issuectl-core` (the old caret
+   requirement excludes the new minor/major). Patch bumps within the same
+   minor don't need this.
 3. Run `cargo build` and `cargo test` to ensure `Cargo.lock` reflects
    the new version and everything still passes.
 4. Commit: `git commit -am "release: X.Y.Z"`
@@ -159,8 +165,13 @@ Release automation is handled by [`cargo-dist`](https://opensource.axo.dev/cargo
    git push --follow-tags
    ```
 6. Watch the workflows on [Actions](https://github.com/jarimustonen/issuectl/actions).
-   On success: GitHub Release is created with binaries, Homebrew tap is
-   updated, and crates.io has the new version.
+   On success the tag-triggered **Release** workflow creates the GitHub
+   Release with binaries and updates the Homebrew tap.
+7. **Publish to crates.io manually** — the tag does NOT trigger it.
+   Once the Release workflow is green, run
+   `gh workflow run "Publish to crates.io"` (it is `workflow_dispatch`
+   only; `GITHUB_TOKEN` does not fire `publish-crates.yml`). Verify with
+   `curl -s https://index.crates.io/is/su/issuectl | tail -1`.
 
 ### Updating cargo-dist itself
 
