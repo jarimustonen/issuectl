@@ -1313,6 +1313,15 @@ enum Command {
         #[arg(long, value_parser = parse_non_empty)]
         cycle: String,
     },
+
+    /// Standard intake flow: file, triage, and dispose of bug reports and
+    /// feature requests. Filing (`file`) is for the reporting agent;
+    /// everything else is the developer / product-manager surface. See
+    /// `docs/design/intake-flow.md`.
+    Intake {
+        #[command(subcommand)]
+        action: IntakeAction,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -1599,6 +1608,177 @@ enum SkillAction {
     },
 }
 
+/// The `--kind` axis of `intake reject`, mapped onto the
+/// `disposition_reason` enum in the mutation layer.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum RejectKindArg {
+    ByDesign,
+    Wontfix,
+    OutOfScope,
+}
+
+impl From<RejectKindArg> for mutate::intake::RejectKind {
+    fn from(k: RejectKindArg) -> Self {
+        match k {
+            RejectKindArg::ByDesign => Self::ByDesign,
+            RejectKindArg::Wontfix => Self::Wontfix,
+            RejectKindArg::OutOfScope => Self::OutOfScope,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum IntakeAction {
+    /// File a new intake item (reporting agent). Creates it directly in
+    /// the `untriaged` reception state; idempotent on
+    /// `(--provenance, --source-ref)`.
+    File {
+        /// Item type (never `epic`)
+        #[arg(short = 't', long = "type", value_parser = PossibleValuesParser::new(ISSUE_TYPES))]
+        issue_type: String,
+        /// One-line title
+        #[arg(long, value_parser = parse_non_empty)]
+        title: String,
+        /// Report body (free text). `--body-file` reads it from a file.
+        #[arg(long, visible_alias = "description", value_parser = parse_non_empty)]
+        body: Option<String>,
+        /// Read the body from a file; `-` reads stdin.
+        #[arg(long = "body-file", conflicts_with = "body")]
+        body_file: Option<PathBuf>,
+        /// Who reported it
+        #[arg(long, value_parser = parse_non_empty)]
+        reporter: Option<String>,
+        /// Where the report came from (e.g. telegram, email). Must be an
+        /// accepted value when the repo constrains `provenance`.
+        #[arg(long, value_parser = parse_non_empty)]
+        provenance: String,
+        /// Free-text provenance detail (for the open-ended `other` case)
+        #[arg(long = "provenance-detail", value_parser = parse_non_empty)]
+        provenance_detail: Option<String>,
+        /// External identity of the source report (idempotency key),
+        /// e.g. `chat:123/message:456`
+        #[arg(long = "source-ref", value_parser = parse_non_empty)]
+        source_ref: Option<String>,
+        /// Filing-time severity hint
+        #[arg(short = 'p', long, value_parser = PossibleValuesParser::new(PRIORITIES))]
+        priority: Option<String>,
+        /// Descriptive kebab-case slug
+        #[arg(long, value_parser = parse_non_empty)]
+        slug: Option<String>,
+        /// Add a label (repeatable)
+        #[arg(short = 'l', long = "label", value_parser = parse_non_empty)]
+        labels: Vec<String>,
+        /// Set a non-protected custom field (repeatable), `key=value`.
+        /// Lifecycle keys (`status`, `type`, `reporter`, `provenance`, …)
+        /// are rejected — use their dedicated flags.
+        #[arg(long = "field", value_parser = parse_custom_field)]
+        fields: Vec<(String, String)>,
+    },
+    /// Inspect the actionable intake queue (default: `untriaged`, oldest
+    /// first).
+    Queue {
+        /// Filter by type
+        #[arg(long = "type", value_parser = parse_non_empty)]
+        issue_type: Option<String>,
+        /// Filter by provenance
+        #[arg(long, value_parser = parse_non_empty)]
+        provenance: Option<String>,
+        /// Only items lacking a `## Triage analysis` section
+        #[arg(long = "needs-analysis")]
+        needs_analysis: bool,
+        /// View a non-default intake state instead of `untriaged`
+        #[arg(long, value_parser = PossibleValuesParser::new(["deferred", "needs-info"]))]
+        state: Option<String>,
+    },
+    /// Show one intake item with its attachments and analysis section
+    Show {
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+    },
+    /// Accept into the backlog (`→ open`)
+    Accept {
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+        #[arg(short = 'a', long, value_parser = parse_non_empty)]
+        assignee: Option<String>,
+        #[arg(short = 'p', long, value_parser = PossibleValuesParser::new(PRIORITIES))]
+        priority: Option<String>,
+    },
+    /// Park it (`→ deferred`)
+    Defer {
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+        #[arg(long, value_parser = parse_non_empty)]
+        reason: String,
+        /// Wake-up date (`deferred_until`)
+        #[arg(long, value_parser = parse_non_empty)]
+        until: Option<String>,
+    },
+    /// Ask the reporter for more (`→ needs-info`)
+    NeedInfo {
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+        #[arg(long, value_parser = parse_non_empty)]
+        reason: String,
+    },
+    /// Reject / not-a-bug (`→ wontfix` + disposition reason)
+    Reject {
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+        #[arg(long, value_parser = parse_non_empty)]
+        reason: String,
+        #[arg(long, value_enum, default_value_t = RejectKindArg::Wontfix)]
+        kind: RejectKindArg,
+    },
+    /// Cannot reproduce (`→ cannot-reproduce`; bug-only)
+    CannotReproduce {
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+        #[arg(long, value_parser = parse_non_empty)]
+        reason: String,
+    },
+    /// Mark as a duplicate (`→ duplicate` + directed `duplicate_of`)
+    Duplicate {
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+        /// Canonical item this duplicates
+        #[arg(long, value_parser = parse_slug_arg)]
+        of: String,
+    },
+    /// Obsolete / superseded (`→ obsolete`)
+    Obsolete {
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+        #[arg(long, value_parser = parse_non_empty)]
+        reason: String,
+        #[arg(long = "superseded-by", value_parser = parse_slug_arg)]
+        superseded_by: Option<String>,
+    },
+    /// Reclassify the type (valid only in an intake state)
+    Retype {
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+        #[arg(long = "to", value_parser = parse_non_empty)]
+        to: String,
+    },
+    /// Reopen a closed item (`→ untriaged` by default, or `open`)
+    Reopen {
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+        #[arg(long = "to", value_parser = PossibleValuesParser::new(["untriaged", "open"]))]
+        to: Option<String>,
+        #[arg(long, value_parser = parse_non_empty)]
+        reason: String,
+    },
+    /// Reporter retracts their own untriaged report (`→ wontfix`)
+    Withdraw {
+        #[arg(value_parser = parse_slug_arg)]
+        slug: String,
+        #[arg(long, value_parser = parse_non_empty)]
+        reason: String,
+    },
+}
+
 /// Build the shared `--json` error object: `{"error":{"code","message"[,…]}}`.
 /// `extra` (when an object) is merged into the inner `error` object so a
 /// command can attach structured context (e.g. `matches` for a duplicate
@@ -1641,6 +1821,15 @@ fn bubbled_error_code(e: &anyhow::Error) -> &'static str {
         .find_map(|cause| cause.downcast_ref::<mutate::MutateError>())
     {
         Some(mutate::MutateError::NotFound) => "not-found",
+        // The intrinsic intake invariants (and any `transitions.yaml`
+        // rule) are enforced inside the shared under-lock path, so a
+        // generic `set`/`update --status` that trips one bubbles a
+        // `TransitionViolation`. Classify it with the same
+        // `transition-illegal` code the first-class `intake` verbs emit
+        // so agents branch on one code regardless of which verb they
+        // used. (The bubble path still exits 1; the `intake` surface maps
+        // the refused-but-actionable case to exit 2 itself.)
+        Some(mutate::MutateError::TransitionViolation(_)) => "transition-illegal",
         _ => "command-failed",
     }
 }
@@ -1926,6 +2115,10 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
                     source,
                     description,
                     custom_fields,
+                    // `new` never files into a reception state — status is
+                    // fixed at `open`. Intake filing goes through
+                    // `issuectl intake file`.
+                    status: None,
                     inbox,
                 },
                 check_duplicates,
@@ -2223,7 +2416,363 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
         Command::Timeline { slug } => cmd_timeline(json_output, &slug),
         Command::Changelog { range } => cmd_changelog(json_output, &range),
         Command::Metrics { since } => cmd_metrics(json_output, since),
+        Command::Intake { action } => dispatch_intake(json_output, action),
     }
+}
+
+/// Thin router for the `intake` subcommand group. Each arm builds args
+/// and delegates to a domain function in `mutate::intake`, then renders
+/// the outcome under the shared `--json` contract.
+fn dispatch_intake(json: bool, action: IntakeAction) -> Result<()> {
+    match action {
+        IntakeAction::File {
+            issue_type,
+            title,
+            body,
+            body_file,
+            reporter,
+            provenance,
+            provenance_detail,
+            source_ref,
+            priority,
+            slug,
+            labels,
+            fields,
+        } => {
+            let body = match body_file {
+                Some(path) => Some(read_body_file_arg(&path)?),
+                None => body,
+            };
+            cmd_intake_file(
+                json,
+                mutate::intake::FileRequest {
+                    issue_type,
+                    title,
+                    body,
+                    reporter,
+                    provenance,
+                    provenance_detail,
+                    source_ref,
+                    priority,
+                    slug,
+                    labels,
+                    fields,
+                },
+            )
+        }
+        IntakeAction::Queue {
+            issue_type,
+            provenance,
+            needs_analysis,
+            state,
+        } => cmd_intake_queue(json, issue_type, provenance, needs_analysis, state),
+        IntakeAction::Show { slug } => cmd_intake_show(json, &slug),
+        IntakeAction::Accept {
+            slug,
+            assignee,
+            priority,
+        } => intake_render(
+            json,
+            &slug,
+            mutate::intake::accept(&find_root(), &slug, assignee, priority, &UncachedConfig),
+        ),
+        IntakeAction::Defer {
+            slug,
+            reason,
+            until,
+        } => intake_render(
+            json,
+            &slug,
+            mutate::intake::defer(&find_root(), &slug, &reason, until, &UncachedConfig),
+        ),
+        IntakeAction::NeedInfo { slug, reason } => intake_render(
+            json,
+            &slug,
+            mutate::intake::need_info(&find_root(), &slug, &reason, &UncachedConfig),
+        ),
+        IntakeAction::Reject { slug, reason, kind } => intake_render(
+            json,
+            &slug,
+            mutate::intake::reject(&find_root(), &slug, kind.into(), &reason, &UncachedConfig),
+        ),
+        IntakeAction::CannotReproduce { slug, reason } => intake_render(
+            json,
+            &slug,
+            mutate::intake::cannot_reproduce(&find_root(), &slug, &reason, &UncachedConfig),
+        ),
+        IntakeAction::Duplicate { slug, of } => intake_render(
+            json,
+            &slug,
+            mutate::intake::duplicate(&find_root(), &slug, &of, &UncachedConfig),
+        ),
+        IntakeAction::Obsolete {
+            slug,
+            reason,
+            superseded_by,
+        } => intake_render(
+            json,
+            &slug,
+            mutate::intake::obsolete(&find_root(), &slug, &reason, superseded_by, &UncachedConfig),
+        ),
+        IntakeAction::Retype { slug, to } => intake_render(
+            json,
+            &slug,
+            mutate::intake::retype(&find_root(), &slug, &to, &UncachedConfig),
+        ),
+        IntakeAction::Reopen { slug, to, reason } => intake_render(
+            json,
+            &slug,
+            mutate::intake::reopen(&find_root(), &slug, to, &reason, &UncachedConfig),
+        ),
+        IntakeAction::Withdraw { slug, reason } => intake_render(
+            json,
+            &slug,
+            mutate::intake::withdraw(&find_root(), &slug, &reason, &UncachedConfig),
+        ),
+    }
+}
+
+/// Render a first-class intake transition outcome. On error, maps the
+/// `IntakeError` onto its stable `--json` code + exit code via the shared
+/// `fail` sink (`-> !`).
+fn intake_render(
+    json: bool,
+    slug: &str,
+    r: Result<mutate::UpdateOutcome, mutate::intake::IntakeError>,
+) -> Result<()> {
+    match r {
+        Ok(out) => {
+            if json {
+                let report = serde_json::json!({
+                    "slug": slug,
+                    "status": out.issue.status,
+                    "dir": out.issue_dir.to_string_lossy(),
+                    "version": out.version,
+                });
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{slug} → {}", out.issue.status);
+            }
+            Ok(())
+        }
+        Err(e) => fail(
+            json,
+            e.exit_code(),
+            e.code(),
+            &format!("{e}"),
+            serde_json::Value::Null,
+        ),
+    }
+}
+
+fn cmd_intake_file(json: bool, req: mutate::intake::FileRequest) -> Result<()> {
+    match mutate::intake::file(&find_root(), req, &UncachedConfig) {
+        Ok(out) => {
+            if json {
+                let report = serde_json::json!({
+                    "slug": out.slug,
+                    "status": "untriaged",
+                    "dir": out.issue_dir.to_string_lossy(),
+                    "version": out.version,
+                    "deduplicated": out.deduplicated,
+                });
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if out.deduplicated {
+                println!(
+                    "Existing issue {} returned (deduplicated on source-ref)",
+                    out.slug
+                );
+            } else {
+                println!("Filed {} (untriaged)", out.slug);
+            }
+            Ok(())
+        }
+        Err(e) => fail(
+            json,
+            e.exit_code(),
+            e.code(),
+            &format!("{e}"),
+            serde_json::Value::Null,
+        ),
+    }
+}
+
+/// Name of the body section a read-only analysis worker appends to. Its
+/// presence is the *derived* "has been analysed" signal — there is no
+/// stored analysis state / lease (design OD-2).
+const TRIAGE_ANALYSIS_SECTION: &str = "Triage analysis";
+
+fn has_triage_analysis(body: &str) -> bool {
+    body_sections::all_h2_sections(body).contains_key(TRIAGE_ANALYSIS_SECTION)
+}
+
+fn intake_provenance(issue: &models::Issue) -> Option<&str> {
+    issue.extra.get("provenance").and_then(|v| v.as_str())
+}
+
+fn cmd_intake_queue(
+    json: bool,
+    issue_type: Option<String>,
+    provenance: Option<String>,
+    needs_analysis: bool,
+    state: Option<String>,
+) -> Result<()> {
+    // Default view is the actionable reception queue; `deferred` /
+    // `needs-info` are excluded unless explicitly requested via --state.
+    let target = state.as_deref().unwrap_or("untriaged");
+    let issues = load();
+    let mut rows: Vec<&models::Issue> = issues
+        .iter()
+        .filter(|i| i.status == target)
+        .filter(|i| issue_type.as_deref().is_none_or(|t| i.issue_type == t))
+        .filter(|i| {
+            provenance
+                .as_deref()
+                .is_none_or(|p| intake_provenance(i) == Some(p))
+        })
+        .filter(|i| !needs_analysis || !has_triage_analysis(&i.body))
+        .collect();
+    // Stable order: oldest `created` first (items lacking a date sort
+    // last), slug as the deterministic tiebreak.
+    rows.sort_by(|a, b| {
+        let ka = (a.created.is_none(), a.created.clone(), a.slug.clone());
+        let kb = (b.created.is_none(), b.created.clone(), b.slug.clone());
+        ka.cmp(&kb)
+    });
+
+    if json {
+        let arr: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "slug": i.slug,
+                    "type": i.issue_type,
+                    "status": i.status,
+                    "priority": i.priority,
+                    "created": i.created,
+                    "provenance": intake_provenance(i),
+                    "reporter": i.reporter,
+                    "title": i.title,
+                    "needs_analysis": !has_triage_analysis(&i.body),
+                    "version": canonical::canonical_hash(i),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "state": target, "items": arr }))?
+        );
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("No items in the {target} queue.");
+        return Ok(());
+    }
+    println!(
+        "Intake queue ({target}) — {} item(s), oldest first:",
+        rows.len()
+    );
+    for i in &rows {
+        let prov = intake_provenance(i).unwrap_or("-");
+        let flag = if has_triage_analysis(&i.body) {
+            ""
+        } else {
+            "  [needs-analysis]"
+        };
+        println!(
+            "  {}  {}  {}  ({})  {}{}",
+            i.created.as_deref().unwrap_or("????-??-??"),
+            i.issue_type,
+            i.slug,
+            prov,
+            i.title,
+            flag
+        );
+    }
+    Ok(())
+}
+
+fn cmd_intake_show(json: bool, slug: &str) -> Result<()> {
+    let root = find_root();
+    let resolved = match repo::resolve_slug_input(&root, slug) {
+        Ok(s) => s,
+        Err(e) => fail(
+            json,
+            1,
+            "ambiguous-slug",
+            &format!("{e:#}"),
+            serde_json::Value::Null,
+        ),
+    };
+    let issues = load();
+    let Some(issue) = issues.iter().find(|i| i.slug == resolved) else {
+        fail(
+            json,
+            1,
+            "not-found",
+            &format!("issue {slug} not found"),
+            serde_json::Value::Null,
+        )
+    };
+
+    // Attachments live under `<issue-dir>/attachments/`.
+    let attachments: Vec<String> = repo::locate_issue_full(&root, &issue.slug)
+        .ok()
+        .and_then(|l| l.item_path.parent().map(Path::to_path_buf))
+        .map(|dir| {
+            let adir = dir.join(mutate::new_issue::ATTACHMENTS_DIRNAME);
+            fs::read_dir(&adir)
+                .map(|rd| {
+                    let mut names: Vec<String> = rd
+                        .flatten()
+                        .filter_map(|e| e.file_name().into_string().ok())
+                        .collect();
+                    names.sort();
+                    names
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    let analysis = body_sections::all_h2_sections(&issue.body)
+        .get(TRIAGE_ANALYSIS_SECTION)
+        .cloned();
+
+    if json {
+        let mut v = serde_json::to_value(issue).expect("Issue serializes");
+        if let serde_json::Value::Object(ref mut m) = v {
+            m.insert(
+                "version".into(),
+                serde_json::Value::String(canonical::canonical_hash(issue)),
+            );
+            m.insert(
+                "attachments".into(),
+                serde_json::to_value(&attachments).unwrap(),
+            );
+            m.insert(
+                "analysis".into(),
+                match &analysis {
+                    Some(a) => serde_json::Value::String(a.clone()),
+                    None => serde_json::Value::Null,
+                },
+            );
+        }
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+
+    print_issue_detail(issue);
+    if !attachments.is_empty() {
+        println!("\nAttachments:");
+        for a in &attachments {
+            println!("  {a}");
+        }
+    }
+    match analysis {
+        Some(a) => println!("\n## {TRIAGE_ANALYSIS_SECTION}\n{a}"),
+        None => println!("\n(no {TRIAGE_ANALYSIS_SECTION} section yet)"),
+    }
+    Ok(())
 }
 
 fn cmd_fmt(json: bool, slugs: Vec<String>, check: bool, diff: bool) -> Result<()> {
@@ -5328,6 +5877,7 @@ mod tests {
             source: None,
             description: None,
             custom_fields: vec![],
+            status: None,
             inbox: false,
         }
     }
@@ -6299,7 +6849,10 @@ mod tests {
         write_raw_issue(
             tmp.path(),
             "amber-loud-fox",
-            "type: bug\nstatus: open\npriority: normal\nassignee: alice\n",
+            // `feature`, so `done` is the type-compatible completion (the
+            // code-level type × status invariant reserves `done` for
+            // non-bug work — a bug completes as `fixed`).
+            "type: feature\nstatus: open\npriority: normal\nassignee: alice\n",
             "# One\n",
         );
         let q = query::parse("status:open").unwrap();
@@ -6346,7 +6899,8 @@ mod tests {
         write_raw_issue(
             tmp.path(),
             "amber-loud-fox",
-            "type: bug\nstatus: open\npriority: normal\nassignee: alice\n",
+            // `feature`, so `done` is the type-compatible completion.
+            "type: feature\nstatus: open\npriority: normal\nassignee: alice\n",
             "# One\n",
         );
         let q = query::parse("status:open").unwrap();

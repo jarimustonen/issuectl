@@ -123,6 +123,117 @@ pub fn rules_path(root: &Path) -> PathBuf {
     root.join(RULES_RELATIVE_PATH)
 }
 
+/// The default intake transition matrix, scaffolded by `issuectl init`.
+///
+/// This is the **complete** graph the intake-flow design calls for, not a
+/// partial sketch: every destination that must be constrained carries an
+/// `allowed_from` whitelist (default-deny), so illegal jumps like
+/// `untriaged → fixed` or `deferred → in-progress` are rejected. `open`
+/// is deliberately left unconstrained — it is the broadly-reachable
+/// backlog state (accept, schedule-from-deferred, reopen all land there).
+///
+/// The matrix is `allowed_from`-only (no `requires_*`): those are stricter
+/// *repo policy* a project layers on top, and baking `requires_commits` /
+/// `requires_assignee` into the default would break the zero-config
+/// `issuectl close` flow. Type × status rules (a bug completes as `fixed`,
+/// a feature as `done`, `cannot-reproduce` is bug-only) cannot be
+/// expressed here (status-only predicates) and live as an always-on
+/// code-level invariant in `mutate::intake` instead.
+///
+/// A repo that never runs `init` (or deletes this file) still gets the
+/// intrinsic source-state invariants from the intake mutations; only the
+/// broader graph is opt-in, exactly as the design's rollout section
+/// describes.
+pub const DEFAULT_TRANSITIONS_YAML: &str = r#"# issuectl status-transition rules (v1) — auto-generated; safe to edit and commit.
+#
+# `allowed_from` is a whitelist: when set, a transition into that status
+# from any source NOT listed is rejected (default-deny). `forbidden_from`
+# is a blacklist applied on top. `requires_assignee` / `requires_commits` /
+# `requires_acceptance_criteria_checked` add stricter per-status gates —
+# none ship by default; add them to encode project policy.
+#
+# Delete this file to fall back to fully-lenient transitions (the intake
+# mutations still enforce their intrinsic source-state invariants).
+version: 1
+status_rules:
+  # --- Intake reception / holding states -------------------------------
+  # Re-entered by a reporter reply (needs-info → untriaged) or by
+  # reopening a closed item. NOT reachable from an in-flight state —
+  # that would silently un-work an issue.
+  untriaged:
+    allowed_from: [needs-info, fixed, done, wontfix, duplicate, cannot-reproduce, obsolete]
+  needs-info:
+    allowed_from: [untriaged, deferred, open]
+  deferred:
+    allowed_from: [untriaged, needs-info, open]
+  # --- Development flow -------------------------------------------------
+  # Start from the backlog, or rework after a failed verification. Denies
+  # "start work from untriaged" and "start from parked (deferred)".
+  in-progress:
+    allowed_from: [open, testing]
+  testing:
+    allowed_from: [in-progress]
+  # --- Closing dispositions --------------------------------------------
+  # Completion statuses come from the dev flow (including a direct `close`
+  # of an `open` item) — never from an untriaged/parked item, which must
+  # be dispositioned via `intake reject|duplicate|obsolete|…`, not
+  # silently "fixed"/"done".
+  fixed:
+    allowed_from: [open, in-progress, testing]
+  done:
+    allowed_from: [open, in-progress, testing]
+  # Intake exits: reachable from any intake/holding state and from the
+  # backlog (an accepted item can still be dropped or found to be a dup).
+  wontfix:
+    allowed_from: [untriaged, needs-info, deferred, open, in-progress, testing]
+  duplicate:
+    allowed_from: [untriaged, needs-info, deferred, open]
+  cannot-reproduce:
+    allowed_from: [untriaged, needs-info, deferred, open]
+  obsolete:
+    allowed_from: [untriaged, needs-info, deferred, open]
+"#;
+
+/// Write the default transition matrix to `.issuectl/transitions.yaml`.
+/// Mirrors [`crate::schema::write_default`]: atomic tempfile-rename,
+/// `force=false` refuses to clobber an existing file (returns
+/// `Ok(false)`), `force=true` replaces it. Returns whether bytes were
+/// written.
+pub fn write_default(root: &Path, force: bool) -> Result<bool> {
+    use std::io::Write;
+    let path = rules_path(root);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("rules path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
+    if path.exists() && !force {
+        return Ok(false);
+    }
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".issuectl-transitions-")
+        .tempfile_in(parent)
+        .with_context(|| format!("cannot create temp rules in {}", parent.display()))?;
+    tmp.as_file_mut()
+        .write_all(DEFAULT_TRANSITIONS_YAML.as_bytes())
+        .with_context(|| format!("cannot write temp rules for {}", path.display()))?;
+    tmp.as_file()
+        .sync_all()
+        .with_context(|| format!("cannot fsync temp rules for {}", path.display()))?;
+    if force {
+        tmp.persist(&path)
+            .map_err(|e| e.error)
+            .with_context(|| format!("cannot persist {}", path.display()))?;
+        Ok(true)
+    } else {
+        match tmp.persist_noclobber(&path) {
+            Ok(_) => Ok(true),
+            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(anyhow::Error::from(e.error))
+                .with_context(|| format!("cannot persist {}", path.display())),
+        }
+    }
+}
+
 /// Load rules from `.issuectl/transitions.yaml`. Returns empty defaults
 /// when the file is missing (lenient — matches pre-feature behaviour).
 ///
@@ -690,6 +801,79 @@ mod tests {
         let only_fenced = "## Acceptance Criteria\n\n```\n- [ ] inside\n```\n";
         let msg = acceptance_criteria_message(only_fenced, "done").unwrap();
         assert!(msg.contains("at least one task-list item"));
+    }
+
+    /// The shipped default matrix parses, every status it references is a
+    /// member of the default schema's `status` enum, and it is a *complete*
+    /// intake graph: the illegal jumps the design calls out are rejected
+    /// while the legal intake edges pass.
+    #[test]
+    fn default_transitions_matrix_is_sound_and_complete() {
+        let rules: TransitionRules = serde_yaml::from_str(DEFAULT_TRANSITIONS_YAML).unwrap();
+        assert_eq!(rules.version, SUPPORTED_VERSION);
+        let universe = crate::schema::status_universe(&crate::schema::default_schema());
+        validate_status_refs(&rules, &universe).expect("every referenced status must be in schema");
+
+        let denied = |prev: &str, new: &str, ty: &str| {
+            let i = make_issue(new, ty, "");
+            !evaluate_transition(&rules, &i, prev).is_empty()
+        };
+        let allowed = |prev: &str, new: &str, ty: &str| {
+            let i = make_issue(new, ty, "");
+            evaluate_transition(&rules, &i, prev).is_empty()
+        };
+
+        // Illegal jumps the design names explicitly.
+        assert!(denied("untriaged", "fixed", "bug"), "untriaged→fixed");
+        assert!(denied("untriaged", "done", "feature"), "untriaged→done");
+        assert!(
+            denied("untriaged", "in-progress", "bug"),
+            "start from untriaged"
+        );
+        assert!(
+            denied("deferred", "in-progress", "bug"),
+            "start from parked"
+        );
+        assert!(
+            denied("testing", "untriaged", "bug"),
+            "un-work an in-flight item"
+        );
+
+        // Legal intake + dev edges.
+        assert!(allowed("untriaged", "open", "bug"), "accept");
+        assert!(allowed("deferred", "open", "feature"), "schedule");
+        assert!(allowed("untriaged", "deferred", "bug"), "defer");
+        assert!(allowed("untriaged", "needs-info", "bug"), "need-info");
+        assert!(allowed("needs-info", "untriaged", "bug"), "reporter reply");
+        assert!(allowed("untriaged", "wontfix", "bug"), "reject");
+        assert!(allowed("untriaged", "duplicate", "bug"), "duplicate");
+        assert!(allowed("open", "in-progress", "bug"), "start work");
+        assert!(allowed("in-progress", "testing", "bug"), "submit");
+        assert!(allowed("testing", "in-progress", "bug"), "rework");
+        assert!(allowed("testing", "fixed", "bug"), "verify fix");
+        assert!(allowed("open", "fixed", "bug"), "direct close of a bug");
+        assert!(
+            allowed("open", "done", "feature"),
+            "direct close of a feature"
+        );
+        assert!(allowed("fixed", "untriaged", "bug"), "reopen (regression)");
+        assert!(allowed("done", "open", "feature"), "reopen a feature");
+    }
+
+    #[test]
+    fn write_default_is_atomic_and_noclobber() {
+        let tmp = TempDir::new().unwrap();
+        assert!(write_default(tmp.path(), false).unwrap());
+        assert!(load(tmp.path()).unwrap().status_rules.contains_key("fixed"));
+        // Second write without force is a no-op that preserves edits.
+        let path = rules_path(tmp.path());
+        let edited = "version: 1\nstatus_rules: {}\n";
+        fs::write(&path, edited).unwrap();
+        assert!(!write_default(tmp.path(), false).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+        // Force replaces it.
+        assert!(write_default(tmp.path(), true).unwrap());
+        assert!(fs::read_to_string(&path).unwrap().contains("in-progress"));
     }
 
     #[test]

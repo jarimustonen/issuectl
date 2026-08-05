@@ -20,6 +20,7 @@
 
 pub mod archive;
 pub mod attach;
+pub mod intake;
 pub mod new_issue;
 pub mod triage;
 
@@ -1316,6 +1317,26 @@ fn update_issue_under_lock(
     //     post-mutation `Issue` projection. Rules are loaded once by
     //     the caller (same pattern as `schema`).
     let projected = projected_issue_for_rules(slug, &item, &item_path, schema)?;
+
+    // Intrinsic intake invariants (OD-9 A) — always on, independent of
+    // `.issuectl/transitions.yaml`. Routed through here so the generic
+    // `set status` / `update --status` path enforces the same type ×
+    // status and reception-state rules as the first-class intake verbs;
+    // neither is a bypass. Gated on an actual status/type change so a
+    // no-op re-assert or an unrelated field PATCH against legacy data is
+    // never retroactively rejected.
+    if projected.status != prev_status || projected.issue_type != prev_type {
+        let intrinsic = intake::intrinsic_transition_violations(
+            &prev_status,
+            &prev_type,
+            &projected.status,
+            &projected.issue_type,
+        );
+        if !intrinsic.is_empty() {
+            return Err(MutateError::TransitionViolation(intrinsic.join("; ")));
+        }
+    }
+
     let mut rule_violations =
         crate::transitions::evaluate_transition(rules, &projected, &prev_status);
     let (dod_warnings, dod_errors) =
@@ -2923,6 +2944,7 @@ pub fn new_issue(
             source: req.source,
             description: req.description,
             custom_fields: req.custom_fields,
+            status: None,
             inbox: false,
         },
         config,

@@ -60,6 +60,10 @@ pub struct NewArgs {
     pub source: Option<String>,
     pub description: Option<String>,
     pub custom_fields: Vec<(String, String)>,
+    /// Creation status override. `None` ⇒ `open` (the historical
+    /// default). Set to `untriaged` by `mutate::intake::file` so a filed
+    /// item is created directly in its reception state.
+    pub status: Option<String>,
     /// Drop the new issue under `issues/inbox/<slug>/` instead of the
     /// canonical flat root. Default `false`. Inbox issues stay out of
     /// `ls` by default and are promoted with `issuectl triage <slug>`.
@@ -82,6 +86,7 @@ impl Default for NewArgs {
             source: None,
             description: None,
             custom_fields: Vec::new(),
+            status: None,
             inbox: false,
         }
     }
@@ -218,6 +223,7 @@ pub(crate) fn do_new_locked(
         related: &related,
         source: args.source.as_deref(),
         description: args.description.as_deref(),
+        status: args.status.as_deref(),
         custom_fields: &args.custom_fields,
     };
     // Build the frontmatter mapping and validate it BEFORE serializing.
@@ -419,6 +425,7 @@ mod tests {
             source: None,
             description: None,
             custom_fields: vec![],
+            status: None,
             inbox: false,
         }
     }

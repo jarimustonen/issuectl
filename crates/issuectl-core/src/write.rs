@@ -335,6 +335,12 @@ pub struct NewIssueArgs<'a> {
     pub related: &'a [String],
     pub source: Option<&'a str>,
     pub description: Option<&'a str>,
+    /// Creation status. `None` ⇒ the historical default `open`. Only the
+    /// intake `file` path overrides it (to `untriaged`), so a filed item
+    /// lands in its reception state directly rather than being created
+    /// `open` and immediately re-transitioned — the latter would trip the
+    /// transition matrix (an `open → untriaged` edge nothing sanctions).
+    pub status: Option<&'a str>,
     /// Custom frontmatter fields supplied by `issuectl new --field key=value`.
     /// Built-in fields (`type`, `priority`, ...) are reserved at the parser
     /// level (`parse_custom_field`), so these can only be names beyond the
@@ -366,7 +372,7 @@ pub fn build_new_frontmatter(args: &NewIssueArgs<'_>) -> Mapping {
         }
     }
 
-    set_string(&mut map, "status", "open");
+    set_string(&mut map, "status", args.status.unwrap_or("open"));
     set_string(&mut map, "priority", args.priority);
 
     if let Some(e) = args.epic {
@@ -887,6 +893,7 @@ mod tests {
             related: &[],
             source: None,
             description: None,
+            status: None,
             custom_fields: &[],
         }
     }
@@ -932,6 +939,7 @@ mod tests {
             related: &related,
             source: Some("frontend/login"),
             description: Some("Stuck in loop."),
+            status: None,
             custom_fields: &[],
         };
         let out = render_new_item(&a);

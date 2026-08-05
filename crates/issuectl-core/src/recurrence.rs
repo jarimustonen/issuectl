@@ -534,6 +534,7 @@ fn materialize(
             ),
             (OCCURRENCE_KEY.to_string(), occurrence_key.to_string()),
         ],
+        status: None,
         inbox: false,
     };
     // Use the under-lock entry point so we don't double-acquire the

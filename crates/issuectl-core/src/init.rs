@@ -16,7 +16,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::{agents, hooks, merge_driver, schema, skill};
+use crate::{agents, hooks, merge_driver, schema, skill, transitions};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InitOptions {
@@ -170,6 +170,33 @@ pub fn run(root: &Path, opts: InitOptions, json: bool) -> Result<()> {
     // filesystem.
     let _schema = schema::load(root)
         .context("loading issues/.schema.yaml — fix or remove the malformed schema and re-run")?;
+
+    // 1b. Transition matrix (.issuectl/transitions.yaml). Scaffolds the
+    // complete default intake graph. `--force` resets it; without
+    // `--force` it's a noop on existing so a project's own edits survive.
+    let rules_path = transitions::rules_path(root);
+    let rules_existed = rules_path.exists();
+    let rules_wrote = transitions::write_default(root, opts.force)
+        .context("initializing .issuectl/transitions.yaml")?;
+    let rules_status = if rules_wrote && rules_existed {
+        ArtifactStatus::Overwritten
+    } else if rules_wrote {
+        ArtifactStatus::Created
+    } else {
+        ArtifactStatus::AlreadyExists
+    };
+    reports.push(StepReport {
+        step: "transitions",
+        status: aggregate(&[rules_status]),
+        artifacts: vec![ArtifactReport {
+            path: rel(root, &rules_path),
+            status: rules_status,
+        }],
+        effects: vec![],
+        next_steps: vec![],
+        message: None,
+        details: None,
+    });
 
     // 2. .issuectl/AGENTS.md.
     let agents_outcome = agents::ensure_default_written(root, opts.force)
@@ -353,6 +380,7 @@ fn print_human(reports: &[StepReport]) {
         };
         let label = match r.step {
             "schema" => "schema",
+            "transitions" => "transition matrix",
             "agents" => ".issuectl/AGENTS.md",
             "skill" => "skill",
             "hooks" => "pre-commit hook",
@@ -419,6 +447,7 @@ mod tests {
         let tmp = fresh_git_repo();
         run(tmp.path(), opts(), false).unwrap();
         assert!(tmp.path().join("issues/.schema.yaml").is_file());
+        assert!(tmp.path().join(".issuectl/transitions.yaml").is_file());
         assert!(tmp.path().join(".issuectl/AGENTS.md").is_file());
         assert!(tmp.path().join("issues/AGENTS.md").is_file());
         assert!(tmp.path().join(".claude/skills/issue/SKILL.md").is_file());
@@ -437,6 +466,7 @@ mod tests {
         let snapshot = |p: &Path| std::fs::read_to_string(p).unwrap();
         let before = [
             snapshot(&tmp.path().join("issues/.schema.yaml")),
+            snapshot(&tmp.path().join(".issuectl/transitions.yaml")),
             snapshot(&tmp.path().join(".issuectl/AGENTS.md")),
             snapshot(&tmp.path().join("issues/AGENTS.md")),
             snapshot(&tmp.path().join(".claude/skills/issue/SKILL.md")),
@@ -448,6 +478,7 @@ mod tests {
 
         let after = [
             snapshot(&tmp.path().join("issues/.schema.yaml")),
+            snapshot(&tmp.path().join(".issuectl/transitions.yaml")),
             snapshot(&tmp.path().join(".issuectl/AGENTS.md")),
             snapshot(&tmp.path().join("issues/AGENTS.md")),
             snapshot(&tmp.path().join(".claude/skills/issue/SKILL.md")),
