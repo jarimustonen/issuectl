@@ -4,6 +4,9 @@ updated: 2026-08-06
 type: feature
 status: in-progress
 priority: normal
+commits:
+- hash: 4e81422
+  summary: distribute /issue-new + /issue-intake via skill install
 ---
 
 # Distribute /issue-new + /issue-intake via skill install (fleet)

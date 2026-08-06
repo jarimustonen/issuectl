@@ -70,7 +70,10 @@ pub enum IntakeSkill {
 }
 
 impl IntakeSkill {
-    /// Every intake skill, in install order.
+    /// Every intake skill, in install order. Ordering is semantic — filing
+    /// (`/issue-new`) before processing (`/issue-intake`), matching the flow's
+    /// lifecycle — and load-bearing for the install summary; do not reorder
+    /// for cosmetic reasons.
     pub const ALL: [IntakeSkill; 2] = [IntakeSkill::IssueNew, IntakeSkill::IssueIntake];
 
     /// The skill's directory name under `.claude/skills/` (and its `/name`).
@@ -128,15 +131,21 @@ pub fn install_skill_summary(
     agents: &[Agent],
     force: bool,
 ) -> Result<Vec<InstallResult>> {
-    let mut results = Vec::with_capacity(agents.len() + 1 + IntakeSkill::ALL.len());
+    // The standalone intake skills are Claude-only; ship them whenever the
+    // Claude agent is selected, so the fleet-apply hook distributes them the
+    // same way it distributes `/issue`. A Codex-only install skips them.
+    let ships_intake = agents.contains(&Agent::Claude);
+    let intake_count = if ships_intake {
+        IntakeSkill::ALL.len()
+    } else {
+        0
+    };
+    let mut results = Vec::with_capacity(agents.len() + 1 + intake_count);
     results.push(install_issues_scaffold(repo_root, force)?);
     for agent in agents {
         results.push(install_agent_template(repo_root, *agent, force)?);
     }
-    // The standalone intake skills are Claude-only; ship them whenever the
-    // Claude agent is selected, so the fleet-apply hook distributes them the
-    // same way it distributes `/issue`. A Codex-only install skips them.
-    if agents.contains(&Agent::Claude) {
+    if ships_intake {
         for skill in IntakeSkill::ALL {
             results.push(install_intake_skill(repo_root, skill, force)?);
         }
@@ -632,6 +641,56 @@ mod tests {
             .install_path(root)
             .ends_with(".claude/skills/issue-intake/SKILL.md"));
         assert_eq!(IntakeSkill::ALL.len(), 2);
+    }
+
+    #[test]
+    fn install_result_order_is_scaffold_then_agents_then_intake() {
+        // The dogfood/print paths rely on install-result order being stable:
+        // scaffold, each agent in input order, then the intake skills in
+        // `IntakeSkill::ALL` order.
+        let tmp = tempfile::tempdir().unwrap();
+        let results = install_skill_summary(tmp.path(), &[Agent::Claude], false).unwrap();
+        assert_eq!(results.len(), 4);
+        assert!(results[0].path.ends_with("issues/AGENTS.md"));
+        assert!(results[1].path.ends_with(".claude/skills/issue/SKILL.md"));
+        assert!(results[2]
+            .path
+            .ends_with(".claude/skills/issue-new/SKILL.md"));
+        assert!(results[3]
+            .path
+            .ends_with(".claude/skills/issue-intake/SKILL.md"));
+    }
+
+    #[test]
+    fn force_reinstall_reports_mixed_outcomes() {
+        // A `--force` install where the `/issue` skill already exists but the
+        // intake skills do not must report `Overwritten` for the former and
+        // `Created` for the latter in the same call.
+        let tmp = tempfile::tempdir().unwrap();
+        let issue = Agent::Claude.install_path(tmp.path());
+        std::fs::create_dir_all(issue.parent().unwrap()).unwrap();
+        std::fs::write(&issue, "pre-existing").unwrap();
+
+        let results = install_skill_summary(tmp.path(), &[Agent::Claude], true).unwrap();
+        let outcome = |needle: &str| {
+            results
+                .iter()
+                .find(|r| r.path.ends_with(needle))
+                .map(|r| r.outcome.clone())
+                .unwrap_or_else(|| panic!("no result for {needle}"))
+        };
+        assert_eq!(
+            outcome(".claude/skills/issue/SKILL.md"),
+            InstallOutcome::Overwritten
+        );
+        assert_eq!(
+            outcome(".claude/skills/issue-new/SKILL.md"),
+            InstallOutcome::Created
+        );
+        assert_eq!(
+            outcome(".claude/skills/issue-intake/SKILL.md"),
+            InstallOutcome::Created
+        );
     }
 
     #[test]
