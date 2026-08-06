@@ -36,7 +36,7 @@ sha2 = "0.10"
 hex = "0.4"
 fs2 = "0.4"
 tempfile = "3"
-rand = "0.8"
+rand = "0.10"
 similar = { version = "2", default-features = false, features = ["text"] }
 
 [dev-dependencies]
