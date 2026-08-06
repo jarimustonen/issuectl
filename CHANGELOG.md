@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-06
+
+### Added
+- **`skill install` (and `init`) now distribute the intake-flow skills.** In
+  addition to the `/issue` skill, `issuectl skill install` and `issuectl init`
+  install the `/issue-new` (filer) and `/issue-intake` (queue processor) skills,
+  shipped as version-pinned `include_str!` templates and dogfood-guarded so the
+  installed copies cannot drift from their templates — the same contract `/issue`
+  already had. This lets the whole intake workflow travel with the binary to every
+  project that installs it, instead of living only in this repo. Shipped in the
+  Claude-Code format; a Codex prompt variant is a follow-up.
+
 ## [0.7.0] - 2026-08-05
 
 ### Added
