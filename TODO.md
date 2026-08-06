@@ -13,28 +13,33 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-06):** `main` == **v0.7.1** — TÄYSIN JULKAISTU: GitHub Release live,
-Homebrew-tap päivitetty, **crates.io `0.7.1` indeksissä** (varmistettu `newest_version`),
-release.yml + publish-crates.yml vihreät, CI vihreä. Työpuu puhdas.
+**Tila (2026-08-06, myöhempi rupeama):** viimeisin **julkaistu** versio on **v0.7.1**
+(GitHub Release + Homebrew + crates.io indeksissä). MUTTA `main` on nyt **7 committia
+tagia edellä** — landattua mutta **JULKAISEMATONTA** työtä (3 close/show-polun korjausta,
+alla). `main` ≠ julkaistu; seuraava release olisi **0.7.2** (tai 0.8.0). Työpuu puhdas.
 
-**0.7.1:ssä shipannut (CHANGELOG täydellinen) — pieni intake-follow-up-rupeama:**
-- **@distribute-intake-skills (feature)** — `skill install` + `init` asentavat nyt myös
-  `/issue-new` (filer) + `/issue-intake` (queue-processor) skillit, version-pinnattuina
-  `include_str!`-templateina + dogfood-guardattuna (sama kontrakti kuin `/issue`illä), joten
-  koko intake-workflow matkaa binäärin mukana joka projektiin. **Vain Claude-Code-formaatti**
-  toistaiseksi (ei Codex-prompt-varianttia — ks. follow-up alla).
-- **@verify-intake-split-queue (task)** — §6 transitional split queue **verifioitu
-  shipatuksi jo 0.7.0:ssa** (molemmat legacy-muodot, JSON + human, migrate-round-trip); ei
-  tuotantokoodimuutosta, lisättiin yksi regressiotesti pinnaamaan human-moden `[legacy]`-flag
-  + migraationudge. Turvaverkko homebase/deutschpad-migraatioille — vahvistettu toimivaksi.
+**Tässä rupeamassa landannut mainiin (JULKAISEMATTA — CHANGELOG `[Unreleased]` päivitettävä
+release-cutissa):**
+- **@show-json-omits-blocked-by (bug, normal, fixed)** — `issuectl --json show` tulostaa nyt
+  top-level `blocked_by`in (kanoninen, `@`-prefiksoitu) + johdetun käänteisen `blocks`-näkymän.
+  Juurisyy: `blocked_by` asui `Issue::extra`-mapissa, plain serde upotti sen; cmd_show:n
+  --json-polku nostaa sen top-leveliin ja strippaa raakakopion (yksi esitys johdolla).
+  Regressio- + kanonisointitestit. 3/3 llm-review-konsensus, green gate ok.
+- **@intensely-blushing-galley (improvement, low, done)** — `closed_by` nostettu `extra`-mapista
+  ensiluokkaiseksi typed-kentäksi (`Issue.closed_by`): mukana `canonical_hash`issa (taaksepäin-
+  yhteensopiva), skeemassa, `doctor`-heal varoittaa aktiivistatuksilla, näkyy `show --json` +
+  human show ("Closed by:"), human `close` kaikuttaa "(by <author>)" `--as`illa. Legacy
+  `extra["closed_by"]` migratoituu lukiessa.
+- **@close-comment (feature, low, done)** — `close --comment/--note "<text>"` liittää
+  aikaleimatun `## Resolution`-lohkon samassa atomisessa kirjoituksessa; komponoituu
+  `--status/--as/--commit`in kanssa. 4-malli-llm-review, yksi oikea parser-fix sovellettu.
 
-**Tämän rupeaman follow-upit (DAG:issa alla):**
-- **@show-json-omits-blocked-by** (bug, normal) — rinnakkaissession filaama: `--json show`
-  ei tulosta `blocked_by`-kenttää. **DAG GLOBAL HEAD-OF-LINE** (ainoa normal-prio työ).
-- **@awfully-courageous-attempt** (feature, low) — Codex-prompt-variantit `/issue-new` +
-  `/issue-intake`ille (triviaalinen frontmatter-strip kuten `/issue`illä). Käyttäjän nosto
-  handoffissa: Codex-client sietäisi Claude-formaatin mutta näyttäisi frontmatterin kohinana.
-  **Build-only-if**: tee vasta jos näitä skillejä oikeasti kutsutaan Codexista jossain.
+**Aiemmat julkaistut (0.7.1, taustaa):** @distribute-intake-skills (`skill install` jakaa
+`/issue-new` + `/issue-intake`), @verify-intake-split-queue (§6 split queue verifioitu). Vain
+Claude-Code-formaatti skilleillä (Codex-variantti = @awfully-courageous-attempt, build-only-if).
+
+**Seuraava release-huomio:** kun 0.7.2 cutataan, päivitä CHANGELOG `[Unreleased]` yllä olevilla
+3 kohdalla ennen tagia.
 
 **⚠️ crates.io-caveat (ennallaan, muista JOKA release):** tag-push laukaisee cargo-dist
 (GitHub Release + Homebrew) mutta **crates.io-julkaisu vaatii manuaalisen triggerin**
@@ -54,10 +59,12 @@ release-engineinä — `/oss-release-cut` EI regeneroi `release.yml`:ää.
 **Iso linjaus (ennallaan):** **kanban/web-board holdissa**. Kaikki kanban/web-issuet +
 build-only-if + `@focus-areas` `deferred` → **Adjacent backlog**. Fokus CLI:ssä.
 
-**Seuraava askel:** 0.7.1 ulkona ja dogfoodissa — odota käyttäjän palautetta. DAG:issa 1
-normal-prio bug (**@show-json-omits-blocked-by**, GLOBAL HEAD-OF-LINE) + 3 low-prio riviä
-(2 close-polkua LANE A:ssa, Codex-variantti LANE B:ssä). Ei kiireä; feedback-issuet menevät
-edelle jos niitä tulee.
+**Seuraava askel:** aktiivinen backlog on käytännössä **tyhjä** — kaikki tämän rupeaman
+DAG-työ landasi. Jäljellä DAG:issa vain **@awfully-courageous-attempt** (low, build-only-if:
+vain jos Codex-käyttö todistuu). Kaksi realistista seuraavaa liikettä: (a) **cutata 0.7.2**
+(3 julkaisematonta korjausta mainissa — päivitä CHANGELOG, tag, muista crates.io manual
+trigger) — vaatii käyttäjän go/no-go:n; tai (b) odottaa lisää dogfood-feedbackia ja nostaa
+uudet issuet DAG:iin. Ei kiirettä; feedback-issuet menevät edelle jos niitä tulee.
 
 ---
 
@@ -75,20 +82,17 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: intensely-blushing-galley   ← LANE A close-path tidy-ups (show-json-omits-blocked-by landed 0.7.1+)
-LANE A — main.rs (show/close handlers) + mutate/ close path + schema/issue_fields  (sequenced — kaikki koskevat cmd_show/cmd_close serialization/output)
-  ▶ intensely-blushing-galley   low · improvement; promote closed_by → typed Issue field (top-level in show) + doctor heal + human close output. Follow-up llm-reviewsta close-as-flag-asymmetrylle.
-    close-comment               low · feature; `close` hyväksyy `--comment/--note` → kirjaa sulkemisen perustelun samassa stepissä (nyt manuaalinen 2-vaihe). Filattu rinnakkaissessiosta.
+GLOBAL HEAD-OF-LINE: awfully-courageous-attempt   ← ainoa aktiivinen ei-deferred issue (low, build-only-if); LANE A tyhjeni (kaikki close-polun työ landasi)
 LANE B — skill install + templates/ + skill.rs (skill distribution)
   ▶ awfully-courageous-attempt  low · feature; Codex-prompt-variantit /issue-new + /issue-intakelle (frontmatter-strip kuten /issuella). Build-only-if: vain jos Codex-käyttö todistuu.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: **`show-json-omits-blocked-by`** (bug, normal) korjattu ja landattu — `--json show`
-tulostaa nyt top-level `blocked_by`in (+ johdettu `blocks`); 3/3 llm-review-konsensus, green gate ok;
-pudotettu DAG:sta (fixed). Uusi GLOBAL HEAD-OF-LINE = **`intensely-blushing-galley`**; LANE A:n 2
-low-prio close-polun riviä (galley + close-comment) sekvensoituna. LANE B:n `awfully-courageous-attempt`
-ennallaan (build-only-if).
+Kaari-lyhyesti: kolme close/show-polun issueta landasi tässä rupeamassa — **`show-json-omits-blocked-by`**
+(bug), **`intensely-blushing-galley`** (typed `closed_by`) ja **`close-comment`** (`close --comment`);
+kaikki pudotettu DAG:sta (terminal). LANE A tyhjeni kokonaan. Jäljellä vain LANE B:n
+**`awfully-courageous-attempt`** (low, build-only-if), joka on nyt GLOBAL HEAD-OF-LINE muun puuttuessa.
+Huom: nämä 3 ovat mainissa mutta **julkaisematta** — seuraava release cuttaa 0.7.2:n.
 
 ---
 
