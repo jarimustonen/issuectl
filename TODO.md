@@ -55,7 +55,7 @@ kumpikaan; feedback-issuet menevät edelle jos niitä tulee.
 
 ---
 
-## Execution DAG (2026-08-05)
+## Execution DAG (2026-08-06)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge each round (drop landed, add active, keep existing order).
@@ -69,18 +69,23 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: intensely-blushing-galley   ← molemmat LANE A -riviä ovat low-prio nice-to-have; ei kiireä
+GLOBAL HEAD-OF-LINE: distribute-intake-skills   ← normal-prio intake follow-up; ranks above the low-prio LANE A close items
 LANE A — main.rs (show/close handlers) + mutate/ close path + schema/issue_fields  (sequenced — molemmat koskevat cmd_close/close_issue)
   ▶ intensely-blushing-galley   low · improvement; promote closed_by → typed Issue field (top-level in show) + doctor heal + human close output. Follow-up llm-reviewsta close-as-flag-asymmetrylle.
     close-comment                low · feature; `close` hyväksyy `--comment/--note` → kirjaa sulkemisen perustelun samassa stepissä (nyt manuaalinen 2-vaihe). Filattu rinnakkaissessiosta.
+LANE B — skill install + templates/ + skill.rs (intake-flow skill distribution)
+  ▶ distribute-intake-skills    normal · feature; `skill install` should also install /issue-new + /issue-intake (own install + tests), so the fleet-apply hook distributes them like /issue. collision: templates
+LANE C — intake queue path (cmd_intake + intake query module)  (sequenced after LANE B — shared templates hot file)
+  ▶ verify-intake-split-queue   normal · task; verify `intake queue` surfaces legacy label-encoded items (open+needs-triage/deferred, via:telegram) with `legacy: true` + migration nudge (design §6). If not shipped in 0.7.0, implement. collision: templates
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: intake-kampanja + close-as-flag landasivat ja **shippasivat 0.7.0:ssa**;
-`standard-intake-flow` (done) ja `close-as-flag-asymmetry` (fixed) pudotettu DAG:sta.
-`particularly-tart-spade` suljettu `wontfix` (väärä hälytys — closed_by ON show --json:issa
-`.extra`:n alla). Jäljellä 2 low-prio LANE A -riviä: **`intensely-blushing-galley`** +
-**`close-comment`** (rinnakkaissessiosta, drift-checkin nostama). Ei kiireä kumpikaan.
+Kaari-lyhyesti: 0.7.0 ulkona ja dogfoodissa. Rinnakkaissessio filasi kaksi normal-prio
+intake-follow-upia (183d14c, vain item.md — ei toteutusta): **`distribute-intake-skills`**
+(jaa /issue-new + /issue-intake skill-installilla) ja **`verify-intake-split-queue`**
+(varmista transitional split queue). Nämä ovat tämän kierroksen frontier (LANE B → LANE C,
+sekvensoitu koska molemmat voivat koskea `templates/`-hottiedostoja). LANE A:n 2 low-prio
+close-riviä (`intensely-blushing-galley`, `close-comment`) jäävät odottamaan — ei kiireä.
 
 ---
 
