@@ -40,6 +40,7 @@ pub const CANONICAL_FRONTMATTER_KEYS: &[&str] = &[
     "created",
     "updated",
     "closed",
+    "closed_by",
     "type",
     "status",
     "priority",

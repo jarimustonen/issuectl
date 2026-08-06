@@ -22,6 +22,8 @@ pub const COMMENTS: &str = "Comments";
 pub const DECISIONS: &str = "Decisions";
 /// Canonical section for `note --agent-run` blocks.
 pub const AGENT_RUNS: &str = "Agent Runs";
+/// Canonical section for `close --comment/--note` closing rationale.
+pub const RESOLUTION: &str = "Resolution";
 
 /// Format the timestamp half of a block heading. UTC, second-precision.
 pub fn now_iso() -> String {

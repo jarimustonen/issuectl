@@ -75,6 +75,12 @@ fn canonical_frontmatter_value(issue: &Issue) -> Value {
     if let Some(v) = &issue.closed {
         m.insert("closed".into(), Value::String(v.clone()));
     }
+    // Projected under the same `closed_by` key it used to occupy via
+    // `extra`, so promoting it to a typed field leaves the hash of any
+    // existing issue unchanged (backward-compatible version tokens).
+    if let Some(v) = &issue.closed_by {
+        m.insert("closed_by".into(), Value::String(v.clone()));
+    }
     if let Some(v) = &issue.reporter {
         m.insert("reporter".into(), Value::String(v.clone()));
     }
@@ -176,6 +182,7 @@ mod tests {
             related: None,
             labels: None,
             closed: None,
+            closed_by: None,
             commits: None,
             title: String::new(),
             body: body.to_string(),
@@ -253,6 +260,38 @@ mod tests {
             canonical_hash(&i),
             "sha256:v1:342ad2308c37e7e3c443bef5d2243800e723955d5d28d75fb6a69de05143d5c4"
         );
+    }
+
+    #[test]
+    fn typed_closed_by_hashes_same_as_legacy_extra() {
+        // Backward compat: promoting `closed_by` from `extra` to a typed
+        // field must not change the version token of any existing issue.
+        // An issue carrying the closer in the typed slot must hash
+        // identically to the pre-promotion shape (same key in `extra`).
+        let mut typed = issue("foo", "closed", "done", "body");
+        typed.closed_by = Some("jari".to_string());
+        let mut legacy = issue("foo", "closed", "done", "body");
+        legacy
+            .extra
+            .insert("closed_by".into(), serde_json::Value::String("jari".into()));
+        assert_eq!(canonical_hash(&typed), canonical_hash(&legacy));
+    }
+
+    #[test]
+    fn closed_by_value_changes_hash() {
+        let mut a = issue("foo", "closed", "done", "body");
+        let mut b = issue("foo", "closed", "done", "body");
+        a.closed_by = Some("jari".to_string());
+        b.closed_by = Some("alice".to_string());
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
+    fn closed_by_presence_changes_hash() {
+        let a = issue("foo", "closed", "done", "body");
+        let mut b = issue("foo", "closed", "done", "body");
+        b.closed_by = Some("jari".to_string());
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
     }
 
     #[test]

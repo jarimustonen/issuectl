@@ -22,6 +22,13 @@ pub struct Frontmatter {
     pub related: Option<Vec<String>>,
     pub labels: Option<Vec<String>>,
     pub closed: Option<String>,
+    /// Closer attribution. Typed (unlike `blocked_by`, which stays in
+    /// `unknown`) because the close path manages it in lockstep with
+    /// `closed:` and no reader needs it out of `extra`. Serde consumes
+    /// the `closed_by:` key here before `unknown` is built, so a
+    /// post-migration file lands it in the typed field directly; a
+    /// legacy file that stashed it elsewhere is reconciled below.
+    pub closed_by: Option<String>,
     pub commits: Option<Vec<super::models::Commit>>,
     /// Slug stored in frontmatter (post-migration files). Authoritative
     /// identifier is still the directory name; this is mirrored for clarity.
@@ -242,6 +249,23 @@ pub fn parse_item_md_text_with_warnings(
         }
     }
 
+    // Legacy migration: pre-typed-field repos may carry `closed_by` as an
+    // untyped frontmatter key, which — on a file that also lacked the
+    // typed slot — would land in `extra`. Now that `closed_by` is a
+    // first-class field, lift any stray `extra["closed_by"]` string into
+    // it (typed value wins if both somehow appear) and drop the `extra`
+    // copy so the field has exactly one representation on the wire and in
+    // the hash. A non-string legacy value is left in `extra` untouched.
+    let mut closed_by = fm.closed_by;
+    if closed_by.is_none() {
+        if let Some(serde_json::Value::String(s)) = extra.get("closed_by") {
+            closed_by = Some(s.clone());
+        }
+    }
+    if closed_by.is_some() {
+        extra.remove("closed_by");
+    }
+
     let title = extract_title(body);
     let issue = crate::models::Issue {
         slug: slug.to_string(),
@@ -258,6 +282,7 @@ pub fn parse_item_md_text_with_warnings(
         related: fm.related,
         labels: fm.labels,
         closed: fm.closed,
+        closed_by,
         commits: fm.commits,
         extra,
         title,
@@ -348,6 +373,7 @@ fn default_issue(slug: &str, folder: &str) -> crate::models::Issue {
         related: None,
         labels: None,
         closed: None,
+        closed_by: None,
         commits: None,
         extra: BTreeMap::new(),
         title: String::new(),
@@ -450,6 +476,37 @@ mod tests {
 
     use super::{parse_item_md_text_with_warnings, split_frontmatter};
     use std::path::Path;
+
+    #[test]
+    fn closed_by_lifts_into_typed_field_not_extra() {
+        // Legacy/round-trip: a `closed_by:` frontmatter key (how the
+        // pre-typed-field close path wrote it) must land in the typed
+        // `Issue::closed_by` slot and NOT in `extra`, so it has exactly
+        // one representation on the wire and in the hash.
+        let text = "---\ntype: bug\nstatus: wontfix\npriority: normal\n\
+                    closed: 2026-05-06\nclosed_by: jari\n---\n\n# Title\n";
+        let parsed =
+            parse_item_md_text_with_warnings(text, "some-slug", "closed", Path::new("<test>"));
+        assert_eq!(parsed.issue.closed_by.as_deref(), Some("jari"));
+        assert!(
+            !parsed.issue.extra.contains_key("closed_by"),
+            "closed_by must not remain in extra: {:?}",
+            parsed.issue.extra
+        );
+        assert!(
+            parsed.warnings.is_empty(),
+            "warnings: {:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn absent_closed_by_is_none() {
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n# Title\n";
+        let parsed =
+            parse_item_md_text_with_warnings(text, "some-slug", "open", Path::new("<test>"));
+        assert_eq!(parsed.issue.closed_by, None);
+    }
 
     #[test]
     fn split_frontmatter_does_not_leak_into_body_yaml_block() {

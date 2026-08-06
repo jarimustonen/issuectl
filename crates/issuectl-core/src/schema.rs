@@ -265,6 +265,13 @@ fields:
     # enforce the same lifecycle rule instead of leaving it implicit.
     required_when:
       status_class: closing
+  # Closer attribution, managed in lockstep with `closed:` (set on close,
+  # scrubbed on reopen). Declared so it is a first-class known field —
+  # schema validation and `doctor`'s unknown-key check recognise it — not
+  # to make it required. The only writer is the validated close-lifecycle
+  # slot; `set`/`update --field` reject it as reserved.
+  closed_by:
+    required: false
   slug:
     required: false
   # --- Intake-flow fields -------------------------------------------

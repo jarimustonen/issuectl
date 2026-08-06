@@ -750,6 +750,7 @@ mod tests {
             related: None,
             labels: Some(vec!["frontend".to_string()]),
             closed: None,
+            closed_by: None,
             commits: None,
             title: "Login redirect loop".to_string(),
             body: "User flock contention on flock(2) deadlock.".to_string(),

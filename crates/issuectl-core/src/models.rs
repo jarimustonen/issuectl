@@ -38,6 +38,13 @@ pub struct Issue {
 
     // Lifecycle
     pub closed: Option<String>,
+    /// Closer attribution, managed in lockstep with `closed:` (set on
+    /// close, scrubbed on reopen). A first-class typed field mirroring
+    /// `closed:` — the parser migrates a legacy `extra["closed_by"]`
+    /// into it on read (see `parser`), it is folded into `canonical_hash`
+    /// under the `closed_by` key, and reserved from `set`/`update --field`
+    /// so the only writer is the validated close-lifecycle slot.
+    pub closed_by: Option<String>,
     pub commits: Option<Vec<Commit>>,
 
     // Derived from markdown body

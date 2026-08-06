@@ -415,6 +415,8 @@ pub enum NoteSection {
     Comments,
     Decisions,
     AgentRuns,
+    /// Closing rationale recorded by `close --comment/--note`.
+    Resolution,
 }
 
 impl NoteSection {
@@ -423,6 +425,7 @@ impl NoteSection {
             NoteSection::Comments => crate::body_sections::COMMENTS,
             NoteSection::Decisions => crate::body_sections::DECISIONS,
             NoteSection::AgentRuns => crate::body_sections::AGENT_RUNS,
+            NoteSection::Resolution => crate::body_sections::RESOLUTION,
         }
     }
 }
@@ -1442,11 +1445,13 @@ fn parse_serialized(serialized: &str, slug: &str, schema: &crate::schema::Schema
 ///
 /// `status_override` mirrors `--status`. When `None`, the default is
 /// `fixed` for `type: bug`, `done` otherwise.
+#[allow(clippy::too_many_arguments)]
 pub fn close_issue(
     root: &Path,
     slug: &str,
     status_override: Option<String>,
     closed_by: Option<String>,
+    comment: Option<String>,
     commits: Vec<CommitSpec>,
     expected_version: Option<String>,
     hub: Option<&Arc<EventHub>>,
@@ -1520,6 +1525,23 @@ pub fn close_issue(
         )));
     }
 
+    // `close --comment/--note` records the closing rationale as a
+    // timestamped block in a `## Resolution` section, appended via the
+    // same body-op path (and same flock) as the status flip so the note
+    // and the close land atomically — all-or-nothing. The block is
+    // attributed to the closer (`--as`) when given; an anonymous close
+    // records it under a stable `issuectl` sentinel so the managed
+    // `### <ts> · @<author>` block shape stays well-formed. `validate()`
+    // rejects an empty/whitespace comment via `validate_message`.
+    let resolution_op = comment.map(|message| {
+        let author = closed_by.clone().unwrap_or_else(|| "issuectl".to_string());
+        BodyOp::AppendNote(AppendNoteOp {
+            author,
+            message,
+            section: NoteSection::Resolution,
+        })
+    });
+
     let req = UpdateIssueRequest {
         expected_version,
         status: Patch::Set(resolved_status),
@@ -1527,13 +1549,15 @@ pub fn close_issue(
         // status flip via the first-class `closed_by` slot (NOT a custom
         // field): it is validated in `UpdateIssueRequest::validate`,
         // stamped alongside `closed:` in the status branch, surfaces in
-        // `show --json` via `Issue::extra`, and is folded into the
-        // version hash. Reopening clears it in lockstep with `closed:`.
+        // `show --json` via the typed `Issue::closed_by` field, and is
+        // folded into the version hash. Reopening clears it in lockstep
+        // with `closed:`.
         closed_by: match closed_by {
             Some(author) => Patch::Set(author),
             None => Patch::Unspecified,
         },
         add_commits: commits,
+        body_ops: resolution_op.into_iter().collect(),
         ..Default::default()
     };
     // _lock drops at end-of-scope after the locked update path returns.
@@ -5111,6 +5135,7 @@ mod tests {
             "close-publish-flock",
             None,
             None,
+            None,
             Vec::new(),
             Some(v0),
             Some(&hub),
@@ -5131,6 +5156,7 @@ mod tests {
             "close-attributed",
             Some("wontfix".into()),
             Some("jari".into()),
+            None,
             Vec::new(),
             None,
             None,
@@ -5141,15 +5167,18 @@ mod tests {
         let after = fs::read_to_string(tmp.path().join("issues/close-attributed/item.md")).unwrap();
         assert!(after.contains("status: wontfix"), "{after}");
         assert!(after.contains("closed_by: jari"), "{after}");
-        // The closer surfaces as first-class JSON via `Issue::extra`.
+        // The closer surfaces via the typed `Issue::closed_by` field —
+        // not `extra`, which no longer carries it once the parser lifts
+        // the key into the first-class slot.
         let parsed = crate::parser::parse_item_md_with_warnings(
             &tmp.path().join("issues/close-attributed/item.md"),
             "close-attributed",
             "open",
         );
-        assert_eq!(
-            parsed.issue.extra.get("closed_by").and_then(|v| v.as_str()),
-            Some("jari")
+        assert_eq!(parsed.issue.closed_by.as_deref(), Some("jari"));
+        assert!(
+            !parsed.issue.extra.contains_key("closed_by"),
+            "closed_by must not remain in extra"
         );
     }
 
@@ -5162,6 +5191,7 @@ mod tests {
             tmp.path(),
             "close-anon",
             Some("fixed".into()),
+            None,
             None,
             Vec::new(),
             None,
@@ -5185,6 +5215,7 @@ mod tests {
             "close-bad-author",
             Some("wontfix".into()),
             Some("has space".into()),
+            None,
             Vec::new(),
             None,
             None,
@@ -5207,6 +5238,7 @@ mod tests {
             "reopen-clears-closer",
             Some("wontfix".into()),
             Some("jari".into()),
+            None,
             Vec::new(),
             None,
             None,
@@ -5249,6 +5281,7 @@ mod tests {
             "close-to-open",
             Some("open".into()),
             Some("jari".into()),
+            None,
             Vec::new(),
             None,
             None,
@@ -5275,6 +5308,7 @@ mod tests {
             "reopen-smuggle",
             Some("wontfix".into()),
             Some("jari".into()),
+            None,
             Vec::new(),
             None,
             None,
@@ -5322,6 +5356,7 @@ mod tests {
             "restatus-closer",
             Some("fixed".into()),
             Some("jari".into()),
+            None,
             Vec::new(),
             None,
             None,
@@ -5360,6 +5395,7 @@ mod tests {
             "anon-scrub",
             Some("fixed".into()),
             None,
+            None,
             Vec::new(),
             None,
             None,
@@ -5369,6 +5405,132 @@ mod tests {
         let after = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(after.contains("status: fixed"), "{after}");
         assert!(!after.contains("closed_by"), "{after}");
+    }
+
+    #[test]
+    fn close_with_comment_appends_resolution_attributed_to_closer() {
+        // `close --as alice --comment "..."` records the closing status,
+        // the `closed_by:` attribution, AND a timestamped block under a
+        // `## Resolution` section attributed to the closer — all in one
+        // atomic write.
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "close-with-note", "open");
+
+        close_issue(
+            tmp.path(),
+            "close-with-note",
+            Some("fixed".into()),
+            Some("alice".into()),
+            Some("Shipped in v1.2; superseded the manual workaround.".into()),
+            Vec::new(),
+            None,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
+
+        let after = fs::read_to_string(tmp.path().join("issues/close-with-note/item.md")).unwrap();
+        assert!(after.contains("status: fixed"), "{after}");
+        assert!(after.contains("closed_by: alice"), "{after}");
+        assert!(after.contains("## Resolution"), "{after}");
+        assert!(
+            after.contains("· @alice"),
+            "resolution block attributed to closer: {after}"
+        );
+        assert!(
+            after.contains("Shipped in v1.2; superseded the manual workaround."),
+            "{after}"
+        );
+        // The block re-parses cleanly as a well-formed Resolution block.
+        let parsed = crate::parser::parse_item_md_with_warnings(
+            &tmp.path().join("issues/close-with-note/item.md"),
+            "close-with-note",
+            "closed",
+        );
+        let section = crate::body_sections::parse_section(
+            &parsed.issue.body,
+            crate::body_sections::RESOLUTION,
+        );
+        assert_eq!(section.blocks.len(), 1, "warnings={:?}", section.warnings);
+        assert_eq!(section.blocks[0].author, "alice");
+    }
+
+    #[test]
+    fn close_with_comment_anonymous_uses_sentinel_author() {
+        // `close --comment` without `--as` still records the rationale,
+        // attributed to the `issuectl` sentinel so the managed block
+        // shape stays well-formed; no `closed_by:` is written.
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "close-anon-note", "open");
+
+        close_issue(
+            tmp.path(),
+            "close-anon-note",
+            Some("fixed".into()),
+            None,
+            Some("Root cause was a stale cache; cleared and verified.".into()),
+            Vec::new(),
+            None,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
+
+        let after = fs::read_to_string(tmp.path().join("issues/close-anon-note/item.md")).unwrap();
+        assert!(after.contains("status: fixed"), "{after}");
+        assert!(!after.contains("closed_by"), "{after}");
+        assert!(after.contains("## Resolution"), "{after}");
+        assert!(after.contains("· @issuectl"), "{after}");
+        assert!(
+            after.contains("Root cause was a stale cache; cleared and verified."),
+            "{after}"
+        );
+    }
+
+    #[test]
+    fn close_without_comment_appends_no_resolution() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "close-no-note", "open");
+
+        close_issue(
+            tmp.path(),
+            "close-no-note",
+            Some("fixed".into()),
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap();
+
+        let after = fs::read_to_string(tmp.path().join("issues/close-no-note/item.md")).unwrap();
+        assert!(!after.contains("## Resolution"), "{after}");
+    }
+
+    #[test]
+    fn close_with_empty_comment_is_rejected() {
+        // A whitespace-only comment is rejected by `validate_message`
+        // before any write — the issue stays open.
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "close-empty-note", "open");
+
+        let err = close_issue(
+            tmp.path(),
+            "close-empty-note",
+            Some("done".into()),
+            None,
+            Some("   ".into()),
+            Vec::new(),
+            None,
+            None,
+            &UncachedConfig,
+        )
+        .unwrap_err();
+        assert!(matches!(err, MutateError::Validation(_)), "{err:?}");
+        let after = fs::read_to_string(tmp.path().join("issues/close-empty-note/item.md")).unwrap();
+        assert!(after.contains("status: open"), "{after}");
     }
 
     #[test]

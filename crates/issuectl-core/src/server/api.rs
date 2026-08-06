@@ -177,6 +177,10 @@ fn summary_as_issue(s: &repo::IssueSummary) -> crate::models::Issue {
         related: s.related.clone(),
         labels: s.labels.clone(),
         closed: s.closed.clone(),
+        // `IssueSummary` carries no `closed_by` (listing DTO), and this
+        // synthetic issue is only used for query matching — never hashed
+        // (see fn doc) and no query term reads the closer.
+        closed_by: None,
         commits: s.commits.clone(),
         title: s.title.clone(),
         body: String::new(),

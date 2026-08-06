@@ -126,6 +126,7 @@ mod tests {
             related: None,
             labels: None,
             closed: None,
+            closed_by: None,
             commits: None,
             title: slug.into(),
             body: String::new(),

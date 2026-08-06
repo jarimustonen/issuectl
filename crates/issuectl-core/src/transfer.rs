@@ -312,6 +312,7 @@ mod tests {
             related: None,
             labels: Some(vec!["interop".to_string()]),
             closed: None,
+            closed_by: None,
             commits: None,
             title: title.to_string(),
             body: "## Description\n\nSomething broke.".to_string(),

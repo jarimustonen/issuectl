@@ -611,6 +611,13 @@ enum Command {
         #[arg(long = "as", value_parser = parse_non_empty)]
         author: Option<String>,
 
+        /// Closing rationale, appended as a timestamped block under a
+        /// `## Resolution` section in one step (no separate `note` +
+        /// commit). `--note` is an alias. Attributed to `--as` when
+        /// given, else recorded under `@issuectl`.
+        #[arg(long = "comment", visible_alias = "note", value_parser = parse_non_empty)]
+        comment: Option<String>,
+
         /// Record a commit, format HASH:summary (repeatable)
         #[arg(long = "commit", value_parser = parse_non_empty)]
         commits: Vec<String>,
@@ -2196,6 +2203,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             slug,
             status,
             author,
+            comment,
             commits,
             expected_version,
         } => cmd_close(
@@ -2203,6 +2211,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             &slug,
             status,
             author,
+            comment,
             commits,
             expected_version,
         ),
@@ -4098,6 +4107,7 @@ fn duplicate_precheck(json: bool, args: &NewArgs) -> bool {
             Some(args.labels.clone())
         },
         closed: None,
+        closed_by: None,
         commits: None,
         title: args.title.clone(),
         body: args.description.clone().unwrap_or_default(),
@@ -4443,17 +4453,27 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_close(
     json: bool,
     slug: &str,
     status: Option<String>,
     author: Option<String>,
+    comment: Option<String>,
     commits: Vec<String>,
     expected_version: Option<String>,
 ) -> Result<()> {
     let root = find_root();
     let closed_by = author.clone();
-    let out = do_close(&root, slug, status, author, commits, expected_version)?;
+    let out = do_close(
+        &root,
+        slug,
+        status,
+        author,
+        comment,
+        commits,
+        expected_version,
+    )?;
     if json {
         let mut report = serde_json::json!({
             "slug": slug,
@@ -4468,18 +4488,25 @@ fn cmd_close(
         return Ok(());
     }
     if out.moved_to_closed {
-        println!("Closed {slug} ({})", out.final_dir.display());
+        // Echo the closer when `--as` recorded one, so the human output
+        // confirms the attribution that landed in `closed_by:`.
+        match &closed_by {
+            Some(by) => println!("Closed {slug} (by {by}) ({})", out.final_dir.display()),
+            None => println!("Closed {slug} ({})", out.final_dir.display()),
+        }
     } else {
         println!("Updated {slug}");
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn do_close(
     root: &Path,
     slug: &str,
     status: Option<String>,
     author: Option<String>,
+    comment: Option<String>,
     commits: Vec<String>,
     expected_version: Option<String>,
 ) -> Result<UpdateOutcome> {
@@ -4499,6 +4526,7 @@ pub(crate) fn do_close(
         slug,
         status,
         author,
+        comment,
         commit_specs,
         expected_version,
         None,
@@ -5953,6 +5981,9 @@ fn print_issue_detail(issue: &models::Issue) {
     if let Some(ref cl) = issue.closed {
         println!("Closed:   {}", cl);
     }
+    if let Some(ref cb) = issue.closed_by {
+        println!("Closed by: {}", cb);
+    }
     if let Some(ref commits) = issue.commits {
         if !commits.is_empty() {
             println!("Commits:");
@@ -6605,7 +6636,7 @@ mod tests {
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
         let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
-        let outcome = do_close(tmp.path(), &n.slug, None, None, vec![], None).unwrap();
+        let outcome = do_close(tmp.path(), &n.slug, None, None, None, vec![], None).unwrap();
         assert!(outcome.moved_to_closed);
         let content = read(&outcome.final_dir.join("item.md"));
         assert!(content.contains("status: fixed"));
@@ -6619,7 +6650,7 @@ mod tests {
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
         let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
-        let outcome = do_close(tmp.path(), &n.slug, None, None, vec![], None).unwrap();
+        let outcome = do_close(tmp.path(), &n.slug, None, None, None, vec![], None).unwrap();
         let content = read(&outcome.final_dir.join("item.md"));
         assert!(content.contains("status: done"));
     }
@@ -6632,8 +6663,8 @@ mod tests {
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
         let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
-        do_close(tmp.path(), &n.slug, None, None, vec![], None).unwrap();
-        assert!(do_close(tmp.path(), &n.slug, None, None, vec![], None).is_err());
+        do_close(tmp.path(), &n.slug, None, None, None, vec![], None).unwrap();
+        assert!(do_close(tmp.path(), &n.slug, None, None, None, vec![], None).is_err());
     }
 
     #[test]

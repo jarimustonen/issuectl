@@ -523,6 +523,7 @@ mod tests {
             related: None,
             labels: None,
             closed: None,
+            closed_by: None,
             commits: None,
             extra: BTreeMap::new(),
             title: String::new(),

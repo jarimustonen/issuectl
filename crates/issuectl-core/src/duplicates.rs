@@ -324,6 +324,7 @@ mod tests {
                 Some(labels.iter().map(|s| s.to_string()).collect())
             },
             closed: None,
+            closed_by: None,
             commits: None,
             title: title.to_string(),
             body: body.to_string(),

@@ -1,8 +1,8 @@
 ---
 created: 2026-08-05
-updated: 2026-08-05
+updated: 2026-08-06
 type: feature
-status: open
+status: in-progress
 priority: low
 ---
 

@@ -1560,6 +1560,11 @@ fn populate_extended_validation(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty());
+        let closed_by = fm
+            .get(serde_yaml::Value::String("closed_by".into()))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
         let created = fm
             .get(serde_yaml::Value::String("created".into()))
             .and_then(|v| v.as_str())
@@ -1608,6 +1613,19 @@ fn populate_extended_validation(
                     ));
                 }
                 _ => {}
+            }
+
+            // `closed_by:` tracks `closed:` — the close path scrubs it on
+            // the active edge, so an active issue carrying a closer is
+            // self-inconsistent (legacy or hand-edited state). Flag it on
+            // any recognised active status, independently of the `closed:`
+            // check above so a stranded `closed_by` still surfaces even
+            // when `closed:` was already cleared.
+            if matches!(class, schema::StatusClass::Active) && recognised && closed_by.is_some() {
+                report.status_consistency.push((
+                    slug.clone(),
+                    format!("active status {s:?} must not carry `closed_by:`"),
+                ));
             }
         }
 
@@ -4585,6 +4603,28 @@ mod tests {
                 .iter()
                 .any(|(slug, msg)| slug == "beta-issue-here" && msg.contains("verified")),
             "expected verified-with-closed flagged, got {:?}",
+            r.status_consistency
+        );
+    }
+
+    #[test]
+    fn flags_active_status_carrying_closed_by() {
+        // A `closed_by:` on an active issue is self-inconsistent (the
+        // close path scrubs it on the active edge), so doctor flags it
+        // alongside the `closed:` heal — even when `closed:` itself is
+        // already absent.
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "stranded-closer-here",
+            "---\ntype: bug\nstatus: open\npriority: normal\nclosed_by: jari\n---\n# S\n",
+        );
+        let r = scan(tmp.path()).unwrap();
+        assert!(
+            r.status_consistency
+                .iter()
+                .any(|(slug, msg)| slug == "stranded-closer-here" && msg.contains("closed_by")),
+            "expected stranded closed_by flagged, got {:?}",
             r.status_consistency
         );
     }
