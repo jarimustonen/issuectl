@@ -13,33 +13,40 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-05):** `main` == **v0.7.0** — TÄYSIN JULKAISTU: GitHub Release live,
-Homebrew-tap päivitetty, **crates.io `0.7.0` indeksissä** (varmistettu), CI vihreä. Työpuu
-puhdas, integraatiobranch mergetty + siivottu. (Huom: rinnakkaissessio filasi `close-comment`in
-mainiin tämän rupeaman jälkeen — mergetty DAG:iin alle.)
+**Tila (2026-08-06):** `main` == **v0.7.1** — TÄYSIN JULKAISTU: GitHub Release live,
+Homebrew-tap päivitetty, **crates.io `0.7.1` indeksissä** (varmistettu `newest_version`),
+release.yml + publish-crates.yml vihreät, CI vihreä. Työpuu puhdas.
 
-**0.7.0:ssa shipannut (CHANGELOG täydellinen):**
-- **@standard-intake-flow (HIGH)** — koko `issuectl intake`-komentoryhmä (file/queue/
-  show/accept/defer/need-info/reject/cannot-reproduce/duplicate/obsolete/retype/reopen/
-  withdraw) + statukset `untriaged`/`deferred`/`needs-info` + kentät (provenance/
-  disposition_reason/duplicate_of/source_ref/deferred_until) + `intake migrate`
-  (dry-run-first) + intrinsic invariantit + type×status-check + täysi transitions-matriisi.
-  Skillit **`/issue-new`** + **`/issue-intake`** (korvaa `/triage-bugs` → thin alias).
-  Rakennettiin `/orchestrate`-kampanjana (4 yksikköä, kukin 4-malli-review). Toteutus =
-  approved `docs/design/intake-flow.md`.
-- **@close-as-flag-asymmetry** — `close --as <author>` → `closed_by` (näkyy `show --json`
-  `.extra`:ssa). + edellisen rupeaman 3 fixiä (refs-issue-hint, mutation-not-found,
-  new-body-flag) jotka odottivat releasea.
+**0.7.1:ssä shipannut (CHANGELOG täydellinen) — pieni intake-follow-up-rupeama:**
+- **@distribute-intake-skills (feature)** — `skill install` + `init` asentavat nyt myös
+  `/issue-new` (filer) + `/issue-intake` (queue-processor) skillit, version-pinnattuina
+  `include_str!`-templateina + dogfood-guardattuna (sama kontrakti kuin `/issue`illä), joten
+  koko intake-workflow matkaa binäärin mukana joka projektiin. **Vain Claude-Code-formaatti**
+  toistaiseksi (ei Codex-prompt-varianttia — ks. follow-up alla).
+- **@verify-intake-split-queue (task)** — §6 transitional split queue **verifioitu
+  shipatuksi jo 0.7.0:ssa** (molemmat legacy-muodot, JSON + human, migrate-round-trip); ei
+  tuotantokoodimuutosta, lisättiin yksi regressiotesti pinnaamaan human-moden `[legacy]`-flag
+  + migraationudge. Turvaverkko homebase/deutschpad-migraatioille — vahvistettu toimivaksi.
+
+**Tämän rupeaman follow-upit (DAG:issa alla):**
+- **@show-json-omits-blocked-by** (bug, normal) — rinnakkaissession filaama: `--json show`
+  ei tulosta `blocked_by`-kenttää. **DAG GLOBAL HEAD-OF-LINE** (ainoa normal-prio työ).
+- **@awfully-courageous-attempt** (feature, low) — Codex-prompt-variantit `/issue-new` +
+  `/issue-intake`ille (triviaalinen frontmatter-strip kuten `/issue`illä). Käyttäjän nosto
+  handoffissa: Codex-client sietäisi Claude-formaatin mutta näyttäisi frontmatterin kohinana.
+  **Build-only-if**: tee vasta jos näitä skillejä oikeasti kutsutaan Codexista jossain.
 
 **⚠️ crates.io-caveat (ennallaan, muista JOKA release):** tag-push laukaisee cargo-dist
 (GitHub Release + Homebrew) mutta **crates.io-julkaisu vaatii manuaalisen triggerin**
 (`gh workflow run "Publish to crates.io"`) — `GITHUB_TOKEN` ei laukaise `publish-crates.yml`:ää.
-0.7.0:ssa se ajettiin käsin ja onnistui. (Korjaus odottaa `@wire-oss-release-as-release-path`ia.)
+0.7.1:ssä ajettiin käsin release.yml:n vihertymisen jälkeen ja onnistui. (Korjaus odottaa
+`@wire-oss-release-as-release-path`ia.)
 
-**Dogfood:** Käyttäjä dogfoodaa 0.7.0:aa omissa projekteissaan. Asennus: `cargo install issuectl`
-(crates.io), `brew upgrade jarimustonen/issuectl/issuectl`, tai `cargo install --path crates/issuectl`.
-Uudet skillit `/issue-new` + `/issue-intake` asennettuina; bugit/feature-pyynnöt sisään
-`issuectl intake file`lla, `/issue-intake` (tai `/stint-start`) nostaa jonon seuraavan kerran.
+**Dogfood:** Käyttäjä dogfoodaa issuectl:ää omissa projekteissaan. Asennus: `cargo install
+issuectl` (crates.io), `brew upgrade jarimustonen/issuectl/issuectl`, tai `cargo install
+--path crates/issuectl`. 0.7.1:stä skillit `/issue`, `/issue-new`, `/issue-intake` tulevat
+kaikki `issuectl skill install`ista; bugit/feature-pyynnöt sisään `issuectl intake file`lla,
+`/issue-intake` (tai `/stint-start`) nostaa jonon seuraavan kerran.
 
 **OSS-init (ennallaan):** `OSS-RELEASE.md` **approved** (`mvp`). cargo-dist pysyy
 release-engineinä — `/oss-release-cut` EI regeneroi `release.yml`:ää.
@@ -47,11 +54,10 @@ release-engineinä — `/oss-release-cut` EI regeneroi `release.yml`:ää.
 **Iso linjaus (ennallaan):** **kanban/web-board holdissa**. Kaikki kanban/web-issuet +
 build-only-if + `@focus-areas` `deferred` → **Adjacent backlog**. Fokus CLI:ssä.
 
-**Seuraava askel:** 0.7.0 ulkona ja dogfoodissa — odota käyttäjän palautetta
-dogfoodauksesta. DAG:issa vain 2 low-prio LANE A -riviä (molemmat `close`-polkua):
-**@intensely-blushing-galley** (closed_by → typed field) ja **@close-comment**
-(`close --comment`). GLOBAL HEAD-OF-LINE = **@intensely-blushing-galley**. Ei kiireä
-kumpikaan; feedback-issuet menevät edelle jos niitä tulee.
+**Seuraava askel:** 0.7.1 ulkona ja dogfoodissa — odota käyttäjän palautetta. DAG:issa 1
+normal-prio bug (**@show-json-omits-blocked-by**, GLOBAL HEAD-OF-LINE) + 3 low-prio riviä
+(2 close-polkua LANE A:ssa, Codex-variantti LANE B:ssä). Ei kiireä; feedback-issuet menevät
+edelle jos niitä tulee.
 
 ---
 
@@ -69,23 +75,22 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: distribute-intake-skills   ← normal-prio intake follow-up; ranks above the low-prio LANE A close items
-LANE A — main.rs (show/close handlers) + mutate/ close path + schema/issue_fields  (sequenced — molemmat koskevat cmd_close/close_issue)
-  ▶ intensely-blushing-galley   low · improvement; promote closed_by → typed Issue field (top-level in show) + doctor heal + human close output. Follow-up llm-reviewsta close-as-flag-asymmetrylle.
-    close-comment                low · feature; `close` hyväksyy `--comment/--note` → kirjaa sulkemisen perustelun samassa stepissä (nyt manuaalinen 2-vaihe). Filattu rinnakkaissessiosta.
-LANE B — skill install + templates/ + skill.rs (intake-flow skill distribution)
-  ▶ distribute-intake-skills    normal · feature; `skill install` should also install /issue-new + /issue-intake (own install + tests), so the fleet-apply hook distributes them like /issue. collision: templates
-LANE C — intake queue path (cmd_intake + intake query module)  (sequenced after LANE B — shared templates hot file)
-  ▶ verify-intake-split-queue   normal · task; verify `intake queue` surfaces legacy label-encoded items (open+needs-triage/deferred, via:telegram) with `legacy: true` + migration nudge (design §6). If not shipped in 0.7.0, implement. collision: templates
+GLOBAL HEAD-OF-LINE: show-json-omits-blocked-by   ← ainoa normal-prio työ (bug); ranks above the 3 low-prio rows
+LANE A — main.rs (show/close handlers) + mutate/ close path + schema/issue_fields  (sequenced — kaikki koskevat cmd_show/cmd_close serialization/output)
+  ▶ show-json-omits-blocked-by  normal · bug; `--json show` ei tulosta `blocked_by`-kenttää. Koskee show-serialisointipolkua (cmd_show / Issue→JSON). Filattu rinnakkaissessiosta.
+    intensely-blushing-galley   low · improvement; promote closed_by → typed Issue field (top-level in show) + doctor heal + human close output. Follow-up llm-reviewsta close-as-flag-asymmetrylle.
+    close-comment               low · feature; `close` hyväksyy `--comment/--note` → kirjaa sulkemisen perustelun samassa stepissä (nyt manuaalinen 2-vaihe). Filattu rinnakkaissessiosta.
+LANE B — skill install + templates/ + skill.rs (skill distribution)
+  ▶ awfully-courageous-attempt  low · feature; Codex-prompt-variantit /issue-new + /issue-intakelle (frontmatter-strip kuten /issuella). Build-only-if: vain jos Codex-käyttö todistuu.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: 0.7.0 ulkona ja dogfoodissa. Rinnakkaissessio filasi kaksi normal-prio
-intake-follow-upia (183d14c, vain item.md — ei toteutusta): **`distribute-intake-skills`**
-(jaa /issue-new + /issue-intake skill-installilla) ja **`verify-intake-split-queue`**
-(varmista transitional split queue). Nämä ovat tämän kierroksen frontier (LANE B → LANE C,
-sekvensoitu koska molemmat voivat koskea `templates/`-hottiedostoja). LANE A:n 2 low-prio
-close-riviä (`intensely-blushing-galley`, `close-comment`) jäävät odottamaan — ei kiireä.
+Kaari-lyhyesti: 0.7.1 shippasi rupeaman kaksi intake-follow-upia — **`distribute-intake-skills`**
+(done, feature — skill install jakaa /issue-new + /issue-intake) ja **`verify-intake-split-queue`**
+(done, task — §6 split queue verifioitu + regressiotesti); molemmat pudotettu DAG:sta. Tilalle
+kaksi uutta: **`show-json-omits-blocked-by`** (bug, normal, LANE A head — rinnakkaissessiosta) ja
+**`awfully-courageous-attempt`** (low, LANE B — Codex-variantit, käyttäjän nosto). LANE A:n 2
+low-prio close-riviä ennallaan. GLOBAL HEAD-OF-LINE = show-json-omits-blocked-by.
 
 ---
 
