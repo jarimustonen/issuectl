@@ -75,22 +75,20 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: show-json-omits-blocked-by   ← ainoa normal-prio työ (bug); ranks above the 3 low-prio rows
+GLOBAL HEAD-OF-LINE: intensely-blushing-galley   ← LANE A close-path tidy-ups (show-json-omits-blocked-by landed 0.7.1+)
 LANE A — main.rs (show/close handlers) + mutate/ close path + schema/issue_fields  (sequenced — kaikki koskevat cmd_show/cmd_close serialization/output)
-  ▶ show-json-omits-blocked-by  normal · bug; `--json show` ei tulosta `blocked_by`-kenttää. Koskee show-serialisointipolkua (cmd_show / Issue→JSON). Filattu rinnakkaissessiosta.
-    intensely-blushing-galley   low · improvement; promote closed_by → typed Issue field (top-level in show) + doctor heal + human close output. Follow-up llm-reviewsta close-as-flag-asymmetrylle.
+  ▶ intensely-blushing-galley   low · improvement; promote closed_by → typed Issue field (top-level in show) + doctor heal + human close output. Follow-up llm-reviewsta close-as-flag-asymmetrylle.
     close-comment               low · feature; `close` hyväksyy `--comment/--note` → kirjaa sulkemisen perustelun samassa stepissä (nyt manuaalinen 2-vaihe). Filattu rinnakkaissessiosta.
 LANE B — skill install + templates/ + skill.rs (skill distribution)
   ▶ awfully-courageous-attempt  low · feature; Codex-prompt-variantit /issue-new + /issue-intakelle (frontmatter-strip kuten /issuella). Build-only-if: vain jos Codex-käyttö todistuu.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: 0.7.1 shippasi rupeaman kaksi intake-follow-upia — **`distribute-intake-skills`**
-(done, feature — skill install jakaa /issue-new + /issue-intake) ja **`verify-intake-split-queue`**
-(done, task — §6 split queue verifioitu + regressiotesti); molemmat pudotettu DAG:sta. Tilalle
-kaksi uutta: **`show-json-omits-blocked-by`** (bug, normal, LANE A head — rinnakkaissessiosta) ja
-**`awfully-courageous-attempt`** (low, LANE B — Codex-variantit, käyttäjän nosto). LANE A:n 2
-low-prio close-riviä ennallaan. GLOBAL HEAD-OF-LINE = show-json-omits-blocked-by.
+Kaari-lyhyesti: **`show-json-omits-blocked-by`** (bug, normal) korjattu ja landattu — `--json show`
+tulostaa nyt top-level `blocked_by`in (+ johdettu `blocks`); 3/3 llm-review-konsensus, green gate ok;
+pudotettu DAG:sta (fixed). Uusi GLOBAL HEAD-OF-LINE = **`intensely-blushing-galley`**; LANE A:n 2
+low-prio close-polun riviä (galley + close-comment) sekvensoituna. LANE B:n `awfully-courageous-attempt`
+ennallaan (build-only-if).
 
 ---
 
