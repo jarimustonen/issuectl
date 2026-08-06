@@ -2,11 +2,14 @@
 created: 2026-08-06
 updated: 2026-08-06
 type: feature
-status: in-progress
+status: done
 priority: normal
 commits:
 - hash: 4e81422
   summary: distribute /issue-new + /issue-intake via skill install
+- hash: aeca332
+  summary: review follow-ups — capacity fix, order + mixed-force guards
+closed: 2026-08-06
 ---
 
 # Distribute /issue-new + /issue-intake via skill install (fleet)
