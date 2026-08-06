@@ -422,6 +422,49 @@ fn queue_surfaces_legacy_form_with_flag_and_nudge() {
 }
 
 #[test]
+fn queue_human_mode_flags_legacy_row_and_prints_nudge() {
+    // §6 requires the legacy surfacing in the HUMAN output path too, not
+    // just `--json`: the legacy row carries a `[legacy]` flag and a trailing
+    // `Note:` line nudges the reader to run the migration. The JSON tests
+    // above pin the machine contract; this pins the text a developer reads.
+    let tmp = fresh_repo();
+    file_bug(tmp.path(), "modern-one");
+    write_legacy(tmp.path(), "legacy-one", "labels: [needs-triage]\n");
+
+    let out = run(tmp.path(), &["intake", "queue"]);
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The legacy row is flagged inline...
+    let legacy_row = stdout
+        .lines()
+        .find(|l| l.contains("legacy-one"))
+        .unwrap_or_else(|| panic!("legacy row missing: {}", dump(&out)));
+    assert!(
+        legacy_row.contains("[legacy]"),
+        "legacy row not flagged: {}",
+        dump(&out)
+    );
+    // ...and the modern row is NOT.
+    let modern_row = stdout
+        .lines()
+        .find(|l| l.contains("modern-one"))
+        .unwrap_or_else(|| panic!("modern row missing: {}", dump(&out)));
+    assert!(
+        !modern_row.contains("[legacy]"),
+        "modern row wrongly flagged: {}",
+        dump(&out)
+    );
+    // The migration nudge names the count, the legacy label, and the command.
+    assert!(
+        stdout.contains("Note: 1 legacy item(s)"),
+        "no nudge line: {}",
+        dump(&out)
+    );
+    assert!(stdout.contains("needs-triage"), "{}", dump(&out));
+    assert!(stdout.contains("issuectl intake migrate"), "{}", dump(&out));
+}
+
+#[test]
 fn queue_state_deferred_surfaces_legacy_deferred_form() {
     // §6 also migrates `open + deferred` → `deferred`. Those items must be
     // visible in the deferred view before migration, else they are silently
