@@ -2,11 +2,14 @@
 created: 2026-08-06
 updated: 2026-08-06
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 commits:
 - hash: 536cc84
   summary: expose blocked_by + derived blocks in --json show; regression test
+- hash: 2995a6b
+  summary: apply llm-review — single blocked_by copy, self-ref/dedup/tests
+closed: 2026-08-06
 ---
 
 # show --json omits blocked_by (and derived blocks)
