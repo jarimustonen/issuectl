@@ -4,6 +4,9 @@ updated: 2026-08-06
 type: bug
 status: in-progress
 priority: normal
+commits:
+- hash: 536cc84
+  summary: expose blocked_by + derived blocks in --json show; regression test
 ---
 
 # show --json omits blocked_by (and derived blocks)

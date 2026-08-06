@@ -3274,18 +3274,21 @@ fn refs_json(slugs: &[String]) -> serde_json::Value {
     )
 }
 
-/// Derived reverse `blocks` view for `slug`: the sorted, deduped slugs of
-/// every issue whose `blocked_by:` list names this one. The forward
-/// relationship is stored in frontmatter; this reverse view is computed at
-/// read time (see `query::build_blocked_by_graph`), never persisted.
+/// Derived reverse `blocks` view for `slug`: the sorted slugs of every
+/// issue whose `blocked_by:` list names this one. The forward relationship
+/// is stored in frontmatter; this reverse view is derived at read time —
+/// the same reverse-edge derivation the query layer materialises repo-wide
+/// in `query::build_blocked_by_graph`, computed here for a single subject.
+/// A self-blocking issue (hand-edited `blocked_by` naming itself) is
+/// excluded so it never appears in its own `blocks`. Slugs are unique per
+/// issue, so the result needs no dedup.
 fn blocks_of(issues: &[models::Issue], slug: &str) -> Vec<String> {
     let mut out: Vec<String> = issues
         .iter()
-        .filter(|i| i.blocked_by().iter().any(|dep| dep == slug))
+        .filter(|i| i.slug != slug && i.blocked_by().iter().any(|dep| dep == slug))
         .map(|i| i.slug.clone())
         .collect();
     out.sort();
-    out.dedup();
     out
 }
 
@@ -3327,12 +3330,20 @@ fn cmd_show(json: bool, slug: &str) -> Result<()> {
                     // `blocked_by` lives in `extra` (it is intentionally not a
                     // typed field — see `Issue::blocked_by`), so plain serde
                     // buries it inside the `extra` object and never surfaces a
-                    // top-level key. Project the canonical, `@`-prefixed ref
-                    // list up to the top level — always present (empty when
-                    // there are no blockers) — so consumers can read it without
-                    // digging into `extra`, and add the derived reverse `blocks`
-                    // view (the issues this one blocks), computed from the
-                    // repo-wide graph.
+                    // top-level key. Lift it to a single canonical, `@`-prefixed
+                    // top-level array — always present (empty when there are no
+                    // blockers) — and drop the raw nested copy so the payload
+                    // carries exactly one representation of the field (the raw
+                    // `extra` form could disagree in shape/order/sigils). Also
+                    // add the derived reverse `blocks` view (the issues this one
+                    // blocks); like `version`, it is a read-time projection, not
+                    // a persisted/writable field.
+                    if let Some(serde_json::Value::Object(extra)) = m.get_mut("extra") {
+                        extra.remove("blocked_by");
+                        if extra.is_empty() {
+                            m.remove("extra");
+                        }
+                    }
                     m.insert("blocked_by".into(), refs_json(&i.blocked_by()));
                     m.insert("blocks".into(), refs_json(&blocks_of(&issues, &i.slug)));
                 }

@@ -1146,4 +1146,54 @@ fn show_json_exposes_blocked_by_and_derived_blocks() {
         "{}",
         dump(&show)
     );
+
+    // The projection is the *only* copy on the wire: the raw nested
+    // `extra.blocked_by` (which serde would otherwise emit) is stripped, so
+    // consumers can't read a second, potentially divergent representation.
+    let show = run(tmp.path(), &["--json", "show", "dp-end"]);
+    let v: serde_json::Value =
+        serde_json::from_slice(&show.stdout).expect("show stdout should be JSON");
+    assert!(
+        v.get("extra").and_then(|e| e.get("blocked_by")).is_none(),
+        "extra.blocked_by must be stripped from show output; {}",
+        dump(&show)
+    );
+}
+
+/// The top-level `blocked_by` is a *canonical* projection, not a raw
+/// frontmatter echo: hand-edited scalar/unsorted/unprefixed/duplicate refs
+/// are coerced to a sorted, deduped, `@`-prefixed array. Guards the
+/// normalization contract the fix promises (the `depend`-driven test above
+/// only ever sees well-formed input).
+#[test]
+fn show_json_canonicalizes_raw_blocked_by_frontmatter() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &["new", "--type", "task", "--title", "Raw", "--slug", "ra-w"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+
+    // Hand-edit the frontmatter to a messy shape: unsorted, mixed sigils,
+    // a duplicate, and surrounding whitespace. `Issue::blocked_by()` must
+    // normalize all of it.
+    let item = tmp.path().join("issues/ra-w/item.md");
+    let text = std::fs::read_to_string(&item).expect("read item.md");
+    let text = text.replacen(
+        "---\n",
+        "---\nblocked_by: ['@zz-later', 'aa-first', '@aa-first', ' @mm-middle ']\n",
+        1,
+    );
+    std::fs::write(&item, text).expect("write item.md");
+
+    let show = run(tmp.path(), &["--json", "show", "ra-w"]);
+    assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
+    let v: serde_json::Value =
+        serde_json::from_slice(&show.stdout).expect("show stdout should be JSON");
+    assert_eq!(
+        v["blocked_by"],
+        serde_json::json!(["@aa-first", "@mm-middle", "@zz-later"]),
+        "sorted, deduped, @-prefixed; {}",
+        dump(&show)
+    );
 }
