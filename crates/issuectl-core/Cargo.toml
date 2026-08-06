@@ -29,7 +29,7 @@ futures-util = { version = "0.3", default-features = false }
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 ammonia = "4"
 notify = "8"
-notify-debouncer-full = "0.6"
+notify-debouncer-full = "0.7"
 parking_lot = "0.12"
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
