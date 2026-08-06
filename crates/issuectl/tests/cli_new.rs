@@ -1083,3 +1083,67 @@ fn new_body_file_missing_path_json_is_clean_envelope() {
     let show = run(tmp.path(), &["--json", "show", "bf-missing"]);
     assert_ne!(show.status.code(), Some(0), "{}", dump(&show));
 }
+
+/// Regression: `--json show` must surface `blocked_by` as a top-level key
+/// after `depend add --blocked-by`, not bury it inside `extra`. Before the
+/// fix the key was absent from the object entirely (`jq .blocked_by` →
+/// null) even though the frontmatter carried it. Also pins the derived
+/// reverse `blocks` view on the blocker side, and that both keys are
+/// present (as empty arrays) when an issue has no dependants.
+#[test]
+fn show_json_exposes_blocked_by_and_derived_blocks() {
+    let tmp = fresh_repo();
+    // Two issues: `dp-end` will be blocked by `bl-ocker`.
+    for (title, slug) in [("Dependent", "dp-end"), ("Blocker", "bl-ocker")] {
+        let out = run(
+            tmp.path(),
+            &["new", "--type", "task", "--title", title, "--slug", slug],
+        );
+        assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    }
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "depend",
+            "add",
+            "dp-end",
+            "--blocked-by",
+            "bl-ocker",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+
+    // Dependent side: `blocked_by` present as a top-level array of
+    // `@`-prefixed refs (matching the frontmatter), `blocks` empty.
+    let show = run(tmp.path(), &["--json", "show", "dp-end"]);
+    assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
+    let v: serde_json::Value =
+        serde_json::from_slice(&show.stdout).expect("show stdout should be JSON");
+    assert!(
+        v.get("blocked_by").is_some(),
+        "blocked_by key must be present, not absent; {}",
+        dump(&show)
+    );
+    assert_eq!(
+        v["blocked_by"],
+        serde_json::json!(["@bl-ocker"]),
+        "{}",
+        dump(&show)
+    );
+    assert_eq!(v["blocks"], serde_json::json!([]), "{}", dump(&show));
+
+    // Blocker side: empty `blocked_by`, and the derived reverse `blocks`
+    // view names the dependent.
+    let show = run(tmp.path(), &["--json", "show", "bl-ocker"]);
+    assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
+    let v: serde_json::Value =
+        serde_json::from_slice(&show.stdout).expect("show stdout should be JSON");
+    assert_eq!(v["blocked_by"], serde_json::json!([]), "{}", dump(&show));
+    assert_eq!(
+        v["blocks"],
+        serde_json::json!(["@dp-end"]),
+        "{}",
+        dump(&show)
+    );
+}

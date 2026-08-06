@@ -3262,6 +3262,33 @@ fn cmd_list(
     Ok(())
 }
 
+/// Render a list of canonical (already `@`-stripped, valid) slugs as a
+/// JSON array of `@`-prefixed refs — the frontmatter-facing form used by
+/// `blocked_by`/`blocks` in `show --json`.
+fn refs_json(slugs: &[String]) -> serde_json::Value {
+    serde_json::Value::Array(
+        slugs
+            .iter()
+            .map(|s| serde_json::Value::String(format!("@{s}")))
+            .collect(),
+    )
+}
+
+/// Derived reverse `blocks` view for `slug`: the sorted, deduped slugs of
+/// every issue whose `blocked_by:` list names this one. The forward
+/// relationship is stored in frontmatter; this reverse view is computed at
+/// read time (see `query::build_blocked_by_graph`), never persisted.
+fn blocks_of(issues: &[models::Issue], slug: &str) -> Vec<String> {
+    let mut out: Vec<String> = issues
+        .iter()
+        .filter(|i| i.blocked_by().iter().any(|dep| dep == slug))
+        .map(|i| i.slug.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn cmd_show(json: bool, slug: &str) -> Result<()> {
     let issues = load();
     // Prefix expansion: `show extremely` resolves to `extremely-quiet-otter`
@@ -3297,6 +3324,17 @@ fn cmd_show(json: bool, slug: &str) -> Result<()> {
                         "version".into(),
                         serde_json::Value::String(canonical::canonical_hash(i)),
                     );
+                    // `blocked_by` lives in `extra` (it is intentionally not a
+                    // typed field — see `Issue::blocked_by`), so plain serde
+                    // buries it inside the `extra` object and never surfaces a
+                    // top-level key. Project the canonical, `@`-prefixed ref
+                    // list up to the top level — always present (empty when
+                    // there are no blockers) — so consumers can read it without
+                    // digging into `extra`, and add the derived reverse `blocks`
+                    // view (the issues this one blocks), computed from the
+                    // repo-wide graph.
+                    m.insert("blocked_by".into(), refs_json(&i.blocked_by()));
+                    m.insert("blocks".into(), refs_json(&blocks_of(&issues, &i.slug)));
                 }
                 println!("{}", serde_json::to_string_pretty(&v)?);
             } else {
