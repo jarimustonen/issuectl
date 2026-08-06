@@ -40,10 +40,12 @@ pub struct Issue {
     pub closed: Option<String>,
     /// Closer attribution, managed in lockstep with `closed:` (set on
     /// close, scrubbed on reopen). A first-class typed field mirroring
-    /// `closed:` — the parser migrates a legacy `extra["closed_by"]`
-    /// into it on read (see `parser`), it is folded into `canonical_hash`
-    /// under the `closed_by` key, and reserved from `set`/`update --field`
-    /// so the only writer is the validated close-lifecycle slot.
+    /// `closed:` — the parser lifts the string value out of the raw
+    /// `closed_by:` frontmatter key into this slot on read (see
+    /// `parser`; a non-string legacy value stays in `extra`). It is
+    /// folded into `canonical_hash` under the `closed_by` key, and
+    /// reserved from `set`/`update --field` so the only writer is the
+    /// validated close-lifecycle slot.
     pub closed_by: Option<String>,
     pub commits: Option<Vec<Commit>>,
 

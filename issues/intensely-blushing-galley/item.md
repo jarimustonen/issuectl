@@ -4,6 +4,9 @@ updated: 2026-08-06
 type: improvement
 status: in-progress
 priority: low
+commits:
+- hash: 26e75b0535ea614d7a92c1258e168fddb06d1feb
+  summary: promote closed_by to typed field, doctor heal, show/close output
 ---
 
 # Promote closed_by to a typed Issue field + doctor heal

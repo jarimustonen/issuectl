@@ -22,13 +22,6 @@ pub struct Frontmatter {
     pub related: Option<Vec<String>>,
     pub labels: Option<Vec<String>>,
     pub closed: Option<String>,
-    /// Closer attribution. Typed (unlike `blocked_by`, which stays in
-    /// `unknown`) because the close path manages it in lockstep with
-    /// `closed:` and no reader needs it out of `extra`. Serde consumes
-    /// the `closed_by:` key here before `unknown` is built, so a
-    /// post-migration file lands it in the typed field directly; a
-    /// legacy file that stashed it elsewhere is reconciled below.
-    pub closed_by: Option<String>,
     pub commits: Option<Vec<super::models::Commit>>,
     /// Slug stored in frontmatter (post-migration files). Authoritative
     /// identifier is still the directory name; this is mirrored for clarity.
@@ -50,6 +43,14 @@ pub struct Frontmatter {
     /// here before `extra` is built, silently dropping it from the
     /// context bundle. If you add it, update `read_blocked_by` to read
     /// the typed field instead.
+    ///
+    /// `closed_by` is likewise intentionally NOT a typed field here even
+    /// though `Issue::closed_by` is: a typed `Option<String>` would make
+    /// a hand-edited non-string `closed_by:` fail the whole-frontmatter
+    /// deserialize (defaulting every other field). Instead the string
+    /// value is lifted out of this map into the typed slot after parsing
+    /// (see `parse_item_md_text_with_warnings`), leaving any non-string
+    /// value safely in `extra`.
     #[serde(flatten)]
     pub unknown: BTreeMap<String, serde_yaml::Value>,
 }
@@ -249,22 +250,23 @@ pub fn parse_item_md_text_with_warnings(
         }
     }
 
-    // Legacy migration: pre-typed-field repos may carry `closed_by` as an
-    // untyped frontmatter key, which — on a file that also lacked the
-    // typed slot — would land in `extra`. Now that `closed_by` is a
-    // first-class field, lift any stray `extra["closed_by"]` string into
-    // it (typed value wins if both somehow appear) and drop the `extra`
-    // copy so the field has exactly one representation on the wire and in
-    // the hash. A non-string legacy value is left in `extra` untouched.
-    let mut closed_by = fm.closed_by;
-    if closed_by.is_none() {
-        if let Some(serde_json::Value::String(s)) = extra.get("closed_by") {
-            closed_by = Some(s.clone());
-        }
-    }
-    if closed_by.is_some() {
-        extra.remove("closed_by");
-    }
+    // Promote `closed_by` from the unknown-key map into the typed
+    // `Issue::closed_by` field. Deliberately NOT a typed `Frontmatter`
+    // field (same reasoning as `blocked_by` — see the `unknown` doc):
+    // declaring it there would make serde reject a hand-edited non-string
+    // `closed_by:` at the whole-frontmatter level, defaulting every other
+    // typed field. Lifting a *string* value here (and only a string)
+    // keeps the domain model typed while leaving any non-string legacy
+    // value in `extra`, where it stays readable and hashes exactly as it
+    // did before promotion. Removing the promoted string from `extra`
+    // gives the field one representation on the wire and in the hash.
+    let closed_by = match extra.get("closed_by") {
+        Some(serde_json::Value::String(_)) => match extra.remove("closed_by") {
+            Some(serde_json::Value::String(s)) => Some(s),
+            _ => None,
+        },
+        _ => None,
+    };
 
     let title = extract_title(body);
     let issue = crate::models::Issue {
@@ -506,6 +508,29 @@ mod tests {
         let parsed =
             parse_item_md_text_with_warnings(text, "some-slug", "open", Path::new("<test>"));
         assert_eq!(parsed.issue.closed_by, None);
+    }
+
+    #[test]
+    fn non_string_closed_by_does_not_break_the_typed_parse() {
+        // Regression: `closed_by` is lifted from `extra` rather than
+        // typed on `Frontmatter`, so a hand-edited non-string value must
+        // NOT fail the whole-frontmatter deserialize (which would default
+        // every other field). Every typed field still parses; the
+        // malformed `closed_by` stays in `extra` (readable + hashed as
+        // before) and the typed slot is left empty.
+        let text = "---\ntype: feature\nstatus: done\npriority: high\n\
+                    closed: 2026-05-06\nclosed_by: 42\n---\n\n# Title\n";
+        let parsed =
+            parse_item_md_text_with_warnings(text, "some-slug", "closed", Path::new("<test>"));
+        assert_eq!(parsed.issue.issue_type, "feature", "type must survive");
+        assert_eq!(parsed.issue.status, "done", "status must survive");
+        assert_eq!(parsed.issue.priority, "high", "priority must survive");
+        assert_eq!(parsed.issue.closed.as_deref(), Some("2026-05-06"));
+        assert_eq!(parsed.issue.closed_by, None, "non-string not lifted");
+        assert!(
+            parsed.issue.extra.contains_key("closed_by"),
+            "non-string closed_by stays in extra"
+        );
     }
 
     #[test]
