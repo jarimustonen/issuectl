@@ -2,11 +2,14 @@
 created: 2026-08-05
 updated: 2026-08-06
 type: improvement
-status: in-progress
+status: done
 priority: low
 commits:
 - hash: 26e75b0535ea614d7a92c1258e168fddb06d1feb
   summary: promote closed_by to typed field, doctor heal, show/close output
+- hash: 554073e3de81cb2d27c3e970d1c28c2b8d251e63
+  summary: apply llm-review — lift closed_by from extra (parser robustness)
+closed: 2026-08-06
 ---
 
 # Promote closed_by to a typed Issue field + doctor heal
