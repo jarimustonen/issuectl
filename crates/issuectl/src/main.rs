@@ -36,7 +36,7 @@ Examples:
   issuectl init                            Bootstrap a new repo (schema, agents, skill)
   issuectl doctor                          Health-check the repo
   issuectl doctor --fix                    Migrate legacy numbered issues
-  issuectl skill install                   Install /issue skill in current repo
+  issuectl skill install                   Install /issue (+ /issue-new, /issue-intake) skills
   issuectl serve                           Run a local Trello-style web board
   issuectl docs                            List bundled documentation topics
   issuectl docs kanban                     Print the kanban / web-board doc
@@ -1590,7 +1590,8 @@ enum HooksAction {
 enum SkillAction {
     /// Install the /issue skill template into the current repo. By default
     /// installs the Claude Code skill; use --agent codex for Codex CLI, or
-    /// --agent all for both.
+    /// --agent all for both. The Claude install also ships the standalone
+    /// intake skills /issue-new and /issue-intake (Claude-only).
     Install {
         /// Which agent's skill format to install
         #[arg(short = 'a', long, default_value = "claude", value_parser = PossibleValuesParser::new(["claude", "codex", "all"]))]

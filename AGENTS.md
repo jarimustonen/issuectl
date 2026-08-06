@@ -31,17 +31,34 @@ the skill templates in the same commit.** Triggers include:
 - Default values changed → update the prose
 - Error messages or exit-code semantics changed in a way agents handle
 
-The two template files:
+The template files (all under `crates/issuectl-core/templates/`, all
+`include_str!`-embedded in `src/skill.rs`):
 
-- `templates/issue-skill.md` — Claude Code variant (YAML frontmatter)
-- `templates/issue-prompt.md` — Codex CLI variant (plain markdown)
+- `issue-skill.md` — `/issue`, Claude Code variant (YAML frontmatter)
+- `issue-prompt.md` — `/issue`, Codex CLI variant (plain markdown)
+- `issue-new-skill.md` — `/issue-new`, the intake **filing** skill (Claude-only)
+- `issue-intake-skill.md` — `/issue-intake`, the intake **processing** skill
+  (Claude-only)
 
-Both are dogfooded into this repo as `.claude/skills/issue/SKILL.md`
-and `.codex/prompts/issue.md` via `issuectl skill install --agent all
---force`. After editing either template, run that command (or
-equivalent) so the local copies don't drift from `templates/`. The
-`skill::tests::dogfooded_copies_match_templates` test enforces this — it
-fails if a committed copy no longer matches its rendered template.
+They are dogfooded into this repo via `issuectl skill install --agent all
+--force`:
+
+| Template | Dogfooded copy |
+|---|---|
+| `issue-skill.md` | `.claude/skills/issue/SKILL.md` |
+| `issue-prompt.md` | `.codex/prompts/issue.md` |
+| `issue-new-skill.md` | `.claude/skills/issue-new/SKILL.md` |
+| `issue-intake-skill.md` | `.claude/skills/issue-intake/SKILL.md` |
+
+The two intake skills are **Claude-only** — they ship whenever the Claude
+agent is selected (`--agent claude` or `all`), have no Codex variant, and are
+skipped on a Codex-only install. After editing any template, re-run the install
+command so the local copies don't drift from `templates/`. The
+`skill::tests::dogfooded_copies_match_templates` test enforces this for **all
+four** copies — it fails if a committed copy no longer matches its rendered
+template (and `standalone_intake_skills_are_wellformed` additionally pins the
+intake skills' filing/processing split). `/triage-bugs` is a repo-local-only
+deprecation alias — it is **not** a binary-shipped template.
 
 If the two variants would otherwise drift, regenerate the Codex one
 from the Claude one with:
@@ -279,8 +296,9 @@ policy.
 - **Hot files (sequence, do not parallelise).** `crates/issuectl/src/main.rs`
   (all `cmd_*` handlers + clap structs), `crates/issuectl-core/src/mutate/`
   (every write path routes here), `crates/issuectl-core/src/schema.rs`,
-  and the skill templates (`templates/issue-skill.md` +
-  `templates/issue-prompt.md`, kept in sync per the rule above).
+  and the skill templates (`templates/issue-skill.md`,
+  `templates/issue-prompt.md`, `templates/issue-new-skill.md`,
+  `templates/issue-intake-skill.md`, kept in sync per the rule above).
   Two worktrees editing any one of these will collide on rebase.
 - **Test-account reset: n/a.** No external services or test accounts;
   tests are hermetic (`cargo test` uses tempdirs). No reset step.

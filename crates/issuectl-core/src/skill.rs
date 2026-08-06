@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 
 const ISSUE_CLAUDE_TEMPLATE: &str = include_str!("../templates/issue-skill.md");
 const ISSUE_CODEX_TEMPLATE: &str = include_str!("../templates/issue-prompt.md");
+const ISSUE_NEW_TEMPLATE: &str = include_str!("../templates/issue-new-skill.md");
+const ISSUE_INTAKE_TEMPLATE: &str = include_str!("../templates/issue-intake-skill.md");
 pub const ISSUES_AGENTS_TEMPLATE: &str = include_str!("../templates/issues-agents.md");
 
 /// Substitute build-time tokens (currently `{{ISSUECTL_VERSION}}`) in a
@@ -50,6 +52,54 @@ impl Agent {
     }
 }
 
+/// The standalone intake-flow skills that ship alongside `/issue`. Unlike
+/// [`Agent`] (which ships `/issue` as a Claude skill *and* a Codex prompt),
+/// these are **Claude-only** — they orchestrate the `/worktree-*` family and
+/// have no Codex variant. They are installed whenever [`Agent::Claude`] is
+/// among the selected agents, so Jari's fleet-apply hook distributes them the
+/// same way it distributes `/issue`. Their bodies live in
+/// `crates/issuectl-core/templates/` (source of truth) and are dogfooded into
+/// this repo's `.claude/skills/`; the
+/// [`tests::dogfooded_copies_match_templates`] test keeps the two in sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntakeSkill {
+    /// `/issue-new` — the thin filing half of the intake flow.
+    IssueNew,
+    /// `/issue-intake` — the read-only processing/briefing half.
+    IssueIntake,
+}
+
+impl IntakeSkill {
+    /// Every intake skill, in install order.
+    pub const ALL: [IntakeSkill; 2] = [IntakeSkill::IssueNew, IntakeSkill::IssueIntake];
+
+    /// The skill's directory name under `.claude/skills/` (and its `/name`).
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::IssueNew => "issue-new",
+            Self::IssueIntake => "issue-intake",
+        }
+    }
+
+    pub fn template(self) -> &'static str {
+        match self {
+            Self::IssueNew => ISSUE_NEW_TEMPLATE,
+            Self::IssueIntake => ISSUE_INTAKE_TEMPLATE,
+        }
+    }
+
+    pub fn install_path(self, repo_root: &Path) -> PathBuf {
+        repo_root.join(format!(".claude/skills/{}/SKILL.md", self.slug()))
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::IssueNew => "Claude Code intake filing skill",
+            Self::IssueIntake => "Claude Code intake processing skill",
+        }
+    }
+}
+
 /// Outcome of installing a single skill-related file. `init` and other
 /// orchestrators consume this to report per-file status without
 /// re-running file-existence checks of their own.
@@ -78,10 +128,18 @@ pub fn install_skill_summary(
     agents: &[Agent],
     force: bool,
 ) -> Result<Vec<InstallResult>> {
-    let mut results = Vec::with_capacity(agents.len() + 1);
+    let mut results = Vec::with_capacity(agents.len() + 1 + IntakeSkill::ALL.len());
     results.push(install_issues_scaffold(repo_root, force)?);
     for agent in agents {
         results.push(install_agent_template(repo_root, *agent, force)?);
+    }
+    // The standalone intake skills are Claude-only; ship them whenever the
+    // Claude agent is selected, so the fleet-apply hook distributes them the
+    // same way it distributes `/issue`. A Codex-only install skips them.
+    if agents.contains(&Agent::Claude) {
+        for skill in IntakeSkill::ALL {
+            results.push(install_intake_skill(repo_root, skill, force)?);
+        }
     }
     Ok(results)
 }
@@ -96,6 +154,9 @@ pub fn install_skill(repo_root: &Path, agents: &[Agent], force: bool) -> Result<
     println!();
     if agents.contains(&Agent::Claude) {
         println!("  Use /issue in Claude Code to create, search, update, and close issues.");
+        println!(
+            "  Use /issue-new to file an intake report and /issue-intake to process the queue."
+        );
     }
     if agents.contains(&Agent::Codex) {
         println!("  Use /issue in Codex CLI (or invoke the prompt) to manage issues.");
@@ -163,13 +224,43 @@ fn install_issues_scaffold(repo_root: &Path, force: bool) -> Result<InstallResul
 }
 
 fn install_agent_template(repo_root: &Path, agent: Agent, force: bool) -> Result<InstallResult> {
-    let path = agent.install_path(repo_root);
+    install_rendered_file(
+        agent.install_path(repo_root),
+        agent.template(),
+        agent.label(),
+        force,
+    )
+}
+
+fn install_intake_skill(
+    repo_root: &Path,
+    skill: IntakeSkill,
+    force: bool,
+) -> Result<InstallResult> {
+    install_rendered_file(
+        skill.install_path(repo_root),
+        skill.template(),
+        skill.label(),
+        force,
+    )
+}
+
+/// Render `template` (substituting build-time tokens) and write it to `path`,
+/// respecting `force` for the overwrite decision. Shared by the `/issue`
+/// agent templates and the standalone intake skills so they handle
+/// creation, `--force` re-install, and parent-dir creation identically.
+fn install_rendered_file(
+    path: PathBuf,
+    template: &str,
+    label: &str,
+    force: bool,
+) -> Result<InstallResult> {
     let existed = path.exists();
 
     if !force && existed {
         return Ok(InstallResult {
             path,
-            label: agent.label().to_string(),
+            label: label.to_string(),
             outcome: InstallOutcome::AlreadyExists,
         });
     }
@@ -178,11 +269,11 @@ fn install_agent_template(repo_root: &Path, agent: Agent, force: bool) -> Result
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
-    std::fs::write(&path, render_template(agent.template()))
+    std::fs::write(&path, render_template(template))
         .with_context(|| format!("cannot write {}", path.display()))?;
     Ok(InstallResult {
         path,
-        label: agent.label().to_string(),
+        label: label.to_string(),
         outcome: if existed {
             InstallOutcome::Overwritten
         } else {
@@ -255,17 +346,18 @@ mod tests {
         }
 
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for agent in [Agent::Claude, Agent::Codex] {
-            let copy_path = agent.install_path(&repo_root);
-            // Dev-only guard: a packaged/standalone crate won't have the
-            // repo-root copies. Skip rather than fail outside the workspace.
+
+        // Compare one dogfooded copy against its rendered template, tolerating
+        // only the pinned `{{ISSUECTL_VERSION}}` (the copy records the release
+        // that wrote it, which lags the in-development version). Dev-only: a
+        // packaged/standalone crate won't have the repo-root copies, so skip
+        // rather than fail outside the workspace.
+        let check = |copy_path: PathBuf, template: &str| {
             if !copy_path.exists() {
-                continue;
+                return;
             }
             let copy = std::fs::read_to_string(&copy_path).unwrap();
-            let expected = agent
-                .template()
-                .replace("{{ISSUECTL_VERSION}}", pinned_version(&copy));
+            let expected = template.replace("{{ISSUECTL_VERSION}}", pinned_version(&copy));
             assert_eq!(
                 copy,
                 expected,
@@ -273,17 +365,29 @@ mod tests {
                  `issuectl skill install --agent all --force` to regenerate",
                 copy_path.display()
             );
+        };
+
+        // `/issue` ships as a Claude skill and a Codex prompt.
+        for agent in [Agent::Claude, Agent::Codex] {
+            check(agent.install_path(&repo_root), agent.template());
+        }
+        // The standalone intake skills ship Claude-only, but are dogfooded the
+        // same way — deleting/renaming a template or letting a copy drift
+        // must fail here just like it does for `/issue`.
+        for skill in IntakeSkill::ALL {
+            check(skill.install_path(&repo_root), skill.template());
         }
     }
 
-    /// The standalone intake skills (`/issue-new`, `/issue-intake`, and the
-    /// `/triage-bugs` deprecation alias) are dogfooded as repo-local
-    /// `.claude/skills/*/SKILL.md` files rather than installed by the binary
-    /// (they orchestrate the `/worktree-*` family, so they are not pushed to
-    /// arbitrary consumer repos). They still need a guard so they don't rot:
-    /// this test pins their frontmatter and the load-bearing filing/processing
-    /// split. Skipped outside the workspace (a packaged crate has no repo-root
-    /// copies), matching `dogfooded_copies_match_templates`.
+    /// Content guard for the standalone intake skills. `/issue-new` and
+    /// `/issue-intake` are now binary-shipped (Claude-only) via
+    /// [`IntakeSkill`] — `dogfooded_copies_match_templates` keeps their copies
+    /// byte-identical to `templates/`; *this* test pins the load-bearing
+    /// filing/processing split and CLI-spelling contract so a template edit
+    /// can't quietly break the flow. `/triage-bugs` stays a repo-local-only
+    /// deprecation alias (not promoted to a template). Skipped outside the
+    /// workspace (a packaged crate has no repo-root copies), matching
+    /// `dogfooded_copies_match_templates`.
     #[test]
     fn standalone_intake_skills_are_wellformed() {
         let skills_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -469,6 +573,81 @@ mod tests {
         install_skill(tmp.path(), &[Agent::Codex], false).unwrap();
         assert!(!tmp.path().join(".claude/skills/issue/SKILL.md").exists());
         assert!(tmp.path().join(".codex/prompts/issue.md").exists());
+    }
+
+    #[test]
+    fn install_claude_writes_intake_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_skill(tmp.path(), &[Agent::Claude], false).unwrap();
+        for skill in IntakeSkill::ALL {
+            assert!(
+                skill.install_path(tmp.path()).exists(),
+                "{} should be installed with the Claude agent",
+                skill.slug()
+            );
+        }
+    }
+
+    #[test]
+    fn install_codex_only_skips_intake_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_skill(tmp.path(), &[Agent::Codex], false).unwrap();
+        for skill in IntakeSkill::ALL {
+            assert!(
+                !skill.install_path(tmp.path()).exists(),
+                "{} is Claude-only and must not ship on a Codex-only install",
+                skill.slug()
+            );
+        }
+    }
+
+    #[test]
+    fn installed_intake_skills_pin_current_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_skill(tmp.path(), &[Agent::Claude], false).unwrap();
+        for skill in IntakeSkill::ALL {
+            let installed = std::fs::read_to_string(skill.install_path(tmp.path())).unwrap();
+            assert!(
+                installed.contains(env!("CARGO_PKG_VERSION")),
+                "{} must pin the current version",
+                skill.slug()
+            );
+            assert!(
+                !installed.contains("{{ISSUECTL_VERSION}}"),
+                "{} must not leave the raw version token",
+                skill.slug()
+            );
+        }
+    }
+
+    #[test]
+    fn intake_skills_are_claude_only() {
+        // Guards the Claude-only design decision: these two skills ship no
+        // Codex variant (they orchestrate the Claude-side `/worktree-*` family).
+        let root = Path::new("/tmp/repo");
+        assert!(IntakeSkill::IssueNew
+            .install_path(root)
+            .ends_with(".claude/skills/issue-new/SKILL.md"));
+        assert!(IntakeSkill::IssueIntake
+            .install_path(root)
+            .ends_with(".claude/skills/issue-intake/SKILL.md"));
+        assert_eq!(IntakeSkill::ALL.len(), 2);
+    }
+
+    #[test]
+    fn intake_skill_reinstall_respects_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = IntakeSkill::IssueNew.install_path(tmp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "user content").unwrap();
+
+        // Without --force the user's copy is preserved.
+        install_skill(tmp.path(), &[Agent::Claude], false).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "user content");
+
+        // With --force it is regenerated from the template.
+        install_skill(tmp.path(), &[Agent::Claude], true).unwrap();
+        assert_ne!(std::fs::read_to_string(&path).unwrap(), "user content");
     }
 
     #[test]
