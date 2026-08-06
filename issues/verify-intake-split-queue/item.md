@@ -2,8 +2,12 @@
 created: 2026-08-06
 updated: 2026-08-06
 type: task
-status: open
+status: done
 priority: normal
+commits:
+- hash: 1cf6c3c
+  summary: verify §6 split queue + human-mode regression test
+closed: 2026-08-06
 ---
 
 # Verify intake queue surfaces legacy label-encoded items (transitional split queue)
