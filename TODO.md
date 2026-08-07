@@ -82,20 +82,20 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: json-blocked-by-null-top-level   ← uusi normal-bug (0.7.1); ainoa oikea työ tässä rupeamassa
-LANE A — main.rs cmd_show/cmd_ls --json + parser.rs (blocked_by-serialisointi)
-  ▶ json-blocked-by-null-top-level  normal · bug; blocked_by asuu Issue::extra-mapissa → top-level .blocked_by aina null show+ls --jsonissa. Fix: nosta typed top-level-kentäksi (kuten @intensely-blushing-galley teki closed_bylle) → sama esitys show JA ls -poluilla. Prod-koodi → /llm-review ennen mergeä.
+GLOBAL HEAD-OF-LINE: awfully-courageous-attempt   ← ainoa aktiivinen ei-deferred issue (low, build-only-if); LANE A tyhjeni taas (json-blocked-by landasi)
 LANE B — skill install + templates/ + skill.rs (skill distribution)
-    awfully-courageous-attempt  low · feature; Codex-prompt-variantit /issue-new + /issue-intakelle (frontmatter-strip kuten /issuella). Build-only-if: vain jos Codex-käyttö todistuu.
+  ▶ awfully-courageous-attempt  low · feature; Codex-prompt-variantit /issue-new + /issue-intakelle (frontmatter-strip kuten /issuella). Build-only-if: vain jos Codex-käyttö todistuu.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: uusi normal-bug **`json-blocked-by-null-top-level`** nostettu LANE A:han ja on
-GLOBAL HEAD-OF-LINE — sama "kenttä hautautuu `extra`-mappiin" -kuvio jonka `closed_by`-fix
-(@intensely-blushing-galley) jo ratkaisi typed-kentällä; edellinen piste-fix (@show-json-omits-blocked-by)
-korjasi vain `cmd_show`-polun, mutta `ls --json` (ja kanoninen top-level-esitys) jäi. LANE B:n
-**`awfully-courageous-attempt`** (low, build-only-if) pysyy parkissa.
-Huom: mainissa on jo 3 close/show-polun korjausta **julkaisematta** — seuraava release cuttaa 0.7.2:n.
+Kaari-lyhyesti: **`json-blocked-by-null-top-level`** (normal bug) landasi tässä rupeamassa —
+`blocked_by` surfataan nyt top-leveliin `show`/`ls`/`search --json`illa jaetun `project_blocked_by`-helperin
+kautta (kanoninen `@`-lista, raaka `extra.blocked_by` stripattu; yksi wire-esitys). Worker piti
+`blocked_by`in `extra`ssa EIKÄ typettänyt sitä — se on jo `canonical_hash`issa raakana, joten typetys
+rikkoisi jokaisen olemassa olevan issuen version-tokenin (sama johtopäätös kuin `closed_by`-reviewssa).
+4-malli-/llm-review, green gate ok. Pudotettu DAG:sta (terminal); LANE A tyhjeni. Jäljellä vain LANE B:n
+**`awfully-courageous-attempt`** (low, build-only-if) parkissa.
+Huom: mainissa on nyt **4** korjausta **julkaisematta** — seuraava release cuttaa 0.7.2:n.
 
 ---
 
