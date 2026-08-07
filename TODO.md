@@ -82,17 +82,20 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: awfully-courageous-attempt   ← ainoa aktiivinen ei-deferred issue (low, build-only-if); LANE A tyhjeni (kaikki close-polun työ landasi)
+GLOBAL HEAD-OF-LINE: json-blocked-by-null-top-level   ← uusi normal-bug (0.7.1); ainoa oikea työ tässä rupeamassa
+LANE A — main.rs cmd_show/cmd_ls --json + parser.rs (blocked_by-serialisointi)
+  ▶ json-blocked-by-null-top-level  normal · bug; blocked_by asuu Issue::extra-mapissa → top-level .blocked_by aina null show+ls --jsonissa. Fix: nosta typed top-level-kentäksi (kuten @intensely-blushing-galley teki closed_bylle) → sama esitys show JA ls -poluilla. Prod-koodi → /llm-review ennen mergeä.
 LANE B — skill install + templates/ + skill.rs (skill distribution)
-  ▶ awfully-courageous-attempt  low · feature; Codex-prompt-variantit /issue-new + /issue-intakelle (frontmatter-strip kuten /issuella). Build-only-if: vain jos Codex-käyttö todistuu.
+    awfully-courageous-attempt  low · feature; Codex-prompt-variantit /issue-new + /issue-intakelle (frontmatter-strip kuten /issuella). Build-only-if: vain jos Codex-käyttö todistuu.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: kolme close/show-polun issueta landasi tässä rupeamassa — **`show-json-omits-blocked-by`**
-(bug), **`intensely-blushing-galley`** (typed `closed_by`) ja **`close-comment`** (`close --comment`);
-kaikki pudotettu DAG:sta (terminal). LANE A tyhjeni kokonaan. Jäljellä vain LANE B:n
-**`awfully-courageous-attempt`** (low, build-only-if), joka on nyt GLOBAL HEAD-OF-LINE muun puuttuessa.
-Huom: nämä 3 ovat mainissa mutta **julkaisematta** — seuraava release cuttaa 0.7.2:n.
+Kaari-lyhyesti: uusi normal-bug **`json-blocked-by-null-top-level`** nostettu LANE A:han ja on
+GLOBAL HEAD-OF-LINE — sama "kenttä hautautuu `extra`-mappiin" -kuvio jonka `closed_by`-fix
+(@intensely-blushing-galley) jo ratkaisi typed-kentällä; edellinen piste-fix (@show-json-omits-blocked-by)
+korjasi vain `cmd_show`-polun, mutta `ls --json` (ja kanoninen top-level-esitys) jäi. LANE B:n
+**`awfully-courageous-attempt`** (low, build-only-if) pysyy parkissa.
+Huom: mainissa on jo 3 close/show-polun korjausta **julkaisematta** — seuraava release cuttaa 0.7.2:n.
 
 ---
 
