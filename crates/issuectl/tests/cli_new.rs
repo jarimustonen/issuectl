@@ -1256,7 +1256,7 @@ fn ls_json_exposes_blocked_by_and_strips_extra_copy() {
     let find = |slug: &str| {
         rows.iter()
             .find(|r| r["slug"] == serde_json::json!(slug))
-            .unwrap_or_else(|| panic!("row {slug} present; {}", dump(&ls)))
+            .unwrap_or_else(|| panic!("row {slug} not found; {}", dump(&ls)))
     };
     assert_eq!(
         find("dp-end")["blocked_by"],
@@ -1269,5 +1269,159 @@ fn ls_json_exposes_blocked_by_and_strips_extra_copy() {
         serde_json::json!([]),
         "{}",
         dump(&ls)
+    );
+
+    // `blocked_by` was the dependent's only unknown-frontmatter key, so
+    // stripping it must drop the whole `extra` object (not leave `{}`) —
+    // matching `Issue::extra`'s `skip_serializing_if` contract. Asserts the
+    // empty-`extra` branch of `project_blocked_by`, which `extra.blocked_by
+    // is None` alone would not (that also holds for `"extra": {}`).
+    assert!(
+        find("dp-end").get("extra").is_none(),
+        "extra must be omitted once its only key (blocked_by) is stripped; {}",
+        dump(&ls)
+    );
+}
+
+/// `ls --json` applies the *canonical* `blocked_by` projection per row
+/// (sorted, deduped, `@`-prefixed — coercing hand-edited scalar/unsorted/
+/// unprefixed/duplicate frontmatter) exactly like `show --json`, and the
+/// strip touches only `blocked_by`: an unrelated `extra` key must survive.
+/// Guards both the normalization contract and the other-key branch of
+/// `project_blocked_by` on the listing path (the `depend`-driven test above
+/// only sees a single well-formed ref and a blocked_by-only `extra`).
+#[test]
+fn ls_json_canonicalizes_blocked_by_and_preserves_other_extra() {
+    let tmp = fresh_repo();
+    for (title, slug) in [("Messy array", "ma-ss"), ("Scalar", "sc-al")] {
+        let out = run(
+            tmp.path(),
+            &["new", "--type", "task", "--title", title, "--slug", slug],
+        );
+        assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    }
+
+    // `ma-ss`: a messy array (unsorted, mixed sigils, a duplicate,
+    // whitespace) alongside an unrelated custom key that must be preserved.
+    let item = tmp.path().join("issues/ma-ss/item.md");
+    let text = std::fs::read_to_string(&item).expect("read ma-ss item.md");
+    let text = text.replacen(
+        "---\n",
+        "---\ntriage: alice\nblocked_by: ['@zz-later', 'aa-first', '@aa-first', ' @mm-middle ']\n",
+        1,
+    );
+    std::fs::write(&item, text).expect("write ma-ss item.md");
+
+    // `sc-al`: `blocked_by` as a bare scalar string (hand-edited form
+    // `Issue::blocked_by()` tolerates), which must still project to an array.
+    let item = tmp.path().join("issues/sc-al/item.md");
+    let text = std::fs::read_to_string(&item).expect("read sc-al item.md");
+    let text = text.replacen("---\n", "---\nblocked_by: '@bl-ocker'\n", 1);
+    std::fs::write(&item, text).expect("write sc-al item.md");
+
+    let ls = run(tmp.path(), &["--json", "ls"]);
+    assert_eq!(ls.status.code(), Some(0), "{}", dump(&ls));
+    let rows: serde_json::Value =
+        serde_json::from_slice(&ls.stdout).expect("ls stdout should be JSON");
+    let rows = rows.as_array().expect("ls output is a JSON array");
+    let find = |slug: &str| {
+        rows.iter()
+            .find(|r| r["slug"] == serde_json::json!(slug))
+            .unwrap_or_else(|| panic!("row {slug} not found; {}", dump(&ls)))
+    };
+
+    // Canonicalized: sorted, deduped, `@`-prefixed.
+    assert_eq!(
+        find("ma-ss")["blocked_by"],
+        serde_json::json!(["@aa-first", "@mm-middle", "@zz-later"]),
+        "sorted, deduped, @-prefixed on ls; {}",
+        dump(&ls)
+    );
+    // The unrelated `extra` key survives; only `blocked_by` is stripped.
+    assert_eq!(
+        find("ma-ss")["extra"]["triage"],
+        serde_json::json!("alice"),
+        "unrelated extra key must survive the blocked_by strip; {}",
+        dump(&ls)
+    );
+    assert!(
+        find("ma-ss")
+            .get("extra")
+            .and_then(|e| e.get("blocked_by"))
+            .is_none(),
+        "extra.blocked_by must be stripped even when other extra keys remain; {}",
+        dump(&ls)
+    );
+    // A scalar `blocked_by` projects to a single-element array, not a string.
+    assert_eq!(
+        find("sc-al")["blocked_by"],
+        serde_json::json!(["@bl-ocker"]),
+        "scalar blocked_by must project to an array on ls; {}",
+        dump(&ls)
+    );
+}
+
+/// Regression: `--json search` shares `ls`'s serialization block, so it
+/// must surface the same top-level `blocked_by` projection (not `null`
+/// under `extra`). Symmetric to `ls_json_exposes_blocked_by_and_strips_extra_copy`.
+#[test]
+fn search_json_exposes_blocked_by_and_strips_extra_copy() {
+    let tmp = fresh_repo();
+    for (title, slug) in [("Dependent", "dp-end"), ("Blocker", "bl-ocker")] {
+        let out = run(
+            tmp.path(),
+            &["new", "--type", "task", "--title", title, "--slug", slug],
+        );
+        assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    }
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "depend",
+            "add",
+            "dp-end",
+            "--blocked-by",
+            "bl-ocker",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+
+    // A positive `status:` term keeps both open issues in scope.
+    let search = run(tmp.path(), &["--json", "search", "status:open"]);
+    assert_eq!(search.status.code(), Some(0), "{}", dump(&search));
+    let rows: serde_json::Value =
+        serde_json::from_slice(&search.stdout).expect("search stdout should be JSON");
+    let rows = rows.as_array().expect("search output is a JSON array");
+
+    for row in rows {
+        assert!(
+            row.get("blocked_by").map(|b| !b.is_null()).unwrap_or(false),
+            "every search row must carry a non-null top-level blocked_by; {}",
+            dump(&search)
+        );
+        assert!(
+            row.get("extra").and_then(|e| e.get("blocked_by")).is_none(),
+            "extra.blocked_by must be stripped from search output; {}",
+            dump(&search)
+        );
+    }
+
+    let find = |slug: &str| {
+        rows.iter()
+            .find(|r| r["slug"] == serde_json::json!(slug))
+            .unwrap_or_else(|| panic!("row {slug} not found; {}", dump(&search)))
+    };
+    assert_eq!(
+        find("dp-end")["blocked_by"],
+        serde_json::json!(["@bl-ocker"]),
+        "{}",
+        dump(&search)
+    );
+    assert_eq!(
+        find("bl-ocker")["blocked_by"],
+        serde_json::json!([]),
+        "{}",
+        dump(&search)
     );
 }

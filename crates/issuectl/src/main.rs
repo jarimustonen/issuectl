@@ -3325,10 +3325,17 @@ fn blocks_of(issues: &[models::Issue], slug: &str) -> Vec<String> {
 /// `Issue::blocked_by`) to the top level — always present, empty when
 /// there are no blockers, mirroring `.related`/`.labels` — and drop the
 /// raw nested copy (whose shape/order/sigils could disagree) so consumers
-/// read one authoritative representation. Shared by the issue-emitting
-/// `--json` paths (`show`, `ls`, `search`) so they serialize `blocked_by`
-/// identically; this is the read-time wire migration off `extra`, leaving
-/// on-disk frontmatter and the hash untouched.
+/// read one authoritative representation of the *field*. Shared by the
+/// issue-emitting `--json` paths (`show`, `ls`, `search`) so they serialize
+/// `blocked_by` identically; this is the read-time wire migration off
+/// `extra`, leaving on-disk frontmatter and the hash untouched.
+///
+/// Note: `version` (`canonical_hash`) is derived from the *raw* frontmatter
+/// via `extra`, so it deliberately does NOT match this canonical projection
+/// — it is an opaque optimistic-concurrency token, not a checksum a client
+/// reconstructs from the wire. Two issues with identical projected
+/// `blocked_by` can carry different `version`s (they wrote the raw list
+/// differently); that is intended.
 fn project_blocked_by(m: &mut serde_json::Map<String, serde_json::Value>, issue: &models::Issue) {
     if let Some(serde_json::Value::Object(extra)) = m.get_mut("extra") {
         extra.remove("blocked_by");
