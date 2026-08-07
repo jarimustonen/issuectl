@@ -1,9 +1,15 @@
 ---
 created: 2026-08-06
-updated: 2026-08-06
+updated: 2026-08-07
 type: bug
-status: open
+status: fixed
 priority: normal
+commits:
+- hash: 857d8df
+  summary: surface blocked_by top-level on ls/search via shared project_blocked_by helper; regression test
+- hash: 438c703
+  summary: apply /llm-review — search --json test, ls canonicalization/scalar/extra-survival tests, panic-msg fix, docstring hash note
+closed: 2026-08-07
 ---
 
 # JSON show/ls buries blocked_by under extra; top-level .blocked_by is always null
