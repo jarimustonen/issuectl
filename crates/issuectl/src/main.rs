@@ -3259,6 +3259,14 @@ fn cmd_list(
                         "version".into(),
                         serde_json::Value::String(canonical::canonical_hash(i)),
                     );
+                    // Same top-level `blocked_by` projection `show --json`
+                    // applies, so a `jq '.blocked_by'` over list output reads
+                    // the canonical array instead of `null` (the real value was
+                    // buried under `.extra.blocked_by`). The derived reverse
+                    // `blocks` view is `show`-only and deliberately not added
+                    // here — a per-row reverse scan across the whole list is out
+                    // of scope for a flat listing.
+                    project_blocked_by(m, i);
                 }
                 v
             })
@@ -3301,6 +3309,36 @@ fn blocks_of(issues: &[models::Issue], slug: &str) -> Vec<String> {
     out
 }
 
+/// Project `blocked_by` onto the top level of a serialized issue object
+/// `m` and strip the raw `extra.blocked_by` copy, so every `--json` path
+/// that emits an issue carries exactly one representation of the field.
+///
+/// `blocked_by` lives in `Issue::extra` — intentionally NOT a typed field
+/// (see `Issue::blocked_by`; typing it would let serde consume the key
+/// before `extra` is built, dropping it from query/context bundles, and
+/// would fold a non-canonical, `@`-sigil-carrying, hand-editable raw value
+/// straight into `canonical_hash`, breaking the version token of every
+/// existing issue). Plain serde therefore buries it inside the `extra`
+/// object and never surfaces a top-level key, so `.blocked_by` reads
+/// `null` while the real value hides under `.extra.blocked_by`. Lift the
+/// canonical, `@`-prefixed ref list (sorted, deduped, validated by
+/// `Issue::blocked_by`) to the top level — always present, empty when
+/// there are no blockers, mirroring `.related`/`.labels` — and drop the
+/// raw nested copy (whose shape/order/sigils could disagree) so consumers
+/// read one authoritative representation. Shared by the issue-emitting
+/// `--json` paths (`show`, `ls`, `search`) so they serialize `blocked_by`
+/// identically; this is the read-time wire migration off `extra`, leaving
+/// on-disk frontmatter and the hash untouched.
+fn project_blocked_by(m: &mut serde_json::Map<String, serde_json::Value>, issue: &models::Issue) {
+    if let Some(serde_json::Value::Object(extra)) = m.get_mut("extra") {
+        extra.remove("blocked_by");
+        if extra.is_empty() {
+            m.remove("extra");
+        }
+    }
+    m.insert("blocked_by".into(), refs_json(&issue.blocked_by()));
+}
+
 fn cmd_show(json: bool, slug: &str) -> Result<()> {
     let issues = load();
     // Prefix expansion: `show extremely` resolves to `extremely-quiet-otter`
@@ -3336,24 +3374,14 @@ fn cmd_show(json: bool, slug: &str) -> Result<()> {
                         "version".into(),
                         serde_json::Value::String(canonical::canonical_hash(i)),
                     );
-                    // `blocked_by` lives in `extra` (it is intentionally not a
-                    // typed field — see `Issue::blocked_by`), so plain serde
-                    // buries it inside the `extra` object and never surfaces a
-                    // top-level key. Lift it to a single canonical, `@`-prefixed
-                    // top-level array — always present (empty when there are no
-                    // blockers) — and drop the raw nested copy so the payload
-                    // carries exactly one representation of the field (the raw
-                    // `extra` form could disagree in shape/order/sigils). Also
-                    // add the derived reverse `blocks` view (the issues this one
-                    // blocks); like `version`, it is a read-time projection, not
-                    // a persisted/writable field.
-                    if let Some(serde_json::Value::Object(extra)) = m.get_mut("extra") {
-                        extra.remove("blocked_by");
-                        if extra.is_empty() {
-                            m.remove("extra");
-                        }
-                    }
-                    m.insert("blocked_by".into(), refs_json(&i.blocked_by()));
+                    // Lift `blocked_by` to a single canonical top-level array
+                    // and strip the raw `extra` copy (see `project_blocked_by`);
+                    // the same projection `ls --json` applies, so both paths
+                    // agree on one wire representation. Additionally add the
+                    // derived reverse `blocks` view (the issues this one blocks)
+                    // — a `show`-only projection, since it needs the full loaded
+                    // set; like `version`, it is read-time, not persisted.
+                    project_blocked_by(m, i);
                     m.insert("blocks".into(), refs_json(&blocks_of(&issues, &i.slug)));
                 }
                 println!("{}", serde_json::to_string_pretty(&v)?);
@@ -3600,6 +3628,14 @@ fn cmd_search(json: bool, query_str: &str, all: bool) -> Result<()> {
                         "version".into(),
                         serde_json::Value::String(canonical::canonical_hash(i)),
                     );
+                    // Same top-level `blocked_by` projection `show --json`
+                    // applies, so a `jq '.blocked_by'` over list output reads
+                    // the canonical array instead of `null` (the real value was
+                    // buried under `.extra.blocked_by`). The derived reverse
+                    // `blocks` view is `show`-only and deliberately not added
+                    // here — a per-row reverse scan across the whole list is out
+                    // of scope for a flat listing.
+                    project_blocked_by(m, i);
                 }
                 v
             })

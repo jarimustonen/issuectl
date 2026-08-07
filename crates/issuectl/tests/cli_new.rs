@@ -1197,3 +1197,77 @@ fn show_json_canonicalizes_raw_blocked_by_frontmatter() {
         dump(&show)
     );
 }
+
+/// Regression: `--json ls` must surface `blocked_by` as a top-level key
+/// for every row, not bury it inside `extra` — the same contract
+/// `--json show` already honours. Before the fix `jq '.[].blocked_by'`
+/// over `ls` output read `null` even though the frontmatter (and the real
+/// value under `.extra.blocked_by`) carried the link, silently fooling any
+/// programmatic consumer that walked the listing. Pins both the populated
+/// dependent row and that the raw `extra.blocked_by` copy is stripped, so
+/// there is exactly one representation on the wire.
+#[test]
+fn ls_json_exposes_blocked_by_and_strips_extra_copy() {
+    let tmp = fresh_repo();
+    // Two issues: `dp-end` will be blocked by `bl-ocker`.
+    for (title, slug) in [("Dependent", "dp-end"), ("Blocker", "bl-ocker")] {
+        let out = run(
+            tmp.path(),
+            &["new", "--type", "task", "--title", title, "--slug", slug],
+        );
+        assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    }
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "depend",
+            "add",
+            "dp-end",
+            "--blocked-by",
+            "bl-ocker",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+
+    let ls = run(tmp.path(), &["--json", "ls"]);
+    assert_eq!(ls.status.code(), Some(0), "{}", dump(&ls));
+    let rows: serde_json::Value =
+        serde_json::from_slice(&ls.stdout).expect("ls stdout should be JSON");
+    let rows = rows.as_array().expect("ls output is a JSON array");
+
+    // Every row carries a top-level `blocked_by` (present, never `null`)
+    // and never leaks the raw `extra.blocked_by`.
+    for row in rows {
+        assert!(
+            row.get("blocked_by").map(|b| !b.is_null()).unwrap_or(false),
+            "every ls row must carry a non-null top-level blocked_by; {}",
+            dump(&ls)
+        );
+        assert!(
+            row.get("extra").and_then(|e| e.get("blocked_by")).is_none(),
+            "extra.blocked_by must be stripped from ls output; {}",
+            dump(&ls)
+        );
+    }
+
+    // The dependent row names its blocker as a canonical `@`-prefixed ref;
+    // the blocker row has an empty list (not `null`).
+    let find = |slug: &str| {
+        rows.iter()
+            .find(|r| r["slug"] == serde_json::json!(slug))
+            .unwrap_or_else(|| panic!("row {slug} present; {}", dump(&ls)))
+    };
+    assert_eq!(
+        find("dp-end")["blocked_by"],
+        serde_json::json!(["@bl-ocker"]),
+        "{}",
+        dump(&ls)
+    );
+    assert_eq!(
+        find("bl-ocker")["blocked_by"],
+        serde_json::json!([]),
+        "{}",
+        dump(&ls)
+    );
+}
