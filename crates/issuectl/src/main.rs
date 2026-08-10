@@ -565,6 +565,15 @@ enum Command {
         #[arg(long, conflicts_with = "lane")]
         no_lane: bool,
 
+        /// Set the coarse intra-lane precedence key (see `issuectl dag`);
+        /// consulted after `blocked_by` and priority, before the slug tie-break
+        #[arg(long = "lane-seq", allow_hyphen_values = true)]
+        lane_seq: Option<i64>,
+
+        /// Remove the lane_seq precedence key
+        #[arg(long = "no-lane-seq", conflicts_with = "lane_seq")]
+        no_lane_seq: bool,
+
         /// Add a collision hot-file token (repeatable)
         #[arg(long = "add-collision", value_parser = parse_non_empty)]
         add_collision: Vec<String>,
@@ -2215,6 +2224,8 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             no_epic,
             lane,
             no_lane,
+            lane_seq,
+            no_lane_seq,
             add_collision,
             remove_collision,
             add_labels,
@@ -2238,6 +2249,8 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 no_epic,
                 lane,
                 no_lane,
+                lane_seq,
+                no_lane_seq,
                 add_collision,
                 remove_collision,
                 add_labels,
@@ -4205,6 +4218,7 @@ fn duplicate_precheck(json: bool, args: &NewArgs) -> bool {
         closed_by: None,
         lane: None,
         collision: None,
+        lane_seq: None,
         commits: None,
         title: args.title.clone(),
         body: args.description.clone().unwrap_or_default(),
@@ -4431,6 +4445,8 @@ pub(crate) struct UpdateArgs {
     pub no_epic: bool,
     pub lane: Option<String>,
     pub no_lane: bool,
+    pub lane_seq: Option<i64>,
+    pub no_lane_seq: bool,
     pub add_collision: Vec<String>,
     pub remove_collision: Vec<String>,
     pub add_labels: Vec<String>,
@@ -4508,6 +4524,11 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
         req.lane = Patch::Set(l);
     } else if args.no_lane {
         req.lane = Patch::Clear;
+    }
+    if let Some(n) = args.lane_seq {
+        req.lane_seq = Patch::Set(n);
+    } else if args.no_lane_seq {
+        req.lane_seq = Patch::Clear;
     }
     req.add_collision = args.add_collision;
     req.remove_collision = args.remove_collision;
@@ -6803,6 +6824,58 @@ mod tests {
         .unwrap();
         let content = read(&n.item_path);
         assert!(content.contains("epic: api-v3"));
+    }
+
+    #[test]
+    fn update_lane_seq_sets_and_clears() {
+        // End-to-end mutate/CLI path: `--lane-seq` writes an *unquoted*
+        // YAML integer (so the parser lifts it back into the typed slot),
+        // and `--no-lane-seq` removes it.
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "T");
+        a.slug = Some("seq-x".into());
+        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+
+        do_update(
+            tmp.path(),
+            UpdateArgs {
+                slug: n.slug.clone(),
+                lane_seq: Some(20),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let content = read(&n.item_path);
+        assert!(
+            content.contains("lane_seq: 20"),
+            "lane_seq must be an unquoted integer; got: {content}"
+        );
+        let parsed = issuectl_core::parser::parse_item_md_text_with_warnings(
+            &content,
+            &n.slug,
+            "open",
+            Path::new("x"),
+        );
+        assert_eq!(
+            parsed.issue.lane_seq,
+            Some(20),
+            "written lane_seq must lift back into the typed field"
+        );
+
+        do_update(
+            tmp.path(),
+            UpdateArgs {
+                slug: n.slug.clone(),
+                no_lane_seq: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let content = read(&n.item_path);
+        assert!(
+            !content.contains("lane_seq"),
+            "--no-lane-seq must remove the key; got: {content}"
+        );
     }
 
     #[test]

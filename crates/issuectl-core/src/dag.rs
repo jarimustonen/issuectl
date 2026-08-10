@@ -12,7 +12,25 @@
 //!
 //! - A **lane** is a spawn-time mutual-exclusion group: at most one issue
 //!   in a lane runs at a time. Issues without a lane are independent and
-//!   surface under [`DagView::unscheduled`].
+//!   surface under [`DagView::unscheduled`]. The reserved lane value
+//!   [`UNLANED`] (`lane: unlaned`) is a *first-class parallel-safe marker*,
+//!   the opposite of a normal shared lane: its members are treated as
+//!   independent (they surface under [`DagView::unscheduled`] and are each
+//!   their own head-of-line), so two `lane: unlaned` issues are both
+//!   spawnable at once rather than serialized. It is distinct from an
+//!   **absent** lane, which means "unclassified" — the row still echoes
+//!   `lane: "unlaned"` so a caller can tell "confirmed parallel-safe" from
+//!   "nobody has laned this yet".
+//! - **Intra-lane order** is topological on `blocked_by`, then priority,
+//!   then the optional coarse key [`Issue::lane_seq`], then `created`, then
+//!   the slug lexical tie-break. `lane_seq` lets a human pin soft
+//!   precedence ("throughput item before hardening item") without
+//!   fabricating a `blocked_by` edge; absent → today's behaviour. Priority
+//!   still dominates `lane_seq` (it is a tie-break within a priority band,
+//!   not an override of it). The same key also settles the *presentation*
+//!   order of the independent `unscheduled` bucket (absent-lane and
+//!   `unlaned` rows) — harmless there since each such issue is its own
+//!   head, but it keeps a one-at-a-time consumer deterministic.
 //! - **Head-of-line** for a lane is the first not-done issue in the lane's
 //!   deterministic order whose `blocked_by` dependencies are all done —
 //!   i.e. the front *runnable* issue. This is **work-conserving**: if the
@@ -20,11 +38,16 @@
 //!   the head advances to the next runnable member rather than stalling
 //!   the whole lane. `None` when the lane has no runnable issue (all done,
 //!   or every not-done issue still has an open blocker).
-//! - **Spawnable** = the issue is its lane's head-of-line ∧ its
-//!   lane/collision tokens are not currently reserved. (Head-of-line
-//!   already implies "not done" and "all blockers done".) With no
-//!   reservations supplied the reservation term is vacuously false, so a
-//!   runnable head-of-line reports spawnable.
+//! - **Spawnable** = the issue is its lane's head-of-line ∧ it is not
+//!   already `in-progress` ∧ its lane/collision tokens are not currently
+//!   reserved. (Head-of-line already implies "not done" and "all blockers
+//!   done".) The `in-progress` exclusion is derived from the issue's own
+//!   `status`, independent of the caller's `--reservations` input: an
+//!   issue whose work is already underway must never read spawnable, or a
+//!   scheduler that trusts `spawnable` alone could launch a *second*
+//!   worker on it. With no reservations supplied the reservation term is
+//!   vacuously false, so a runnable, not-underway head-of-line reports
+//!   spawnable.
 //!
 //! **Contract caveat (TOCTOU).** `spawnable` is *per-issue eligibility
 //! against the supplied reservation snapshot*, not a jointly-safe set:
@@ -45,6 +68,16 @@ use serde::Serialize;
 use crate::models::Issue;
 use crate::query;
 use crate::schema::{status_class, Schema, StatusClass};
+
+/// Reserved `lane` value marking an issue as **confirmed parallel-safe**:
+/// independently spawnable and never serialized with siblings that share
+/// it (the opposite of a normal shared lane). Distinct from an absent
+/// lane, which means "unclassified".
+pub const UNLANED: &str = "unlaned";
+
+/// The status whose presence marks an issue's work as already underway,
+/// so it is never spawnable regardless of the caller's reservations.
+const IN_PROGRESS: &str = "in-progress";
 
 /// Currently-held scheduling tokens, supplied by the caller (e.g. an
 /// orchestrator that knows which lanes/collision files its in-flight runs
@@ -298,13 +331,18 @@ pub fn compute(issues: &[Issue], schema: &Schema, reservations: Option<&Reservat
     // ref (missing) from a real still-open dependency.
     let all_slugs: BTreeSet<&str> = issues.iter().map(|i| i.slug.as_str()).collect();
 
-    // Partition by lane. Issues without a lane go to the unscheduled bucket.
+    // Partition by lane. Issues without a lane — and issues carrying the
+    // parallel-safe `unlaned` sentinel — go to the unscheduled bucket,
+    // where each is independent (its own head-of-line) rather than
+    // serialized. The sentinel differs from an absent lane only in what
+    // the row echoes (`lane: "unlaned"` vs `null`), so a caller can tell
+    // "confirmed parallel-safe" from "unclassified".
     let mut by_lane: BTreeMap<&str, Vec<&Issue>> = BTreeMap::new();
     let mut unscheduled: Vec<&Issue> = Vec::new();
     for i in issues {
         match i.lane.as_deref() {
+            Some(UNLANED) | None => unscheduled.push(i),
             Some(lane) => by_lane.entry(lane).or_default().push(i),
-            None => unscheduled.push(i),
         }
     }
 
@@ -378,20 +416,32 @@ impl ComputeCtx<'_> {
     }
 
     /// Build one row. `is_head` is decided by the caller (lane head vs.
-    /// unscheduled-independent). `spawnable` = head ∧ runnable ∧ not
-    /// reserved; the runnable check is redundant for a lane head (which is
-    /// runnable by construction) but load-bearing for unscheduled issues.
-    fn make_issue(&self, i: &Issue, pos: usize, lane: Option<&str>, is_head: bool) -> DagIssue {
+    /// unscheduled-independent). `res_lane` is the lane that gates
+    /// *reservation* — `Some(name)` for a real lane member, `None` for an
+    /// unscheduled or `unlaned` issue (which is never reserved by lane).
+    /// The row still echoes the issue's *own* `lane` (so an `unlaned`
+    /// sentinel surfaces), which is why the two are threaded separately.
+    ///
+    /// `spawnable` = head ∧ runnable ∧ not already `in-progress` ∧ not
+    /// reserved. The runnable check is redundant for a lane head (which is
+    /// runnable by construction) but load-bearing for unscheduled issues;
+    /// the `in-progress` check keeps a second worker off work already
+    /// underway, derived from `status` independent of `res_lane`.
+    fn make_issue(&self, i: &Issue, pos: usize, res_lane: Option<&str>, is_head: bool) -> DagIssue {
         let empty = Vec::new();
         let blocked_by = self.graph.get(&i.slug).unwrap_or(&empty).clone();
         let (blockers_open, blockers_missing) = self.partition_blockers(&blocked_by);
         let collision = i.collision.clone().unwrap_or_default();
         let reserved = self
             .reservations
-            .map(|r| r.reserves(lane, &collision))
+            .map(|r| r.reserves(res_lane, &collision))
             .unwrap_or(false);
-        let spawnable =
-            is_head && blockers_open.is_empty() && blockers_missing.is_empty() && !reserved;
+        let underway = i.status == IN_PROGRESS;
+        let spawnable = is_head
+            && blockers_open.is_empty()
+            && blockers_missing.is_empty()
+            && !underway
+            && !reserved;
         DagIssue {
             slug: i.slug.clone(),
             title: i.title.clone(),
@@ -404,19 +454,25 @@ impl ComputeCtx<'_> {
             blockers_open,
             blockers_missing,
             reserved,
-            lane: lane.map(|l| l.to_string()),
+            lane: i.lane.clone(),
             collision,
         }
     }
 }
 
-/// Deterministic tiebreak order: priority (high→low), then `created`
-/// ascending (missing dates last), then slug. Stable.
+/// Deterministic tiebreak order: priority (high→low), then the optional
+/// coarse key `lane_seq` (issues that set it sort ahead of those that
+/// don't, ascending among setters), then `created` ascending (missing
+/// dates last), then slug. Stable. `lane_seq` sits between priority and
+/// `created` so a human precedence hint overrides the incidental
+/// creation-order and lexical-slug tie-breaks without displacing priority.
 fn tiebreak_sorted<'a>(members: &[&'a Issue]) -> Vec<&'a Issue> {
     let mut v = members.to_vec();
     v.sort_by(|a, b| {
         priority_rank(&a.priority)
             .cmp(&priority_rank(&b.priority))
+            .then_with(|| a.lane_seq.is_none().cmp(&b.lane_seq.is_none()))
+            .then_with(|| a.lane_seq.unwrap_or(0).cmp(&b.lane_seq.unwrap_or(0)))
             .then_with(|| a.created.is_none().cmp(&b.created.is_none()))
             .then_with(|| a.created.cmp(&b.created))
             .then_with(|| a.slug.cmp(&b.slug))
@@ -431,6 +487,13 @@ fn tiebreak_sorted<'a>(members: &[&'a Issue]) -> Vec<&'a Issue> {
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct OrderKey {
     priority: u8,
+    // `lane_seq` sits directly below priority: an issue that sets it sorts
+    // ahead of one that doesn't (`no_lane_seq` false < true), ascending
+    // among setters, so a human precedence hint beats the incidental
+    // `created`/slug tie-breaks below without displacing priority. Field
+    // order here IS the comparison order (derived `Ord`).
+    no_lane_seq: bool,
+    lane_seq: i64,
     no_created: bool,
     created: Option<String>,
     slug: String,
@@ -439,6 +502,8 @@ struct OrderKey {
 fn order_key(i: &Issue) -> OrderKey {
     OrderKey {
         priority: priority_rank(&i.priority),
+        no_lane_seq: i.lane_seq.is_none(),
+        lane_seq: i.lane_seq.unwrap_or(0),
         no_created: i.created.is_none(),
         created: i.created.clone(),
         slug: i.slug.clone(),
@@ -560,6 +625,7 @@ mod tests {
             closed_by: None,
             lane: None,
             collision: None,
+            lane_seq: None,
             commits: None,
             title: format!("Title {slug}"),
             body: String::new(),
@@ -569,6 +635,11 @@ mod tests {
 
     fn with_lane(mut i: Issue, lane: &str) -> Issue {
         i.lane = Some(lane.to_string());
+        i
+    }
+
+    fn with_lane_seq(mut i: Issue, seq: i64) -> Issue {
+        i.lane_seq = Some(seq);
         i
     }
 
@@ -867,6 +938,251 @@ mod tests {
             .map(|i| i.slug.as_str())
             .collect();
         assert_eq!(order, vec!["a-first", "z-last"]);
+    }
+
+    // ── dag-inprogress-spawnable (bug) ──────────────────────────────────
+
+    #[test]
+    fn in_progress_head_is_not_spawnable() {
+        // Regression: an `in-progress` issue is work already underway — it
+        // stays head-of-line but must never be spawnable, or a scheduler
+        // could launch a second worker on it. Independent of reservations.
+        let issues = vec![with_lane(
+            mk("a-underway", "in-progress", "normal"),
+            "schema",
+        )];
+        let v = compute(&issues, &default_schema(), None);
+        let l = lane(&v, "schema");
+        assert_eq!(l.head_of_line.as_deref(), Some("a-underway"));
+        let a = &l.issues[0];
+        assert!(a.is_head_of_line, "still the head-of-line");
+        assert!(!a.spawnable, "in-progress work must not be spawnable");
+    }
+
+    #[test]
+    fn in_progress_unscheduled_is_not_spawnable() {
+        // The bug was found on an unlaned in-progress issue reporting
+        // spawnable=true with no reservations supplied. Exercise that path.
+        let issues = vec![mk("a-underway", "in-progress", "normal")];
+        let v = compute(&issues, &default_schema(), None);
+        let a = &v.unscheduled[0];
+        assert!(a.is_head_of_line);
+        assert!(
+            !a.spawnable,
+            "in-progress unscheduled issue must not be spawnable"
+        );
+    }
+
+    #[test]
+    fn in_progress_head_keeps_following_lane_member_unspawnable() {
+        // A serial lane is a mutual-exclusion group: while its head member
+        // is `in-progress` (work underway), the lane stays occupied — the
+        // head does NOT advance to the next member, and that next member is
+        // not spawnable either. This is the intended serial semantics; the
+        // single-member `in_progress_head_is_not_spawnable` test does not
+        // exercise it.
+        let issues = vec![
+            with_lane(mk("a-underway", "in-progress", "normal"), "shared"),
+            with_lane(mk("b-next", "open", "normal"), "shared"),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let l = lane(&v, "shared");
+        assert_eq!(l.head_of_line.as_deref(), Some("a-underway"));
+        let a = l.issues.iter().find(|i| i.slug == "a-underway").unwrap();
+        let b = l.issues.iter().find(|i| i.slug == "b-next").unwrap();
+        assert!(
+            a.is_head_of_line && !a.spawnable,
+            "underway head not spawnable"
+        );
+        assert!(
+            !b.is_head_of_line && !b.spawnable,
+            "lane occupied by underway head — next member must not spawn"
+        );
+    }
+
+    // ── dag-stable-intralane-order (lane_seq) ───────────────────────────
+
+    #[test]
+    fn lane_seq_orders_before_slug_tiebreak() {
+        // Two equal-priority, no-dependency lane members invert under slug
+        // order; lane_seq pins the intended precedence regardless of slug.
+        let issues = vec![
+            with_lane_seq(
+                with_lane(mk("z-throughput", "open", "normal"), "digest"),
+                10,
+            ),
+            with_lane_seq(with_lane(mk("a-hardening", "open", "normal"), "digest"), 20),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let order: Vec<&str> = lane(&v, "digest")
+            .issues
+            .iter()
+            .map(|i| i.slug.as_str())
+            .collect();
+        // Without lane_seq, "a-hardening" sorts first (slug); the lower-seq
+        // throughput item takes head instead.
+        assert_eq!(order, vec!["z-throughput", "a-hardening"]);
+        assert_eq!(
+            lane(&v, "digest").head_of_line.as_deref(),
+            Some("z-throughput")
+        );
+    }
+
+    #[test]
+    fn lane_seq_setter_sorts_ahead_of_unset_but_below_priority() {
+        // A lane_seq setter sorts ahead of an equal-priority non-setter;
+        // priority still dominates lane_seq (a high-priority issue with a
+        // large lane_seq still leads).
+        let issues = vec![
+            with_lane(mk("a-unset", "open", "normal"), "lane"),
+            with_lane_seq(with_lane(mk("z-set", "open", "normal"), "lane"), 5),
+            with_lane_seq(with_lane(mk("m-high", "open", "high"), "lane"), 99),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let order: Vec<&str> = lane(&v, "lane")
+            .issues
+            .iter()
+            .map(|i| i.slug.as_str())
+            .collect();
+        assert_eq!(order, vec!["m-high", "z-set", "a-unset"]);
+    }
+
+    #[test]
+    fn absent_lane_seq_keeps_todays_order() {
+        // No lane_seq anywhere ⇒ unchanged behaviour (priority, then slug).
+        let issues = vec![
+            with_lane(mk("b-two", "open", "normal"), "lane"),
+            with_lane(mk("a-one", "open", "normal"), "lane"),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let order: Vec<&str> = lane(&v, "lane")
+            .issues
+            .iter()
+            .map(|i| i.slug.as_str())
+            .collect();
+        assert_eq!(order, vec!["a-one", "b-two"]);
+    }
+
+    #[test]
+    fn negative_lane_seq_sorts_ahead() {
+        // `lane_seq` is a signed key: a negative value sorts ahead of a
+        // positive one (lower = earlier), giving a way to pin something
+        // before the zero/positive band.
+        let issues = vec![
+            with_lane_seq(with_lane(mk("a-pos", "open", "normal"), "lane"), 5),
+            with_lane_seq(with_lane(mk("b-neg", "open", "normal"), "lane"), -5),
+            with_lane_seq(with_lane(mk("c-zero", "open", "normal"), "lane"), 0),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let order: Vec<&str> = lane(&v, "lane")
+            .issues
+            .iter()
+            .map(|i| i.slug.as_str())
+            .collect();
+        assert_eq!(order, vec!["b-neg", "c-zero", "a-pos"]);
+    }
+
+    #[test]
+    fn lane_seq_does_not_override_blocked_by() {
+        // Dependency edges outrank lane_seq: even with a lower lane_seq on
+        // the dependent, its blocker must still precede it.
+        let issues = vec![
+            with_lane_seq(
+                with_lane(
+                    with_blocked_by(mk("a-dependent", "open", "normal"), &["b-blocker"]),
+                    "lane",
+                ),
+                1,
+            ),
+            with_lane_seq(with_lane(mk("b-blocker", "open", "normal"), "lane"), 99),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let order: Vec<&str> = lane(&v, "lane")
+            .issues
+            .iter()
+            .map(|i| i.slug.as_str())
+            .collect();
+        assert_eq!(order, vec!["b-blocker", "a-dependent"]);
+    }
+
+    // ── dag-unlaned-parallel-sentinel ───────────────────────────────────
+
+    #[test]
+    fn unlaned_sentinel_members_are_parallel_spawnable() {
+        // Two `lane: unlaned` issues are both independently spawnable — not
+        // serialized like a normal shared lane. They surface as unscheduled
+        // but echo lane: "unlaned" (distinct from an absent lane).
+        let issues = vec![
+            with_lane(mk("a-par", "open", "normal"), UNLANED),
+            with_lane(mk("b-par", "open", "normal"), UNLANED),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        assert!(
+            v.lanes.iter().all(|l| l.lane != UNLANED),
+            "the sentinel must not create a serial lane"
+        );
+        assert_eq!(v.unscheduled.len(), 2);
+        for i in &v.unscheduled {
+            assert!(
+                i.is_head_of_line && i.spawnable,
+                "{} should be parallel-spawnable",
+                i.slug
+            );
+            assert_eq!(i.lane.as_deref(), Some(UNLANED), "row echoes the sentinel");
+        }
+    }
+
+    #[test]
+    fn normal_shared_lane_still_serializes() {
+        // Contrast with unlaned: a normal shared lane serializes — only the
+        // head is spawnable.
+        let issues = vec![
+            with_lane(mk("a-one", "open", "normal"), "shared"),
+            with_lane(mk("b-two", "open", "normal"), "shared"),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let l = lane(&v, "shared");
+        assert_eq!(
+            l.issues.iter().filter(|i| i.spawnable).count(),
+            1,
+            "only the head of a normal shared lane spawns"
+        );
+    }
+
+    #[test]
+    fn absent_lane_is_unclassified_not_unlaned() {
+        // An absent lane still means "unclassified": the row echoes
+        // lane: null, distinct from the confirmed-parallel sentinel.
+        let issues = vec![mk("a-loose", "open", "normal")];
+        let v = compute(&issues, &default_schema(), None);
+        assert_eq!(v.unscheduled[0].lane, None);
+    }
+
+    #[test]
+    fn unlaned_collision_still_reserves() {
+        // The parallel-safe sentinel does not exempt collision tokens: a
+        // held collision token still blocks an unlaned issue's spawn.
+        let mut a = with_lane(mk("a-par", "open", "normal"), UNLANED);
+        a.collision = Some(vec!["shared.rs".to_string()]);
+        let res =
+            Reservations::from_lanes_collisions(std::iter::empty(), ["shared.rs".to_string()]);
+        let v = compute(&[a], &default_schema(), Some(&res));
+        let a = &v.unscheduled[0];
+        assert!(
+            a.reserved && !a.spawnable,
+            "collision reservation still applies to unlaned"
+        );
+    }
+
+    #[test]
+    fn holding_unlaned_as_a_lane_does_not_reserve() {
+        // `unlaned` is never a real lane, so a (nonsensical) reservation of
+        // a lane literally named "unlaned" must not reserve the sentinel.
+        let issues = vec![with_lane(mk("a-par", "open", "normal"), UNLANED)];
+        let res = Reservations::from_tokens(["unlaned".to_string()]);
+        let v = compute(&issues, &default_schema(), Some(&res));
+        assert!(!v.unscheduled[0].reserved);
+        assert!(v.unscheduled[0].spawnable);
     }
 
     #[test]

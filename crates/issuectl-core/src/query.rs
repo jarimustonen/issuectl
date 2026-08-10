@@ -753,6 +753,7 @@ mod tests {
             closed_by: None,
             lane: None,
             collision: None,
+            lane_seq: None,
             commits: None,
             title: "Login redirect loop".to_string(),
             body: "User flock contention on flock(2) deadlock.".to_string(),

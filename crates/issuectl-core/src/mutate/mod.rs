@@ -126,6 +126,12 @@ pub struct UpdateIssueRequest {
     /// from `custom_fields` so this validated slot is the only writer.
     #[serde(default)]
     pub lane: Patch<String>,
+    /// Coarse intra-lane precedence key (`crate::dag`). Integer `Patch`
+    /// like `lane` but numeric: `Set` writes `lane_seq: <int>`, `Clear`
+    /// removes it (`update --no-lane-seq`). Reserved from `custom_fields`
+    /// so this validated slot is the only writer.
+    #[serde(default)]
+    pub lane_seq: Patch<i64>,
     #[serde(default)]
     pub add_labels: Vec<String>,
     #[serde(default)]
@@ -226,6 +232,10 @@ pub const RESERVED_CUSTOM_FIELD_KEYS: &[(&str, &str)] = &[
         "set automatically by `close --as <author>`; cleared on reopen",
     ),
     ("lane", "use `update --lane <name>` / `--no-lane`"),
+    (
+        "lane_seq",
+        "use `update --lane-seq <int>` / `--no-lane-seq`",
+    ),
     (
         "collision",
         "list-typed: use `update --add-collision` / `--remove-collision`",
@@ -461,6 +471,7 @@ impl UpdateIssueRequest {
             && matches!(self.epic, Patch::Unspecified)
             && matches!(self.closed_by, Patch::Unspecified)
             && matches!(self.lane, Patch::Unspecified)
+            && matches!(self.lane_seq, Patch::Unspecified)
             && self.add_labels.is_empty()
             && self.remove_labels.is_empty()
             && self.add_related.is_empty()
@@ -1165,6 +1176,20 @@ fn update_issue_under_lock(
         apply_string_patch(&mut item, key, patch);
         if !matches!(patch, Patch::Unspecified) {
             written.insert(key.into());
+        }
+    }
+
+    // lane_seq: numeric scalar patch (mirrors `lane`, but writes a YAML
+    // integer rather than a string).
+    match &req.lane_seq {
+        Patch::Unspecified => {}
+        Patch::Clear => {
+            write::remove_key(&mut item.frontmatter, "lane_seq");
+            written.insert("lane_seq".into());
+        }
+        Patch::Set(n) => {
+            write::set_i64(&mut item.frontmatter, "lane_seq", *n);
+            written.insert("lane_seq".into());
         }
     }
 

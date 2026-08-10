@@ -51,7 +51,7 @@ same way:
 
 ## Install or upgrade `issuectl`
 
-This skill was installed for `issuectl 0.7.2`. On the
+This skill was installed for `issuectl 0.8.0`. On the
 first invocation in a session, run `issuectl --version` and compare:
 
 - **Missing**: install one of:
@@ -59,12 +59,12 @@ first invocation in a session, run `issuectl --version` and compare:
   - **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
   - **Shell installer** (no toolchain):
     `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
-- **Older than `0.7.2`**: tell the user the skill expects
-  `0.7.2` and suggest upgrading via the same channel
+- **Older than `0.8.0`**: tell the user the skill expects
+  `0.8.0` and suggest upgrading via the same channel
   they originally used (`brew upgrade jarimustonen/issuectl/issuectl`,
   `cargo install issuectl --force`, or re-run the shell installer).
   Stop and wait — schema/CLI surface may have changed.
-- **Newer than `0.7.2`**: the installed binary is ahead
+- **Newer than `0.8.0`**: the installed binary is ahead
   of what this skill was written for. Tell the user to refresh the
   skill so the instructions match the CLI surface they actually have:
   `issuectl skill install --force` (Claude Code; add `--agent codex`
@@ -209,7 +209,7 @@ Common flags:
 - `--add-label LABEL` / `--remove-label LABEL` (repeatable)
 - `--add-related "@<slug>"` / `--remove-related "@<slug>"` (repeatable; bare slug also accepted)
 - `--add-commit HASH:summary` (repeatable)
-- `--lane NAME` / `--no-lane` and `--add-collision TOKEN` / `--remove-collision TOKEN` — optional scheduling-DAG hints (a lane is a spawn-time mutual-exclusion group; collision tokens are extra shared "hot files"). Only useful to an orchestrator; `issuectl dag [--json]` renders the resulting lanes, per-lane order, `blocked_by` mirror, and computed head-of-line (deterministic, AI-first). Pass `dag --reservations <file|-|json>` to have spawnability account for lane/collision tokens in-flight runs hold.
+- `--lane NAME` / `--no-lane`, `--lane-seq <int>` / `--no-lane-seq`, and `--add-collision TOKEN` / `--remove-collision TOKEN` — optional scheduling-DAG hints (a lane is a spawn-time mutual-exclusion group; collision tokens are extra shared "hot files"; `lane_seq` is a coarse intra-lane precedence key consulted after `blocked_by` and priority but before the slug tie-break, so you can pin "do this member before that one" without a fake dependency). The reserved lane value `--lane unlaned` marks an issue *confirmed parallel-safe*: `dag` treats it as independently spawnable and never serializes it with siblings (distinct from an absent lane, which means "unclassified"). Only useful to an orchestrator; `issuectl dag [--json]` renders the resulting lanes, per-lane order, `blocked_by` mirror, and computed head-of-line (deterministic, AI-first). An issue whose `status` is `in-progress` is never `spawnable` (work already underway). Pass `dag --reservations <file|-|json>` to have spawnability account for lane/collision tokens in-flight runs hold.
 
 Example flows:
 

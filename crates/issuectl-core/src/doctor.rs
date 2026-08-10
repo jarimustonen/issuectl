@@ -1410,6 +1410,11 @@ fn populate_extended_validation(
         "labels",
         "closed",
         "commits",
+        // `lane_seq` is a typed field lifted by the parser but, like
+        // `commits`, intentionally NOT declared in the schema (the v1
+        // string validator would reject the YAML integer). Recognise it
+        // here so doctor doesn't flag it as an unknown key.
+        "lane_seq",
         "slug",
         "number",
         "blocked_by",

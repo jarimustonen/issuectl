@@ -129,6 +129,7 @@ mod tests {
             closed_by: None,
             lane: None,
             collision: None,
+            lane_seq: None,
             commits: None,
             title: slug.into(),
             body: String::new(),

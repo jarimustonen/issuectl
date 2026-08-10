@@ -65,6 +65,17 @@ pub struct Issue {
     /// exclusion — two issues sharing a collision token cannot run
     /// concurrently even across lanes.
     pub collision: Option<Vec<String>>,
+    /// Coarse intra-lane precedence key (see `crate::dag`). Consulted
+    /// after the `blocked_by` topological order but before the slug
+    /// lexical tie-break, so a human can pin "do this lane member before
+    /// that one" without fabricating a dependency edge. Absent → today's
+    /// behaviour (priority, then created, then slug). Lifted from the raw
+    /// mapping by the parser exactly like `lane` — an *integer* `lane_seq:`
+    /// is promoted into this typed slot; any other shape stays in `extra`.
+    /// Projected into `canonical_hash` only when `Some` (so an issue that
+    /// never sets it hashes identically). Reserved from `set`/`update
+    /// --field`; the only writer is `update --lane-seq`.
+    pub lane_seq: Option<i64>,
 
     // Derived from markdown body
     pub title: String,

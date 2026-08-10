@@ -318,6 +318,7 @@ mod tests {
             closed_by: None,
             lane: None,
             collision: None,
+            lane_seq: None,
             commits: None,
             title: title.to_string(),
             body: "## Description\n\nSomething broke.".to_string(),

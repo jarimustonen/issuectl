@@ -312,6 +312,30 @@ pub fn parse_item_md_text_with_warnings(
         }
         _ => None,
     };
+    // Promote an *integer* `lane_seq:` out of `extra` into its typed slot,
+    // mirroring `lane` above. Only a JSON integer is lifted — a float, a
+    // string, or any other shape stays in `extra` where it remains
+    // readable and hashes exactly as it did before promotion.
+    let lane_seq = match extra.get("lane_seq") {
+        Some(serde_json::Value::Number(n)) if n.is_i64() => {
+            let v = n.as_i64();
+            extra.remove("lane_seq");
+            v
+        }
+        _ => None,
+    };
+    // A present-but-unliftable `lane_seq` (a string, float, list, or an
+    // integer outside `i64` range) is left in `extra` and silently has no
+    // scheduling effect. Surface it as a load warning — mirroring the
+    // legacy-epic warning above — so a typo like `lane_seq: "10"` doesn't
+    // quietly defeat the intended intra-lane ordering.
+    if lane_seq.is_none() && extra.contains_key("lane_seq") {
+        warnings.push(format!(
+            "{}: lane_seq must be an integer to affect `issuectl dag` ordering — \
+             the current value is ignored (set it with `issuectl update --lane-seq <int>`)",
+            source.display()
+        ));
+    }
 
     let title = extract_title(body);
     let issue = crate::models::Issue {
@@ -332,6 +356,7 @@ pub fn parse_item_md_text_with_warnings(
         closed_by,
         lane,
         collision,
+        lane_seq,
         commits: fm.commits,
         extra,
         title,
@@ -425,6 +450,7 @@ fn default_issue(slug: &str, folder: &str) -> crate::models::Issue {
         closed_by: None,
         lane: None,
         collision: None,
+        lane_seq: None,
         commits: None,
         extra: BTreeMap::new(),
         title: String::new(),
@@ -615,6 +641,58 @@ mod tests {
             parse_item_md_text_with_warnings(text, "some-slug", "open", Path::new("<test>"));
         assert_eq!(parsed.issue.lane, None);
         assert_eq!(parsed.issue.collision, None);
+        assert_eq!(parsed.issue.lane_seq, None);
+    }
+
+    #[test]
+    fn integer_lane_seq_lifts_into_typed_field_not_extra() {
+        // An integer `lane_seq:` is promoted into the typed slot and
+        // stripped from `extra`, mirroring `lane`. A non-integer shape
+        // (float / string) stays in `extra`, readable and hashed as-is.
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\nlane_seq: 20\n---\n\n# Title\n";
+        let parsed =
+            parse_item_md_text_with_warnings(text, "some-slug", "open", Path::new("<test>"));
+        assert_eq!(parsed.issue.lane_seq, Some(20));
+        assert!(
+            !parsed.issue.extra.contains_key("lane_seq"),
+            "lane_seq must not remain in extra: {:?}",
+            parsed.issue.extra
+        );
+
+        // Non-integer shapes stay in `extra` AND raise a load warning so
+        // the silent-no-op is surfaced. `9223372036854775808` is
+        // `i64::MAX + 1` — an unsigned value `is_i64()` rejects, so it is
+        // treated as unliftable exactly like a float/string/list.
+        for bad in [
+            "lane_seq: 1.5",
+            "lane_seq: \"3\"",
+            "lane_seq: [1]",
+            "lane_seq: 9223372036854775808",
+        ] {
+            let text =
+                format!("---\ntype: bug\nstatus: open\npriority: normal\n{bad}\n---\n\n# T\n");
+            let p = parse_item_md_text_with_warnings(&text, "s", "open", Path::new("<t>"));
+            assert_eq!(
+                p.issue.lane_seq, None,
+                "non-integer lane_seq not lifted: {bad}"
+            );
+            assert!(
+                p.issue.extra.contains_key("lane_seq"),
+                "malformed lane_seq stays in extra: {bad}"
+            );
+            assert!(
+                p.warnings.iter().any(|w| w.contains("lane_seq")),
+                "malformed lane_seq must raise a warning: {bad}"
+            );
+        }
+
+        // A negative integer is a valid `i64` — lifted (higher precedence),
+        // no warning.
+        let neg = "---\ntype: bug\nstatus: open\npriority: normal\nlane_seq: -3\n---\n\n# T\n";
+        let p = parse_item_md_text_with_warnings(neg, "s", "open", Path::new("<t>"));
+        assert_eq!(p.issue.lane_seq, Some(-3));
+        assert!(!p.issue.extra.contains_key("lane_seq"));
+        assert!(!p.warnings.iter().any(|w| w.contains("lane_seq")));
     }
 
     #[test]

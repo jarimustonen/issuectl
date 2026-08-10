@@ -183,6 +183,7 @@ fn summary_as_issue(s: &repo::IssueSummary) -> crate::models::Issue {
         closed_by: None,
         lane: None,
         collision: None,
+        lane_seq: None,
         commits: s.commits.clone(),
         title: s.title.clone(),
         body: String::new(),

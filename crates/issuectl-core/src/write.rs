@@ -225,6 +225,10 @@ pub fn set_string(map: &mut Mapping, key: &str, value: &str) {
     );
 }
 
+pub fn set_i64(map: &mut Mapping, key: &str, value: i64) {
+    map.insert(Value::String(key.to_string()), Value::Number(value.into()));
+}
+
 pub fn remove_key(map: &mut Mapping, key: &str) {
     map.remove(Value::String(key.to_string()));
 }

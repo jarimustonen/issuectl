@@ -94,6 +94,13 @@ fn canonical_frontmatter_value(issue: &Issue) -> Value {
             Value::Array(v.iter().cloned().map(Value::String).collect()),
         );
     }
+    // Projected under the same `lane_seq` key it occupied via `extra`
+    // before promotion — an integer, so an issue that never set it adds no
+    // entry and hashes identically (see `no_lane_seq_hashes_identically`),
+    // exactly like `lane`/`collision`.
+    if let Some(v) = &issue.lane_seq {
+        m.insert("lane_seq".into(), Value::Number((*v).into()));
+    }
     if let Some(v) = &issue.reporter {
         m.insert("reporter".into(), Value::String(v.clone()));
     }
@@ -198,6 +205,7 @@ mod tests {
             closed_by: None,
             lane: None,
             collision: None,
+            lane_seq: None,
             commits: None,
             title: String::new(),
             body: body.to_string(),
@@ -368,6 +376,84 @@ mod tests {
             .extra
             .insert("collision".into(), serde_json::json!(["a.rs", "b.rs"]));
         assert_eq!(canonical_hash(&typed), canonical_hash(&legacy));
+    }
+
+    #[test]
+    fn no_lane_seq_hashes_identically() {
+        // Load-bearing regression, mirroring `no_lane_collision_hashes_identically`:
+        // adding the `lane_seq` field must not churn the version token of
+        // any issue that never sets it. An all-`None` projection must carry
+        // no `lane_seq` key, so its hash matches the pre-field byte input.
+        let base = issue("foo", "open", "open", "body");
+        assert_eq!(base.lane_seq, None);
+        let projected = canonical_frontmatter_value(&base);
+        let obj = projected.as_object().expect("projection is an object");
+        assert!(
+            !obj.contains_key("lane_seq"),
+            "absent lane_seq must not project"
+        );
+        // Same frozen pre-fields vector as `no_lane_collision_hashes_identically`:
+        // `lane_seq` is projected only when `Some`, so it cannot perturb the
+        // all-`None` shape.
+        assert_eq!(
+            canonical_hash(&base),
+            "sha256:v1:6be6f7521e3e0f1390a8271a959e792c98a97b440909134e04fad66c8dc8b4dd"
+        );
+    }
+
+    #[test]
+    fn lane_seq_presence_and_value_change_hash() {
+        let a = issue("foo", "open", "open", "body");
+        let mut b = issue("foo", "open", "open", "body");
+        b.lane_seq = Some(10);
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
+        let mut c = issue("foo", "open", "open", "body");
+        c.lane_seq = Some(20);
+        assert_ne!(canonical_hash(&b), canonical_hash(&c));
+    }
+
+    #[test]
+    fn typed_lane_seq_hash_same_as_legacy_extra() {
+        // Backward compat: an issue carrying `lane_seq` in the typed slot
+        // must hash identically to the pre-promotion shape, where it rode
+        // through `extra` as a JSON number. Covers positive, negative,
+        // zero, and both `i64` extremes so the projection is checked across
+        // the sign boundary, not just for one value.
+        for v in [7i64, -3, 0, i64::MAX, i64::MIN] {
+            let mut typed = issue("foo", "open", "open", "body");
+            typed.lane_seq = Some(v);
+            let mut legacy = issue("foo", "open", "open", "body");
+            legacy.extra.insert("lane_seq".into(), serde_json::json!(v));
+            assert_eq!(
+                canonical_hash(&typed),
+                canonical_hash(&legacy),
+                "typed lane_seq {v} must hash like the legacy extra shape"
+            );
+        }
+    }
+
+    #[test]
+    fn parsed_yaml_lane_seq_hashes_like_legacy_extra() {
+        // Guards against the "legacy-compat passes only by coincidence"
+        // trap: prove the actual parser YAML→typed path yields the same
+        // canonical bytes as an issue that carried `lane_seq` in `extra`
+        // before promotion. If serde_yaml ever deserialised `lane_seq: 7`
+        // as a float (not an integer), the parser would not lift it and
+        // this equality would break — catching the divergence.
+        use crate::parser::parse_item_md_text_with_warnings;
+        use std::path::Path;
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2026-05-06\nlane_seq: 7\n---\n\n# T\n\nbody\n";
+        let parsed = parse_item_md_text_with_warnings(text, "foo", "open", Path::new("a.md"));
+        assert_eq!(parsed.issue.lane_seq, Some(7));
+
+        // Build the legacy shape from the *same* parsed issue (identical
+        // body/title/dates), moving `lane_seq` back into `extra` — so the
+        // only thing under test is the frontmatter projection of that one
+        // field, not any body difference.
+        let mut legacy = parsed.issue.clone();
+        legacy.lane_seq = None;
+        legacy.extra.insert("lane_seq".into(), serde_json::json!(7));
+        assert_eq!(canonical_hash(&parsed.issue), canonical_hash(&legacy));
     }
 
     #[test]
