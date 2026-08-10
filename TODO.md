@@ -19,18 +19,15 @@ Alkoi siivous-/linjausrupeamana, laajeni: 2 dag-polish-featurea + wire-oss landa
 cutattiin. **⚠️ Release jouduttiin tekemään MANUAALISESTI — `ossctl release cut` on rikki (ks. alla
 `@ossctl-cut-no-publish`).**
 
-**⚠️⚠️ RELEASE-POLKU = MANUAALINEN (ossctl `release cut` EI julkaise oikeasti):** 0.8.1-cut paljasti
-että `ossctl release cut` ei todella uploadaa crates.io:hon (raportoi 300s "index visibility"
--timeoutin cratelle jota se ei koskaan uploadannut; crate pysyi 404:ssä 9 min, ei receiptejä). Juurisyy
-todennäk. ossctl:n publish-adapterin bug (dry-run/no-op oikeassa cutissa), jäi kiinni koska
-`@wire-oss-release-as-release-path` verifioi vain `release plan`-dry-runilla. **Kunnes korjattu, releaset
-tehdään manuaalisesti** (näin 0.8.1 ja kaikki ≤0.7.2 tehtiin): bump `Cargo.toml` (workspace +
-internal dep) + `cargo update --workspace` → finalisoi CHANGELOG → `git commit -am "release: X.Y.Z"`
-→ `cargo publish -p issuectl-core` (odota) → `cargo publish -p issuectl` → `git tag -a vX.Y.Z` +
-`git push origin main --follow-tags` (tag laukaisee `release.yml`-binäärit). **HUOM: `ossctl release
-cut` julkaisee sen version joka PUUSSA on — se EI bumppaa versiota eikä finalisoi CHANGELOGia** (tämä
-kaatoi ekan cut-yrityksen kun se yritti julkaista 0.8.0:aa). Täydet stepit + korjattu polku:
-AGENTS.md "Operating facts". Bug: **`@ossctl-cut-no-publish`** (high).
+**Miksi 0.8.1 tehtiin manuaalisesti (kertaluontoinen, KORJATAAN):** `ossctl release cut` ei todella
+uploadannut crates.io:hon (raportoi 300s "index visibility" -timeoutin cratelle jota se ei koskaan
+uploadannut; crate pysyi 404:ssä 9 min, ei receiptejä). Juurisyy todennäk. ossctl:n publish-adapterin
+bug (dry-run/no-op oikeassa cutissa), jäi kiinni koska `@wire-oss-release-as-release-path` verifioi vain
+`release plan`-dry-runilla. 0.8.1 pelastettiin `cargo publish`illa. **Tätä EI jätetä workaroundiksi —
+`@ossctl-cut-no-publish` (high) korjataan** (root cause on upstream-ossctl:ssä), sen jälkeen `ossctl
+release cut` on taas ainoa release-polku (ks. AGENTS.md "Operating facts"). Toinen 0.8.1-opetus jo
+AGENTS.md:ssä: bump + CHANGELOG-finalisointi + `release:`-commit tehdään ENNEN cutia (cut julkaisee puun
+version, ei bumppaa).
 
 **Mitä tässä rupeamassa tehtiin:**
 - **0.8.1 sisältö (2 featurea + 1 bugfix, CHANGELOG `[0.8.1]`):** dag-polish — `issuectl dag` ei enää
