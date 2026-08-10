@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`issuectl dag`: stable intra-lane ordering via an optional `lane_seq`
+  key.** A new optional numeric frontmatter field `lane_seq: <int>` is
+  consulted **after** the `blocked_by` topological order but **before** the
+  slug lexical tie-break, so a lane's soft human precedence no longer has to
+  be faked as a `blocked_by` edge (or left to alphabetical slug order).
+  Absent → previous behaviour. Written with `issuectl update --lane-seq <int>`
+  / cleared with `--no-lane-seq`. Additive optional v1 field (projected into
+  `canonical_hash` only when set; no `SUPPORTED_SCHEMA_VERSION` bump). (issue:
+  `@dag-stable-intralane-order`)
+- **`issuectl dag`: `lane: unlaned` parallel-safe sentinel.** A first-class
+  "confirmed parallel-safe" marker, distinct from an **absent** lane
+  (unclassified): issues tagged `lane: unlaned` are each independently
+  spawnable and **never serialized with siblings** that share the sentinel —
+  the opposite of a normal shared lane. (issue: `@dag-unlaned-parallel-sentinel`)
+
 ### Changed
 - **Release path switched to the `ossctl` engine (`/oss-release` →
   `ossctl release plan|cut`).** ossctl now owns the version bump,
@@ -23,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this path is its end-to-end proof). Docs updated (`OSS-RELEASE.md`,
   `AGENTS.md`, `CONTRIBUTING.md`). No behavioural change to the `issuectl`
   binary. (issue: `@wire-oss-release-as-release-path`)
+
+### Fixed
+- **`issuectl dag` no longer reports `spawnable: true` for an `in-progress`
+  issue.** An already-in-progress issue is now treated as not spawnable
+  (independent of the caller's `--reservations` input), so a scheduler cannot
+  be told to launch a second worker on work already underway. (issue:
+  `@dag-inprogress-spawnable`)
 
 ## [0.8.0] - 2026-08-10
 

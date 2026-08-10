@@ -346,18 +346,25 @@ policy.
   never fired because cargo-dist publishes the Release with `GITHUB_TOKEN`,
   which does not fire downstream workflows.) Full steps:
   [CONTRIBUTING.md](CONTRIBUTING.md) "Per-release steps".
-- **Deploy/release autonomy: autonomous.** The conductor may cut and
-  publish releases **without asking**, and may **decide autonomously
-  whether** a release is warranted — run `ossctl release plan --version
-  X.Y.Z` then `ossctl release cut --plan <id> --version X.Y.Z`; the cut
-  bumps, rolls the CHANGELOG, publishes both crates to crates.io, and
-  pushes the tag (which fires `release.yml` for binaries). No go/no-go
-  handoff is required, and no separate crates.io trigger — the publish is
-  part of the cut. (Granted 2026-08-10; supersedes the earlier go/no-go
-  rule.) Use judgement on *timing* — batch trivial changes, don't release
-  off a red or half-landed `main` — but the decision itself is yours. If a
-  cut is interrupted, `ossctl release resume` reconciles and continues;
-  `ossctl release verify` is a read-only reconcile against the registry.
+- **Deploy/release autonomy: FULLY autonomous — no go/no-go, no output
+  review.** The conductor **cuts and publishes releases automatically** and
+  **decides autonomously whether** a release is warranted — run `ossctl
+  release plan --version X.Y.Z` then `ossctl release cut --plan <id>
+  --version X.Y.Z`; the cut bumps, rolls the CHANGELOG, publishes both
+  crates to crates.io, and pushes the tag (which fires `release.yml` for
+  binaries). **No confirmation at any point, and the user does NOT want to
+  review the `release plan` (or any deploy) output before it runs** — do not
+  pause to show it for approval. Run the release end-to-end and report the
+  outcome afterward. This holds for the **first** release on a newly-wired
+  path too, and there is no separate crates.io trigger (the publish is part
+  of the cut). (Reaffirmed + strengthened 2026-08-10 on explicit user
+  instruction — "deployt ja releaset saa tehdä automaattisesti"; supersedes
+  the earlier go/no-go rule and any "show the plan first" caveat.) Use
+  judgement only on *timing* — batch trivial changes, don't release off a
+  red or half-landed `main`; the bar is a green gate **plus** a complete
+  CHANGELOG `[Unreleased]`. If a cut is interrupted, `ossctl release resume`
+  reconciles and continues; `ossctl release verify` is a read-only reconcile
+  against the registry.
 - **Live-version check.** Shipped: `git tag --sort=-creatordate | head
   -1` and `grep '^version' Cargo.toml`. Published: crates.io / the
   Homebrew tap. Compare against `main` before recommending a release.
