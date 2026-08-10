@@ -1,10 +1,11 @@
 ---
 created: 2026-05-07
-updated: 2026-08-04
+updated: 2026-08-10
 type: feature
-status: open
+status: obsolete
 priority: normal
 labels: [deferred]
+closed: 2026-08-10
 ---
 
 # Floating Undo for kanban drag-and-drop moves
@@ -24,3 +25,9 @@ Implementation notes:
 - If the user has since dragged the same card again, hide/disable the Undo (state.pending_writes guard).
 
 Spin-off from the round-2 review smoke test of @needlessly-fluffy-decision.
+
+## Resolution
+
+### 2026-08-10T10:03:40Z · @issuectl
+
+Web/browser UI is being removed from issuectl (product decision 2026-08-10). This is a web-board enhancement, so it is obsolete. See @remove-web-ui.

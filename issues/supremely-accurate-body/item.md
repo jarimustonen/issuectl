@@ -1,10 +1,11 @@
 ---
 created: 2026-05-06
-updated: 2026-08-04
+updated: 2026-08-10
 type: improvement
-status: open
+status: obsolete
 priority: normal
 labels: [deferred]
+closed: 2026-08-10
 ---
 
 # Field-level merge for commuting metadata PATCHes (build only if M2 shows real 409 friction)
@@ -29,3 +30,9 @@ Edge cases to think through:
 DO NOT BUILD ahead of demand. Reviewers were split on whether this is worth the complexity. Wait until M2 ships and real-world reports show 409 friction is more than an annoyance. localStorage-backed body editing already prevents data loss; metadata 409s just cost a click to retry.
 
 If this is never built, the design degrades to 'last writer wins, surfaced as 409 to one of them' — acceptable for a single-user local tool.
+
+## Resolution
+
+### 2026-08-10T10:03:40Z · @issuectl
+
+Web/browser UI is being removed from issuectl (product decision 2026-08-10). This is a web-board enhancement, so it is obsolete. See @remove-web-ui.

@@ -1,11 +1,12 @@
 ---
 created: 2026-05-11
-updated: 2026-08-04
+updated: 2026-08-10
 type: chore
-status: open
+status: obsolete
 priority: normal
 labels: [monitoring, web-edit-sync, deferred]
 related: ['@incredibly-real-hour']
+closed: 2026-08-10
 ---
 
 # Add per-slug version dedup / observability log for watcher race
@@ -29,3 +30,9 @@ Add hub-level per-slug last-version tracking so we can either:
 ## Why this is a separate issue
 
 The work touches EventHub state (new per-slug LRU or BTreeMap), is a behaviour change at the publish boundary, and the dedup vs log-only choice is itself a design decision. Bundling it into wt-cleanup-internals would have inflated that branch beyond the "internals cleanup" framing.
+
+## Resolution
+
+### 2026-08-10T10:03:40Z · @issuectl
+
+Web/browser UI is being removed from issuectl (product decision 2026-08-10). This is a web-board enhancement, so it is obsolete. See @remove-web-ui.

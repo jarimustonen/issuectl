@@ -1,13 +1,14 @@
 ---
 created: 2026-05-10
-updated: 2026-08-04
+updated: 2026-08-10
 type: feature
 reporter: jari
 assignee: jari
-status: open
+status: obsolete
 priority: high
 epic: hugely-exciting-spiders
 labels: [deferred]
+closed: 2026-08-10
 ---
 
 # Custom boards: user-defined views with configurable column grouping (epic, label, custom field) for triage and planning
@@ -28,3 +29,9 @@ Design questions to resolve:
 Stretch:
 - 'Saved views' menu in the header, surfaced from the same definition file.
 - Per-board card display options (which fields to show on the card).
+
+## Resolution
+
+### 2026-08-10T10:03:40Z · @issuectl
+
+Web/browser UI is being removed from issuectl (product decision 2026-08-10). This is a web-board enhancement, so it is obsolete. See @remove-web-ui.

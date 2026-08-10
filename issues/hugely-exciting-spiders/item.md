@@ -62,8 +62,8 @@ When v0.6.0 planning starts:
 - [ ] @somewhat-flawless-letter — Uncommitted-state indicator on cards
 
 ### Visualization
-- [ ] @massively-periodic-surprise — Dependency graph (Mermaid / SVG / web)
-- [ ] @needlessly-slippery-pan — Epic tree view (CLI + web)
+- [ ] @issue-graph-view — Dependency graph (Mermaid / SVG / web)
+- [ ] @epic-tree-view — Epic tree view (CLI + web)
 
 ### Content / interop
 - [ ] @terrifically-minor-quiver — Issue-local attachments + fixtures dirs

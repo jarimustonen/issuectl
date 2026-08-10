@@ -13,12 +13,22 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-10):** **0.8.0 JULKAISTU JA VARMISTETTU — koko ketju vihreä.** Tag **v0.8.0**
-origin:ssa (`90cb695` = `release: 0.8.0`). Kaikki kolme julkaisukanavaa vahvistettu vihreiksi
-tässä rupeamassa: **GitHub Release** v0.8.0 (ei draft, 12 assettia — binäärit + installerit),
-**Homebrew** (cargo-dist push vihreän `release.yml`:n kautta), **crates.io** (`Publish to
-crates.io` -run `31364623070` `completed/success` — taustawatcheri triggeröi sen automaattisesti
-`release.yml`:n vihertyessä). `main` == origin, työpuu puhdas.
+**Tila (2026-08-10, iltapäivän rupeama):** **Iso linjaus: web/selain-UI poistetaan issuectl:stä.**
+Tässä rupeamassa ei koodattu eikä releasetty — tämä oli **issue-kannan siivous- ja
+linjausrupeama**. `main` == origin, työpuu puhdas, **v0.8.0** yhä uusin release (koko ketju
+vihreä edellisestä rupeamasta: GitHub Release + Homebrew + crates.io).
+
+**Mitä tässä rupeamassa tehtiin:**
+- **Phantom-bug suljettu:** `@json-show-omits-blocked-by` → `cannot-reproduce` (oli jo korjattu
+  0.7.2:ssa `project_blocked_by`-projektiolla; verifoitu nykykoodilla).
+- **Web-UI:n poisto linjattu.** Kaikki selain/kanban-featuret suljettu `obsolete` (13 kpl, ks.
+  alla), ja luotu portitettu poisto-issue **`@remove-web-ui`** (chore, deferred). **⛔ Gate:
+  poistoa EI tehdä ennen kuin web-toiminnot on arvioitu seuraaja-ohjelmaa varten** (luonnos
+  tekeillä toisessa repossa; gate hoidetaan käsin — un-defer + start vasta kun luonnos valmis).
+- **Kaksi web-issueä säilytettiin ja re-scopattiin CLI-only + nimettiin kunnon slugilla:**
+  `massively-periodic-surprise` → **`@issue-graph-view`** (`issuectl graph` -moottori + lensit;
+  lens 2 osin jo `issuectl dag`), `needlessly-slippery-pan` → **`@epic-tree-view`**
+  (`issuectl epic tree`). Molemmat pysyvät `deferred`.
 
 **⚠️ Minor-bump-gotcha (UUSI, muista seuraavassa minor-releasessa):** 0.8.0-cut paljasti että
 `crates/issuectl/Cargo.toml`:n sisäinen dep `issuectl-core = { path = "…", version = "0.7.0" }`
@@ -61,23 +71,19 @@ kaikki `issuectl skill install`ista; bugit/feature-pyynnöt sisään `issuectl i
 **OSS-init (ennallaan):** `OSS-RELEASE.md` **approved** (`mvp`). cargo-dist pysyy
 release-engineinä — `/oss-release-cut` EI regeneroi `release.yml`:ää.
 
-**Iso linjaus (ennallaan):** **kanban/web-board holdissa**. Kaikki kanban/web-issuet +
-build-only-if + `@focus-areas` `deferred` → **Adjacent backlog**. Fokus CLI:ssä.
+**Iso linjaus (PÄIVITETTY tässä rupeamassa):** **web/selain-UI POISTETAAN** (ei enää vain
+holdissa). issuectl → puhdas AI-first CLI. Kaikki kanban/web-featuret suljettu `obsolete`;
+poisto ajetaan `@remove-web-ui`:n kautta **vasta kun seuraaja-ohjelman luonnos on arvioitu**
+(gate käsin, ks. Tila-blokki). Fokus CLI:ssä.
 
-**Seuraava askel:** **triage `@json-show-omits-blocked-by` ensin.** Tämä on `from-homebase`-
-filattu bug (2026-08-10) joka väittää `--json show`:n jättävän `blocked_by`:n pois top-leveliltä
-— MUTTA tämä on jo korjattu 0.7.2:ssa (`@show-json-omits-blocked-by` / `@json-blocked-by-null-
-top-level`, ks. AGENTS.md-nootti). Verifoitu nykykoodilla: `issuectl depend add y --blocked-by x;
-issuectl --json show y | jq 'has("blocked_by")'` → **true**. Raportti syntyi ennen 0.7.2-fixin
-tuloa. **Suositus: sulje `cannot-reproduce`** (`issuectl close json-show-omits-blocked-by
---status cannot-reproduce --comment "already fixed in 0.7.2 via project_blocked_by"`). Bug-intake
-on decoupled → jätetty käyttäjän/`/stint`:n päätökseksi, EI suljettu autonomisesti.
-
-Sen jälkeen **aktiivinen työjono on tyhjä** paitsi parkissa oleva `@awfully-courageous-attempt`
-(low, build-only-if — vain jos Codex-käyttö todistuu). Backlog (Adjacent) on kaikki `deferred`:
-kanban/web holdissa, `@focus-areas` iso strateginen (ADR 0001 valmis, koskee `schema.rs`),
-`@wire-oss-release-as-release-path` blocked upstream-ossctl:llä. Uusi rupeama alkaa siis
-todennäköisesti backlogista nostamalla tai uudesta feedback/intake-issuesta.
+**Seuraava askel:** **aktiivinen (ei-deferred) työjono on käytännössä tyhjä** — ainoa on
+`@awfully-courageous-attempt` (low, build-only-if — vain jos Codex-käyttö todistuu). Kaikki muu
+on `deferred`: portitettu `@remove-web-ui` (odottaa seuraaja-ohjelman luonnosta), CLI-only
+re-scopatut `@issue-graph-view` + `@epic-tree-view`, iso strateginen `@focus-areas` (ADR 0001
+valmis, koskee `schema.rs`), `@wire-oss-release-as-release-path` (blocked upstream-ossctl:llä),
+`@somewhat-heady-zephyr` (events.jsonl, build-only-if). Uusi rupeama alkaa siis backlogista
+nostamalla (todennäk. `@focus-areas`), uudesta intake-issuesta, tai — kun seuraaja-luonnos
+valmistuu — `@remove-web-ui`:n un-deferillä.
 
 ---
 
@@ -95,21 +101,19 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: json-show-omits-blocked-by   ← TRIAGE FIRST — from-homebase-bug, jo korjattu 0.7.2:ssa, suositus close cannot-reproduce (ei ajettavaa työtä; bug-intake on käyttäjän päätös)
-LANE A — main.rs (cmd_* + clap) + schema.rs
-    json-show-omits-blocked-by  bug · from-homebase; väittää `--json show`:n jättävän `blocked_by`:n pois top-leveliltä. JO KORJATTU 0.7.2:ssa (`project_blocked_by`-projektio) — verifoitu nykykoodilla has("blocked_by")=true. EI ajettavaa fixiä → triage/close cannot-reproduce. Ei worktreetä.
+GLOBAL HEAD-OF-LINE: (none active) — ainoa ei-deferred issue on build-only-if; nosta backlogista
 LANE B — skill install + templates/ + skill.rs (skill distribution)
     awfully-courageous-attempt  low · feature; Codex-prompt-variantit /issue-new + /issue-intakelle (frontmatter-strip kuten /issuella). Build-only-if: vain jos Codex-käyttö todistuu.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: tässä rupeamassa landasi **kaksi homebase-research-featurea** — `dag-scheduling-view`
-(lane/collision-kentät + `issuectl dag`-view, orkestraattori-agnostinen) ja `default-slug-from-title`
-(otsikkojohdettu default-slug) — ja **0.8.0 cutattiin + varmistettiin** (kaikki 3 kanavaa vihreää,
-ks. Tila-blokki). Molemmat featuret terminal (`done`) → pudotettu DAG:sta. Tilalle nousi vain yksi
-aktiivinen: **`json-show-omits-blocked-by`** (from-homebase-bug, jo korjattu 0.7.2:ssa → suositus
-close). **`awfully-courageous-attempt`** (low, build-only-if) pysyy LANE B:ssä parkissa. Aktiivinen
-työ on käytännössä loppu — seuraava rupeama nostaa backlogista tai uudesta intake-issuesta.
+Kaari-lyhyesti: tämä oli **siivous-/linjausrupeama** (ei koodia, ei releasea). Suljettiin phantom-bug
+`json-show-omits-blocked-by` (`cannot-reproduce`) ja **linjattiin web-UI:n poisto**: 13 selain/kanban-
+issueä `obsolete`, luotu portitettu `@remove-web-ui` (deferred), ja `massively-periodic-surprise` /
+`needlessly-slippery-pan` re-scopattiin CLI-only + uudelleennimettiin → `@issue-graph-view` /
+`@epic-tree-view`. DAG:sta pudotettu `json-show-omits-blocked-by` (suljettu). LANE A tyhjä.
+**`awfully-courageous-attempt`** (low, build-only-if) pysyy LANE B:ssä parkissa. Ei-deferred työ on
+käytännössä loppu — seuraava rupeama nostaa backlogista (todennäk. `@focus-areas`) tai uudesta intakesta.
 
 ---
 
@@ -118,20 +122,23 @@ työ on käytännössä loppu — seuraava rupeama nostaa backlogista tai uudest
 Kaikki alla on labeloitu `deferred` issuectl:ssä (2026-08-04), joten ne eivät ole DAG-lanella
 eivätkä laukaise drift-checkiä. Poista `deferred`-label kun otat takaisin peliin.
 
-**Kanban / web-board (HOLD — ei käyttäjiä nyt):**
-`@intensely-teeny-ink` (custom boards, oli high), `@genuinely-cloistered-current`
-(multiple boards), `@truly-somber-payment` (priority-sort), `@needlessly-flimsy-scarecrow`
-(card fields), `@partially-nasty-sack` (WIP-limit), `@fiercely-juicy-kettle` (copy-buttonit),
-`@almost-homely-decision` (per-user view state), `@somewhat-flawless-letter`
-(uncommitted-indikaattori), `@perfectly-white-linen` (undo), `@needlessly-mysterious-volcano`
-(näppäimistö-a11y), `@massively-periodic-surprise` (dependency graph),
-`@needlessly-slippery-pan` (epic-puu; CLI-osa relevantti jos kanban palaa),
-`@fiercely-colossal-rabbits` (canonical_hash-cache — vain `/api/issues`-web-boardin perf).
+**Web/selain-UI: POISTETAAN (portitettu):**
+`@remove-web-ui` (chore, deferred) — poistaa `issuectl serve` + web-server + `/api` + kanban-
+frontend + web-only watcher. **⛔ Gate:** ei ennen kuin web-toiminnot on arvioitu seuraaja-
+ohjelmaa varten (luonnos tekeillä toisessa repossa; hoidetaan käsin). Kaikki entiset kanban/web-
+enhancement-issuet (13 kpl) suljettu `obsolete` tässä rupeamassa (2026-08-10): intensely-teeny-ink,
+genuinely-cloistered-current, truly-somber-payment, needlessly-flimsy-scarecrow, partially-nasty-sack,
+fiercely-juicy-kettle, almost-homely-decision, somewhat-flawless-letter, perfectly-white-linen,
+needlessly-mysterious-volcano, practically-truculent-music, supremely-accurate-body,
+fiercely-colossal-rabbits.
+
+**Web-issueistä CLI-only re-scopatut (SÄILYVÄT):**
+`@issue-graph-view` (ent. massively-periodic-surprise) — `issuectl graph` -moottori + lensit
+(deps / worktree-planning / epic-rollup); lens 2 osin jo `issuectl dag`:ssä.
+`@epic-tree-view` (ent. needlessly-slippery-pan) — `issuectl epic tree <slug>`.
 
 **Build-only-if (älä rakenna ennen kuin tarve todistuu):**
-`@supremely-accurate-body` (field-merge — vain jos 409-kitka todistuu),
-`@somewhat-heady-zephyr` (events.jsonl — vain jos git-metriikat ei riitä),
-`@practically-truculent-music` (watcher-race-observability — matala kiire).
+`@somewhat-heady-zephyr` (events.jsonl — vain jos git-metriikat ei riitä).
 
 **Strateginen (iso, aikatauluta kun on tilaa):**
 `@focus-areas` — päätös tehty (ADR 0001: `areas: []` skeemakenttä), valmis
