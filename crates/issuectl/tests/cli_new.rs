@@ -173,6 +173,88 @@ fn new_json_with_reserved_notes_section_populates_warnings() {
     assert!(warnings[0].as_str().unwrap().contains("## Notes"));
 }
 
+#[test]
+fn new_with_body_file_reserved_section_warns() {
+    let tmp = fresh_repo();
+    let body_path = tmp.path().join("body.md");
+    std::fs::write(&body_path, "intro\n\n## Notes\n\nlegacy\n").expect("write body file");
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "new",
+            "--type",
+            "bug",
+            "--title",
+            "Hello",
+            "--slug",
+            "bf-notes",
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("new --json stdout should be JSON");
+    let warnings = v["warnings"].as_array().expect("warnings array");
+    assert_eq!(warnings.len(), 1, "{}", dump(&out));
+    assert!(warnings[0].as_str().unwrap().contains("## Notes"));
+}
+
+#[test]
+fn body_set_with_reserved_section_warns_on_stderr_and_json() {
+    let tmp = fresh_repo();
+    // Create the target issue first (clean body, no warning).
+    let created = run(
+        tmp.path(),
+        &[
+            "new", "--type", "bug", "--title", "Target", "--slug", "bs-notes",
+        ],
+    );
+    assert_eq!(created.status.code(), Some(0), "{}", dump(&created));
+
+    let body_path = tmp.path().join("newbody.md");
+    std::fs::write(&body_path, "fresh\n\n## Notes\n\nlegacy\n").expect("write body file");
+
+    // Human mode: warning on stderr, write succeeds.
+    let human = run(
+        tmp.path(),
+        &[
+            "body",
+            "set",
+            "bs-notes",
+            "--from-file",
+            body_path.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(human.status.code(), Some(0), "{}", dump(&human));
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(
+        stderr.contains("warning:") && stderr.contains("## Notes"),
+        "expected reserved-section warning on stderr; {}",
+        dump(&human)
+    );
+
+    // JSON mode: warnings array populated.
+    let json = run(
+        tmp.path(),
+        &[
+            "--json",
+            "body",
+            "set",
+            "bs-notes",
+            "--from-file",
+            body_path.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(json.status.code(), Some(0), "{}", dump(&json));
+    let v: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("body set --json stdout should be JSON");
+    let warnings = v["warnings"].as_array().expect("warnings array");
+    assert_eq!(warnings.len(), 1, "{}", dump(&json));
+    assert!(warnings[0].as_str().unwrap().contains("## Notes"));
+}
+
 /// Reads `field` from an `issuectl --json show <slug>` payload.
 fn show_field(root: &std::path::Path, slug: &str, field: &str) -> String {
     let show = run(root, &["--json", "show", slug]);

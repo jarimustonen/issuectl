@@ -4,6 +4,9 @@ updated: 2026-08-10
 type: feature
 status: in-progress
 priority: low
+commits:
+- hash: '44267e7'
+  summary: 'warn at authoring time on reserved ## Notes section'
 ---
 
 # Warn at authoring time when an issue body uses the reserved '## Notes' section

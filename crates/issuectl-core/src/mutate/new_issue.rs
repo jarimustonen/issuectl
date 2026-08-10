@@ -294,10 +294,15 @@ pub(crate) fn do_new_locked(
     // reserved-legacy section heading (`## Notes`) so the collision
     // surfaces now, not at commit time via the doctor pre-commit hook.
     // Non-fatal — the create still proceeds (the author may be
-    // migrating). Computed on the rendered body, so a `## Notes` in
-    // `--description` or `--body-file` is caught the same way.
-    let body_only = render.split("---\n\n").nth(1).unwrap_or(&render);
-    let warnings = crate::body_sections::reserved_section_warnings(body_only);
+    // migrating). Scanned on the *raw* user body (`--description` /
+    // `--body-file`, unified into `description` upstream), NOT the
+    // rendered document: a `## Notes` can only originate from user
+    // input, never from the renderer (which only injects `# <title>`
+    // and canonical section stubs). Scanning the raw body avoids
+    // splitting frontmatter back off `render`, which a Markdown
+    // horizontal rule (`---`) or CRLF in the body would break.
+    let warnings =
+        crate::body_sections::reserved_section_warnings(args.description.as_deref().unwrap_or(""));
 
     let issues_parent = if args.inbox {
         root.join("issues").join(crate::repo::INBOX_DIR)

@@ -6785,6 +6785,21 @@ mod tests {
     }
 
     #[test]
+    fn new_warns_when_reserved_section_follows_horizontal_rule() {
+        // Regression: the raw body carries a Markdown horizontal rule
+        // (`---` + blank line) *before* `## Notes`. An earlier version
+        // stripped frontmatter by splitting `render` on `---\n\n`, which
+        // this body would truncate — silently dropping the warning.
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "Reserved");
+        a.slug = Some("notes-after-rule".into());
+        a.description = Some("intro\n\n---\n\n## Notes\n\nlegacy content".into());
+        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        assert_eq!(n.warnings.len(), 1, "warnings={:?}", n.warnings);
+        assert!(n.warnings[0].contains("## Notes"));
+    }
+
+    #[test]
     fn new_with_clean_body_has_no_warnings() {
         let tmp = fresh_repo();
         let mut a = new_args("task", "Clean");

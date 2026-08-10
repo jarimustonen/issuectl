@@ -27,10 +27,16 @@ pub const RESOLUTION: &str = "Resolution";
 
 /// Legacy H2 section names that are no longer canonical: `doctor`
 /// migrates each `## <legacy>` heading to its canonical replacement
-/// (today only `## Notes` → `## Comments`). Single-sourced here so the
-/// authoring-time warning ([`reserved_section_warnings`], surfaced by
-/// `issuectl new` / `issuectl body set`) and doctor's migration agree
-/// on which names are reserved-legacy — see `doctor::classify_notes`.
+/// (today only `## Notes` → `## Comments`). Single source of truth for
+/// the authoring-time warning ([`reserved_section_warnings`], surfaced
+/// by `issuectl new` / `issuectl body set`). The `iter` order fixes the
+/// order warnings are emitted in.
+///
+/// NOTE: doctor's migration (`doctor::classify_notes` /
+/// `migrate_notes_heading`) still hardcodes the same `Notes` → `Comments`
+/// mapping independently — it is not yet driven by this constant, so a
+/// new alias added here warns at authoring time but is NOT auto-migrated
+/// until doctor is wired to consume this list (tracked as a spinoff).
 pub const LEGACY_SECTION_ALIASES: &[(&str, &str)] = &[("Notes", COMMENTS)];
 
 /// Format the timestamp half of a block heading. UTC, second-precision.
@@ -793,8 +799,8 @@ pub fn reserved_section_warnings(body: &str) -> Vec<String> {
         .filter(|(legacy, _)| present.contains_key(*legacy))
         .map(|(legacy, canonical)| {
             format!(
-                "body uses reserved legacy section `## {legacy}`; it must be renamed/merged \
-                 into `## {canonical}` (run `issuectl doctor --fix`). The write was not blocked."
+                "body uses reserved legacy section `## {legacy}`; rename it to `## {canonical}` \
+                 or run `issuectl doctor --fix` to migrate it. Saved anyway."
             )
         })
         .collect()
@@ -1090,6 +1096,15 @@ mod tests {
         assert!(reserved_section_warnings(body).is_empty());
         // No sections at all is also clean.
         assert!(reserved_section_warnings("\n# T\n\njust prose\n").is_empty());
+    }
+
+    #[test]
+    fn reserved_section_warnings_dedups_repeated_legacy_heading() {
+        // Two `## Notes` sections collapse to a single warning (one per
+        // distinct legacy name) — locks the dedup so a future switch to a
+        // heading iterator can't start spamming one message per heading.
+        let body = "\n# T\n\n## Notes\n\none\n\n## Notes\n\ntwo\n";
+        assert_eq!(reserved_section_warnings(body).len(), 1);
     }
 
     #[test]
