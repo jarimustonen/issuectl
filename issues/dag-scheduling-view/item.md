@@ -12,6 +12,8 @@ commits:
   summary: issuectl dag scheduling-view command + tests
 - hash: '7218610'
   summary: docs + skill sync for lane/collision + dag
+- hash: b863bb6
+  summary: apply llm-review findings (ordering/semantics/strictness)
 ---
 
 # issuectl dag: lane/collision fields + a scheduling-DAG view command
