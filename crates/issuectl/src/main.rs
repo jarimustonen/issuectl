@@ -5165,6 +5165,9 @@ fn print_dag_row(mark: &str, i: &dag::DagIssue) {
     if !i.blockers_open.is_empty() {
         suffix.push_str(&format!(" blocked-by:{}", i.blockers_open.join(",")));
     }
+    if !i.blockers_missing.is_empty() {
+        suffix.push_str(&format!(" missing-dep:{}", i.blockers_missing.join(",")));
+    }
     if i.reserved {
         suffix.push_str(" [reserved]");
     }

@@ -313,8 +313,15 @@ mod tests {
             !obj.contains_key("collision"),
             "absent collision must not project"
         );
-        // And the hash is stable/deterministic for the all-None shape.
-        assert_eq!(canonical_hash(&base), canonical_hash(&base));
+        // Frozen pre-fields vector: this hash was produced by the
+        // projection BEFORE `lane`/`collision` existed. If projecting an
+        // all-`None` issue ever inserts a scheduling key, the byte input
+        // changes and this flips — the actual backward-compat guard, not a
+        // tautology.
+        assert_eq!(
+            canonical_hash(&base),
+            "sha256:v1:6be6f7521e3e0f1390a8271a959e792c98a97b440909134e04fad66c8dc8b4dd"
+        );
     }
 
     #[test]

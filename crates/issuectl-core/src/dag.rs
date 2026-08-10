@@ -14,11 +14,26 @@
 //!   in a lane runs at a time. Issues without a lane are independent and
 //!   surface under [`DagView::unscheduled`].
 //! - **Head-of-line** for a lane is the first not-done issue in the lane's
-//!   deterministic order — the front of the queue.
-//! - **Spawnable** = head-of-line ∧ every `blocked_by` dependency is done
-//!   ∧ the issue's lane/collision tokens are not currently reserved. With
-//!   no reservations supplied the reservation term is vacuously false, so
-//!   an unblocked head-of-line reports spawnable.
+//!   deterministic order whose `blocked_by` dependencies are all done —
+//!   i.e. the front *runnable* issue. This is **work-conserving**: if the
+//!   earliest not-done issue is stuck behind an open (cross-lane) blocker,
+//!   the head advances to the next runnable member rather than stalling
+//!   the whole lane. `None` when the lane has no runnable issue (all done,
+//!   or every not-done issue still has an open blocker).
+//! - **Spawnable** = the issue is its lane's head-of-line ∧ its
+//!   lane/collision tokens are not currently reserved. (Head-of-line
+//!   already implies "not done" and "all blockers done".) With no
+//!   reservations supplied the reservation term is vacuously false, so a
+//!   runnable head-of-line reports spawnable.
+//!
+//! **Contract caveat (TOCTOU).** `spawnable` is *per-issue eligibility
+//! against the supplied reservation snapshot*, not a jointly-safe set:
+//! two head-of-line issues in different lanes that share a collision
+//! token can both read `spawnable: true` at once. The caller must claim
+//! the lane/collision tokens **atomically** as it spawns (and feed the
+//! new holds back via `--reservations`); a read-then-spawn without an
+//! atomic claim races. issuectl computes eligibility; it does not
+//! arbitrate concurrent spawns.
 //!
 //! Determinism: every list is ordered by an explicit key so two runs over
 //! the same repo produce byte-identical output (cacheable by agents).
@@ -33,54 +48,80 @@ use crate::schema::{status_class, Schema, StatusClass};
 
 /// Currently-held scheduling tokens, supplied by the caller (e.g. an
 /// orchestrator that knows which lanes/collision files its in-flight runs
-/// hold). A single flat set: a lane name and a collision token share one
-/// "hot-file" namespace, so an issue is reserved when *any* of its own
-/// lane/collision tokens appears here.
+/// hold). Lane names and collision tokens are kept in **separate**
+/// namespaces — matching the JSON input shape — so a lane named `x` never
+/// accidentally reserves an unrelated collision token also named `x`. An
+/// issue is reserved when its lane is a held lane OR any of its collision
+/// tokens is a held collision token.
 #[derive(Debug, Clone, Default)]
 pub struct Reservations {
-    held: BTreeSet<String>,
+    held_lanes: BTreeSet<String>,
+    held_collisions: BTreeSet<String>,
 }
 
+/// Top-level object keys accepted by [`Reservations::from_json`].
+const RESERVATION_OBJECT_KEYS: &[&str] = &["lanes", "lane", "collision"];
+/// Keys accepted inside a hold object of the array shape.
+const RESERVATION_HOLD_KEYS: &[&str] = &["run_id", "lanes", "lane", "collision"];
+
 impl Reservations {
-    /// Build from an explicit set of held tokens.
-    pub fn from_tokens<I: IntoIterator<Item = String>>(tokens: I) -> Self {
+    /// Build from an explicit set of held lane names (collision set empty).
+    /// Test/ergonomic constructor.
+    pub fn from_tokens<I: IntoIterator<Item = String>>(lanes: I) -> Self {
         Reservations {
-            held: tokens.into_iter().collect(),
+            held_lanes: lanes.into_iter().collect(),
+            held_collisions: BTreeSet::new(),
+        }
+    }
+
+    /// Build from explicit held lane names and collision tokens.
+    pub fn from_lanes_collisions<L, C>(lanes: L, collisions: C) -> Self
+    where
+        L: IntoIterator<Item = String>,
+        C: IntoIterator<Item = String>,
+    {
+        Reservations {
+            held_lanes: lanes.into_iter().collect(),
+            held_collisions: collisions.into_iter().collect(),
         }
     }
 
     /// Parse the caller-supplied reservations JSON. Two shapes are
-    /// accepted and unioned into one held-token set:
+    /// accepted:
     ///
     /// - an object `{"lanes": [..], "collision": [..]}` (either key
-    ///   optional), or
+    ///   optional; a scalar `lane: "x"` is also accepted), or
     /// - an array of hold objects `[{"run_id"?, "lane"?, "collision"?:[..]}, ..]`.
     ///
     /// Strict per the AI-first contract: an unrecognised top-level shape,
-    /// a non-string token, or a wrong-typed field is an error rather than
-    /// a silent drop, so the caller can fix its output and retry.
+    /// an **unknown key** (a typo like `collisions` that would silently
+    /// disable exclusion), a non-string token, an empty token, or a
+    /// wrong-typed field is an error rather than a silent drop — so the
+    /// caller can fix its output and retry.
     pub fn from_json(v: &serde_json::Value) -> Result<Self, String> {
-        let mut held = BTreeSet::new();
+        let mut lanes = BTreeSet::new();
+        let mut collisions = BTreeSet::new();
         match v {
             serde_json::Value::Object(map) => {
-                collect_token_array(map.get("lanes"), "lanes", &mut held)?;
-                collect_token_array(map.get("collision"), "collision", &mut held)?;
-                // A single `lane: "x"` scalar is tolerated for convenience.
+                reject_unknown_keys(map, RESERVATION_OBJECT_KEYS, "reservations")?;
+                collect_token_array(map.get("lanes"), "lanes", &mut lanes)?;
                 if let Some(lane) = map.get("lane") {
-                    collect_scalar_or_array(lane, "lane", &mut held)?;
+                    collect_scalar_or_array(lane, "lane", &mut lanes)?;
                 }
+                collect_token_array(map.get("collision"), "collision", &mut collisions)?;
             }
             serde_json::Value::Array(holds) => {
                 for (i, hold) in holds.iter().enumerate() {
                     let obj = hold.as_object().ok_or_else(|| {
                         format!("reservations[{i}] must be an object, got {hold}")
                     })?;
+                    let ctx = format!("reservations[{i}]");
+                    reject_unknown_keys(obj, RESERVATION_HOLD_KEYS, &ctx)?;
+                    collect_token_array(obj.get("lanes"), "lanes", &mut lanes)?;
                     if let Some(lane) = obj.get("lane") {
-                        collect_scalar_or_array(lane, "lane", &mut held)?;
+                        collect_scalar_or_array(lane, "lane", &mut lanes)?;
                     }
-                    collect_token_array(obj.get("collision"), "collision", &mut held)?;
-                    // `lanes` is also accepted inside a hold for symmetry.
-                    collect_token_array(obj.get("lanes"), "lanes", &mut held)?;
+                    collect_token_array(obj.get("collision"), "collision", &mut collisions)?;
                 }
             }
             other => {
@@ -89,22 +130,38 @@ impl Reservations {
                 ));
             }
         }
-        Ok(Reservations { held })
+        Ok(Reservations {
+            held_lanes: lanes,
+            held_collisions: collisions,
+        })
     }
 
-    /// True when the issue's own lane or any of its collision tokens is
-    /// currently held.
+    /// True when the issue's own lane is a held lane, or any of its
+    /// collision tokens is a held collision token.
     fn reserves(&self, lane: Option<&str>, collision: &[String]) -> bool {
-        if self.held.is_empty() {
-            return false;
-        }
         if let Some(l) = lane {
-            if self.held.contains(l) {
+            if self.held_lanes.contains(l) {
                 return true;
             }
         }
-        collision.iter().any(|c| self.held.contains(c))
+        collision.iter().any(|c| self.held_collisions.contains(c))
     }
+}
+
+fn reject_unknown_keys(
+    map: &serde_json::Map<String, serde_json::Value>,
+    allowed: &[&str],
+    ctx: &str,
+) -> Result<(), String> {
+    for k in map.keys() {
+        if !allowed.contains(&k.as_str()) {
+            return Err(format!(
+                "{ctx}: unknown key {k:?} (allowed: {})",
+                allowed.join(", ")
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn collect_scalar_or_array(
@@ -172,8 +229,14 @@ pub struct DagIssue {
     pub position: usize,
     /// Canonical `blocked_by` projection (sorted, deduped, bare slugs).
     pub blocked_by: Vec<String>,
-    /// Subset of `blocked_by` that is not yet done (still gating).
+    /// Subset of `blocked_by` that is not yet done and refers to an issue
+    /// that exists in the repo (a real, still-gating dependency).
     pub blockers_open: Vec<String>,
+    /// Subset of `blocked_by` whose target slug does not exist in the repo
+    /// — a dangling reference that can never become done (repair the data
+    /// or run `doctor`). Kept distinct from `blockers_open` so a caller can
+    /// tell "waiting on real work" from "your graph is broken".
+    pub blockers_missing: Vec<String>,
     pub is_head_of_line: bool,
     pub spawnable: bool,
     pub reserved: bool,
@@ -196,7 +259,8 @@ pub struct DagLane {
 /// The full scheduling-DAG view.
 #[derive(Debug, Clone, Serialize)]
 pub struct DagView {
-    /// On-disk schema version surfaced per the AI-first contract.
+    /// On-disk schema version of the loaded repo schema, surfaced per the
+    /// AI-first contract.
     pub schema_version: u32,
     /// Whether a caller-supplied reservations set was applied.
     pub reservations_applied: bool,
@@ -230,7 +294,9 @@ pub fn compute(issues: &[Issue], schema: &Schema, reservations: Option<&Reservat
 
     // blocked_by graph (sorted/deduped/bare-slug) via the shared helper.
     let graph = query::build_blocked_by_graph(issues);
-    let empty: Vec<String> = Vec::new();
+    // Universe of real slugs, for distinguishing a dangling `blocked_by`
+    // ref (missing) from a real still-open dependency.
+    let all_slugs: BTreeSet<&str> = issues.iter().map(|i| i.slug.as_str()).collect();
 
     // Partition by lane. Issues without a lane go to the unscheduled bucket.
     let mut by_lane: BTreeMap<&str, Vec<&Issue>> = BTreeMap::new();
@@ -242,63 +308,106 @@ pub fn compute(issues: &[Issue], schema: &Schema, reservations: Option<&Reservat
         }
     }
 
+    let ctx = ComputeCtx {
+        graph: &graph,
+        done: &done,
+        all_slugs: &all_slugs,
+        reservations,
+    };
+
     let lanes = by_lane
         .into_iter()
-        .map(|(lane, members)| {
-            let ordered = order_lane(&members, &graph);
-            build_lane(lane, &ordered, &graph, &empty, &done, reservations)
-        })
+        .map(|(lane, members)| build_lane(lane, &order_lane(&members, &graph), &ctx))
         .collect();
 
-    // Unscheduled issues are independent; order them by the same tiebreak
-    // (no intra-lane topo needed) and render each as its own head-of-line
-    // when not done.
-    let ordered_unscheduled = tiebreak_sorted(&unscheduled);
-    let unscheduled = ordered_unscheduled
+    // Unscheduled issues are independent (no lane mutual-exclusion); order
+    // them by the same tiebreak and render each as its own head-of-line
+    // when not done. `spawnable` still requires blockers to be satisfied.
+    let unscheduled = tiebreak_sorted(&unscheduled)
         .iter()
         .enumerate()
         .map(|(pos, i)| {
-            let blocked_by = graph.get(&i.slug).unwrap_or(&empty).clone();
-            let blockers_open = open_blockers(&blocked_by, &done);
-            let collision = i.collision.clone().unwrap_or_default();
-            let reserved = reservations
-                .map(|r| r.reserves(i.lane.as_deref(), &collision))
-                .unwrap_or(false);
-            // An unscheduled issue has no lane queue in front of it, so it
-            // is its own head-of-line whenever it is not done.
-            let is_head = !done.contains(i.slug.as_str());
-            DagIssue {
-                slug: i.slug.clone(),
-                title: i.title.clone(),
-                status: i.status.clone(),
-                priority: i.priority.clone(),
-                position: pos,
-                spawnable: is_head && blockers_open.is_empty() && !reserved,
-                is_head_of_line: is_head,
-                blocked_by,
-                blockers_open,
-                reserved,
-                lane: None,
-                collision,
-            }
+            let is_head = !ctx.done.contains(i.slug.as_str());
+            ctx.make_issue(i, pos, None, is_head)
         })
         .collect();
 
     DagView {
-        schema_version: crate::schema::SUPPORTED_SCHEMA_VERSION,
+        schema_version: schema.version,
         reservations_applied: reservations.is_some(),
         lanes,
         unscheduled,
     }
 }
 
-/// Subset of `blocked_by` whose target is not done (or does not exist).
-fn open_blockers(blocked_by: &[String], done: &BTreeSet<&str>) -> Vec<String> {
-    blocked_by
-        .iter()
-        .filter(|b| !done.contains(b.as_str()))
-        .cloned()
-        .collect()
+/// Shared, read-only inputs threaded through per-issue row construction.
+struct ComputeCtx<'a> {
+    graph: &'a BTreeMap<String, Vec<String>>,
+    done: &'a BTreeSet<&'a str>,
+    all_slugs: &'a BTreeSet<&'a str>,
+    reservations: Option<&'a Reservations>,
+}
+
+impl ComputeCtx<'_> {
+    /// Split an issue's `blocked_by` into (still-open real deps, dangling
+    /// missing refs). A blocker is `open` when it exists and is not done;
+    /// `missing` when its slug is absent from the repo.
+    fn partition_blockers(&self, blocked_by: &[String]) -> (Vec<String>, Vec<String>) {
+        let mut open = Vec::new();
+        let mut missing = Vec::new();
+        for b in blocked_by {
+            if !self.all_slugs.contains(b.as_str()) {
+                missing.push(b.clone());
+            } else if !self.done.contains(b.as_str()) {
+                open.push(b.clone());
+            }
+        }
+        (open, missing)
+    }
+
+    /// True when an issue is runnable now: not done and every `blocked_by`
+    /// dependency is satisfied (none open, none dangling).
+    fn is_runnable(&self, i: &Issue) -> bool {
+        if self.done.contains(i.slug.as_str()) {
+            return false;
+        }
+        let empty = Vec::new();
+        let blocked_by = self.graph.get(&i.slug).unwrap_or(&empty);
+        let (open, missing) = self.partition_blockers(blocked_by);
+        open.is_empty() && missing.is_empty()
+    }
+
+    /// Build one row. `is_head` is decided by the caller (lane head vs.
+    /// unscheduled-independent). `spawnable` = head ∧ runnable ∧ not
+    /// reserved; the runnable check is redundant for a lane head (which is
+    /// runnable by construction) but load-bearing for unscheduled issues.
+    fn make_issue(&self, i: &Issue, pos: usize, lane: Option<&str>, is_head: bool) -> DagIssue {
+        let empty = Vec::new();
+        let blocked_by = self.graph.get(&i.slug).unwrap_or(&empty).clone();
+        let (blockers_open, blockers_missing) = self.partition_blockers(&blocked_by);
+        let collision = i.collision.clone().unwrap_or_default();
+        let reserved = self
+            .reservations
+            .map(|r| r.reserves(lane, &collision))
+            .unwrap_or(false);
+        let spawnable =
+            is_head && blockers_open.is_empty() && blockers_missing.is_empty() && !reserved;
+        DagIssue {
+            slug: i.slug.clone(),
+            title: i.title.clone(),
+            status: i.status.clone(),
+            priority: i.priority.clone(),
+            position: pos,
+            spawnable,
+            is_head_of_line: is_head,
+            blocked_by,
+            blockers_open,
+            blockers_missing,
+            reserved,
+            lane: lane.map(|l| l.to_string()),
+            collision,
+        }
+    }
 }
 
 /// Deterministic tiebreak order: priority (high→low), then `created`
@@ -315,112 +424,108 @@ fn tiebreak_sorted<'a>(members: &[&'a Issue]) -> Vec<&'a Issue> {
     v
 }
 
+/// Sort key for the ready-set: tiebreak fields in comparison order, with
+/// the base index as the final total-order guarantee. `BTreeSet` pops the
+/// smallest key, so a newly-released high-priority node correctly overtakes
+/// an already-ready lower-priority node.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct OrderKey {
+    priority: u8,
+    no_created: bool,
+    created: Option<String>,
+    slug: String,
+}
+
+fn order_key(i: &Issue) -> OrderKey {
+    OrderKey {
+        priority: priority_rank(&i.priority),
+        no_created: i.created.is_none(),
+        created: i.created.clone(),
+        slug: i.slug.clone(),
+    }
+}
+
 /// Order a lane's issues so that any *intra-lane* `blocked_by` dependency
-/// precedes its dependent, tie-broken by [`tiebreak_sorted`]. Kahn's
-/// algorithm with the tiebreak as the ready-set selection key; a cycle
-/// (already flagged by `doctor`) degrades gracefully — leftover nodes are
-/// appended in tiebreak order, so the render never panics or loops.
+/// precedes its dependent, tie-broken by [`order_key`]. Kahn's algorithm
+/// over an **ordered ready set** — one node popped at a time — so releasing
+/// a dependency re-evaluates the tiebreak globally (a freshly-unblocked
+/// high-priority node overtakes an already-ready low-priority node). A
+/// cycle (already flagged by `doctor`) degrades gracefully: leftover nodes
+/// are appended in tiebreak order, so the render never panics or loops.
 fn order_lane<'a>(members: &[&'a Issue], graph: &BTreeMap<String, Vec<String>>) -> Vec<&'a Issue> {
-    let in_lane: BTreeSet<&str> = members.iter().map(|i| i.slug.as_str()).collect();
-    let base = tiebreak_sorted(members);
+    let by_slug: BTreeMap<&str, &'a Issue> =
+        members.iter().map(|i| (i.slug.as_str(), *i)).collect();
+    let in_lane: BTreeSet<&str> = by_slug.keys().copied().collect();
 
-    // Intra-lane dependency count per slug (only edges to same-lane nodes
-    // constrain ordering; cross-lane blockers gate spawnability, not order).
-    let mut indegree: BTreeMap<String, usize> =
-        base.iter().map(|i| (i.slug.clone(), 0usize)).collect();
-    let mut dependents: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for i in &base {
+    // Intra-lane indegree + dependents. Edges to same-lane nodes only;
+    // cross-lane blockers gate spawnability, not order. Deduped defensively
+    // (the shared graph already dedupes, but ordering correctness must not
+    // rely on an upstream invariant).
+    let mut indegree: BTreeMap<&str, usize> = by_slug.keys().map(|s| (*s, 0usize)).collect();
+    let mut dependents: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for i in members {
+        let slug = i.slug.as_str();
         if let Some(deps) = graph.get(&i.slug) {
+            let mut seen = BTreeSet::new();
             for dep in deps {
-                if in_lane.contains(dep.as_str()) && dep != &i.slug {
-                    *indegree.get_mut(&i.slug).unwrap() += 1;
-                    dependents
-                        .entry(dep.clone())
-                        .or_default()
-                        .push(i.slug.clone());
+                let dep = dep.as_str();
+                if dep != slug && in_lane.contains(dep) && seen.insert(dep) {
+                    *indegree.get_mut(slug).unwrap() += 1;
+                    dependents.entry(dep).or_default().push(slug);
                 }
             }
         }
     }
 
-    // `base` is already in tiebreak order; walking it to pick the first
-    // ready (indegree 0) node preserves the tiebreak among ready nodes.
-    let mut result: Vec<&'a Issue> = Vec::with_capacity(base.len());
-    let mut emitted: BTreeSet<String> = BTreeSet::new();
-    let by_slug: BTreeMap<&str, &'a Issue> = base.iter().map(|i| (i.slug.as_str(), *i)).collect();
+    // Ready set keyed by the tiebreak; pop smallest one at a time.
+    let mut ready: BTreeSet<(OrderKey, &str)> = BTreeSet::new();
+    for (slug, deg) in &indegree {
+        if *deg == 0 {
+            ready.insert((order_key(by_slug[slug]), slug));
+        }
+    }
 
-    loop {
-        let mut progressed = false;
-        for i in &base {
-            let slug = &i.slug;
-            if emitted.contains(slug) {
-                continue;
-            }
-            if indegree.get(slug).copied().unwrap_or(0) == 0 {
-                result.push(by_slug[slug.as_str()]);
-                emitted.insert(slug.clone());
-                progressed = true;
-                if let Some(deps) = dependents.get(slug) {
-                    for d in deps.clone() {
-                        if let Some(c) = indegree.get_mut(&d) {
-                            *c = c.saturating_sub(1);
-                        }
-                    }
+    let mut result: Vec<&'a Issue> = Vec::with_capacity(members.len());
+    while let Some((_, slug)) = ready.pop_first() {
+        result.push(by_slug[slug]);
+        if let Some(deps) = dependents.get(slug) {
+            for &d in deps {
+                let c = indegree.get_mut(d).unwrap();
+                *c -= 1;
+                if *c == 0 {
+                    ready.insert((order_key(by_slug[d]), d));
                 }
             }
         }
-        if !progressed {
-            break;
-        }
     }
+
     // Cycle fallback: append any not-yet-emitted node in tiebreak order.
-    for i in &base {
-        if !emitted.contains(&i.slug) {
-            result.push(*i);
+    if result.len() < members.len() {
+        let emitted_set: BTreeSet<&str> = result.iter().map(|i| i.slug.as_str()).collect();
+        for i in tiebreak_sorted(members) {
+            if !emitted_set.contains(i.slug.as_str()) {
+                result.push(i);
+            }
         }
     }
     result
 }
 
-fn build_lane(
-    lane: &str,
-    ordered: &[&Issue],
-    graph: &BTreeMap<String, Vec<String>>,
-    empty: &Vec<String>,
-    done: &BTreeSet<&str>,
-    reservations: Option<&Reservations>,
-) -> DagLane {
-    // Head-of-line = first not-done issue in order (front of the queue).
+fn build_lane(lane: &str, ordered: &[&Issue], ctx: &ComputeCtx<'_>) -> DagLane {
+    // Work-conserving head-of-line: first not-done issue whose blockers are
+    // all satisfied (runnable). Advances past a blocked front issue so a
+    // stuck head does not starve the lane.
     let head = ordered
         .iter()
-        .find(|i| !done.contains(i.slug.as_str()))
+        .find(|i| ctx.is_runnable(i))
         .map(|i| i.slug.clone());
 
     let issues = ordered
         .iter()
         .enumerate()
         .map(|(pos, i)| {
-            let blocked_by = graph.get(&i.slug).unwrap_or(empty).clone();
-            let blockers_open = open_blockers(&blocked_by, done);
-            let collision = i.collision.clone().unwrap_or_default();
-            let reserved = reservations
-                .map(|r| r.reserves(Some(lane), &collision))
-                .unwrap_or(false);
             let is_head = head.as_deref() == Some(i.slug.as_str());
-            DagIssue {
-                slug: i.slug.clone(),
-                title: i.title.clone(),
-                status: i.status.clone(),
-                priority: i.priority.clone(),
-                position: pos,
-                spawnable: is_head && blockers_open.is_empty() && !reserved,
-                is_head_of_line: is_head,
-                blocked_by,
-                blockers_open,
-                reserved,
-                lane: Some(lane.to_string()),
-                collision,
-            }
+            ctx.make_issue(i, pos, Some(lane), is_head)
         })
         .collect();
 
@@ -537,8 +642,10 @@ mod tests {
     }
 
     #[test]
-    fn head_with_open_blocker_is_head_but_not_spawnable() {
-        // The head-of-line has a cross-lane blocker that is still open.
+    fn sole_blocked_issue_yields_no_head_of_line() {
+        // Work-conserving: a lane whose only not-done issue is blocked has
+        // no runnable head — head_of_line is None and the issue is neither
+        // head nor spawnable, but its open blocker is surfaced.
         let issues = vec![
             mk("dep-x", "open", "normal"), // unscheduled blocker, still open
             with_lane(
@@ -548,10 +655,96 @@ mod tests {
         ];
         let v = compute(&issues, &default_schema(), None);
         let l = lane(&v, "schema");
+        assert_eq!(l.head_of_line, None);
         let a = &l.issues[0];
-        assert!(a.is_head_of_line, "front of queue");
+        assert!(!a.is_head_of_line);
         assert_eq!(a.blockers_open, vec!["dep-x".to_string()]);
         assert!(!a.spawnable, "open blocker blocks spawn");
+    }
+
+    #[test]
+    fn work_conserving_head_advances_past_blocked_front() {
+        // Front issue `a-front` (position 0) is blocked by a cross-lane
+        // dep; `b-next` behind it is unblocked. Head-of-line must advance
+        // to `b-next` instead of stalling the whole lane.
+        let issues = vec![
+            mk("dep-x", "open", "normal"),
+            with_lane(
+                with_blocked_by(mk("a-front", "open", "high"), &["dep-x"]),
+                "schema",
+            ),
+            with_lane(mk("b-next", "open", "normal"), "schema"),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let l = lane(&v, "schema");
+        // `a-front` is position 0 (high priority, no intra-lane dep), but
+        // it is blocked, so the head advances to `b-next`.
+        assert_eq!(l.issues[0].slug, "a-front");
+        assert!(!l.issues[0].spawnable);
+        assert_eq!(l.head_of_line.as_deref(), Some("b-next"));
+        let b = l.issues.iter().find(|i| i.slug == "b-next").unwrap();
+        assert!(b.is_head_of_line && b.spawnable);
+    }
+
+    #[test]
+    fn newly_released_high_priority_overtakes_ready_low_priority() {
+        // Kahn tie-break regression: `a-high` depends on `z-normal`;
+        // `m-low` is independent. After `z-normal` is emitted, `a-high`
+        // becomes ready and must overtake the already-ready `m-low`.
+        let issues = vec![
+            with_lane(
+                with_blocked_by(mk("a-high", "open", "high"), &["z-normal"]),
+                "schema",
+            ),
+            with_lane(mk("z-normal", "open", "normal"), "schema"),
+            with_lane(mk("m-low", "open", "low"), "schema"),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let order: Vec<&str> = lane(&v, "schema")
+            .issues
+            .iter()
+            .map(|i| i.slug.as_str())
+            .collect();
+        assert_eq!(order, vec!["z-normal", "a-high", "m-low"]);
+    }
+
+    #[test]
+    fn dangling_blocker_is_reported_missing_not_open() {
+        let issues = vec![with_lane(
+            with_blocked_by(mk("a-head", "open", "normal"), &["ghost-slug"]),
+            "schema",
+        )];
+        let v = compute(&issues, &default_schema(), None);
+        let a = &lane(&v, "schema").issues[0];
+        assert_eq!(a.blockers_missing, vec!["ghost-slug".to_string()]);
+        assert!(a.blockers_open.is_empty(), "not a real open dep");
+        assert!(!a.spawnable, "dangling ref still blocks spawn");
+        assert_eq!(lane(&v, "schema").head_of_line, None);
+    }
+
+    #[test]
+    fn fully_done_lane_has_no_head() {
+        let issues = vec![
+            with_lane(mk("a-done", "done", "normal"), "schema"),
+            with_lane(mk("b-done", "fixed", "normal"), "schema"),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let l = lane(&v, "schema");
+        assert_eq!(l.head_of_line, None);
+        assert!(l.issues.iter().all(|i| !i.is_head_of_line && !i.spawnable));
+    }
+
+    #[test]
+    fn self_dependency_does_not_hang_and_blocks_spawn() {
+        let issues = vec![with_lane(
+            with_blocked_by(mk("a-self", "open", "normal"), &["a-self"]),
+            "schema",
+        )];
+        let v = compute(&issues, &default_schema(), None);
+        let a = &lane(&v, "schema").issues[0];
+        // A self-blocker is a real (existing) open dep → blocks spawn.
+        assert_eq!(a.blockers_open, vec!["a-self".to_string()]);
+        assert!(!a.spawnable);
     }
 
     #[test]
@@ -576,13 +769,51 @@ mod tests {
         let issues = vec![with_lane(mk("a-head", "open", "normal"), "schema"), b];
 
         // Hold the schema lane and the shared.rs collision token.
-        let res = Reservations::from_tokens(["schema".to_string(), "shared.rs".to_string()]);
+        let res =
+            Reservations::from_lanes_collisions(["schema".to_string()], ["shared.rs".to_string()]);
         let v = compute(&issues, &default_schema(), Some(&res));
         assert!(v.reservations_applied);
         let a = &lane(&v, "schema").issues[0];
         assert!(a.reserved && !a.spawnable, "lane token reserved");
         let bb = &lane(&v, "main-rs").issues[0];
         assert!(bb.reserved && !bb.spawnable, "collision token reserved");
+    }
+
+    #[test]
+    fn reservation_namespaces_are_separate() {
+        // A held LANE named "shared" must NOT reserve an issue whose only
+        // match is a COLLISION token "shared" (and vice versa).
+        let held_lane_only =
+            Reservations::from_lanes_collisions(["shared".to_string()], std::iter::empty());
+        assert!(held_lane_only.reserves(Some("shared"), &[]), "lane matches");
+        assert!(
+            !held_lane_only.reserves(Some("other"), &["shared".to_string()]),
+            "collision token must not match a held lane name"
+        );
+
+        let held_collision_only =
+            Reservations::from_lanes_collisions(std::iter::empty(), ["shared".to_string()]);
+        assert!(
+            !held_collision_only.reserves(Some("shared"), &[]),
+            "lane name must not match a held collision token"
+        );
+        assert!(held_collision_only.reserves(None, &["shared".to_string()]));
+    }
+
+    #[test]
+    fn reservations_from_json_rejects_unknown_keys() {
+        // A typo like `collisions` must error, not silently disable exclusion.
+        let err = Reservations::from_json(&serde_json::json!({"collisions": ["x"]})).unwrap_err();
+        assert!(err.contains("unknown key"), "got: {err}");
+        assert!(Reservations::from_json(&serde_json::json!({"lanez": ["x"]})).is_err());
+        assert!(
+            Reservations::from_json(&serde_json::json!([{"lane": "x", "typo": 1}])).is_err(),
+            "unknown key inside a hold must error"
+        );
+        // run_id is allowed inside a hold.
+        assert!(
+            Reservations::from_json(&serde_json::json!([{"run_id": "r", "lane": "x"}])).is_ok()
+        );
     }
 
     #[test]

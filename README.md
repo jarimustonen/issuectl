@@ -397,11 +397,24 @@ issuectl dag --reservations run-holds.json      # account for in-flight runs
 
 `issuectl dag` renders the DAG by joining `lane` + a deterministic
 per-lane order + the `blocked_by` mirror with **live status**, and
-computes the **head-of-line** (front of each lane's queue) and
-**spawnability** entirely on read — nothing is stored, so status stays
-issuectl's and the plan stays lanes+deps. An issue is `spawnable` when it
-is its lane's head-of-line, all its `blocked_by` dependencies are done,
-and none of its lane/collision tokens are reserved.
+computes the **head-of-line** and **spawnability** entirely on read —
+nothing is stored, so status stays issuectl's and the plan stays
+lanes+deps. Head-of-line is *work-conserving*: it is the first not-done
+issue in a lane whose dependencies are all satisfied, so a lane whose
+front issue is stuck behind a cross-lane blocker advances to the next
+runnable member instead of stalling. An issue is `spawnable` when it is
+its lane's head-of-line and none of its lane/collision tokens are
+reserved. A dangling `blocked_by` ref (target slug not in the repo)
+surfaces separately as `blockers_missing` so a broken graph is
+distinguishable from real pending work.
+
+`spawnable` is per-issue eligibility against the reservation snapshot you
+pass — it is **not** a jointly-safe set. Two head-of-line issues in
+different lanes that share a collision token can both read
+`spawnable: true`; the orchestrator must claim the lane/collision tokens
+atomically as it spawns (and feed the new holds back via
+`--reservations`). issuectl computes eligibility; it does not arbitrate
+concurrent spawns.
 
 issuectl stays orchestrator-agnostic: the one signal it cannot know alone
 — which lane/collision tokens an in-flight run currently holds — is

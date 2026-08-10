@@ -10,6 +10,8 @@ commits:
   summary: lane/collision schema fields + update write path
 - hash: 1818fd1
   summary: issuectl dag scheduling-view command + tests
+- hash: '7218610'
+  summary: docs + skill sync for lane/collision + dag
 ---
 
 # issuectl dag: lane/collision fields + a scheduling-DAG view command

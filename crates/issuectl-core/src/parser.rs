@@ -276,15 +276,27 @@ pub fn parse_item_md_text_with_warnings(
     // readable and hashes exactly as it did before promotion. Removing
     // the lifted value from `extra` keeps one representation on the wire
     // and in the hash.
+    // Lift only a *well-formed, non-empty* string. A hand-edited
+    // `lane: ""` / `lane: "  "` (or a non-string shape) is treated as
+    // malformed and left in `extra` — never promoted to a real empty
+    // lane, which would otherwise pollute the scheduling view.
     let lane = match extra.get("lane") {
-        Some(serde_json::Value::String(_)) => match extra.remove("lane") {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => match extra.remove("lane") {
             Some(serde_json::Value::String(s)) => Some(s),
             _ => None,
         },
         _ => None,
     };
+    // Lift only a non-empty list whose every element is a non-empty
+    // string. An empty list, a non-string element, or a whitespace-only
+    // token leaves the whole value in `extra` (malformed / no-op).
     let collision = match extra.get("collision") {
-        Some(serde_json::Value::Array(items)) if items.iter().all(|v| v.is_string()) => {
+        Some(serde_json::Value::Array(items))
+            if !items.is_empty()
+                && items
+                    .iter()
+                    .all(|v| matches!(v, serde_json::Value::String(s) if !s.trim().is_empty())) =>
+        {
             match extra.remove("collision") {
                 Some(serde_json::Value::Array(items)) => Some(
                     items
@@ -627,6 +639,34 @@ mod tests {
             parse_item_md_text_with_warnings(text2, "some-slug", "open", Path::new("<test>"));
         assert_eq!(parsed2.issue.collision, None, "mixed-type list not lifted");
         assert!(parsed2.issue.extra.contains_key("collision"));
+    }
+
+    #[test]
+    fn empty_or_whitespace_lane_collision_not_lifted() {
+        // Hand-edited empty/whitespace scheduling fields must NOT become a
+        // real empty lane or an empty typed collision list — they stay in
+        // `extra` as malformed input.
+        let empty_lane = "---\ntype: bug\nstatus: open\npriority: normal\n\
+                          lane: \"\"\n---\n\n# T\n";
+        let p = parse_item_md_text_with_warnings(empty_lane, "s", "open", Path::new("<t>"));
+        assert_eq!(p.issue.lane, None, "empty lane not lifted");
+        assert!(p.issue.extra.contains_key("lane"));
+
+        let ws_lane = "---\ntype: bug\nstatus: open\npriority: normal\n\
+                       lane: \"   \"\n---\n\n# T\n";
+        let p = parse_item_md_text_with_warnings(ws_lane, "s", "open", Path::new("<t>"));
+        assert_eq!(p.issue.lane, None, "whitespace lane not lifted");
+
+        let empty_list = "---\ntype: bug\nstatus: open\npriority: normal\n\
+                          collision: []\n---\n\n# T\n";
+        let p = parse_item_md_text_with_warnings(empty_list, "s", "open", Path::new("<t>"));
+        assert_eq!(p.issue.collision, None, "empty collision list not lifted");
+
+        let ws_token = "---\ntype: bug\nstatus: open\npriority: normal\n\
+                        collision:\n  - ok\n  - \"  \"\n---\n\n# T\n";
+        let p = parse_item_md_text_with_warnings(ws_token, "s", "open", Path::new("<t>"));
+        assert_eq!(p.issue.collision, None, "whitespace token blocks lift");
+        assert!(p.issue.extra.contains_key("collision"));
     }
 
     #[test]

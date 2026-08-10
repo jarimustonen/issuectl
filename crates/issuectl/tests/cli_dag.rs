@@ -200,3 +200,72 @@ fn dag_invalid_reservations_errors() {
     );
     assert_ne!(out.status.code(), Some(0), "invalid reservations must fail");
 }
+
+#[test]
+fn dag_no_lane_and_remove_collision_round_trip() {
+    let tmp = fresh_repo();
+    let r = tmp.path();
+    new_issue(r, "foo-bar");
+    run(
+        r,
+        &[
+            "--json",
+            "update",
+            "foo-bar",
+            "--lane",
+            "schema",
+            "--add-collision",
+            "a.rs",
+            "--add-collision",
+            "b.rs",
+        ],
+    );
+    // Remove one collision token and confirm the other survives.
+    run(
+        r,
+        &["--json", "update", "foo-bar", "--remove-collision", "a.rs"],
+    );
+    let v = json(&run(r, &["--json", "show", "foo-bar"]));
+    assert_eq!(v["lane"], "schema");
+    assert_eq!(v["collision"], serde_json::json!(["b.rs"]));
+    // Removing the last collision token drops the frontmatter key entirely.
+    run(
+        r,
+        &["--json", "update", "foo-bar", "--remove-collision", "b.rs"],
+    );
+    // Clear the lane.
+    run(r, &["--json", "update", "foo-bar", "--no-lane"]);
+    let v = json(&run(r, &["--json", "show", "foo-bar"]));
+    assert_eq!(v["lane"], serde_json::Value::Null);
+    assert_eq!(v["collision"], serde_json::Value::Null);
+}
+
+#[test]
+fn dag_fields_ok_on_pre_existing_v1_schema_without_them() {
+    // A repo whose committed `.schema.yaml` predates lane/collision (it
+    // does not declare them) must still accept `update --lane` and pass
+    // `doctor` clean — the built-in default schema always contributes the
+    // fields, so doctor's unknown-key check recognises them.
+    let tmp = fresh_repo();
+    let r = tmp.path();
+    std::fs::write(
+        r.join("issues").join(".schema.yaml"),
+        "version: 1\nfields:\n  status:\n    required: true\n    enum: [open, done]\n",
+    )
+    .unwrap();
+    new_issue(r, "foo-bar");
+    let out = run(r, &["--json", "update", "foo-bar", "--lane", "schema"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "update --lane on old schema: {out:?}"
+    );
+    // doctor must not flag `lane` as an unknown key.
+    let doc = run(r, &["--json", "doctor"]);
+    let v: serde_json::Value = serde_json::from_slice(&doc.stdout).expect("doctor json");
+    let unknown = v["unknown_keys"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !unknown.iter().any(|u| u.to_string().contains("lane")),
+        "lane flagged as unknown key: {unknown:?}"
+    );
+}
