@@ -524,6 +524,8 @@ mod tests {
             labels: None,
             closed: None,
             closed_by: None,
+            lane: None,
+            collision: None,
             commits: None,
             extra: BTreeMap::new(),
             title: String::new(),

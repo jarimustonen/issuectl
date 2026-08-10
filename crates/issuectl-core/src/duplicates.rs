@@ -325,6 +325,8 @@ mod tests {
             },
             closed: None,
             closed_by: None,
+            lane: None,
+            collision: None,
             commits: None,
             title: title.to_string(),
             body: body.to_string(),

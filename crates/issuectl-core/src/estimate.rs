@@ -485,6 +485,8 @@ mod tests {
             labels: None,
             closed: None,
             closed_by: None,
+            lane: None,
+            collision: None,
             commits: None,
             title: slug.into(),
             body: String::new(),

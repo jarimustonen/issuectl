@@ -181,6 +181,8 @@ fn summary_as_issue(s: &repo::IssueSummary) -> crate::models::Issue {
         // synthetic issue is only used for query matching — never hashed
         // (see fn doc) and no query term reads the closer.
         closed_by: None,
+        lane: None,
+        collision: None,
         commits: s.commits.clone(),
         title: s.title.clone(),
         body: String::new(),

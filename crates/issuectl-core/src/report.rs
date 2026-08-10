@@ -517,6 +517,8 @@ mod tests {
             labels: None,
             closed: closed.map(|s| s.to_string()),
             closed_by: None,
+            lane: None,
+            collision: None,
             commits: None,
             title: format!("title for {slug}"),
             body: String::new(),

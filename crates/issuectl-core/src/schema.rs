@@ -272,6 +272,17 @@ fields:
   # slot; `set`/`update --field` reject it as reserved.
   closed_by:
     required: false
+  # Scheduling-DAG fields (see `issuectl dag`). Both optional and
+  # absent-by-default; declared here so schema validation and `doctor`'s
+  # unknown-key check recognise them as first-class known fields. `lane`
+  # is a scalar scheduling group; `collision` is a list of extra hot-file
+  # tokens. The only writers are `update --lane` / `--add-collision`
+  # (reserved from `set`/`update --field`).
+  lane:
+    required: false
+  collision:
+    required: false
+    list: true
   slug:
     required: false
   # --- Intake-flow fields -------------------------------------------

@@ -549,6 +549,22 @@ enum Command {
         #[arg(long, conflicts_with = "epic")]
         no_epic: bool,
 
+        /// Set the scheduling lane (see `issuectl dag`)
+        #[arg(long, value_parser = parse_non_empty)]
+        lane: Option<String>,
+
+        /// Remove the scheduling lane
+        #[arg(long, conflicts_with = "lane")]
+        no_lane: bool,
+
+        /// Add a collision hot-file token (repeatable)
+        #[arg(long = "add-collision", value_parser = parse_non_empty)]
+        add_collision: Vec<String>,
+
+        /// Remove a collision hot-file token (repeatable)
+        #[arg(long = "remove-collision", value_parser = parse_non_empty)]
+        remove_collision: Vec<String>,
+
         /// Add a label (repeatable)
         #[arg(long = "add-label", value_parser = parse_non_empty)]
         add_labels: Vec<String>,
@@ -2170,6 +2186,10 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             priority,
             epic,
             no_epic,
+            lane,
+            no_lane,
+            add_collision,
+            remove_collision,
             add_labels,
             remove_labels,
             add_related,
@@ -2189,6 +2209,10 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 priority,
                 epic,
                 no_epic,
+                lane,
+                no_lane,
+                add_collision,
+                remove_collision,
                 add_labels,
                 remove_labels,
                 add_related,
@@ -4151,6 +4175,8 @@ fn duplicate_precheck(json: bool, args: &NewArgs) -> bool {
         },
         closed: None,
         closed_by: None,
+        lane: None,
+        collision: None,
         commits: None,
         title: args.title.clone(),
         body: args.description.clone().unwrap_or_default(),
@@ -4375,6 +4401,10 @@ pub(crate) struct UpdateArgs {
     pub priority: Option<String>,
     pub epic: Option<String>,
     pub no_epic: bool,
+    pub lane: Option<String>,
+    pub no_lane: bool,
+    pub add_collision: Vec<String>,
+    pub remove_collision: Vec<String>,
     pub add_labels: Vec<String>,
     pub remove_labels: Vec<String>,
     pub add_related: Vec<String>,
@@ -4446,6 +4476,13 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
     } else if args.no_epic {
         req.epic = Patch::Clear;
     }
+    if let Some(l) = args.lane {
+        req.lane = Patch::Set(l);
+    } else if args.no_lane {
+        req.lane = Patch::Clear;
+    }
+    req.add_collision = args.add_collision;
+    req.remove_collision = args.remove_collision;
     req.add_labels = args.add_labels;
     req.remove_labels = args.remove_labels;
     req.add_related = args.add_related;

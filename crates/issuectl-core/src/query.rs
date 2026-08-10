@@ -751,6 +751,8 @@ mod tests {
             labels: Some(vec!["frontend".to_string()]),
             closed: None,
             closed_by: None,
+            lane: None,
+            collision: None,
             commits: None,
             title: "Login redirect loop".to_string(),
             body: "User flock contention on flock(2) deadlock.".to_string(),

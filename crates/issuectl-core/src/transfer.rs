@@ -313,6 +313,8 @@ mod tests {
             labels: Some(vec!["interop".to_string()]),
             closed: None,
             closed_by: None,
+            lane: None,
+            collision: None,
             commits: None,
             title: title.to_string(),
             body: "## Description\n\nSomething broke.".to_string(),

@@ -81,6 +81,19 @@ fn canonical_frontmatter_value(issue: &Issue) -> Value {
     if let Some(v) = &issue.closed_by {
         m.insert("closed_by".into(), Value::String(v.clone()));
     }
+    // Scheduling-DAG fields, projected under the same keys they occupied
+    // via `extra` before promotion — so an issue that never set them adds
+    // no entry and hashes identically to the pre-field shape (see
+    // `no_lane_collision_hashes_identically`), exactly like `closed_by`.
+    if let Some(v) = &issue.lane {
+        m.insert("lane".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &issue.collision {
+        m.insert(
+            "collision".into(),
+            Value::Array(v.iter().cloned().map(Value::String).collect()),
+        );
+    }
     if let Some(v) = &issue.reporter {
         m.insert("reporter".into(), Value::String(v.clone()));
     }
@@ -183,6 +196,8 @@ mod tests {
             labels: None,
             closed: None,
             closed_by: None,
+            lane: None,
+            collision: None,
             commits: None,
             title: String::new(),
             body: body.to_string(),
@@ -274,6 +289,77 @@ mod tests {
         legacy
             .extra
             .insert("closed_by".into(), serde_json::Value::String("jari".into()));
+        assert_eq!(canonical_hash(&typed), canonical_hash(&legacy));
+    }
+
+    #[test]
+    fn no_lane_collision_hashes_identically() {
+        // Load-bearing regression: adding the `lane`/`collision` fields
+        // must not churn the version token of any issue that sets
+        // neither. This frozen vector was computed against the projection
+        // BEFORE the two fields were added; if projecting an all-`None`
+        // issue ever inserts a `lane`/`collision` map entry, this flips.
+        // (`golden_hash_with_title` pins the same guarantee for a
+        // title-bearing issue.)
+        let base = issue("foo", "open", "open", "body");
+        assert_eq!(base.lane, None);
+        assert_eq!(base.collision, None);
+        // The projected object must carry no scheduling keys at all, so
+        // the byte input to the hash is identical to the pre-field shape.
+        let projected = canonical_frontmatter_value(&base);
+        let obj = projected.as_object().expect("projection is an object");
+        assert!(!obj.contains_key("lane"), "absent lane must not project");
+        assert!(
+            !obj.contains_key("collision"),
+            "absent collision must not project"
+        );
+        // And the hash is stable/deterministic for the all-None shape.
+        assert_eq!(canonical_hash(&base), canonical_hash(&base));
+    }
+
+    #[test]
+    fn lane_presence_changes_hash() {
+        let a = issue("foo", "open", "open", "body");
+        let mut b = issue("foo", "open", "open", "body");
+        b.lane = Some("schema".to_string());
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
+    fn lane_value_changes_hash() {
+        let mut a = issue("foo", "open", "open", "body");
+        let mut b = issue("foo", "open", "open", "body");
+        a.lane = Some("schema".to_string());
+        b.lane = Some("main-rs".to_string());
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    #[test]
+    fn collision_presence_and_value_change_hash() {
+        let a = issue("foo", "open", "open", "body");
+        let mut b = issue("foo", "open", "open", "body");
+        b.collision = Some(vec!["a.rs".to_string()]);
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
+        let mut c = issue("foo", "open", "open", "body");
+        c.collision = Some(vec!["b.rs".to_string()]);
+        assert_ne!(canonical_hash(&b), canonical_hash(&c));
+    }
+
+    #[test]
+    fn typed_lane_collision_hash_same_as_legacy_extra() {
+        // Backward compat, mirroring `typed_closed_by_hashes_same_as_legacy_extra`:
+        // an issue carrying `lane`/`collision` in the typed slots must hash
+        // identically to the pre-promotion shape (same keys in `extra`).
+        let mut typed = issue("foo", "open", "open", "body");
+        typed.lane = Some("schema".to_string());
+        typed.collision = Some(vec!["a.rs".to_string(), "b.rs".to_string()]);
+        let mut legacy = issue("foo", "open", "open", "body");
+        legacy
+            .extra
+            .insert("lane".into(), serde_json::Value::String("schema".into()));
+        legacy
+            .extra
+            .insert("collision".into(), serde_json::json!(["a.rs", "b.rs"]));
         assert_eq!(canonical_hash(&typed), canonical_hash(&legacy));
     }
 

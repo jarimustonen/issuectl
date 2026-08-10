@@ -121,6 +121,11 @@ pub struct UpdateIssueRequest {
     /// grammar as `note --as`.
     #[serde(default)]
     pub closed_by: Patch<String>,
+    /// Scheduling lane (`crate::dag`). Scalar `Patch` like `epic`: `Set`
+    /// assigns the lane, `Clear` removes it (`update --no-lane`). Reserved
+    /// from `custom_fields` so this validated slot is the only writer.
+    #[serde(default)]
+    pub lane: Patch<String>,
     #[serde(default)]
     pub add_labels: Vec<String>,
     #[serde(default)]
@@ -139,6 +144,13 @@ pub struct UpdateIssueRequest {
     pub add_blocked_by: Vec<String>,
     #[serde(default)]
     pub remove_blocked_by: Vec<String>,
+    /// `collision:` list operations, same shape as `add_labels` /
+    /// `remove_labels`: free-form hot-file tokens with no ref
+    /// normalization (they are file/family identifiers, not slugs).
+    #[serde(default)]
+    pub add_collision: Vec<String>,
+    #[serde(default)]
+    pub remove_collision: Vec<String>,
     #[serde(default)]
     pub add_commits: Vec<CommitSpec>,
     /// Per-key custom-frontmatter PATCH. Mirrors the top-level `Patch`
@@ -212,6 +224,11 @@ pub const RESERVED_CUSTOM_FIELD_KEYS: &[(&str, &str)] = &[
     (
         "closed_by",
         "set automatically by `close --as <author>`; cleared on reopen",
+    ),
+    ("lane", "use `update --lane <name>` / `--no-lane`"),
+    (
+        "collision",
+        "list-typed: use `update --add-collision` / `--remove-collision`",
     ),
     ("status", "set automatically by `new` (always `open`)"),
     ("created", "set automatically by `new` (today)"),
@@ -443,12 +460,15 @@ impl UpdateIssueRequest {
             && matches!(self.owner, Patch::Unspecified)
             && matches!(self.epic, Patch::Unspecified)
             && matches!(self.closed_by, Patch::Unspecified)
+            && matches!(self.lane, Patch::Unspecified)
             && self.add_labels.is_empty()
             && self.remove_labels.is_empty()
             && self.add_related.is_empty()
             && self.remove_related.is_empty()
             && self.add_blocked_by.is_empty()
             && self.remove_blocked_by.is_empty()
+            && self.add_collision.is_empty()
+            && self.remove_collision.is_empty()
             && self.add_commits.is_empty()
             && self.custom_fields.is_empty()
             && self.body_ops.is_empty()
@@ -489,6 +509,7 @@ impl UpdateIssueRequest {
         check_set_nonempty("owner", &self.owner)?;
         check_set_nonempty("epic", &self.epic)?;
         check_set_nonempty("closed_by", &self.closed_by)?;
+        check_set_nonempty("lane", &self.lane)?;
         // Closer attribution follows the same author grammar as
         // `note --as`, so the recorded value is a well-formed,
         // hash-stable token regardless of entry point (CLI `close --as`
@@ -534,6 +555,8 @@ impl UpdateIssueRequest {
             ("remove_related", &self.remove_related),
             ("add_blocked_by", &self.add_blocked_by),
             ("remove_blocked_by", &self.remove_blocked_by),
+            ("add_collision", &self.add_collision),
+            ("remove_collision", &self.remove_collision),
         ] {
             if list.iter().any(|s| s.is_empty()) {
                 return Err(MutateError::Validation(format!(
@@ -564,6 +587,11 @@ impl UpdateIssueRequest {
         if let Some(overlap) = first_overlap(&self.add_blocked_by, &self.remove_blocked_by) {
             return Err(MutateError::ConflictingIntent(format!(
                 "blocked_by ref {overlap:?} appears in both add_blocked_by and remove_blocked_by"
+            )));
+        }
+        if let Some(overlap) = first_overlap(&self.add_collision, &self.remove_collision) {
+            return Err(MutateError::ConflictingIntent(format!(
+                "collision token {overlap:?} appears in both add_collision and remove_collision"
             )));
         }
 
@@ -1132,6 +1160,7 @@ fn update_issue_under_lock(
         ("assignee", &req.assignee),
         ("owner", &req.owner),
         ("epic", &req.epic),
+        ("lane", &req.lane),
     ] {
         apply_string_patch(&mut item, key, patch);
         if !matches!(patch, Patch::Unspecified) {
@@ -1175,6 +1204,20 @@ fn update_issue_under_lock(
     }
     for r in &req.remove_blocked_by {
         write::remove_from_string_list(&mut item.frontmatter, "blocked_by", r)
+            .map_err(MutateError::Io)?;
+    }
+
+    // collision: free-form hot-file tokens, same list mechanics as labels
+    // (no ref normalization — they are file/family identifiers).
+    if !req.add_collision.is_empty() || !req.remove_collision.is_empty() {
+        written.insert("collision".into());
+    }
+    for c in &req.add_collision {
+        write::add_to_string_list(&mut item.frontmatter, "collision", c)
+            .map_err(MutateError::Io)?;
+    }
+    for c in &req.remove_collision {
+        write::remove_from_string_list(&mut item.frontmatter, "collision", c)
             .map_err(MutateError::Io)?;
     }
 

@@ -49,6 +49,23 @@ pub struct Issue {
     pub closed_by: Option<String>,
     pub commits: Option<Vec<Commit>>,
 
+    // Scheduling DAG (see `crate::dag`). Both optional and
+    // absent-by-default so an issue that sets neither hashes identically
+    // to the pre-scheduling-fields shape. Lifted from the raw
+    // frontmatter mapping by the parser exactly like `closed_by`: a
+    // string `lane:` and a list-of-strings `collision:` are promoted
+    // into these typed slots (and removed from `extra`); a malformed
+    // shape stays in `extra`, readable and hashed as-is. Reserved from
+    // `set`/`update --field`; the only writers are the dedicated
+    // `update --lane` / `--add-collision` slots.
+    /// Scheduling group ("hot-file family"). At most one lane per issue;
+    /// a lane is a spawn-time mutual-exclusion group (one runs at a time).
+    pub lane: Option<String>,
+    /// Extra hot-file tokens beyond the lane that force spawn-time
+    /// exclusion — two issues sharing a collision token cannot run
+    /// concurrently even across lanes.
+    pub collision: Option<Vec<String>>,
+
     // Derived from markdown body
     pub title: String,
     pub body: String,

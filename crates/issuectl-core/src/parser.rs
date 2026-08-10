@@ -268,6 +268,39 @@ pub fn parse_item_md_text_with_warnings(
         _ => None,
     };
 
+    // Promote the scheduling-DAG fields out of the unknown-key map into
+    // their typed slots, mirroring `closed_by` above. Only a well-typed
+    // shape is lifted — a *string* `lane:` and a *list of strings*
+    // `collision:`; any other shape (a hand-edited `lane: [oops]`, a
+    // `collision: bare-string`) stays in `extra` where it remains
+    // readable and hashes exactly as it did before promotion. Removing
+    // the lifted value from `extra` keeps one representation on the wire
+    // and in the hash.
+    let lane = match extra.get("lane") {
+        Some(serde_json::Value::String(_)) => match extra.remove("lane") {
+            Some(serde_json::Value::String(s)) => Some(s),
+            _ => None,
+        },
+        _ => None,
+    };
+    let collision = match extra.get("collision") {
+        Some(serde_json::Value::Array(items)) if items.iter().all(|v| v.is_string()) => {
+            match extra.remove("collision") {
+                Some(serde_json::Value::Array(items)) => Some(
+                    items
+                        .into_iter()
+                        .filter_map(|v| match v {
+                            serde_json::Value::String(s) => Some(s),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
     let title = extract_title(body);
     let issue = crate::models::Issue {
         slug: slug.to_string(),
@@ -285,6 +318,8 @@ pub fn parse_item_md_text_with_warnings(
         labels: fm.labels,
         closed: fm.closed,
         closed_by,
+        lane,
+        collision,
         commits: fm.commits,
         extra,
         title,
@@ -376,6 +411,8 @@ fn default_issue(slug: &str, folder: &str) -> crate::models::Issue {
         labels: None,
         closed: None,
         closed_by: None,
+        lane: None,
+        collision: None,
         commits: None,
         extra: BTreeMap::new(),
         title: String::new(),
@@ -531,6 +568,65 @@ mod tests {
             parsed.issue.extra.contains_key("closed_by"),
             "non-string closed_by stays in extra"
         );
+    }
+
+    #[test]
+    fn lane_and_collision_lift_into_typed_fields_not_extra() {
+        // A string `lane:` and a list-of-strings `collision:` are promoted
+        // into the typed slots and stripped from `extra`, exactly like
+        // `closed_by`, so there is one wire/hash representation.
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\n\
+                    lane: schema\ncollision:\n  - a.rs\n  - b.rs\n---\n\n# Title\n";
+        let parsed =
+            parse_item_md_text_with_warnings(text, "some-slug", "open", Path::new("<test>"));
+        assert_eq!(parsed.issue.lane.as_deref(), Some("schema"));
+        assert_eq!(
+            parsed.issue.collision.as_deref(),
+            Some(&["a.rs".to_string(), "b.rs".to_string()][..])
+        );
+        assert!(
+            !parsed.issue.extra.contains_key("lane"),
+            "lane must not remain in extra: {:?}",
+            parsed.issue.extra
+        );
+        assert!(
+            !parsed.issue.extra.contains_key("collision"),
+            "collision must not remain in extra: {:?}",
+            parsed.issue.extra
+        );
+    }
+
+    #[test]
+    fn absent_lane_collision_are_none() {
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n# Title\n";
+        let parsed =
+            parse_item_md_text_with_warnings(text, "some-slug", "open", Path::new("<test>"));
+        assert_eq!(parsed.issue.lane, None);
+        assert_eq!(parsed.issue.collision, None);
+    }
+
+    #[test]
+    fn malformed_lane_collision_stay_in_extra() {
+        // A non-string `lane:` and a non-list / non-string-element
+        // `collision:` must NOT break the typed parse and must be left in
+        // `extra` (readable, hashed as-is) — mirroring the non-string
+        // `closed_by` tolerance.
+        let text = "---\ntype: bug\nstatus: open\npriority: normal\n\
+                    lane: [oops]\ncollision: bare\n---\n\n# Title\n";
+        let parsed =
+            parse_item_md_text_with_warnings(text, "some-slug", "open", Path::new("<test>"));
+        assert_eq!(parsed.issue.lane, None, "list lane not lifted");
+        assert_eq!(parsed.issue.collision, None, "scalar collision not lifted");
+        assert!(parsed.issue.extra.contains_key("lane"));
+        assert!(parsed.issue.extra.contains_key("collision"));
+
+        // A collision list containing a non-string element also stays put.
+        let text2 = "---\ntype: bug\nstatus: open\npriority: normal\n\
+                     collision:\n  - ok\n  - 42\n---\n\n# Title\n";
+        let parsed2 =
+            parse_item_md_text_with_warnings(text2, "some-slug", "open", Path::new("<test>"));
+        assert_eq!(parsed2.issue.collision, None, "mixed-type list not lifted");
+        assert!(parsed2.issue.extra.contains_key("collision"));
     }
 
     #[test]
