@@ -2,7 +2,7 @@
 created: 2026-08-10
 updated: 2026-08-10
 type: feature
-status: in-progress
+status: done
 priority: normal
 labels: [from-homebase-research]
 commits:
@@ -14,6 +14,8 @@ commits:
   summary: docs + skill sync for lane/collision + dag
 - hash: b863bb6
   summary: apply llm-review findings (ordering/semantics/strictness)
+closed: 2026-08-10
+closed_by: agent-dag
 ---
 
 # issuectl dag: lane/collision fields + a scheduling-DAG view command
@@ -112,3 +114,9 @@ never reads orchestratectl state — the caller passes this in.
                             "reserved":bool, "lane","collision":[…] } ] } ],
   "unscheduled": [ …same issue shape, lane=null… ] }
 Reuses shared vocab (slug/title/status/priority). Deterministic ordering throughout.
+
+## Resolution
+
+### 2026-08-10T06:17:40Z · @agent-dag
+
+Shipped: lane/collision typed fields (closed_by precedent, zero hash churn) + issuectl dag [--json] [--reservations] with work-conserving head-of-line + spawnability on read. Multi-model /llm-review applied. Green gate passes.
