@@ -9,6 +9,8 @@ commits:
   summary: retire publish-crates.yml; ossctl release plan dry-run reconciled
 - hash: 93dbf8e
   summary: wire ossctl release path in OSS-RELEASE/AGENTS/CONTRIBUTING/CHANGELOG/TODO
+- hash: 66ac7a5
+  summary: apply /llm-review findings (provenance, caret, recovery, secret cleanup)
 ---
 
 # Wire /oss-release as the release path (integrate ossctl release engine with cargo-dist)
