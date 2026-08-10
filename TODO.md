@@ -13,21 +13,24 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-10, iltapäivän rupeama):** **0.8.1 JULKAISTU** (crates.io molemmat cratet `200`,
-tag `v0.8.1` originissa, `release.yml`-run käynnissä/valmis binääreille + Homebrew). `main` == origin.
-Alkoi siivous-/linjausrupeamana, laajeni: 2 dag-polish-featurea + wire-oss landasivat, ja 0.8.1
-cutattiin. **⚠️ Release jouduttiin tekemään MANUAALISESTI — `ossctl release cut` on rikki (ks. alla
-`@ossctl-cut-no-publish`).**
+**Tila (2026-08-10, iltapäivän rupeama):** **0.8.1 JULKAISTU JA VARMISTETTU — kaikki 3 kanavaa vihreä.**
+crates.io molemmat cratet `200`, tag `v0.8.1` originissa, `release.yml`-run `31395041120`
+**completed/success** (binäärit + shell-installer + Homebrew). `main` == origin (`0b49850`), työpuu
+puhdas. Rupeama alkoi siivous-/linjausrupeamana, laajeni: dag-polish (2 featurea + 1 bugfix) + wire-oss
+landasivat ja **0.8.1 cutattiin — mutta manuaalisesti**, koska `ossctl release cut` osoittautui rikki.
 
-**Miksi 0.8.1 tehtiin manuaalisesti (kertaluontoinen, KORJATAAN):** `ossctl release cut` ei todella
-uploadannut crates.io:hon (raportoi 300s "index visibility" -timeoutin cratelle jota se ei koskaan
-uploadannut; crate pysyi 404:ssä 9 min, ei receiptejä). Juurisyy todennäk. ossctl:n publish-adapterin
+**⚠️ RELEASE-OPPI (tärkein): ossctl `release cut` EI julkaissut oikeasti → 0.8.1 tehtiin `cargo publish`illa.**
+Real cut ei uploadannut crates.io:hon (raportoi 300s "index visibility" -timeoutin cratelle jota se ei
+koskaan uploadannut; crate 404:ssä 9 min, ei receiptejä). Juurisyy todennäk. ossctl:n publish-adapterin
 bug (dry-run/no-op oikeassa cutissa), jäi kiinni koska `@wire-oss-release-as-release-path` verifioi vain
-`release plan`-dry-runilla. 0.8.1 pelastettiin `cargo publish`illa. **Tätä EI jätetä workaroundiksi —
-`@ossctl-cut-no-publish` (high) korjataan** (root cause on upstream-ossctl:ssä), sen jälkeen `ossctl
-release cut` on taas ainoa release-polku (ks. AGENTS.md "Operating facts"). Toinen 0.8.1-opetus jo
-AGENTS.md:ssä: bump + CHANGELOG-finalisointi + `release:`-commit tehdään ENNEN cutia (cut julkaisee puun
-version, ei bumppaa).
+`release plan`-dry-runilla. 0.8.1 pelastettiin manuaalilla `cargo publish -p issuectl-core` → `-p issuectl`
+→ tag → push. **EI jätetä workaroundiksi:** bug filattu upstream-ossctl-reppuun **`release-cut-publish-noop`**
+(high) + downstream-tracker tässä **`@ossctl-cut-no-publish`** (high, DAG LANE C). AGENTS.md kuvaa taas
+`ossctl release cut`:n ainoana polkuna (workaround-stepit poistettu käyttäjän pyynnöstä — korjataan, ei
+kierretä). **Toinen 0.8.1-opetus (AGENTS.md:ssä):** `ossctl release cut` julkaisee PUUN version — se EI
+bumppaa; siksi bump + CHANGELOG-finalisointi + `release:`-commit tehdään ENNEN cutia.
+(Sekundäärifriktio: stale-lock esti `release abandon`in tapetun cutin jälkeen → ossctl
+`@release-abandon-break-stale-lock`, oli jo filattu, lisätty repro-kommentti.)
 
 **Mitä tässä rupeamassa tehtiin:**
 - **0.8.1 sisältö (2 featurea + 1 bugfix, CHANGELOG `[0.8.1]`):** dag-polish — `issuectl dag` ei enää
@@ -54,32 +57,13 @@ on caret-vaatimus (`^0.7.0` = `<0.8.0`) → **rikkoi buildin** kun workspace-ver
 Korjaus: bumppaa tuo `version =` vastaamaan uutta minoria (0.7.0 → 0.8.0) samassa release-commitissa.
 Patch-bumpeissa (0.8.0 → 0.8.1) ei tarvita; vain minor/major-rajan ylitys vaatii tämän.
 
-**⚠️ Autonomy (ennallaan):** `AGENTS.md`:n operating-faktoissa: konduktööri saa tehdä releaset
-**JA päättää niistä autonomisesti** (ei go/no-go). 0.8.0 cutattiin sen nojalla.
+**⚠️ Autonomy (VAHVISTETTU tässä rupeamassa):** `AGENTS.md`:n operating-faktoissa deployt/releaset
+ovat **TÄYSIN autonomisia — ei go/no-go, ei output-reviewia** (käyttäjän eksplisiittinen ohje 2026-08-10:
+"deployt ja releaset saa tehdä automaattisesti"). 0.8.1 cutattiin sen nojalla.
 
-**0.8.0:n sisältö (2 homebase-research-featurea, CHANGELOG `[0.8.0]`):**
-- **@dag-scheduling-view (feature, done)** — kaksi valinnaista per-issue-scheduling-kenttää `lane`
-  + `collision` (frontmatter, `closed_by`-precedentti: absent-by-default, `canonical_hash`iin vain
-  kun asetettu → olemassa olevien issueiden version-tokenit EIVÄT muutu; verifoitu frozen-hash-
-  testillä; `SUPPORTED_SCHEMA_VERSION` EI noussut) + uusi `issuectl dag [--json] [--reservations
-  <file|-|json>]`-komento (`crates/issuectl-core/src/dag.rs`): join lane+order+blocked_by+live
-  status, head-of-line & spawnability ON READ (mitään ei talleteta), orkestraattori-agnostinen
-  (reservations caller-input). 4-model /llm-review sovellettu. → Consumerit voivat korvata käsin-
-  ylläpidetyn markdown-`## Execution DAG`-blockin lasketulla näkymällä.
-- **@default-slug-from-title (feature, done)** — `issuectl new "<title>"` ilman `--slug`:ia johtaa
-  nyt 2–3 sanan kebab-slugin otsikosta (stop-wordit pois, apostrofit, vain ASCII) satunnaisen
-  `intensifier-adjective-noun`in sijaan; dedupe numeroliitteellä (`base-2`…99). Satunnaismuoto
-  tavoitettavissa uudella `--slug-random`-flagilla + auto-fallbackina kun otsikko ei slugautu.
-  `--slug <x>` ennallaan. Intake + toistuvat pitävät satunnaismuodon tarkoituksella. AGENTS.md-
-  konventionootti ("CLI default is random") päivitetty + `/issue`-skilltemplatet synkattu. 4-model
-  /llm-review sovellettu.
-
-**❌ ossctl-release-polku EI toimi (päivitetty 0.8.1-cutissa):** `@wire-oss-release-as-release-path`
-retiroi `publish-crates.yml`:n ja osoitti docsit `ossctl release`-polulle, MUTTA ensimmäinen oikea
-cut paljasti että `ossctl release cut` ei todella julkaise (ks. ⚠️⚠️-blokki yllä). → **crates.io-
-julkaisu tehdään nyt manuaalisesti** `cargo publish`illa kunnes `@ossctl-cut-no-publish` korjattu.
-`publish-crates.yml` on poistettu, joten CI-polkuakaan ei ole — manuaalinen lokaali `cargo publish`
-on ainoa toimiva reitti juuri nyt. Tag → cargo-dist `release.yml` binääreille toimii normaalisti.
+**Aiemmat releaset (pointeri, ei toistoa):** 0.8.0 = `@dag-scheduling-view` (lane/collision-kentät +
+`issuectl dag`-view) + `@default-slug-from-title` (otsikkojohdettu default-slug). Täydet muutokset
+CHANGELOG `[0.8.0]`/`[0.8.1]`:ssä; ei toisteta tässä.
 
 **Dogfood:** Käyttäjä dogfoodaa issuectl:ää omissa projekteissaan. Asennus: `cargo install
 issuectl` (crates.io), `brew upgrade jarimustonen/issuectl/issuectl`, tai `cargo install
