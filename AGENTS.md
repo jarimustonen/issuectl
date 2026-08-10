@@ -163,6 +163,22 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
   (the same conclusion the four-way `closed_by` review reached).
   `@intensely-blushing-galley` is the contrasting case where the hash
   impact of typing *was* acceptable.
+- **`lane` / `collision` follow the `closed_by` (typed) precedent, not
+  the `blocked_by` (stays-in-`extra`) one.** The two scheduling-DAG
+  fields are typed `Option`s on `Issue`, lifted from the raw mapping by
+  the parser (a *string* `lane:`, a *list of strings* `collision:`;
+  malformed shapes stay in `extra`) and projected into `canonical_hash`
+  **only when `Some`** — so an issue that sets neither hashes identically
+  to the pre-field shape (pinned by `no_lane_collision_hashes_identically`
+  + the unchanged `golden_hash_with_title` vector). No
+  `SUPPORTED_SCHEMA_VERSION` bump: they are additive optional fields
+  inside the v1 format, and bumping would reject every repo's `version: 1`
+  `.schema.yaml`. Both are reserved custom-field keys — the only writers
+  are `update --lane` / `--add-collision`. The DAG *computation* lives in
+  `crate::dag` (head-of-line + spawnability computed on read, nothing
+  stored); `cmd_dag` in `main.rs` stays thin. Reservations are a
+  caller-supplied input (`--reservations`), never read from an
+  orchestrator — issuectl stays orchestrator-agnostic.
 - **Descriptive slugs are derived in the `/issue` skill; the CLI
   default is random.** `issuectl new` emits a random
   `intensifier-adjective-noun` slug when `--slug` is omitted. The

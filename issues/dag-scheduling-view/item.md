@@ -8,6 +8,8 @@ labels: [from-homebase-research]
 commits:
 - hash: bba2329
   summary: lane/collision schema fields + update write path
+- hash: 1818fd1
+  summary: issuectl dag scheduling-view command + tests
 ---
 
 # issuectl dag: lane/collision fields + a scheduling-DAG view command

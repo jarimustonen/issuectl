@@ -62,6 +62,10 @@ terminal too, but the design centre is the agent.
 **Lightweight planning.**
 - `depend add/remove` — canonical `blocked_by:` arrays; reverse
   `blocks:` derived at runtime; doctor flags cycles and self-deps.
+- `dag [--json]` — scheduling-DAG view over the optional `lane:` /
+  `collision:` fields: per-lane order, `blocked_by` mirror, and a
+  head-of-line + spawnability computed on read (`--reservations` feeds in
+  live run holds without coupling to any orchestrator).
 - `cycle current/plan/status` — Linear-style iterations via an
   optional `cycle: 2026-W22` frontmatter label.
 - `size:` / `estimate:` frontmatter + `workload` (open + in-progress
@@ -370,6 +374,54 @@ issuectl ls "blocked_by:none"            # ready to start
 reverse `blocks:` relationship is derived at runtime to avoid drift.
 `doctor` reports missing referenced slugs, self-dependencies, and
 cycles.
+
+### Scheduling DAG
+
+Two optional per-issue frontmatter fields let an orchestrator schedule
+parallel agent work without a second tool:
+
+- `lane:` — a scheduling group ("hot-file family"); at most one issue in
+  a lane runs at a time (spawn-time mutual exclusion).
+- `collision:` — a list of extra shared "hot file" tokens beyond the
+  lane that also force exclusion across lanes.
+
+```sh
+issuectl update <slug> --lane schema            # assign a lane
+issuectl update <slug> --add-collision path/to/shared.rs
+issuectl update <slug> --no-lane                # unassign
+
+issuectl dag                                    # human view
+issuectl dag --json                             # agent view (schema_version)
+issuectl dag --reservations run-holds.json      # account for in-flight runs
+```
+
+`issuectl dag` renders the DAG by joining `lane` + a deterministic
+per-lane order + the `blocked_by` mirror with **live status**, and
+computes the **head-of-line** (front of each lane's queue) and
+**spawnability** entirely on read — nothing is stored, so status stays
+issuectl's and the plan stays lanes+deps. An issue is `spawnable` when it
+is its lane's head-of-line, all its `blocked_by` dependencies are done,
+and none of its lane/collision tokens are reserved.
+
+issuectl stays orchestrator-agnostic: the one signal it cannot know alone
+— which lane/collision tokens an in-flight run currently holds — is
+supplied by the caller via `--reservations` (a file path, `-` for stdin,
+or an inline JSON string), shaped as `{"lanes":[…],"collision":[…]}` or an
+array of holds `[{"lane":…,"collision":[…]}]`. Without it, spawnability
+ignores reservations. issuectl never reaches into an orchestrator.
+
+`lane`/`collision` are absent by default and reserved from `set` /
+`update --field` (the only writers are `--lane` / `--add-collision`); an
+issue that sets neither hashes identically to one from before the fields
+existed, so adding them churns no version tokens.
+
+> **Migration note.** Projects that hand-maintained a markdown
+> `## Execution DAG` block in `TODO.md` can drop it: set `lane:` (and any
+> `collision:`) on the scheduled issues and read the live plan from
+> `issuectl dag [--json]` instead. The block was re-implementing what
+> issuectl already models (`blocked_by` edges + status); the fields move
+> the *scheduling group* into frontmatter and the *ordering/head-of-line*
+> into a computed-on-read view.
 
 ### Cycles, estimates, workload
 

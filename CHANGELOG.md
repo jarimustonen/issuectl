@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Two optional per-issue scheduling fields — `lane:` (a spawn-time
+  mutual-exclusion group) and `collision:` (extra shared "hot file" tokens)
+  — plus `issuectl dag [--json]`, which renders the scheduling DAG by
+  joining lane + a deterministic per-lane order + the `blocked_by` mirror
+  with live status, computing head-of-line and spawnability on read
+  (nothing stored). Set them with `update --lane` / `--no-lane` and
+  `--add-collision` / `--remove-collision` (reserved from `set` /
+  `--field`). `dag --reservations <file|-|json>` lets a caller feed in the
+  lane/collision tokens in-flight runs hold so spawnability is accurate
+  without issuectl coupling to any orchestrator. Both fields follow the
+  typed `closed_by` precedent: absent-by-default and projected into
+  `canonical_hash` only when set, so existing issues keep their version
+  tokens. Consumers can retire a hand-maintained `## Execution DAG`
+  markdown block in favour of the computed view. (issue:
+  `@dag-scheduling-view`)
+
 ## [0.7.2] - 2026-08-10
 
 ### Added

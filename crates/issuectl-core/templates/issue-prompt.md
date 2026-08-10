@@ -207,6 +207,7 @@ Common flags:
 - `--add-label LABEL` / `--remove-label LABEL` (repeatable)
 - `--add-related "@<slug>"` / `--remove-related "@<slug>"` (repeatable; bare slug also accepted)
 - `--add-commit HASH:summary` (repeatable)
+- `--lane NAME` / `--no-lane` and `--add-collision TOKEN` / `--remove-collision TOKEN` — optional scheduling-DAG hints (a lane is a spawn-time mutual-exclusion group; collision tokens are extra shared "hot files"). Only useful to an orchestrator; `issuectl dag [--json]` renders the resulting lanes, per-lane order, `blocked_by` mirror, and computed head-of-line (deterministic, AI-first). Pass `dag --reservations <file|-|json>` to have spawnability account for lane/collision tokens in-flight runs hold.
 
 Example flows:
 
