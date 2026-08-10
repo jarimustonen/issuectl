@@ -9,9 +9,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::repo_config::UncachedConfig;
 use issuectl_core::{
-    agents, body_sections, canonical, context, cycle as cycle_mod, docs, doctor, duplicates,
+    agents, body_sections, canonical, context, cycle as cycle_mod, dag, docs, doctor, duplicates,
     estimate as estimate_mod, fmt, hooks, init as init_cmd, merge_driver, models, mutate, query,
-    recurrence, repo, report as report_mod, server, skill, slug, sync_commits,
+    recurrence, repo, report as report_mod, schema, server, skill, slug, sync_commits,
 };
 
 const TOP_LEVEL_HELP: &str = "\
@@ -1294,6 +1294,23 @@ enum Command {
         action: DependAction,
     },
 
+    /// Render the scheduling DAG: lanes, per-lane order, `blocked_by`
+    /// mirror, and a computed head-of-line, all derived on read from the
+    /// `lane` / `collision` fields joined with live status. Deterministic
+    /// and AI-first (`--json` carries `schema_version`). Optionally pass
+    /// `--reservations` so spawnability accounts for the lane/collision
+    /// tokens an orchestrator's in-flight runs already hold; issuectl
+    /// never reads that from orchestratectl itself.
+    Dag {
+        /// Caller-supplied live run reservations, as JSON. Accepts a file
+        /// path, `-` for stdin, or an inline JSON string. Shapes:
+        /// `{"lanes":[..],"collision":[..]}` or an array of holds
+        /// `[{"lane":..,"collision":[..]}]`. Without it, spawnability
+        /// ignores reservations (head-of-line reported spawnable).
+        #[arg(long, value_parser = parse_non_empty)]
+        reservations: Option<String>,
+    },
+
     /// Linear-style lightweight cycles (iterations).
     ///
     /// Issues opt in via an optional `cycle:` frontmatter label
@@ -2444,6 +2461,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 expected_version,
             } => cmd_depend(json_output, &slug, blocked_by, false, expected_version),
         },
+        Command::Dag { reservations } => cmd_dag(json_output, reservations),
         Command::Workload => cmd_workload(json_output),
         Command::Burndown { cycle } => cmd_burndown(json_output, &cycle),
         Command::Cycle { action } => match action {
@@ -5072,6 +5090,91 @@ fn cmd_label(
     let outcome = mutate::update_issue(&root, slug, req, None, &UncachedConfig)
         .map_err(anyhow::Error::new)?;
     finish_mutation(json, slug, &outcome, dry_run, "Updated labels for")
+}
+
+fn cmd_dag(json: bool, reservations: Option<String>) -> Result<()> {
+    let root = find_root();
+    let issues = load();
+    let schema = schema::load(&root)?;
+    let reservations = reservations
+        .map(|src| load_reservations(&src))
+        .transpose()?;
+    let view = dag::compute(&issues, &schema, reservations.as_ref());
+    if json {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        print_dag_human(&view);
+    }
+    Ok(())
+}
+
+/// Resolve the `--reservations` argument (a file path, `-` for stdin, or
+/// an inline JSON string) into a parsed [`dag::Reservations`].
+fn load_reservations(src: &str) -> Result<dag::Reservations> {
+    let text = if src == "-" {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+            .context("cannot read reservations from stdin")?;
+        buf
+    } else if Path::new(src).is_file() {
+        fs::read_to_string(src).with_context(|| format!("cannot read reservations file {src}"))?
+    } else {
+        // Treat as inline JSON.
+        src.to_string()
+    };
+    let value: serde_json::Value = serde_json::from_str(&text).with_context(|| {
+        format!("reservations is neither a readable file nor valid JSON: {src:?}")
+    })?;
+    dag::Reservations::from_json(&value).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Human-readable rendering of the scheduling DAG. `--json` is the
+/// machine contract; this is the terminal view.
+fn print_dag_human(view: &dag::DagView) {
+    let mark = |i: &dag::DagIssue| -> &'static str {
+        if i.spawnable {
+            "▶"
+        } else if i.is_head_of_line {
+            "◆"
+        } else {
+            " "
+        }
+    };
+    if view.lanes.is_empty() && view.unscheduled.is_empty() {
+        println!("(no issues)");
+        return;
+    }
+    for lane in &view.lanes {
+        let head = lane.head_of_line.as_deref().unwrap_or("—");
+        println!("lane {} (head-of-line: {head})", lane.lane);
+        for i in &lane.issues {
+            print_dag_row(mark(i), i);
+        }
+        println!();
+    }
+    if !view.unscheduled.is_empty() {
+        println!("unscheduled");
+        for i in &view.unscheduled {
+            print_dag_row(mark(i), i);
+        }
+    }
+}
+
+fn print_dag_row(mark: &str, i: &dag::DagIssue) {
+    let mut suffix = String::new();
+    if !i.blockers_open.is_empty() {
+        suffix.push_str(&format!(" blocked-by:{}", i.blockers_open.join(",")));
+    }
+    if i.reserved {
+        suffix.push_str(" [reserved]");
+    }
+    if !i.collision.is_empty() {
+        suffix.push_str(&format!(" collision:{}", i.collision.join(",")));
+    }
+    println!(
+        "  {mark} {:<28} {:<12} {}{}",
+        i.slug, i.status, i.title, suffix
+    );
 }
 
 fn cmd_depend(

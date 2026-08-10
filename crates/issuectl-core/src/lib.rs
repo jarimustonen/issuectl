@@ -33,6 +33,8 @@ pub mod context;
 #[doc(hidden)]
 pub mod cycle;
 #[doc(hidden)]
+pub mod dag;
+#[doc(hidden)]
 pub mod docs;
 #[doc(hidden)]
 pub mod doctor;

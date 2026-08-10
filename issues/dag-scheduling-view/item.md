@@ -5,6 +5,9 @@ type: feature
 status: in-progress
 priority: normal
 labels: [from-homebase-research]
+commits:
+- hash: bba2329
+  summary: lane/collision schema fields + update write path
 ---
 
 # issuectl dag: lane/collision fields + a scheduling-DAG view command
