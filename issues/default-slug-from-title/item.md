@@ -2,11 +2,16 @@
 created: 2026-08-10
 updated: 2026-08-10
 type: feature
-status: in-progress
+status: done
 priority: normal
 commits:
 - hash: pending
   summary: file feature
+- hash: 15a81454
+  summary: 'feat(slug): derive default new-issue slug from title'
+- hash: c8337c14
+  summary: 'fix(slug): apply llm-review findings'
+closed: 2026-08-10
 ---
 
 # issuectl new: derive default slug from title instead of random words
