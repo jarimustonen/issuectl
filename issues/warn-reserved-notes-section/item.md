@@ -2,13 +2,14 @@
 created: 2026-08-10
 updated: 2026-08-10
 type: feature
-status: in-progress
+status: done
 priority: low
 commits:
 - hash: '44267e7'
   summary: 'warn at authoring time on reserved ## Notes section'
 - hash: d03fc38
   summary: review fixes - raw-body scan, wording, tests
+closed: 2026-08-10
 ---
 
 # Warn at authoring time when an issue body uses the reserved '## Notes' section
