@@ -101,19 +101,23 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: (none active) — ainoa ei-deferred issue on build-only-if; nosta backlogista
+GLOBAL HEAD-OF-LINE: dag-inprogress-spawnable
+LANE A — issuectl dag (dag.rs + schema.rs + cmd_dag in main.rs) — "dag-polish", yksi worktree tekee kaikki 3 sarjassa
+  ▶ dag-inprogress-spawnable       bug · dag raportoi spawnable=true vaikka status in-progress → kaksoisspawn-riski
+    dag-stable-intralane-order     feature · valinnainen lane_seq:<int> intra-lane-sort (ennen slug-tie-breakia); schema.rs-kenttä
+    dag-unlaned-parallel-sentinel  feature · ensiluokkainen confirmed-parallel-safe -merkki (varattu lane: unlaned) vs. puuttuva lane; schema.rs-kenttä
 LANE B — skill install + templates/ + skill.rs (skill distribution)
-    awfully-courageous-attempt  low · feature; Codex-prompt-variantit /issue-new + /issue-intakelle (frontmatter-strip kuten /issuella). Build-only-if: vain jos Codex-käyttö todistuu.
+    codex-prompt-variants  low · feature; Codex-prompt-variantit /issue-new + /issue-intakelle. Build-only-if: vain jos Codex-käyttö todistuu.
+LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl) — disjoint LANE A:sta, rinnakkaisturvallinen
+  ▶ wire-oss-release-as-release-path  feature · siirrä julkaisu /oss-release-polulle; ossctl valmis. Korjaa myös crates.io-manuaalitriggerin.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: tämä oli **siivous-/linjausrupeama** (ei koodia, ei releasea). Suljettiin phantom-bug
-`json-show-omits-blocked-by` (`cannot-reproduce`) ja **linjattiin web-UI:n poisto**: 13 selain/kanban-
-issueä `obsolete`, luotu portitettu `@remove-web-ui` (deferred), ja `massively-periodic-surprise` /
-`needlessly-slippery-pan` re-scopattiin CLI-only + uudelleennimettiin → `@issue-graph-view` /
-`@epic-tree-view`. DAG:sta pudotettu `json-show-omits-blocked-by` (suljettu). LANE A tyhjä.
-**`awfully-courageous-attempt`** (low, build-only-if) pysyy LANE B:ssä parkissa. Ei-deferred työ on
-käytännössä loppu — seuraava rupeama nostaa backlogista (todennäk. `@focus-areas`) tai uudesta intakesta.
+Kaari-lyhyesti: siivous-/linjausrupeaman jälkeen homebase-dogfood filasi 3 `dag-*`-gappia (committi
+`03ab843`) jotka hiovat 0.8.0:n `issuectl dag`-komentoa → **LANE A "dag-polish"** (bug + 2 schema-kenttää,
+yksi worktree sarjassa). ossctl valmistui → **`@wire-oss-release-as-release-path` un-deferoitu** LANE C:hen
+(rinnakkainen). Molemmat production-koodia → `/llm-review` ennen mergeä. `codex-prompt-variants` (ent.
+awfully-courageous-attempt) pysyy LANE B:ssä build-only-if-parkissa.
 
 ---
 
