@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-10
+
+### Added
+- `issuectl close --comment/--note "<text>"` attaches a timestamped
+  `## Resolution` block to the issue body in the same atomic write, composing
+  with `--status` / `--as` / `--commit`. (issue: `@close-comment`)
+- `closed_by` is now a typed first-class field rather than an `extra` map
+  entry: it is folded into `canonical_hash` (back-compat preserved), validated
+  by the schema, `doctor`-healed on active statuses, and surfaced in both
+  `show --json` (top-level) and human `show` ("Closed by:"); human `close`
+  echoes "(by <author>)" under `--as`. Legacy `extra["closed_by"]` migrates on
+  read. (issue: `@intensely-blushing-galley`)
+
+### Fixed
+- `--json show`, `ls`, and `search` now surface `blocked_by` as a top-level,
+  canonical `@`-prefixed list (plus a derived `blocks` reverse view on `show`)
+  instead of burying it under `.extra`, where the top-level `.blocked_by` read
+  as `null` on every path. Programmatic consumers reading `.blocked_by` now get
+  the real value uniformly; a shared `project_blocked_by` projection keeps a
+  single representation on the wire. (issues: `@show-json-omits-blocked-by`,
+  `@json-blocked-by-null-top-level`)
+
 ## [0.7.1] - 2026-08-06
 
 ### Added
