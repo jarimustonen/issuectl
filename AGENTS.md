@@ -147,6 +147,22 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
   (see its `lib.rs` doc comment) — `pub` items there are *not* a
   semver contract. The semver contract lives in the `issuectl`
   binary's CLI surface.
+- **`blocked_by` stays in `extra`; its JSON top-level is a *canonical
+  projection*, not a typed field.** Unlike `closed_by` (typed) or
+  `related`/`labels` (plain-serialized), `blocked_by` is deliberately
+  kept as a raw `extra` map entry: it is folded into `canonical_hash`
+  as the raw user-written value, so promoting it to a typed
+  `Frontmatter` field would change **every existing issue's version
+  token**. `show` / `ls` / `search --json` surface it at top level via
+  the shared `project_blocked_by` helper (sorted/deduped/`@`-prefixed
+  canonical list; the raw `extra.blocked_by` is stripped so there is one
+  wire representation, plus a derived `blocks` reverse view on `show`).
+  Do **not** "fix" the historical top-level-`null` shape by typing the
+  field — that regression was considered and rejected in
+  `@show-json-omits-blocked-by` / `@json-blocked-by-null-top-level`
+  (the same conclusion the four-way `closed_by` review reached).
+  `@intensely-blushing-galley` is the contrasting case where the hash
+  impact of typing *was* acceptable.
 - **Descriptive slugs are derived in the `/issue` skill; the CLI
   default is random.** `issuectl new` emits a random
   `intensifier-adjective-noun` slug when `--slug` is omitted. The
@@ -291,7 +307,12 @@ policy.
   crates.io caveat below). No go/no-go handoff is required. (Granted
   2026-08-10; supersedes the earlier go/no-go rule.) Use judgement on
   *timing* — batch trivial changes, don't tag a red or half-landed
-  `main` — but the decision itself is yours.
+  `main` — but the decision itself is yours. **Autonomous crates.io
+  recipe:** after the tag push, background `gh run watch
+  <release-run-id> --exit-status && gh workflow run "Publish to
+  crates.io" --ref main` so the crates.io publish fires automatically
+  the moment `release.yml` goes green — this satisfies the manual-trigger
+  caveat without a human in the loop (used for 0.7.2).
 - **Live-version check.** Shipped: `git tag --sort=-creatordate | head
   -1` and `grep '^version' Cargo.toml`. Published: crates.io / the
   Homebrew tap. Compare against `main` before recommending a release.
