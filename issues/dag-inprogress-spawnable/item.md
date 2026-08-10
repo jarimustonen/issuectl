@@ -2,8 +2,12 @@
 created: 2026-08-10
 updated: 2026-08-10
 type: bug
-status: in-progress
+status: fixed
 priority: normal
+commits:
+- hash: 33c8e93
+  summary: fix in-progress issue never spawnable
+closed: 2026-08-10
 ---
 
 # issuectl dag reports spawnable=true for in-progress issues

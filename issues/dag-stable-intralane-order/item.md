@@ -2,8 +2,12 @@
 created: 2026-08-10
 updated: 2026-08-10
 type: feature
-status: in-progress
+status: done
 priority: normal
+closed: 2026-08-10
+commits:
+- hash: 33c8e93
+  summary: lane_seq intra-lane ordering key
 ---
 
 # issuectl dag: stable intra-lane ordering key (lane_seq)

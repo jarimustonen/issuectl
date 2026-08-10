@@ -2,8 +2,12 @@
 created: 2026-08-10
 updated: 2026-08-10
 type: feature
-status: in-progress
+status: done
 priority: normal
+closed: 2026-08-10
+commits:
+- hash: 33c8e93
+  summary: unlaned parallel-safe lane sentinel
 ---
 
 # issuectl dag: explicit parallel-safe (unlaned) sentinel distinct from absent lane
