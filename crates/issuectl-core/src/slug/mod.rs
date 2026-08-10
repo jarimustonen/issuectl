@@ -56,6 +56,92 @@ pub fn generate() -> String {
     )
 }
 
+/// Maximum number of words kept in a title-derived slug. Two is the
+/// floor enforced by [`is_valid`]; three keeps a long title readable
+/// without letting it sprawl into the directory / branch name.
+const DERIVED_SLUG_MAX_WORDS: usize = 3;
+
+/// Common English stop-words dropped from a title before deriving a slug,
+/// so `"Fix the login bug"` yields `fix-login-bug` rather than
+/// `fix-the-login`. Deliberately short — only high-frequency function
+/// words that never carry the identifying meaning of an issue title.
+const STOP_WORDS: &[&str] = &[
+    "a", "an", "the", "of", "to", "for", "in", "on", "at", "by", "and", "or", "is", "are", "be",
+    "was", "were", "with", "from", "this", "that", "it", "its", "as", "when", "no", "not", "we",
+    "you", "i", "do", "does", "did", "should", "would", "could", "can", "will",
+];
+
+/// Derive a descriptive 2–3 word kebab slug from an issue `title`.
+///
+/// Lowercases, tokenizes on any non-alphanumeric boundary, drops
+/// [`STOP_WORDS`], and joins the first [`DERIVED_SLUG_MAX_WORDS`] content
+/// words with `-`. Returns `None` when the title yields no sensible slug —
+/// empty/whitespace/punctuation-only, all stop-words, only one usable
+/// word, or non-ASCII words that cannot form a valid ASCII slug (e.g. a
+/// Finnish `"Käyttäjän virhe"`). The caller falls back to a random slug in
+/// that case. The result is guaranteed to satisfy [`is_valid`].
+///
+/// Pure and deterministic — no repo access, no collision handling. The
+/// dedupe against existing directories is the caller's concern (the
+/// derived-slug claim loop in `do_new_locked`).
+pub fn derive_from_title(title: &str) -> Option<String> {
+    let words = candidate_words(title);
+    if words.is_empty() {
+        return None;
+    }
+    // Prefer content words (stop-words stripped). Only fall back to the
+    // raw word list if stripping would leave fewer than two segments, so
+    // a terse title like "The bug" still derives `the-bug` rather than
+    // going random.
+    let content: Vec<&String> = words
+        .iter()
+        .filter(|w| !STOP_WORDS.contains(&w.as_str()))
+        .collect();
+    let chosen: Vec<String> = if content.len() >= 2 {
+        content
+            .into_iter()
+            .take(DERIVED_SLUG_MAX_WORDS)
+            .cloned()
+            .collect()
+    } else {
+        words.iter().take(DERIVED_SLUG_MAX_WORDS).cloned().collect()
+    };
+    if chosen.len() < 2 {
+        return None;
+    }
+    let slug = chosen.join("-");
+    // Belt-and-braces: `candidate_words` already guarantees ASCII
+    // lowercase/digit segments, so this holds by construction — but gate
+    // on it so the function's contract (a valid slug or `None`) can never
+    // be violated by a future change to the tokenizer.
+    is_valid(&slug).then_some(slug)
+}
+
+/// Tokenize `title` into lowercase words, keeping only words made purely
+/// of ASCII `[a-z0-9]`. Words containing a non-ASCII letter (Finnish ä/ö,
+/// accents, CJK, …) are dropped whole rather than mangled, so such titles
+/// surface as "too few usable words" and route to the random fallback.
+fn candidate_words(title: &str) -> Vec<String> {
+    let lowered = title.to_lowercase();
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in lowered.chars() {
+        if ch.is_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words.retain(|w| {
+        w.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    });
+    words
+}
+
 /// Generate a slug that does not collide with an existing directory under
 /// `issues/{open,closed}/<slug>/`. Loops up to [`COLLISION_RETRY_CAP`]
 /// times. With ~105M combinations (1094 intensifiers' worth ≈ 99 ×
@@ -197,6 +283,82 @@ mod tests {
         assert!(!is_valid("Foo-bar"));
         assert!(!is_valid("käyttäjän-virhe"));
         assert!(!is_valid("foo-bar_baz"));
+    }
+
+    #[test]
+    fn derive_from_title_kebabs_and_trims_to_three_words() {
+        assert_eq!(
+            derive_from_title("Login redirect loops on safari"),
+            Some("login-redirect-loops".into())
+        );
+        // Punctuation and case are normalized away.
+        assert_eq!(
+            derive_from_title("Fix: Login, Redirect!"),
+            Some("fix-login-redirect".into())
+        );
+    }
+
+    #[test]
+    fn derive_from_title_strips_stop_words() {
+        assert_eq!(
+            derive_from_title("Fix the login bug"),
+            Some("fix-login-bug".into())
+        );
+        assert_eq!(
+            derive_from_title("Improve performance of the search index"),
+            // "of"/"the" dropped → first three content words.
+            Some("improve-performance-search".into())
+        );
+    }
+
+    #[test]
+    fn derive_from_title_keeps_raw_words_when_stripping_leaves_too_few() {
+        // Only one content word survives stop-word removal ("bug"), so the
+        // raw word list is used instead of falling back to random.
+        assert_eq!(derive_from_title("The bug"), Some("the-bug".into()));
+    }
+
+    #[test]
+    fn derive_from_title_returns_none_for_unsluggable_titles() {
+        assert_eq!(derive_from_title(""), None);
+        assert_eq!(derive_from_title("   "), None);
+        assert_eq!(derive_from_title("!!! ??? ..."), None);
+        // All stop-words → nothing meaningful, and fewer than two words.
+        assert_eq!(derive_from_title("the"), None);
+        // Single meaningful word cannot form a ≥2-segment slug.
+        assert_eq!(derive_from_title("Login"), None);
+    }
+
+    #[test]
+    fn derive_from_title_returns_none_for_non_ascii_titles() {
+        // Finnish letters can't form a valid ASCII slug; drop those words.
+        assert_eq!(derive_from_title("Käyttäjän virhe"), None);
+        // Mixed: non-ASCII words are dropped, ASCII words still derive.
+        assert_eq!(
+            derive_from_title("Käyttäjän login redirect"),
+            Some("login-redirect".into())
+        );
+    }
+
+    #[test]
+    fn derive_from_title_keeps_digits() {
+        assert_eq!(
+            derive_from_title("Fix api v2 redirect"),
+            Some("fix-api-v2".into())
+        );
+    }
+
+    #[test]
+    fn derive_from_title_output_is_always_valid() {
+        for t in [
+            "Login redirect loops",
+            "Fix the login bug",
+            "api v2 migration plan",
+            "The bug",
+        ] {
+            let s = derive_from_title(t).unwrap();
+            assert!(is_valid(&s), "{t:?} derived invalid slug {s:?}");
+        }
     }
 
     #[test]

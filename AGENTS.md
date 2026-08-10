@@ -179,11 +179,23 @@ tail -n +5 templates/issue-skill.md > templates/issue-prompt.md
   stored); `cmd_dag` in `main.rs` stays thin. Reservations are a
   caller-supplied input (`--reservations`), never read from an
   orchestrator — issuectl stays orchestrator-agnostic.
-- **Descriptive slugs are derived in the `/issue` skill; the CLI
-  default is random.** `issuectl new` emits a random
-  `intensifier-adjective-noun` slug when `--slug` is omitted. The
-  `--slug` collision error lives only in the explicit-`--slug` arm of
-  `do_new`; the random path retries internally in `claim_random_slug`.
+- **The CLI default slug is title-derived; random is the opt-in/
+  fallback.** `issuectl new "<title>"` with no `--slug` derives a
+  descriptive 2–3 word kebab slug from the title (the pure
+  `slug::derive_from_title` helper in `issuectl-core`), lowercasing,
+  stripping stop-words, and trimming to a clean slug. The random
+  `intensifier-adjective-noun` form is reachable explicitly via
+  `--slug-random` and is the automatic fallback when the title yields
+  no sensible slug (empty/all-stop-words/non-ASCII). `--slug <x>` stays
+  authoritative when passed. Three collision paths, three shapes, do
+  **not** cross-wire them: the explicit-`--slug` arm of `do_new` errors
+  on collision; the derived-default path disambiguates silently with a
+  numeric suffix (`-2`, `-3`, …) in its own `claim_derived_slug` loop;
+  the random path retries internally in `claim_random_slug`. The
+  non-`new` programmatic callers choose deliberately: `intake file` and
+  recurring occurrences force `slug_random` (untrusted/sensitive titles;
+  many occurrences of one title), while `import` and the server `new`
+  endpoint inherit the title-derived default.
 - **Doctor `--fix` is forward-progress only.** When the apply
   pipeline mutates the repo (flat-layout migration, status
   reconciliation, notes rename, ...) and a *later* phase finds a new

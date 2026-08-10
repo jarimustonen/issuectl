@@ -666,6 +666,66 @@ fn json_remaining_verbs_tokenless_writes_succeed_with_version() {
     );
 }
 
+/// End-to-end: with no `--slug`, the built binary derives the slug from
+/// the title (the flipped default). Observed through the `--json` payload
+/// and the on-disk directory the process created — neither visible to an
+/// inline test.
+#[test]
+fn new_without_slug_derives_from_title() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "new",
+            "--type",
+            "bug",
+            "--title",
+            "Login redirect loops on safari",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("new stdout should be JSON");
+    assert_eq!(v["slug"], "login-redirect-loops", "{}", dump(&out));
+    assert!(
+        tmp.path()
+            .join("issues/login-redirect-loops/item.md")
+            .is_file(),
+        "{}",
+        dump(&out)
+    );
+}
+
+/// `--slug-random` and `--slug` are mutually exclusive — a clap-level
+/// conflict observable only through the built binary's arg parser (exit 2,
+/// "cannot be used with"). An explicit slug always wins, so forcing random
+/// at the same time is a usage error rather than a silent precedence rule.
+#[test]
+fn new_slug_random_conflicts_with_slug() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &[
+            "new",
+            "--type",
+            "bug",
+            "--title",
+            "x",
+            "--slug",
+            "ab-cd",
+            "--slug-random",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", dump(&out));
+    assert!(out.stdout.is_empty(), "{}", dump(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "stderr was: {stderr:?}"
+    );
+}
+
 #[test]
 fn new_validation_owner_on_non_epic_fails() {
     let tmp = fresh_repo();

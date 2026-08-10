@@ -4,7 +4,7 @@
 Manage issues and epics in `issues/` using the `issuectl` CLI as the primary
 interface. The user's message determines the action:
 
-- **Create**: user describes a problem, task, or feature → `issuectl new --slug <descriptive-2-3-word-kebab> ...` (see "Identifiers" for slug policy)
+- **Create**: user describes a problem, task, or feature → `issuectl new "<title>" ...` (the slug is derived from the title by default; see "Identifiers" for slug policy)
 - **Search/list**: user asks to find, list, or check issues → `issuectl ls`, `issuectl show`, `issuectl search`
 - **Close**: user says an issue is done/resolved → `issuectl close <slug>`
 - **Update**: user wants to change status, assignee, or other details → `issuectl update <slug> ...`
@@ -77,14 +77,16 @@ first invocation in a session, run `issuectl --version` and compare:
 ## Identifiers
 
 Issues are identified by short kebab-case slugs (the primary key in
-every command that takes an issue argument). **Prefer a descriptive
-2-3 word slug derived from the title** (e.g. `login-redirect-loops`)
-by passing `--slug` on `issuectl new` — the slug shows up in directory
-names, branch names, and every agent command, so making it
-recognizable pays off. The CLI generates a random
-`intensifier-adjective-noun` slug (e.g. `extremely-quiet-otter`) only
-as a fallback when `--slug` is omitted or no obvious short slug exists
-(see "Action: Create → step 2" for the operational details). Body
+every command that takes an issue argument). By default `issuectl new`
+**derives a descriptive 2-3 word slug from the title** (e.g.
+`login-redirect-loops`) — the slug shows up in directory names, branch
+names, and every agent command, so a recognizable one pays off. Pass
+`--slug` to override the derived default with an explicit slug. The CLI
+falls back to a random `intensifier-adjective-noun` slug (e.g.
+`extremely-quiet-otter`) only when the title yields no sensible slug, or
+when you force it with `--slug-random` (for a title that would leak
+sensitive data) — see "Action: Create → step 2" for the operational
+details. Body
 cross-references use `@<slug>` form. The `epic:` and `related:`
 frontmatter fields store bare slugs / `@<slug>` strings (no leading
 `#NN`).
@@ -365,29 +367,33 @@ suggest creating an epic instead.
 
 #### 2. Create with the CLI
 
-**Prefer a descriptive slug.** Derive a short, human-readable 2-3 word
-kebab-case slug from the title and pass it via `--slug` (e.g. "Login
-redirect loops on safari" → `--slug login-redirect-loops`). Pick the words
-that make the issue recognizable at a glance; drop filler. When no obvious
-short slug exists (vague title, mostly stopwords, or fewer than two
-meaningful words remain), **omit `--slug`** and let the CLI generate a
-random `intensifier-adjective-noun` slug. Never put sensitive data
-(customer names, emails, secrets) in the slug — it lands in the directory
-name and git history; omit `--slug` for a random one instead. If `--slug`
-collides with an existing issue, the CLI errors — retry with a different
-descriptive slug or omit it for a random one.
+**The slug is derived from the title by default.** `issuectl new "Login
+redirect loops on safari"` auto-derives `login-redirect-loops` — lowercased,
+stop-words stripped, trimmed to 2-3 words — so you normally don't pass
+`--slug` at all. If the derived slug collides with an existing issue, the
+CLI silently disambiguates with a numeric suffix (`-2`, `-3`, …). Pass an
+explicit `--slug <kebab>` only to override the derived default with a
+different descriptive slug; an explicit `--slug` that collides errors
+(retry with a different slug). When the title would leak sensitive data
+(customer names, emails, secrets) into the directory name and git history,
+pass **`--slug-random`** to force a random `intensifier-adjective-noun`
+slug instead. The CLI also falls back to a random slug automatically when
+the title yields no sensible slug (empty, all stop-words, or non-ASCII).
 
 ```
 issuectl --json new \
     --type bug \
     --title "Login redirect loops on safari" \
-    --slug login-redirect-loops \
     --reporter alice \
     --assignee bob \
     --priority normal \
     --source "frontend/login" \
     --description "Users get stuck in a 302 loop after SSO redirect."
 ```
+
+(The slug is derived from the title — `login-redirect-loops` here — so no
+`--slug` is needed. Add `--slug <kebab>` to override, or `--slug-random`
+to force a random slug.)
 
 `create` is accepted as an alias for `new`, and `--body` as an alias
 for `--description`, so `issuectl --json create --type task --title X
@@ -417,15 +423,15 @@ issuectl --json new --type epic --title "API v2 migration" --owner cara --priori
 Output shape:
 
 ```json
-{ "slug": "extremely-quiet-otter",
+{ "slug": "login-redirect-loops",
   "title": "Login redirect loops on safari",
-  "item_path": "/abs/path/issues/open/extremely-quiet-otter/item.md",
-  "dir": "/abs/path/issues/open/extremely-quiet-otter" }
+  "item_path": "/abs/path/issues/open/login-redirect-loops/item.md",
+  "dir": "/abs/path/issues/open/login-redirect-loops" }
 ```
 
 The CLI:
 - Uses `--slug <kebab>` when given (validated: ≥2 lowercase ASCII kebab segments)
-- Falls back to a random `intensifier-adjective-noun` slug when `--slug` is omitted
+- Otherwise derives a 2-3 word kebab slug from the title (numeric suffix on collision); `--slug-random`, or an unsluggable title, yields a random `intensifier-adjective-noun` slug instead
 - Writes `issues/open/<slug>/item.md` with the right frontmatter
 - Returns the slug and path in `--json` (parse `.slug`)
 
@@ -619,7 +625,7 @@ On `--fix`, the JSON envelope carries an `apply_outcome` object with a
 
 - **Today's date** is set automatically by the CLI for `created`/`updated`
 - Write issue content in English; Finnish text is fine in the body
-- Prefer a descriptive 2-3 word `--slug` derived from the title (see Create → step 2); fall back to the random `intensifier-adjective-noun` slug only when no obvious short slug exists
+- The slug is derived from the title by default (see Create → step 2); pass `--slug` to override, or `--slug-random` when the title would leak sensitive data
 - Default priority is `normal`; default status is `open` (except the intake
   flow, which files into `untriaged` via `issuectl intake file` — see "Action:
   Intake")

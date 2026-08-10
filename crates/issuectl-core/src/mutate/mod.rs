@@ -3002,6 +3002,11 @@ pub fn new_issue(
             issue_type: req.issue_type,
             title: req.title,
             slug: req.slug,
+            // Server-side `new` mirrors the CLI: a `None` slug derives from
+            // the title (with random fallback). The API has no `--slug-random`
+            // knob; a caller wanting a random slug omits `slug` on an
+            // unsluggable title, or passes an explicit one.
+            slug_random: false,
             reporter: req.reporter,
             assignee: req.assignee,
             owner: req.owner,

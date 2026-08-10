@@ -202,6 +202,9 @@ impl ImportRecord {
             issue_type,
             title: self.title,
             slug: None,
+            // Imported records carry real, distinct titles: derive a
+            // readable slug (with random fallback) just like `issuectl new`.
+            slug_random: false,
             reporter: if is_epic { None } else { self.reporter },
             assignee: if is_epic { None } else { self.assignee },
             owner: if is_epic { self.owner } else { None },

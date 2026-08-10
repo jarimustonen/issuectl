@@ -518,6 +518,10 @@ fn materialize(
         issue_type: def.file.issue_type.clone().unwrap_or_else(|| "task".into()),
         title: def.file.title.clone(),
         slug: None,
+        // Recurring occurrences all share the template's title, so a
+        // title-derived slug would collide every period and burn through
+        // the numeric-suffix namespace. Keep the random slug per occurrence.
+        slug_random: true,
         reporter: def.file.reporter.clone(),
         assignee: def.file.assignee.clone(),
         owner: None,

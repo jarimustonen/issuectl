@@ -431,9 +431,17 @@ enum Command {
         #[arg(long = "title", value_name = "TITLE", value_parser = parse_non_empty)]
         title_flag: Option<String>,
 
-        /// Descriptive 2-3 word kebab-case slug derived from the title (e.g. `login-redirect-loops`). Omit to fall back to a random `intensifier-adjective-noun` slug — only do that when no obvious short slug exists or the title would leak sensitive data
+        /// Explicit descriptive 2-3 word kebab-case slug (e.g. `login-redirect-loops`), authoritative when passed. Omit to auto-derive a kebab slug from the title (collisions get a numeric suffix); a title with no sensible slug falls back to a random one. Use `--slug-random` to force the random form
         #[arg(long, value_parser = parse_non_empty)]
         slug: Option<String>,
+
+        /// Force a random `intensifier-adjective-noun` slug instead of the
+        /// title-derived default. Use when the title would leak sensitive
+        /// data (customer names, emails, secrets) into the directory /
+        /// branch name, or when the derived slug just isn't wanted. Ignored
+        /// if `--slug` is given (an explicit slug always wins).
+        #[arg(long = "slug-random", conflicts_with = "slug")]
+        slug_random: bool,
 
         /// Reporter username (issues only)
         #[arg(long, value_parser = parse_non_empty)]
@@ -2135,6 +2143,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             title_pos,
             title_flag,
             slug,
+            slug_random,
             reporter,
             assignee,
             owner,
@@ -2175,6 +2184,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
                         )
                     })?,
                     slug,
+                    slug_random,
                     reporter,
                     assignee,
                     owner,
@@ -6348,6 +6358,7 @@ mod tests {
             issue_type: t.to_string(),
             title: title.to_string(),
             slug: None,
+            slug_random: false,
             reporter: None,
             assignee: None,
             owner: None,

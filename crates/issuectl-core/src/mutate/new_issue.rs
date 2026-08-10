@@ -50,6 +50,12 @@ pub struct NewArgs {
     pub issue_type: String,
     pub title: String,
     pub slug: Option<String>,
+    /// Force a random `intensifier-adjective-noun` slug instead of the
+    /// title-derived default (`issuectl new --slug-random`). Ignored when
+    /// `slug` is `Some` — an explicit `--slug` always wins. Use this for a
+    /// title that would leak sensitive data into the directory / branch
+    /// name, or when the derived slug simply isn't wanted.
+    pub slug_random: bool,
     pub reporter: Option<String>,
     pub assignee: Option<String>,
     pub owner: Option<String>,
@@ -76,6 +82,7 @@ impl Default for NewArgs {
             issue_type: "bug".into(),
             title: String::new(),
             slug: None,
+            slug_random: false,
             reporter: None,
             assignee: None,
             owner: None,
@@ -342,7 +349,33 @@ pub(crate) fn do_new_locked(
                 }
             }
         }
-        None => claim_random_slug(root, &issues_parent).map_err(DoNewError::Io)?,
+        None => {
+            // Default: derive a descriptive kebab slug from the title
+            // (with its own numeric-suffix dedupe). The random
+            // `intensifier-adjective-noun` form is reachable explicitly
+            // via `--slug-random`, and is the automatic fallback when the
+            // title yields no sensible slug (empty/all-stop-words/
+            // non-ASCII) or the derived namespace is saturated. This path
+            // does NOT route through the explicit-`--slug` conflict arm
+            // above — a derived collision disambiguates silently rather
+            // than erroring at the caller.
+            let derived = if args.slug_random {
+                None
+            } else {
+                slug::derive_from_title(&args.title)
+            };
+            match derived {
+                Some(base) => {
+                    match claim_derived_slug(root, &issues_parent, &base, args.inbox)
+                        .map_err(DoNewError::Io)?
+                    {
+                        Some(claimed) => claimed,
+                        None => claim_random_slug(root, &issues_parent).map_err(DoNewError::Io)?,
+                    }
+                }
+                None => claim_random_slug(root, &issues_parent).map_err(DoNewError::Io)?,
+            }
+        }
     };
 
     let item_path = dir.join("item.md");
@@ -367,6 +400,63 @@ pub(crate) fn do_new_locked(
         title: args.title,
         item_path,
     })
+}
+
+/// Upper bound on the numeric-suffix dedupe for a title-derived slug.
+/// A base plus `-2`..=`-<cap>` gives 99 distinct homes for one title;
+/// beyond that the title is too generic to keep disambiguating, and the
+/// caller falls back to a random slug.
+const DERIVED_SLUG_SUFFIX_CAP: usize = 99;
+
+/// Atomically claim a flat directory for a title-derived `base` slug,
+/// disambiguating collisions with a numeric suffix (`base`, `base-2`,
+/// `base-3`, …). Returns `Ok(None)` when every candidate up to
+/// [`DERIVED_SLUG_SUFFIX_CAP`] is taken, so the caller can fall back to a
+/// random slug rather than fail the create.
+///
+/// Mirrors the conflict checks of the explicit-`--slug` arm — legacy
+/// (pre-flat) paths and the cross-bucket (flat ↔ inbox) namespace — but
+/// treats every conflict as "try the next suffix" instead of an error.
+fn claim_derived_slug(
+    root: &Path,
+    issues_parent: &Path,
+    base: &str,
+    inbox: bool,
+) -> Result<Option<(String, PathBuf)>> {
+    for n in 1..=DERIVED_SLUG_SUFFIX_CAP {
+        let candidate = if n == 1 {
+            base.to_string()
+        } else {
+            format!("{base}-{n}")
+        };
+        // Skip a slug already present at a legacy (pre-flat) path or in the
+        // other bucket — a later `triage` must be able to move an inbox
+        // draft to the flat root (or vice versa) without colliding.
+        let (_flat, legacy_open, legacy_closed) = repo::paths_for(root, &candidate);
+        if legacy_open.exists() || legacy_closed.exists() {
+            continue;
+        }
+        let flat_path = root.join("issues").join(&candidate);
+        let inbox_path = root
+            .join("issues")
+            .join(crate::repo::INBOX_DIR)
+            .join(&candidate);
+        let other = if inbox { &flat_path } else { &inbox_path };
+        if other.exists() {
+            continue;
+        }
+        let dir = issues_parent.join(&candidate);
+        match fs::create_dir(&dir) {
+            Ok(()) => return Ok(Some((candidate, dir))),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::from(e).context(format!("cannot create {}", dir.display()))
+                )
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Generate a random slug and atomically claim its flat directory.
@@ -415,6 +505,7 @@ mod tests {
             issue_type: t.to_string(),
             title: title.to_string(),
             slug: None,
+            slug_random: false,
             reporter: None,
             assignee: None,
             owner: None,
@@ -452,6 +543,84 @@ mod tests {
         assert!(content.contains("reporter: alice"));
         assert!(content.contains("assignee: bob"));
         assert!(content.contains("# First bug"));
+    }
+
+    #[test]
+    fn new_derives_slug_from_title_by_default() {
+        let tmp = fresh_repo();
+        // No --slug: the default is now a title-derived kebab slug, not a
+        // random intensifier-adjective-noun.
+        let out = do_new(
+            tmp.path(),
+            new_args("bug", "Login redirect loops on safari"),
+            &UncachedConfig,
+        )
+        .unwrap();
+        assert_eq!(out.slug, "login-redirect-loops");
+        assert!(out
+            .item_path
+            .to_string_lossy()
+            .contains("/login-redirect-loops/"));
+    }
+
+    #[test]
+    fn new_derived_slug_collision_gets_numeric_suffix() {
+        let tmp = fresh_repo();
+        let first = do_new(
+            tmp.path(),
+            new_args("bug", "Fix login bug"),
+            &UncachedConfig,
+        )
+        .unwrap();
+        assert_eq!(first.slug, "fix-login-bug");
+        // Same title again → deterministic base collides → `-2` suffix.
+        let second = do_new(
+            tmp.path(),
+            new_args("bug", "Fix login bug"),
+            &UncachedConfig,
+        )
+        .unwrap();
+        assert_eq!(second.slug, "fix-login-bug-2");
+        let third = do_new(
+            tmp.path(),
+            new_args("bug", "Fix login bug"),
+            &UncachedConfig,
+        )
+        .unwrap();
+        assert_eq!(third.slug, "fix-login-bug-3");
+    }
+
+    #[test]
+    fn new_falls_back_to_random_for_unsluggable_title() {
+        let tmp = fresh_repo();
+        // A title that derives no valid slug (non-ASCII) must still create
+        // an issue — via the random fallback.
+        let out = do_new(
+            tmp.path(),
+            new_args("bug", "Käyttäjän virhe"),
+            &UncachedConfig,
+        )
+        .unwrap();
+        assert!(
+            slug::is_valid(&out.slug),
+            "{} should be a valid slug",
+            out.slug
+        );
+        // Random form is three lowercase-letter segments; the derived path
+        // would have produced digits or the title's words (neither here).
+        assert_eq!(out.slug.split('-').count(), 3, "expected random slug shape");
+    }
+
+    #[test]
+    fn new_slug_random_flag_forces_random_slug() {
+        let tmp = fresh_repo();
+        let mut args = new_args("bug", "Login redirect loops");
+        args.slug_random = true;
+        let out = do_new(tmp.path(), args, &UncachedConfig).unwrap();
+        assert!(slug::is_valid(&out.slug));
+        // Explicitly NOT the derived slug.
+        assert_ne!(out.slug, "login-redirect-loops");
+        assert_eq!(out.slug.split('-').count(), 3, "expected random slug shape");
     }
 
     #[test]

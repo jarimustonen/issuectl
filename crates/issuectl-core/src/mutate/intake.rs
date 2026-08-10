@@ -312,7 +312,12 @@ pub fn file(
     let new_args = NewArgs {
         issue_type: req.issue_type,
         title: req.title,
+        // Intake titles come from untrusted external reporters (Telegram
+        // bug filings, etc.) and may carry customer names / secrets that
+        // must not land in a directory or branch name. Default to a random
+        // slug unless the filer supplied an explicit one.
         slug: req.slug,
+        slug_random: true,
         reporter: req.reporter,
         assignee: None,
         owner: None,
