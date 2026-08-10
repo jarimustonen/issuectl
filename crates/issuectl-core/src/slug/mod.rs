@@ -65,10 +65,14 @@ const DERIVED_SLUG_MAX_WORDS: usize = 3;
 /// so `"Fix the login bug"` yields `fix-login-bug` rather than
 /// `fix-the-login`. Deliberately short — only high-frequency function
 /// words that never carry the identifying meaning of an issue title.
+///
+/// Negations (`no`/`not`/`never`) are deliberately NOT here: stripping
+/// them would flip meaning (`"Do not delete data"` → `delete-data`) and
+/// alias opposite issues onto the same slug.
 const STOP_WORDS: &[&str] = &[
     "a", "an", "the", "of", "to", "for", "in", "on", "at", "by", "and", "or", "is", "are", "be",
-    "was", "were", "with", "from", "this", "that", "it", "its", "as", "when", "no", "not", "we",
-    "you", "i", "do", "does", "did", "should", "would", "could", "can", "will",
+    "was", "were", "with", "from", "this", "that", "it", "its", "as", "when", "we", "you", "i",
+    "do", "does", "did", "should", "would", "could", "can", "will",
 ];
 
 /// Derive a descriptive 2–3 word kebab slug from an issue `title`.
@@ -76,35 +80,34 @@ const STOP_WORDS: &[&str] = &[
 /// Lowercases, tokenizes on any non-alphanumeric boundary, drops
 /// [`STOP_WORDS`], and joins the first [`DERIVED_SLUG_MAX_WORDS`] content
 /// words with `-`. Returns `None` when the title yields no sensible slug —
-/// empty/whitespace/punctuation-only, all stop-words, only one usable
-/// word, or non-ASCII words that cannot form a valid ASCII slug (e.g. a
-/// Finnish `"Käyttäjän virhe"`). The caller falls back to a random slug in
-/// that case. The result is guaranteed to satisfy [`is_valid`].
+/// empty/whitespace/punctuation-only, all stop-words (zero content words),
+/// only one usable word, or non-ASCII words that cannot form a valid ASCII
+/// slug (e.g. a Finnish `"Käyttäjän virhe"`). The caller falls back to a
+/// random slug in that case. The result is guaranteed to satisfy
+/// [`is_valid`].
 ///
 /// Pure and deterministic — no repo access, no collision handling. The
 /// dedupe against existing directories is the caller's concern (the
 /// derived-slug claim loop in `do_new_locked`).
 pub fn derive_from_title(title: &str) -> Option<String> {
     let words = candidate_words(title);
-    if words.is_empty() {
-        return None;
-    }
-    // Prefer content words (stop-words stripped). Only fall back to the
-    // raw word list if stripping would leave fewer than two segments, so
-    // a terse title like "The bug" still derives `the-bug` rather than
-    // going random.
     let content: Vec<&String> = words
         .iter()
         .filter(|w| !STOP_WORDS.contains(&w.as_str()))
         .collect();
-    let chosen: Vec<String> = if content.len() >= 2 {
-        content
+    let chosen: Vec<String> = match content.len() {
+        // No content words survive stop-word removal (empty title or all
+        // stop-words) → unsluggable, route to the random fallback.
+        0 => return None,
+        // Exactly one content word can't make a ≥2-segment slug on its
+        // own; fall back to the raw word list so a terse title like
+        // "The bug" still derives `the-bug` rather than going random.
+        1 => words.iter().take(DERIVED_SLUG_MAX_WORDS).cloned().collect(),
+        _ => content
             .into_iter()
             .take(DERIVED_SLUG_MAX_WORDS)
             .cloned()
-            .collect()
-    } else {
-        words.iter().take(DERIVED_SLUG_MAX_WORDS).cloned().collect()
+            .collect(),
     };
     if chosen.len() < 2 {
         return None;
@@ -121,11 +124,19 @@ pub fn derive_from_title(title: &str) -> Option<String> {
 /// of ASCII `[a-z0-9]`. Words containing a non-ASCII letter (Finnish ä/ö,
 /// accents, CJK, …) are dropped whole rather than mangled, so such titles
 /// surface as "too few usable words" and route to the random fallback.
+///
+/// Apostrophes (ASCII `'` and the typographic `’`) are elided rather than
+/// treated as boundaries, so `"can't login"` yields `["cant", "login"]`
+/// instead of a junk `"t"` fragment that would consume the word budget.
 fn candidate_words(title: &str) -> Vec<String> {
     let lowered = title.to_lowercase();
     let mut words: Vec<String> = Vec::new();
     let mut current = String::new();
     for ch in lowered.chars() {
+        if ch == '\'' || ch == '\u{2019}' {
+            // Elide apostrophes without breaking the word.
+            continue;
+        }
         if ch.is_alphanumeric() {
             current.push(ch);
         } else if !current.is_empty() {
@@ -323,10 +334,53 @@ mod tests {
         assert_eq!(derive_from_title(""), None);
         assert_eq!(derive_from_title("   "), None);
         assert_eq!(derive_from_title("!!! ??? ..."), None);
-        // All stop-words → nothing meaningful, and fewer than two words.
+        // A single stop-word → zero content words.
         assert_eq!(derive_from_title("the"), None);
         // Single meaningful word cannot form a ≥2-segment slug.
         assert_eq!(derive_from_title("Login"), None);
+    }
+
+    #[test]
+    fn derive_from_title_all_stop_words_returns_none() {
+        // Zero content words survive stop-word removal, so even multi-word
+        // all-stop-word titles are unsluggable (route to random), never a
+        // meaningless `the-and`.
+        assert_eq!(derive_from_title("the and"), None);
+        assert_eq!(derive_from_title("of the"), None);
+        assert_eq!(derive_from_title("we should do this"), None);
+    }
+
+    #[test]
+    fn derive_from_title_preserves_negation() {
+        // "no"/"not" are NOT stop-words: dropping them would flip meaning.
+        assert_eq!(
+            derive_from_title("Do not delete data"),
+            Some("not-delete-data".into())
+        );
+        assert_eq!(
+            derive_from_title("No password reset"),
+            Some("no-password-reset".into())
+        );
+    }
+
+    #[test]
+    fn derive_from_title_elides_apostrophes() {
+        // Contractions/possessives don't fragment into junk single-letter
+        // segments — the apostrophe is elided, not treated as a boundary.
+        assert_eq!(
+            derive_from_title("User's profile broken"),
+            Some("users-profile-broken".into())
+        );
+        assert_eq!(
+            derive_from_title("Can't login redirect"),
+            // "cant" is not a stop-word.
+            Some("cant-login-redirect".into())
+        );
+        // Typographic apostrophe (U+2019) is elided too.
+        assert_eq!(
+            derive_from_title("Can\u{2019}t reach server"),
+            Some("cant-reach-server".into())
+        );
     }
 
     #[test]

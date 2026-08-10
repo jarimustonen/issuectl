@@ -429,6 +429,15 @@ fn claim_derived_slug(
         } else {
             format!("{base}-{n}")
         };
+        // Valid by construction: `base` came from `slug::derive_from_title`
+        // (which gates on `is_valid`), and appending `-<digits>` keeps every
+        // segment a lowercase-ascii/digit kebab segment. Assert it so a
+        // future change to the base derivation or suffix shape can't silently
+        // claim a directory whose name isn't a resolvable slug.
+        debug_assert!(
+            slug::is_valid(&candidate),
+            "derived candidate {candidate:?} must be a valid slug"
+        );
         // Skip a slug already present at a legacy (pre-flat) path or in the
         // other bucket — a later `triage` must be able to move an inbox
         // draft to the flat root (or vice versa) without colliding.
@@ -529,6 +538,9 @@ mod tests {
     fn new_creates_random_slug_directory() {
         let tmp = fresh_repo();
         let mut args = new_args("bug", "First bug");
+        // Force the random path so this test actually exercises it — the
+        // default would derive `first-bug` from the title.
+        args.slug_random = true;
         args.reporter = Some("alice".into());
         args.assignee = Some("bob".into());
         let out = do_new(tmp.path(), args, &UncachedConfig).unwrap();
@@ -644,15 +656,39 @@ mod tests {
     #[test]
     fn new_rejects_existing_slug() {
         let tmp = fresh_repo();
-        fs::create_dir_all(tmp.path().join("issues/taken")).unwrap();
+        // Use a valid ≥2-segment slug so the create actually reaches the
+        // collision arm — a single-segment slug like "taken" would be
+        // rejected by `is_valid` first and never test the conflict path.
+        fs::create_dir_all(tmp.path().join("issues/already-taken")).unwrap();
         fs::write(
-            tmp.path().join("issues/taken/item.md"),
+            tmp.path().join("issues/already-taken/item.md"),
             "---\nstatus: open\n---\n",
         )
         .unwrap();
         let mut args = new_args("bug", "Title");
-        args.slug = Some("taken".into());
-        assert!(do_new(tmp.path(), args, &UncachedConfig).is_err());
+        args.slug = Some("already-taken".into());
+        let err = do_new(tmp.path(), args, &UncachedConfig)
+            .err()
+            .expect("explicit-slug collision must error");
+        assert!(
+            err.to_string().contains("already exists"),
+            "expected an already-exists conflict, got {err}"
+        );
+    }
+
+    #[test]
+    fn new_explicit_slug_wins_over_slug_random() {
+        // The `slug_random` flag is ignored when an explicit `--slug` is
+        // given — explicit always wins. This precedence is load-bearing:
+        // `mutate::intake::file` sets both (slug = the filer's optional slug,
+        // slug_random = true) so a supplied slug is honoured while unslugged
+        // filings go random.
+        let tmp = fresh_repo();
+        let mut args = new_args("bug", "Some Title");
+        args.slug = Some("custom-thing".into());
+        args.slug_random = true;
+        let out = do_new(tmp.path(), args, &UncachedConfig).unwrap();
+        assert_eq!(out.slug, "custom-thing");
     }
 
     #[test]
