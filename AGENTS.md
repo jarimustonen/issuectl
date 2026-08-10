@@ -283,9 +283,15 @@ policy.
   workflow succeeds. (This is the gap `@wire-oss-release-as-release-path`
   will close.) Full steps: [CONTRIBUTING.md](CONTRIBUTING.md)
   "Per-release steps".
-- **Deploy/release autonomy: go/no-go required.** The conductor may
-  **recommend** a release but must **not** tag/publish without the
-  user's explicit approval on that request.
+- **Deploy/release autonomy: autonomous.** The conductor may cut and
+  publish releases **without asking**, and may **decide autonomously
+  whether** a release is warranted — bump the version, roll the
+  CHANGELOG, commit, tag, `git push --follow-tags`, then fire the
+  crates.io manual trigger once `release.yml` is green (see the
+  crates.io caveat below). No go/no-go handoff is required. (Granted
+  2026-08-10; supersedes the earlier go/no-go rule.) Use judgement on
+  *timing* — batch trivial changes, don't tag a red or half-landed
+  `main` — but the decision itself is yours.
 - **Live-version check.** Shipped: `git tag --sort=-creatordate | head
   -1` and `grep '^version' Cargo.toml`. Published: crates.io / the
   Homebrew tap. Compare against `main` before recommending a release.
