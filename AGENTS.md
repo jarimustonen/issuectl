@@ -326,16 +326,40 @@ Facts a `/stint` orchestrator needs. The work queue and session handoff
 live in [TODO.md](TODO.md); this section is the project's operating
 policy.
 
-- **What "deploy" means here.** This is a Rust CLI, not a server. The
-  release path is the `ossctl` engine (`/oss-release` → `ossctl release
-  plan|cut`), reading the approved [OSS-RELEASE.md](OSS-RELEASE.md)
-  contract. A release is: `ossctl release plan --version X.Y.Z` (seals a
-  content-addressed dry-run plan; phases `dry-run-all → build-all →
-  publish-all → tag → dist`), then `ossctl release cut --plan <id>
-  --version X.Y.Z`. **ossctl owns** the `version` bump in `Cargo.toml`,
-  the `CHANGELOG.md` `[Unreleased] → [X.Y.Z]` finalize, the **crates.io
-  publish** of both crates (`issuectl-core` before `issuectl`, adapter
-  `cargo-publish`), and the `vX.Y.Z` tag. The tag then triggers
+- **⚠️ CURRENT RELEASE PATH = MANUAL (ossctl `release cut` is BROKEN).**
+  As of **0.8.1 (2026-08-10)**, `ossctl release cut` does **not** actually
+  publish to crates.io on a real cut — it reports a 300s "index visibility"
+  timeout for a crate it never uploaded (crate stayed 404 for 9 min; no
+  receipts). Root cause is an ossctl publish-adapter defect (likely a
+  dry-run/no-op on the real publish), missed because
+  `@wire-oss-release-as-release-path` only dry-run-verified it. Tracked in
+  `@ossctl-cut-no-publish`. **Until that is fixed, release MANUALLY** (this
+  is what actually shipped 0.8.1 and every release ≤0.7.2):
+  1. Bump `version` in root `Cargo.toml` `[workspace.package]` **and** the
+     internal dep `version` in `crates/issuectl/Cargo.toml` (on a minor/major
+     boundary only — the caret gotcha); run `cargo update --workspace` to sync
+     `Cargo.lock`.
+  2. Finalize `CHANGELOG.md` `[Unreleased] → [X.Y.Z] - <date>` (add a fresh
+     empty `[Unreleased]`).
+  3. `git commit -am "release: X.Y.Z"`.
+  4. `cargo publish -p issuectl-core` (wait — cargo blocks until it's available
+     on the registry), then `cargo publish -p issuectl`.
+  5. `git tag -a vX.Y.Z -m "Release X.Y.Z"` + `git push origin main
+     --follow-tags`. The tag fires cargo-dist `release.yml` for binaries +
+     Homebrew (that part works — it is unaffected by the ossctl bug).
+- **What "deploy" WILL mean once ossctl is fixed.** This is a Rust CLI, not a
+  server. The intended release path is the `ossctl` engine (`/oss-release` →
+  `ossctl release plan|cut`), reading the approved
+  [OSS-RELEASE.md](OSS-RELEASE.md) contract: `ossctl release plan --version
+  X.Y.Z` (seals a content-addressed plan; phases `dry-run-all → build-all →
+  publish-all → tag → dist`), then `ossctl release cut --plan <id> --version
+  X.Y.Z`. **NOTE (learned the hard way in the 0.8.1 cut): `ossctl release cut`
+  publishes the version already in `Cargo.toml` — it does NOT bump the version
+  or finalize the CHANGELOG.** So even on the fixed path, the `version` bump +
+  `CHANGELOG` finalize + `release: X.Y.Z` commit are done **before** the cut
+  (steps 1–3 above); ossctl then owns the **crates.io publish** of both crates
+  (`issuectl-core` before `issuectl`, adapter `cargo-publish`) and the `vX.Y.Z`
+  tag. The tag then triggers
   `cargo-dist` (`.github/workflows/release.yml`) → GitHub Release with
   binaries + shell installer + the Homebrew formula pushed to
   `jarimustonen/homebrew-issuectl`. `release.yml` is a **binary-only
