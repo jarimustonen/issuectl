@@ -4,6 +4,9 @@ updated: 2026-08-10
 type: feature
 status: in-progress
 priority: low
+commits:
+- hash: c423eff
+  summary: ship Codex-prompt variants of /issue-new + /issue-intake; extend dogfood sync test to all six copies
 ---
 
 # Ship Codex-prompt variants of /issue-new + /issue-intake
