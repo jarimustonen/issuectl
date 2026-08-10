@@ -103,6 +103,10 @@ pub struct WriteOutcome {
     pub slug: String,
     pub title: String,
     pub item_path: PathBuf,
+    /// Non-fatal authoring-time advisories — currently reserved-legacy
+    /// section headings in the body (`## Notes`). Surfaced through the
+    /// shared `warnings` output field; never blocks the create.
+    pub warnings: Vec<String>,
 }
 
 /// Typed error surfaced by `do_new_locked`. Maps to `MutateError` via
@@ -286,6 +290,15 @@ pub(crate) fn do_new_locked(
         }
     };
 
+    // Authoring-time advisory: warn when the supplied body carries a
+    // reserved-legacy section heading (`## Notes`) so the collision
+    // surfaces now, not at commit time via the doctor pre-commit hook.
+    // Non-fatal — the create still proceeds (the author may be
+    // migrating). Computed on the rendered body, so a `## Notes` in
+    // `--description` or `--body-file` is caught the same way.
+    let body_only = render.split("---\n\n").nth(1).unwrap_or(&render);
+    let warnings = crate::body_sections::reserved_section_warnings(body_only);
+
     let issues_parent = if args.inbox {
         root.join("issues").join(crate::repo::INBOX_DIR)
     } else {
@@ -399,6 +412,7 @@ pub(crate) fn do_new_locked(
         slug,
         title: args.title,
         item_path,
+        warnings,
     })
 }
 

@@ -488,7 +488,9 @@ enum Command {
         /// Read the initial body from a file, written below the
         /// `# <title>` heading. Pass `-` to read stdin (use `./-` for a
         /// file literally named `-`). Mutually exclusive with
-        /// `--description`/`--body`.
+        /// `--description`/`--body`. A body using a reserved legacy
+        /// section heading (`## Notes` — use `## Comments`) is accepted
+        /// but warns; `issuectl doctor --fix` migrates it later.
         #[arg(long = "body-file", conflicts_with = "description")]
         body_file: Option<PathBuf>,
 
@@ -1591,6 +1593,9 @@ enum BodyAction {
     /// is optional in both modes: pass it only when you want a
     /// compare-and-swap (it is enforced when passed). `flock` prevents
     /// corruption regardless; without a token, blind clobber is allowed.
+    /// A body using a reserved legacy section heading (`## Notes` — use
+    /// `## Comments`) is accepted but warns; `issuectl doctor --fix`
+    /// migrates it later.
     Set {
         /// Issue slug
         #[arg(value_parser = parse_slug_arg)]
@@ -4282,11 +4287,13 @@ fn cmd_new(json: bool, args: NewArgs, check_duplicates: bool) -> Result<()> {
                 .item_path
                 .parent()
                 .map(|p| p.to_string_lossy().into_owned()),
+            "warnings": out.warnings,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!("Created {}: {}", out.slug, out.title);
         println!("  {}", out.item_path.display());
+        emit_warnings_to_stderr(&out.warnings);
     }
     Ok(())
 }
@@ -5638,10 +5645,12 @@ fn cmd_body_set(
             "slug": slug,
             "version": outcome.version,
             "dir": outcome.issue_dir.to_string_lossy(),
+            "warnings": outcome.warnings,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!("Updated body of {slug}");
+        emit_warnings_to_stderr(&outcome.warnings);
     }
     Ok(())
 }
@@ -6758,6 +6767,76 @@ mod tests {
         // a single-character string, violating the contract.
         assert_eq!(truncate("anything", 0), "");
         assert_eq!(truncate("", 0), "");
+    }
+
+    #[test]
+    fn new_with_reserved_notes_section_warns_without_blocking() {
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "Reserved");
+        a.slug = Some("reserved-notes".into());
+        a.description = Some("intro\n\n## Notes\n\nlegacy content".into());
+        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        // Write still happened.
+        assert!(n.item_path.exists());
+        // ...and a reserved-section warning was surfaced.
+        assert_eq!(n.warnings.len(), 1, "warnings={:?}", n.warnings);
+        assert!(n.warnings[0].contains("## Notes"));
+        assert!(n.warnings[0].contains("## Comments"));
+    }
+
+    #[test]
+    fn new_with_clean_body_has_no_warnings() {
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "Clean");
+        a.slug = Some("clean-body".into());
+        a.description = Some("intro\n\n## Comments\n\nfine".into());
+        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        assert!(n.warnings.is_empty(), "warnings={:?}", n.warnings);
+    }
+
+    #[test]
+    fn body_set_with_reserved_notes_section_warns_without_blocking() {
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "Body target");
+        a.slug = Some("body-target".into());
+        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let outcome = mutate::update_body(
+            tmp.path(),
+            &n.slug,
+            None,
+            "fresh body\n\n## Notes\n\nlegacy".into(),
+            None,
+            false,
+            &UncachedConfig,
+        )
+        .unwrap();
+        assert_eq!(outcome.warnings.len(), 1, "warnings={:?}", outcome.warnings);
+        assert!(outcome.warnings[0].contains("## Notes"));
+        // The body was written despite the warning.
+        assert!(read(&n.item_path).contains("## Notes"));
+    }
+
+    #[test]
+    fn body_set_with_clean_body_has_no_warnings() {
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "Body clean");
+        a.slug = Some("body-clean".into());
+        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let outcome = mutate::update_body(
+            tmp.path(),
+            &n.slug,
+            None,
+            "fresh body\n\n## Comments\n\nfine".into(),
+            None,
+            false,
+            &UncachedConfig,
+        )
+        .unwrap();
+        assert!(
+            outcome.warnings.is_empty(),
+            "warnings={:?}",
+            outcome.warnings
+        );
     }
 
     #[test]

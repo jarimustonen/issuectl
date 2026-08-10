@@ -113,11 +113,64 @@ fn new_json_success_prints_expected_payload() {
     let dir = tmp.path().join("issues/ab-cd");
     // Unified field vocabulary: `dir` = issue directory, `path` = item.md.
     let expected = format!(
-        "{{\n  \"dir\": \"{}\",\n  \"path\": \"{}\",\n  \"slug\": \"ab-cd\",\n  \"title\": \"Hello\"\n}}\n",
+        "{{\n  \"dir\": \"{}\",\n  \"path\": \"{}\",\n  \"slug\": \"ab-cd\",\n  \"title\": \"Hello\",\n  \"warnings\": []\n}}\n",
         dir.display(),
         item_path.display(),
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+}
+
+#[test]
+fn new_with_reserved_notes_section_warns_on_stderr_but_succeeds() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &[
+            "new",
+            "--type",
+            "bug",
+            "--title",
+            "Hello",
+            "--slug",
+            "notes-warn",
+            "--description",
+            "intro\n\n## Notes\n\nlegacy",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning:") && stderr.contains("## Notes"),
+        "expected a reserved-section warning on stderr; {}",
+        dump(&out)
+    );
+    assert!(tmp.path().join("issues/notes-warn/item.md").is_file());
+}
+
+#[test]
+fn new_json_with_reserved_notes_section_populates_warnings() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "new",
+            "--type",
+            "bug",
+            "--title",
+            "Hello",
+            "--slug",
+            "notes-json",
+            "--description",
+            "intro\n\n## Notes\n\nlegacy",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("new --json stdout should be JSON");
+    let warnings = v["warnings"].as_array().expect("warnings array");
+    assert_eq!(warnings.len(), 1, "{}", dump(&out));
+    assert!(warnings[0].as_str().unwrap().contains("## Notes"));
 }
 
 /// Reads `field` from an `issuectl --json show <slug>` payload.

@@ -1818,6 +1818,13 @@ pub fn update_body(
         }
     }
 
+    // Authoring-time advisory: warn when the replacement body carries a
+    // reserved-legacy section heading (`## Notes`) so the collision
+    // surfaces now rather than at commit time via the doctor pre-commit
+    // hook. Non-fatal — the write still proceeds (the author may be
+    // migrating). Computed before `body` is moved into `item.body`.
+    let warnings = crate::body_sections::reserved_section_warnings(&body);
+
     let mut item = write::read_item(&item_path).map_err(MutateError::Io)?;
     let before_serialized =
         if dry_run {
@@ -1884,7 +1891,7 @@ pub fn update_body(
             moved_to_open: false,
             pending_serialized: Some(pending),
             before_serialized,
-            warnings: Vec::new(),
+            warnings,
         });
     }
 
@@ -1919,7 +1926,7 @@ pub fn update_body(
         moved_to_open: false,
         pending_serialized: None,
         before_serialized: None,
-        warnings: Vec::new(),
+        warnings,
     })
 }
 

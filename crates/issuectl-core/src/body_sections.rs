@@ -25,6 +25,14 @@ pub const AGENT_RUNS: &str = "Agent Runs";
 /// Canonical section for `close --comment/--note` closing rationale.
 pub const RESOLUTION: &str = "Resolution";
 
+/// Legacy H2 section names that are no longer canonical: `doctor`
+/// migrates each `## <legacy>` heading to its canonical replacement
+/// (today only `## Notes` → `## Comments`). Single-sourced here so the
+/// authoring-time warning ([`reserved_section_warnings`], surfaced by
+/// `issuectl new` / `issuectl body set`) and doctor's migration agree
+/// on which names are reserved-legacy — see `doctor::classify_notes`.
+pub const LEGACY_SECTION_ALIASES: &[(&str, &str)] = &[("Notes", COMMENTS)];
+
 /// Format the timestamp half of a block heading. UTC, second-precision.
 pub fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
@@ -768,6 +776,30 @@ pub fn all_h2_sections(body: &str) -> std::collections::BTreeMap<String, String>
     out
 }
 
+/// Warn about any reserved legacy section heading (see
+/// [`LEGACY_SECTION_ALIASES`]) present in `body`. Detection is
+/// fence-aware and reuses [`all_h2_sections`] — the same scanner the
+/// writer and doctor's migration use — so a `## Notes` line inside a
+/// fenced code block is content, not a real heading, and no ad-hoc
+/// regex can drift from the reserved-name list.
+///
+/// Non-fatal: callers surface these but must NOT block the write — an
+/// author may legitimately be mid-migration. Returns one message per
+/// distinct legacy heading found, naming its canonical replacement.
+pub fn reserved_section_warnings(body: &str) -> Vec<String> {
+    let present = all_h2_sections(body);
+    LEGACY_SECTION_ALIASES
+        .iter()
+        .filter(|(legacy, _)| present.contains_key(*legacy))
+        .map(|(legacy, canonical)| {
+            format!(
+                "body uses reserved legacy section `## {legacy}`; it must be renamed/merged \
+                 into `## {canonical}` (run `issuectl doctor --fix`). The write was not blocked."
+            )
+        })
+        .collect()
+}
+
 #[allow(dead_code)]
 fn parse_block_heading(line: &str) -> Option<(String, String)> {
     let rest = line.strip_prefix("### ")?.trim_end();
@@ -1038,6 +1070,35 @@ mod tests {
         let decs = parse_section(&out, DECISIONS);
         assert_eq!(decs.blocks.len(), 1);
         assert_eq!(decs.blocks[0].author, "cara");
+    }
+
+    // ── reserved-section warnings ───────────────────────────────────
+
+    #[test]
+    fn reserved_section_warnings_flags_notes() {
+        let body = "\n# T\n\n## Description\n\nx\n\n## Notes\n\nlegacy note\n";
+        let warns = reserved_section_warnings(body);
+        assert_eq!(warns.len(), 1, "warns={warns:?}");
+        assert!(warns[0].contains("## Notes"));
+        assert!(warns[0].contains("## Comments"));
+    }
+
+    #[test]
+    fn reserved_section_warnings_clean_body_is_silent() {
+        // Canonical section names must never warn.
+        let body = "\n# T\n\n## Description\n\nx\n\n## Comments\n\nfine\n";
+        assert!(reserved_section_warnings(body).is_empty());
+        // No sections at all is also clean.
+        assert!(reserved_section_warnings("\n# T\n\njust prose\n").is_empty());
+    }
+
+    #[test]
+    fn reserved_section_warnings_is_fence_aware() {
+        // A `## Notes` line inside a fenced code block is content, not a
+        // reserved heading — must not warn (single-sourced via
+        // all_h2_sections, matching the writer/doctor scanner).
+        let body = "\n# T\n\n## Description\n\n```\n## Notes\n```\n";
+        assert!(reserved_section_warnings(body).is_empty());
     }
 
     // ── parser ──────────────────────────────────────────────────────
