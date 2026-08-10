@@ -13,33 +13,44 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-10):** **0.7.2 JULKAISTU JA VARMISTETTU — koko ketju vihreä.** Tag **v0.7.2**
-origin:ssa (`b9b3cf2`). Kaikki kolme julkaisukanavaa vahvistettu vihreiksi tässä rupeamassa:
-**GitHub Release** v0.7.2 (ei draft, 12 assettia — binäärit + installerit), **Homebrew** (cargo-
-dist push tappiin), **crates.io** (`Publish to crates.io` workflow `completed/success` —
-taustawatcheri triggeröi sen automaattisesti `release.yml`:n vihertyessä). `main` on release-
-commitin (`release: 0.7.2`) + tämän handoffin verran tagin edellä; työpuu puhdas.
+**Tila (2026-08-10):** **0.8.0 JULKAISTU JA VARMISTETTU — koko ketju vihreä.** Tag **v0.8.0**
+origin:ssa (`90cb695` = `release: 0.8.0`). Kaikki kolme julkaisukanavaa vahvistettu vihreiksi
+tässä rupeamassa: **GitHub Release** v0.8.0 (ei draft, 12 assettia — binäärit + installerit),
+**Homebrew** (cargo-dist push vihreän `release.yml`:n kautta), **crates.io** (`Publish to
+crates.io` -run `31364623070` `completed/success` — taustawatcheri triggeröi sen automaattisesti
+`release.yml`:n vihertyessä). `main` == origin, työpuu puhdas.
 
-**⚠️ Autonomy-muutos (2026-08-10):** `AGENTS.md`:n operating-faktoihin kirjattu että konduktööri
-saa nyt tehdä releaset **JA päättää niistä autonomisesti** (ei enää go/no-go). Tämä 0.7.2-release
-cutattiin sen nojalla. (Committi `docs(agents): grant conductor autonomous release authority`.)
+**⚠️ Minor-bump-gotcha (UUSI, muista seuraavassa minor-releasessa):** 0.8.0-cut paljasti että
+`crates/issuectl/Cargo.toml`:n sisäinen dep `issuectl-core = { path = "…", version = "0.7.0" }`
+on caret-vaatimus (`^0.7.0` = `<0.8.0`) → **rikkoi buildin** kun workspace-versio nousi 0.8.0:aan.
+Korjaus: bumppaa tuo `version =` vastaamaan uutta minoria (0.7.0 → 0.8.0) samassa release-commitissa.
+Patch-bumpeissa (0.8.0 → 0.8.1) ei tarvita; vain minor/major-rajan ylitys vaatii tämän.
 
-**0.7.2:n sisältö (4 korjausta, CHANGELOG `[0.7.2]`):**
-- **@show-json-omits-blocked-by + @json-blocked-by-null-top-level (bugs, fixed)** — `blocked_by`
-  surfataan top-leveliin (kanoninen `@`-lista + johdettu `blocks` show:ssa) `show`/`ls`/`search
-  --json`illa jaetun `project_blocked_by`-projektion kautta; ennen top-level `.blocked_by` oli aina
-  `null` (arvo hautautui `.extra`an) — nyt yksi wire-esitys joka polulla. Worker piti kentän
-  `extra`ssa (ei typettänyt: se on jo `canonical_hash`issa raakana → typetys rikkoisi version-tokenit).
-- **@intensely-blushing-galley (improvement, done)** — typed `closed_by`-kenttä: `canonical_hash`,
-  skeema, `doctor`-heal, näkyy `show --json` + human.
-- **@close-comment (feature, done)** — `close --comment/--note` liittää aikaleimatun `## Resolution`
-  -lohkon samassa atomisessa kirjoituksessa.
+**⚠️ Autonomy (ennallaan):** `AGENTS.md`:n operating-faktoissa: konduktööri saa tehdä releaset
+**JA päättää niistä autonomisesti** (ei go/no-go). 0.8.0 cutattiin sen nojalla.
+
+**0.8.0:n sisältö (2 homebase-research-featurea, CHANGELOG `[0.8.0]`):**
+- **@dag-scheduling-view (feature, done)** — kaksi valinnaista per-issue-scheduling-kenttää `lane`
+  + `collision` (frontmatter, `closed_by`-precedentti: absent-by-default, `canonical_hash`iin vain
+  kun asetettu → olemassa olevien issueiden version-tokenit EIVÄT muutu; verifoitu frozen-hash-
+  testillä; `SUPPORTED_SCHEMA_VERSION` EI noussut) + uusi `issuectl dag [--json] [--reservations
+  <file|-|json>]`-komento (`crates/issuectl-core/src/dag.rs`): join lane+order+blocked_by+live
+  status, head-of-line & spawnability ON READ (mitään ei talleteta), orkestraattori-agnostinen
+  (reservations caller-input). 4-model /llm-review sovellettu. → Consumerit voivat korvata käsin-
+  ylläpidetyn markdown-`## Execution DAG`-blockin lasketulla näkymällä.
+- **@default-slug-from-title (feature, done)** — `issuectl new "<title>"` ilman `--slug`:ia johtaa
+  nyt 2–3 sanan kebab-slugin otsikosta (stop-wordit pois, apostrofit, vain ASCII) satunnaisen
+  `intensifier-adjective-noun`in sijaan; dedupe numeroliitteellä (`base-2`…99). Satunnaismuoto
+  tavoitettavissa uudella `--slug-random`-flagilla + auto-fallbackina kun otsikko ei slugautu.
+  `--slug <x>` ennallaan. Intake + toistuvat pitävät satunnaismuodon tarkoituksella. AGENTS.md-
+  konventionootti ("CLI default is random") päivitetty + `/issue`-skilltemplatet synkattu. 4-model
+  /llm-review sovellettu.
 
 **⚠️ crates.io-caveat (ennallaan, muista JOKA release):** tag-push laukaisee cargo-dist
 (GitHub Release + Homebrew) mutta **crates.io-julkaisu vaatii manuaalisen triggerin**
 (`gh workflow run "Publish to crates.io"`) — `GITHUB_TOKEN` ei laukaise `publish-crates.yml`:ää.
-0.7.2:ssa tämä hoidettiin taustawatcherilla joka triggeröi sen `release.yml`:n vihertyessä (ks.
-Tila yllä — verifoi että meni läpi). (Korjaus odottaa `@wire-oss-release-as-release-path`ia.)
+0.8.0:ssa (kuten 0.7.2:ssa) tämä hoidettiin taustawatcherilla joka triggeröi sen `release.yml`:n
+vihertyessä. (Korjaus odottaa `@wire-oss-release-as-release-path`ia.)
 
 **Dogfood:** Käyttäjä dogfoodaa issuectl:ää omissa projekteissaan. Asennus: `cargo install
 issuectl` (crates.io), `brew upgrade jarimustonen/issuectl/issuectl`, tai `cargo install
@@ -53,14 +64,20 @@ release-engineinä — `/oss-release-cut` EI regeneroi `release.yml`:ää.
 **Iso linjaus (ennallaan):** **kanban/web-board holdissa**. Kaikki kanban/web-issuet +
 build-only-if + `@focus-areas` `deferred` → **Adjacent backlog**. Fokus CLI:ssä.
 
-**Seuraava askel:** ensin **verifoi 0.7.2-release meni vihreäksi loppuun** (ks. Tila yllä —
-`gh run list`, `gh release view v0.7.2`, crates.io). Sitten backlogin kärjessä on kaksi uutta
-**homebase-research**-featurea (2026-08-10): **@dag-scheduling-view** (normal — `lane`/`collision`-
-frontmatter-kentät + `issuectl dag`-view, koskee `schema.rs` + `main.rs`, design-first) ja
-**@default-slug-from-title** (normal — johda default-slug otsikosta satunnaisen sijaan, koskee
-`main.rs`). Molemmat koskevat `main.rs`:ää → **samassa lanessa, sekvensoitu**. @awfully-courageous-
-attempt (low, build-only-if) pysyy parkissa. Molemmat uudet ovat design-first-kokoisia — harkitse
-`/worktree-code` (ihmisen review) tai design-first-spinoff. Ei kiirettä; feedback-issuet edelle.
+**Seuraava askel:** **triage `@json-show-omits-blocked-by` ensin.** Tämä on `from-homebase`-
+filattu bug (2026-08-10) joka väittää `--json show`:n jättävän `blocked_by`:n pois top-leveliltä
+— MUTTA tämä on jo korjattu 0.7.2:ssa (`@show-json-omits-blocked-by` / `@json-blocked-by-null-
+top-level`, ks. AGENTS.md-nootti). Verifoitu nykykoodilla: `issuectl depend add y --blocked-by x;
+issuectl --json show y | jq 'has("blocked_by")'` → **true**. Raportti syntyi ennen 0.7.2-fixin
+tuloa. **Suositus: sulje `cannot-reproduce`** (`issuectl close json-show-omits-blocked-by
+--status cannot-reproduce --comment "already fixed in 0.7.2 via project_blocked_by"`). Bug-intake
+on decoupled → jätetty käyttäjän/`/stint`:n päätökseksi, EI suljettu autonomisesti.
+
+Sen jälkeen **aktiivinen työjono on tyhjä** paitsi parkissa oleva `@awfully-courageous-attempt`
+(low, build-only-if — vain jos Codex-käyttö todistuu). Backlog (Adjacent) on kaikki `deferred`:
+kanban/web holdissa, `@focus-areas` iso strateginen (ADR 0001 valmis, koskee `schema.rs`),
+`@wire-oss-release-as-release-path` blocked upstream-ossctl:llä. Uusi rupeama alkaa siis
+todennäköisesti backlogista nostamalla tai uudesta feedback/intake-issuesta.
 
 ---
 
@@ -78,22 +95,21 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: dag-scheduling-view   ← normal-feature (homebase-research); design-first; toinen kärki default-slug-from-title samassa lanessa (jaettu main.rs → sekvensoitu)
+GLOBAL HEAD-OF-LINE: json-show-omits-blocked-by   ← TRIAGE FIRST — from-homebase-bug, jo korjattu 0.7.2:ssa, suositus close cannot-reproduce (ei ajettavaa työtä; bug-intake on käyttäjän päätös)
 LANE A — main.rs (cmd_* + clap) + schema.rs
-  ▶ dag-scheduling-view      normal · feature; `lane`/`collision`-frontmatter-kentät (schema.rs) + `issuectl dag`-view-komento (main.rs): join lane+order+blocked_by+live status, head-of-line ON READ, --json. Pidä orkestraattori-agnostinen (reservations valinnaisena inputtina). collision: schema.rs. Design-first.
-    default-slug-from-title  normal · feature; johda `new`:n default-slug otsikosta (2–3 sanan kebab) satunnaisen intensifier-adjective-noun sijaan; dedupe numeroliitteellä + --slug-random/-fallback sensitiivisille otsikoille. main.rs (do_new/claim). Sekvensoi dag-scheduling-viewn jälkeen (jaettu main.rs).
+    json-show-omits-blocked-by  bug · from-homebase; väittää `--json show`:n jättävän `blocked_by`:n pois top-leveliltä. JO KORJATTU 0.7.2:ssa (`project_blocked_by`-projektio) — verifoitu nykykoodilla has("blocked_by")=true. EI ajettavaa fixiä → triage/close cannot-reproduce. Ei worktreetä.
 LANE B — skill install + templates/ + skill.rs (skill distribution)
     awfully-courageous-attempt  low · feature; Codex-prompt-variantit /issue-new + /issue-intakelle (frontmatter-strip kuten /issuella). Build-only-if: vain jos Codex-käyttö todistuu.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: tässä rupeamassa landasi **`json-blocked-by-null-top-level`** (normal bug,
-`blocked_by` top-leveliin `show`/`ls`/`search --json`illa) ja **0.7.2 cutattiin** (4 korjausta,
-ks. Tila-blokki). Kaikki 0.7.2:n issuet terminal → pudotettu DAG:sta. Tilalle **kaksi uutta
-homebase-research-featurea** (2026-08-10): **`dag-scheduling-view`** (normal — DAG-mallinnus
-issuectl:ään, `lane`/`collision`-kentät + `dag`-view) ja **`default-slug-from-title`** (normal —
-otsikkojohdettu default-slug). Molemmat koskevat `main.rs`:ää → LANE A, sekvensoitu.
-**`awfully-courageous-attempt`** (low, build-only-if) pysyy LANE B:ssä parkissa.
+Kaari-lyhyesti: tässä rupeamassa landasi **kaksi homebase-research-featurea** — `dag-scheduling-view`
+(lane/collision-kentät + `issuectl dag`-view, orkestraattori-agnostinen) ja `default-slug-from-title`
+(otsikkojohdettu default-slug) — ja **0.8.0 cutattiin + varmistettiin** (kaikki 3 kanavaa vihreää,
+ks. Tila-blokki). Molemmat featuret terminal (`done`) → pudotettu DAG:sta. Tilalle nousi vain yksi
+aktiivinen: **`json-show-omits-blocked-by`** (from-homebase-bug, jo korjattu 0.7.2:ssa → suositus
+close). **`awfully-courageous-attempt`** (low, build-only-if) pysyy LANE B:ssä parkissa. Aktiivinen
+työ on käytännössä loppu — seuraava rupeama nostaa backlogista tai uudesta intake-issuesta.
 
 ---
 
