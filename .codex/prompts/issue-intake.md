@@ -1,8 +1,3 @@
----
-name: issue-intake
-description: "Read-only intake processing for the standard intake flow — REPLACES /triage-bugs. Reads the actionable queue with `issuectl intake queue --json` (bug reports AND feature requests, any provenance), drives a read-only analysis worker (`/worktree-bug-analysis`, kept as the engine) on unclear items so they gain a `## Triage analysis` section, then briefs the user in product-owner language with a per-item recommendation (accept / defer / needs-info / reject / cannot-reproduce / duplicate / obsolete / retype). PRESENTATION ONLY — it never files, analyses inline, decides, or applies a disposition; the decision and its `issuectl intake accept|defer|reject|…` transition belong to the user (or `/stint`). Use at the start of a work session or when asked 'katso tuliko uusia', 'check the intake queue'. NOT for filing (`/issue-new`), NOT for fixing (`/worktree-bugfix`)."
-argument-hint: (optional --no-pull, --state deferred|needs-info, --type bug)
----
 
 # issue-intake — process the intake queue & brief the PO
 

@@ -5,7 +5,9 @@ use anyhow::{Context, Result};
 const ISSUE_CLAUDE_TEMPLATE: &str = include_str!("../templates/issue-skill.md");
 const ISSUE_CODEX_TEMPLATE: &str = include_str!("../templates/issue-prompt.md");
 const ISSUE_NEW_TEMPLATE: &str = include_str!("../templates/issue-new-skill.md");
+const ISSUE_NEW_CODEX_TEMPLATE: &str = include_str!("../templates/issue-new-prompt.md");
 const ISSUE_INTAKE_TEMPLATE: &str = include_str!("../templates/issue-intake-skill.md");
+const ISSUE_INTAKE_CODEX_TEMPLATE: &str = include_str!("../templates/issue-intake-prompt.md");
 pub const ISSUES_AGENTS_TEMPLATE: &str = include_str!("../templates/issues-agents.md");
 
 /// Substitute build-time tokens (currently `{{ISSUECTL_VERSION}}`) in a
@@ -52,15 +54,16 @@ impl Agent {
     }
 }
 
-/// The standalone intake-flow skills that ship alongside `/issue`. Unlike
+/// The standalone intake-flow skills that ship alongside `/issue`. Like
 /// [`Agent`] (which ships `/issue` as a Claude skill *and* a Codex prompt),
-/// these are **Claude-only** — they orchestrate the `/worktree-*` family and
-/// have no Codex variant. They are installed whenever [`Agent::Claude`] is
-/// among the selected agents, so Jari's fleet-apply hook distributes them the
-/// same way it distributes `/issue`. Their bodies live in
-/// `crates/issuectl-core/templates/` (source of truth) and are dogfooded into
-/// this repo's `.claude/skills/`; the
-/// [`tests::dogfooded_copies_match_templates`] test keeps the two in sync.
+/// each of these ships in **both** formats: a Claude skill under
+/// `.claude/skills/` and a Codex prompt under `.codex/prompts/` (frontmatter
+/// stripped, body identical). They are installed once per selected agent, so
+/// Jari's fleet-apply hook distributes them the same way it distributes
+/// `/issue`. Their bodies live in `crates/issuectl-core/templates/` (source of
+/// truth — a `*-skill.md` Claude variant and a `*-prompt.md` Codex variant per
+/// skill) and are dogfooded into this repo; the
+/// [`tests::dogfooded_copies_match_templates`] test keeps every copy in sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntakeSkill {
     /// `/issue-new` — the thin filing half of the intake flow.
@@ -84,21 +87,34 @@ impl IntakeSkill {
         }
     }
 
-    pub fn template(self) -> &'static str {
-        match self {
-            Self::IssueNew => ISSUE_NEW_TEMPLATE,
-            Self::IssueIntake => ISSUE_INTAKE_TEMPLATE,
+    /// The rendered body for this skill in the given agent's format. The
+    /// Codex variant is the Claude one with its YAML frontmatter stripped
+    /// (body byte-identical), mirroring how `/issue` ships both.
+    pub fn template(self, agent: Agent) -> &'static str {
+        match (self, agent) {
+            (Self::IssueNew, Agent::Claude) => ISSUE_NEW_TEMPLATE,
+            (Self::IssueNew, Agent::Codex) => ISSUE_NEW_CODEX_TEMPLATE,
+            (Self::IssueIntake, Agent::Claude) => ISSUE_INTAKE_TEMPLATE,
+            (Self::IssueIntake, Agent::Codex) => ISSUE_INTAKE_CODEX_TEMPLATE,
         }
     }
 
-    pub fn install_path(self, repo_root: &Path) -> PathBuf {
-        repo_root.join(format!(".claude/skills/{}/SKILL.md", self.slug()))
+    /// Where this skill installs for the given agent: a Claude skill under
+    /// `.claude/skills/<slug>/SKILL.md`, or a Codex prompt under
+    /// `.codex/prompts/<slug>.md` (matching the `/issue` Codex convention).
+    pub fn install_path(self, agent: Agent, repo_root: &Path) -> PathBuf {
+        match agent {
+            Agent::Claude => repo_root.join(format!(".claude/skills/{}/SKILL.md", self.slug())),
+            Agent::Codex => repo_root.join(format!(".codex/prompts/{}.md", self.slug())),
+        }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::IssueNew => "Claude Code intake filing skill",
-            Self::IssueIntake => "Claude Code intake processing skill",
+    pub fn label(self, agent: Agent) -> &'static str {
+        match (self, agent) {
+            (Self::IssueNew, Agent::Claude) => "Claude Code intake filing skill",
+            (Self::IssueNew, Agent::Codex) => "Codex intake filing prompt",
+            (Self::IssueIntake, Agent::Claude) => "Claude Code intake processing skill",
+            (Self::IssueIntake, Agent::Codex) => "Codex intake processing prompt",
         }
     }
 }
@@ -131,23 +147,18 @@ pub fn install_skill_summary(
     agents: &[Agent],
     force: bool,
 ) -> Result<Vec<InstallResult>> {
-    // The standalone intake skills are Claude-only; ship them whenever the
-    // Claude agent is selected, so the fleet-apply hook distributes them the
-    // same way it distributes `/issue`. A Codex-only install skips them.
-    let ships_intake = agents.contains(&Agent::Claude);
-    let intake_count = if ships_intake {
-        IntakeSkill::ALL.len()
-    } else {
-        0
-    };
-    let mut results = Vec::with_capacity(agents.len() + 1 + intake_count);
+    // The standalone intake skills ship in every selected agent's format —
+    // a Claude skill for `--agent claude`, a Codex prompt for `--agent codex`
+    // — the same way `/issue` does, so the fleet-apply hook distributes them
+    // to both fleets.
+    let mut results = Vec::with_capacity(agents.len() * (1 + IntakeSkill::ALL.len()) + 1);
     results.push(install_issues_scaffold(repo_root, force)?);
     for agent in agents {
         results.push(install_agent_template(repo_root, *agent, force)?);
     }
-    if ships_intake {
+    for agent in agents {
         for skill in IntakeSkill::ALL {
-            results.push(install_intake_skill(repo_root, skill, force)?);
+            results.push(install_intake_skill(repo_root, skill, *agent, force)?);
         }
     }
     Ok(results)
@@ -169,6 +180,9 @@ pub fn install_skill(repo_root: &Path, agents: &[Agent], force: bool) -> Result<
     }
     if agents.contains(&Agent::Codex) {
         println!("  Use /issue in Codex CLI (or invoke the prompt) to manage issues.");
+        println!(
+            "  Use /issue-new to file an intake report and /issue-intake to process the queue."
+        );
     }
     println!("  Or use `issuectl list` to browse issues from the command line.");
     Ok(())
@@ -244,12 +258,13 @@ fn install_agent_template(repo_root: &Path, agent: Agent, force: bool) -> Result
 fn install_intake_skill(
     repo_root: &Path,
     skill: IntakeSkill,
+    agent: Agent,
     force: bool,
 ) -> Result<InstallResult> {
     install_rendered_file(
-        skill.install_path(repo_root),
-        skill.template(),
-        skill.label(),
+        skill.install_path(agent, repo_root),
+        skill.template(agent),
+        skill.label(agent),
         force,
     )
 }
@@ -380,11 +395,14 @@ mod tests {
         for agent in [Agent::Claude, Agent::Codex] {
             check(agent.install_path(&repo_root), agent.template());
         }
-        // The standalone intake skills ship Claude-only, but are dogfooded the
-        // same way — deleting/renaming a template or letting a copy drift
-        // must fail here just like it does for `/issue`.
+        // The standalone intake skills ship in both formats too — a Claude
+        // skill and a Codex prompt each — and are dogfooded the same way.
+        // Deleting/renaming a template or letting any copy drift must fail
+        // here just like it does for `/issue`.
         for skill in IntakeSkill::ALL {
-            check(skill.install_path(&repo_root), skill.template());
+            for agent in [Agent::Claude, Agent::Codex] {
+                check(skill.install_path(agent, &repo_root), skill.template(agent));
+            }
         }
     }
 
@@ -590,7 +608,7 @@ mod tests {
         install_skill(tmp.path(), &[Agent::Claude], false).unwrap();
         for skill in IntakeSkill::ALL {
             assert!(
-                skill.install_path(tmp.path()).exists(),
+                skill.install_path(Agent::Claude, tmp.path()).exists(),
                 "{} should be installed with the Claude agent",
                 skill.slug()
             );
@@ -598,13 +616,21 @@ mod tests {
     }
 
     #[test]
-    fn install_codex_only_skips_intake_skills() {
+    fn install_codex_writes_intake_skills() {
+        // The intake skills now ship a Codex prompt too, so a Codex-only
+        // install writes them under `.codex/prompts/<slug>.md`.
         let tmp = tempfile::tempdir().unwrap();
         install_skill(tmp.path(), &[Agent::Codex], false).unwrap();
         for skill in IntakeSkill::ALL {
+            let path = skill.install_path(Agent::Codex, tmp.path());
             assert!(
-                !skill.install_path(tmp.path()).exists(),
-                "{} is Claude-only and must not ship on a Codex-only install",
+                path.exists(),
+                "{} should ship as a Codex prompt on a Codex install",
+                skill.slug()
+            );
+            assert!(
+                path.ends_with(format!(".codex/prompts/{}.md", skill.slug())),
+                "{} Codex prompt must land under .codex/prompts/",
                 skill.slug()
             );
         }
@@ -615,7 +641,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         install_skill(tmp.path(), &[Agent::Claude], false).unwrap();
         for skill in IntakeSkill::ALL {
-            let installed = std::fs::read_to_string(skill.install_path(tmp.path())).unwrap();
+            let installed =
+                std::fs::read_to_string(skill.install_path(Agent::Claude, tmp.path())).unwrap();
             assert!(
                 installed.contains(env!("CARGO_PKG_VERSION")),
                 "{} must pin the current version",
@@ -630,17 +657,47 @@ mod tests {
     }
 
     #[test]
-    fn intake_skills_are_claude_only() {
-        // Guards the Claude-only design decision: these two skills ship no
-        // Codex variant (they orchestrate the Claude-side `/worktree-*` family).
+    fn intake_skills_install_paths_per_agent() {
+        // Each intake skill ships in both formats: a Claude skill under
+        // `.claude/skills/<slug>/SKILL.md` and a Codex prompt under
+        // `.codex/prompts/<slug>.md` (matching the `/issue` convention).
         let root = Path::new("/tmp/repo");
         assert!(IntakeSkill::IssueNew
-            .install_path(root)
+            .install_path(Agent::Claude, root)
             .ends_with(".claude/skills/issue-new/SKILL.md"));
+        assert!(IntakeSkill::IssueNew
+            .install_path(Agent::Codex, root)
+            .ends_with(".codex/prompts/issue-new.md"));
         assert!(IntakeSkill::IssueIntake
-            .install_path(root)
+            .install_path(Agent::Claude, root)
             .ends_with(".claude/skills/issue-intake/SKILL.md"));
+        assert!(IntakeSkill::IssueIntake
+            .install_path(Agent::Codex, root)
+            .ends_with(".codex/prompts/issue-intake.md"));
         assert_eq!(IntakeSkill::ALL.len(), 2);
+    }
+
+    #[test]
+    fn intake_codex_prompt_strips_frontmatter() {
+        // The Codex prompt is the Claude skill with its YAML frontmatter
+        // removed; the body must be identical (same as `/issue`).
+        for skill in IntakeSkill::ALL {
+            let claude = skill.template(Agent::Claude);
+            let codex = skill.template(Agent::Codex);
+            assert!(
+                claude.starts_with("---\n"),
+                "{} Claude template must carry YAML frontmatter",
+                skill.slug()
+            );
+            assert!(
+                !codex.starts_with("---\n"),
+                "{} Codex prompt must strip the frontmatter",
+                skill.slug()
+            );
+            // The Claude body after the closing `---` equals the Codex prompt.
+            let body = claude.split_once("\n---\n").expect("frontmatter closes").1;
+            assert_eq!(body, codex, "{} bodies must match", skill.slug());
+        }
     }
 
     #[test]
@@ -696,7 +753,7 @@ mod tests {
     #[test]
     fn intake_skill_reinstall_respects_force() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = IntakeSkill::IssueNew.install_path(tmp.path());
+        let path = IntakeSkill::IssueNew.install_path(Agent::Claude, tmp.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "user content").unwrap();
 

@@ -1,8 +1,3 @@
----
-name: issue-new
-description: "Thin filing skill for the standard intake flow. Captures a bug report or feature request faithfully (verbatim text + attachments), picks a `type` hint, sets reporter/provenance/source-ref, and files it with `issuectl intake file --json` into the `untriaged` reception state — then attaches screenshots and returns the slug. FILING ONLY — it never triages, decides, analyses, or fixes; that is `/issue-intake`'s and the user's job. Use when a reporter (human or bot) hands you a report to record, or when a deterministic filer needs one validated, idempotent CLI call. NOT for processing the queue (`/issue-intake`), NOT for fixing (`/worktree-bugfix`)."
-argument-hint: <the report text, or a path/pointer to it>
----
 
 # issue-new — faithful intake filing
 
@@ -151,7 +146,7 @@ the `deduplicated` flag so the caller can branch.
 
 ## Install or upgrade `issuectl`
 
-This skill was installed for `issuectl 0.8.1` and drives the
+This skill was installed for `issuectl {{ISSUECTL_VERSION}}` and drives the
 `issuectl intake` command group (issuectl ≥ 0.6.6). On first use in a session, run
 `issuectl --version`; if `intake` is missing (`issuectl intake --help` errors), the
 binary is too old — tell the user to upgrade (`brew upgrade
