@@ -7,6 +7,8 @@ priority: normal
 commits:
 - hash: 802cd81
   summary: retire publish-crates.yml; ossctl release plan dry-run reconciled
+- hash: 93dbf8e
+  summary: wire ossctl release path in OSS-RELEASE/AGENTS/CONTRIBUTING/CHANGELOG/TODO
 ---
 
 # Wire /oss-release as the release path (integrate ossctl release engine with cargo-dist)
