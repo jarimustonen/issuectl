@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-10
+
 ### Added
 - Two optional per-issue scheduling fields — `lane:` (a spawn-time
   mutual-exclusion group) and `collision:` (extra shared "hot file" tokens)
@@ -23,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tokens. Consumers can retire a hand-maintained `## Execution DAG`
   markdown block in favour of the computed view. (issue:
   `@dag-scheduling-view`)
+
+### Changed
+- `issuectl new "<title>"` without `--slug` now derives a descriptive 2–3
+  word kebab slug from the title (lowercase, stop-words dropped, apostrophes
+  elided, ASCII words only) instead of minting a random
+  `intensifier-adjective-noun`. The derived path has its own numeric-suffix
+  dedupe (`base`, `base-2`, … up to 99). The random form stays reachable via
+  the new `--slug-random` flag (mutually exclusive with `--slug`) and remains
+  the automatic fallback when a title is unsluggable (empty, all stop-words,
+  non-ASCII) or the derived namespace saturates. `--slug <x>` is unchanged.
+  Intake (untrusted titles) and recurring occurrences keep the random form
+  deliberately. (issue: `@default-slug-from-title`)
 
 ## [0.7.2] - 2026-08-10
 
