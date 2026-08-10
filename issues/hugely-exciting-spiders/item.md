@@ -73,7 +73,7 @@ When v0.6.0 planning starts:
 - [ ] @hugely-madly-haircut — Replace thread-local schema/transitions cache activation with explicit injection (spin-off from @deeply-wistful-beam)
 
 ### Discuss / maybe-don't-build
-- [ ] @somewhat-heady-zephyr — Per-issue `events.jsonl` log (only if v0.5.0 git-derived activity proves insufficient)
+- [ ] @events-jsonl-log — Per-issue `events.jsonl` log (only if v0.5.0 git-derived activity proves insufficient)
 
 ## Notes
 

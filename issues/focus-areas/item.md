@@ -1,11 +1,12 @@
 ---
 created: 2026-06-04
-updated: 2026-08-04
+updated: 2026-08-10
 type: feature
 reporter: jari
-status: open
+status: wontfix
 priority: normal
 labels: [deferred]
+closed: 2026-08-10
 ---
 
 # Focus areas: validoidut pitkäkestoiset teemat issue-hallintaan
@@ -137,3 +138,9 @@ to the implementation ADR.
 ### 2026-06-04T11:09:33Z · @claude
 
 ADR 0001-focus-areas-top-level-approach records the top-level a/b/c decision: adopt option (b) — focus areas as a first-class areas field in the schema (labels untouched). Open design questions (validation strictness, sub-areas, config location, epic relation, sub-tags) plus the internal schema shape (taxonomies registry vs inline enum_with_descriptions) deferred to the implementation ADR.
+
+## Resolution
+
+### 2026-08-10T10:44:45Z · @issuectl
+
+No current need (2026-08-10). Top-level approach was decided in ADR 0001 (areas: [] schema field); reopen + write the implementation ADR if the need resurfaces.

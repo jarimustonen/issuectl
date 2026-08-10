@@ -1,10 +1,9 @@
 ---
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-08-10
 type: feature
 status: open
 priority: normal
-labels: [deferred]
 ---
 
 # Wire /oss-release as the release path (integrate ossctl release engine with cargo-dist)
