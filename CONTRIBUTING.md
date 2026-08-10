@@ -156,19 +156,34 @@ Binary distribution stays with [`cargo-dist`](https://opensource.axo.dev/cargo-d
 3. **crates.io credential** where you run `ossctl release cut` (it runs
    `cargo publish` locally, not in CI): either `cargo login` once, or
    export `CARGO_REGISTRY_TOKEN` in that shell — an API token from
-   <https://crates.io/settings/tokens> with `publish-update` scope. (The
-   old repo-level `CARGO_REGISTRY_TOKEN` secret that fed
-   `publish-crates.yml` is no longer used by any workflow now that the
-   publish moved into `ossctl release cut`.)
+   <https://crates.io/settings/tokens> with `publish-update` scope,
+   **crate-scoped to `issuectl` + `issuectl-core`** and with an expiry set.
+   Because it lives on a workstation, keep it least-privilege and rotate it.
+4. **Retire the old CI secret** (one-time cleanup, do this now): the
+   repo-level `CARGO_REGISTRY_TOKEN` GitHub Actions secret that fed
+   `publish-crates.yml` is no longer used by any workflow. **Revoke that
+   token** at <https://crates.io/settings/tokens> and **delete the secret**
+   from the repo's Settings → Secrets → Actions — a stale publish-scoped
+   token is attack surface.
 
 ### Per-release steps
 
 The bump/CHANGELOG/publish/tag steps are driven by `ossctl` — you supply
 the approved version; the engine does the rest and refuses on repo drift.
 
-1. Ensure `main` is green (see the green gate in
-   [AGENTS.md](AGENTS.md) "Operating facts") and that `CHANGELOG.md`
-   `## [Unreleased]` holds the items for this release.
+1. **Preflight.** Ensure `main` is green (see the green gate in
+   [AGENTS.md](AGENTS.md) "Operating facts"), that your working tree is
+   clean and at `origin/main`, that `CHANGELOG.md` `## [Unreleased]` holds
+   the items for this release, and that the crates.io credential from
+   "One-time setup" is present in this shell.
+   > **Caret boundary — do this BEFORE step 2.** When the bump crosses a
+   > caret boundary (e.g. `0.6.x → 0.7.0`, or any major bump), edit the
+   > internal `issuectl-core = { path = "../issuectl-core", version =
+   > "X.Y.Z" }` requirement in `crates/issuectl/Cargo.toml` to the new
+   > version and commit it — `ossctl` bumps the workspace `version` field
+   > but does not rewrite this internal dependency requirement, and if it's
+   > stale `cargo publish` of `issuectl` selects the old `issuectl-core`.
+   > Patch bumps within the same minor don't need this.
 2. **Seal the plan** (dry-run — inspect what will happen, no changes yet):
    ```sh
    ossctl release plan --version X.Y.Z
@@ -181,22 +196,32 @@ the approved version; the engine does the rest and refuses on repo drift.
    ossctl release cut --plan <PLAN_ID> --version X.Y.Z
    ```
    ossctl bumps `version` in `Cargo.toml`, finalizes `CHANGELOG.md`
-   (moves `[Unreleased]` → `[X.Y.Z]` with the date), publishes both crates
-   to crates.io, and pushes the `vX.Y.Z` tag.
-   > **Caret note:** when the bump crosses a caret boundary (e.g.
-   > `0.6.x → 0.7.0`, or any major bump), the internal
-   > `issuectl-core = { path = "../issuectl-core", version = "X.Y.Z" }`
-   > requirement in `crates/issuectl/Cargo.toml` must move to the new
-   > version too, or `cargo build` can't select `issuectl-core`. Patch
-   > bumps within the same minor don't need this.
+   (moves `[Unreleased]` → `[X.Y.Z]` with the date), commits those
+   mutations, publishes both crates to crates.io, and pushes the `vX.Y.Z`
+   tag (pointing at that commit).
 4. Watch the workflows on [Actions](https://github.com/jarimustonen/issuectl/actions).
    The tag-triggered **Release** workflow (cargo-dist) creates the GitHub
    Release with binaries and updates the Homebrew tap. crates.io was
    already published in step 3 — there is no separate manual trigger.
-5. Verify: `curl -s https://index.crates.io/is/su/issuectl | tail -1`.
+5. Verify both crates landed at `X.Y.Z`:
+   ```sh
+   for c in issuectl issuectl-core; do cargo search "$c" --limit 1; done
+   ```
 
-If a cut is interrupted, `ossctl release resume` reconciles and continues;
-`ossctl release verify` does a read-only reconcile against the registry.
+#### If a cut is interrupted
+
+`ossctl release cut` seals a content-addressed plan and refuses on repo
+drift, so re-running is safe: `ossctl release resume --plan <PLAN_ID>
+--version X.Y.Z` reconciles and continues (a `cargo publish` that already
+landed is a no-op — crates.io rejects duplicate `name@version`), and
+`ossctl release verify` is a read-only reconcile against the registry.
+
+Note the phase order: crates.io publish happens **before** the tag. If
+`publish-all` succeeded but `tag` failed, the crates are permanent (yank
+only) but the release is *not* lost — `resume` pushes the `vX.Y.Z` tag for
+the same sealed source, which fires cargo-dist for binaries. Only if you
+must abandon the version entirely do you `cargo yank` both crates and cut a
+new patch — you can never re-publish the same `name@version`.
 
 ### Updating cargo-dist itself
 

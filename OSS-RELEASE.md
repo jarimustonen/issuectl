@@ -52,13 +52,18 @@ docs_site: none
   existing workflow.
 - **conventional_commits: true** — commit history is uniformly `type(scope): summary`
   (`feat(cli):`, `fix(doctor):`, `docs(todo):`). Recorded as fact; no commitlint gate exists yet.
-- **release: gated / single** — release is a deliberate human-approved step, now driven by
-  `ossctl release plan|cut`: the human supplies the approved version, ossctl bumps + finalizes
-  CHANGELOG + publishes both crates to crates.io + tags `vX.Y.Z`; the tag then triggers cargo-dist
-  for binaries. Not `auto` on-merge. `single` layout: the workspace shares one version + one
+- **release: gated / single** — a deliberate, explicitly-versioned step (not `auto` on-merge),
+  now driven by `ossctl release plan|cut`: the releaser supplies the approved version, ossctl
+  bumps + finalizes CHANGELOG + publishes both crates to crates.io + tags `vX.Y.Z`; the tag then
+  triggers cargo-dist for binaries. ("Releaser" = the maintainer, or the autonomous conductor
+  where AGENTS.md grants it — the `gated` contract means the version is a discrete decision, not
+  that a human must be in the loop.) `single` layout: the workspace shares one version + one
   `vX.Y.Z` tag.
-- **provenance_level: keyless** — releases are CI-published; keyless attestation is the mvp
-  default. Not `slsa-l3` (production-only).
+- **provenance_level: keyless** — the mvp default; not `slsa-l3` (production-only). ⚠️ As of
+  2026-08-10 the crates.io publish is **not** CI-published — `ossctl release cut` runs
+  `cargo publish` wherever the releaser invokes it (locally), so the crates.io artifacts have no
+  CI/OIDC provenance. Only the cargo-dist **binaries** (`release.yml`) are CI-published. Revisit
+  (crates.io trusted publishing / a `workflow_dispatch` CI cut) when moving to `production`.
 - **dependency_bot: dependabot** — `.github/dependabot.yml` present.
 - **health_badges: [ci, registry, license]** — CI exists, crates.io registry target exists,
   MIT license. coverage/scorecard are production-tier — omitted at mvp.
