@@ -13,13 +13,12 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-10):** **0.7.2 CUTATTU + PUSHATTU.** Tag **v0.7.2** origin:ssa (`b9b3cf2`),
-`main` == v0.7.2 (release-commit `release: 0.7.2`, työpuu puhdas). Release-flow käynnistetty:
-cargo-dist (`release.yml`) käynnissä push-hetkellä, ja **taustawatcheri triggeröi crates.io-
-julkaisun automaattisesti kun `release.yml` vihertyy** (`gh run watch … && gh workflow run
-"Publish to crates.io"`). **VERIFOI seuraavalla resumella:** `gh run list --limit 5`,
-`gh release view v0.7.2`, ja crates.io — jos watcheri ehti kaatua ennen crates.iota, aja
-`gh workflow run "Publish to crates.io" --ref main` käsin.
+**Tila (2026-08-10):** **0.7.2 JULKAISTU JA VARMISTETTU — koko ketju vihreä.** Tag **v0.7.2**
+origin:ssa (`b9b3cf2`). Kaikki kolme julkaisukanavaa vahvistettu vihreiksi tässä rupeamassa:
+**GitHub Release** v0.7.2 (ei draft, 12 assettia — binäärit + installerit), **Homebrew** (cargo-
+dist push tappiin), **crates.io** (`Publish to crates.io` workflow `completed/success` —
+taustawatcheri triggeröi sen automaattisesti `release.yml`:n vihertyessä). `main` on release-
+commitin (`release: 0.7.2`) + tämän handoffin verran tagin edellä; työpuu puhdas.
 
 **⚠️ Autonomy-muutos (2026-08-10):** `AGENTS.md`:n operating-faktoihin kirjattu että konduktööri
 saa nyt tehdä releaset **JA päättää niistä autonomisesti** (ei enää go/no-go). Tämä 0.7.2-release
