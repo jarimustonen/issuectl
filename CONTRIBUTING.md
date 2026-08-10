@@ -153,8 +153,13 @@ Binary distribution stays with [`cargo-dist`](https://opensource.axo.dev/cargo-d
 2. **`HOMEBREW_TAP_TOKEN`** secret in this repo: a classic Personal
    Access Token with `repo` scope, used by the release workflow to
    push the formula to the tap repo.
-3. **`CARGO_REGISTRY_TOKEN`** secret in this repo: an API token from
-   <https://crates.io/settings/tokens> with `publish-update` scope.
+3. **crates.io credential** where you run `ossctl release cut` (it runs
+   `cargo publish` locally, not in CI): either `cargo login` once, or
+   export `CARGO_REGISTRY_TOKEN` in that shell — an API token from
+   <https://crates.io/settings/tokens> with `publish-update` scope. (The
+   old repo-level `CARGO_REGISTRY_TOKEN` secret that fed
+   `publish-crates.yml` is no longer used by any workflow now that the
+   publish moved into `ossctl release cut`.)
 
 ### Per-release steps
 
