@@ -13,12 +13,33 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-10, iltapäivän rupeama):** **Iso linjaus: web/selain-UI poistetaan issuectl:stä.**
-Tässä rupeamassa ei koodattu eikä releasetty — tämä oli **issue-kannan siivous- ja
-linjausrupeama**. `main` == origin, työpuu puhdas, **v0.8.0** yhä uusin release (koko ketju
-vihreä edellisestä rupeamasta: GitHub Release + Homebrew + crates.io).
+**Tila (2026-08-10, iltapäivän rupeama):** **0.8.1 JULKAISTU** (crates.io molemmat cratet `200`,
+tag `v0.8.1` originissa, `release.yml`-run käynnissä/valmis binääreille + Homebrew). `main` == origin.
+Alkoi siivous-/linjausrupeamana, laajeni: 2 dag-polish-featurea + wire-oss landasivat, ja 0.8.1
+cutattiin. **⚠️ Release jouduttiin tekemään MANUAALISESTI — `ossctl release cut` on rikki (ks. alla
+`@ossctl-cut-no-publish`).**
+
+**⚠️⚠️ RELEASE-POLKU = MANUAALINEN (ossctl `release cut` EI julkaise oikeasti):** 0.8.1-cut paljasti
+että `ossctl release cut` ei todella uploadaa crates.io:hon (raportoi 300s "index visibility"
+-timeoutin cratelle jota se ei koskaan uploadannut; crate pysyi 404:ssä 9 min, ei receiptejä). Juurisyy
+todennäk. ossctl:n publish-adapterin bug (dry-run/no-op oikeassa cutissa), jäi kiinni koska
+`@wire-oss-release-as-release-path` verifioi vain `release plan`-dry-runilla. **Kunnes korjattu, releaset
+tehdään manuaalisesti** (näin 0.8.1 ja kaikki ≤0.7.2 tehtiin): bump `Cargo.toml` (workspace +
+internal dep) + `cargo update --workspace` → finalisoi CHANGELOG → `git commit -am "release: X.Y.Z"`
+→ `cargo publish -p issuectl-core` (odota) → `cargo publish -p issuectl` → `git tag -a vX.Y.Z` +
+`git push origin main --follow-tags` (tag laukaisee `release.yml`-binäärit). **HUOM: `ossctl release
+cut` julkaisee sen version joka PUUSSA on — se EI bumppaa versiota eikä finalisoi CHANGELOGia** (tämä
+kaatoi ekan cut-yrityksen kun se yritti julkaista 0.8.0:aa). Täydet stepit + korjattu polku:
+AGENTS.md "Operating facts". Bug: **`@ossctl-cut-no-publish`** (high).
 
 **Mitä tässä rupeamassa tehtiin:**
+- **0.8.1 sisältö (2 featurea + 1 bugfix, CHANGELOG `[0.8.1]`):** dag-polish — `issuectl dag` ei enää
+  raportoi `spawnable=true` in-progress-issuelle (`@dag-inprogress-spawnable`, fixed); uusi valinnainen
+  `lane_seq:<int>` intra-lane-sort + `update --lane-seq` (`@dag-stable-intralane-order`, done); `lane:
+  unlaned`-sentinel confirmed-parallel-safe (`@dag-unlaned-parallel-sentinel`, done). Molemmat schema-
+  kentät `closed_by`-precedentillä (canonical_hash vain kun set, ei schema-bumppia). + wire-oss:
+  `publish-crates.yml` eläkkeelle, docs `ossctl release`-polulle (`@wire-oss-release-as-release-path`,
+  done — mutta polku osoittautui rikki, ks. yllä). Molemmat 2 worktreeta landasivat, green gate vihreä.
 - **Phantom-bug suljettu:** `@json-show-omits-blocked-by` → `cannot-reproduce` (oli jo korjattu
   0.7.2:ssa `project_blocked_by`-projektiolla; verifoitu nykykoodilla).
 - **Web-UI:n poisto linjattu.** Kaikki selain/kanban-featuret suljettu `obsolete` (13 kpl, ks.
@@ -56,13 +77,12 @@ Patch-bumpeissa (0.8.0 → 0.8.1) ei tarvita; vain minor/major-rajan ylitys vaat
   konventionootti ("CLI default is random") päivitetty + `/issue`-skilltemplatet synkattu. 4-model
   /llm-review sovellettu.
 
-**✅ crates.io-caveat WIRATTU POIS (`@wire-oss-release-as-release-path`, 2026-08-10):** julkaisupolku
-on nyt `ossctl release plan|cut` — se hoitaa version bumpin, CHANGELOGin, crates.io-julkaisun
-(molemmat cratet) **ja** tagin. Ei enää manuaalista `gh workflow run "Publish to crates.io"`
--triggeriä. Tag laukaisee cargo-dist `release.yml`:n vain binääreille (GitHub Release + Homebrew).
-`publish-crates.yml` on eläkkeellä. **Todennettu vain `ossctl release plan` dry-runilla — ensimmäinen
-oikea release tällä polulla on sen end-to-end-todiste** (aja `ossctl release verify` sen jälkeen).
-Täydet stepit: CONTRIBUTING.md "Per-release steps" + AGENTS.md "Operating facts".
+**❌ ossctl-release-polku EI toimi (päivitetty 0.8.1-cutissa):** `@wire-oss-release-as-release-path`
+retiroi `publish-crates.yml`:n ja osoitti docsit `ossctl release`-polulle, MUTTA ensimmäinen oikea
+cut paljasti että `ossctl release cut` ei todella julkaise (ks. ⚠️⚠️-blokki yllä). → **crates.io-
+julkaisu tehdään nyt manuaalisesti** `cargo publish`illa kunnes `@ossctl-cut-no-publish` korjattu.
+`publish-crates.yml` on poistettu, joten CI-polkuakaan ei ole — manuaalinen lokaali `cargo publish`
+on ainoa toimiva reitti juuri nyt. Tag → cargo-dist `release.yml` binääreille toimii normaalisti.
 
 **Dogfood:** Käyttäjä dogfoodaa issuectl:ää omissa projekteissaan. Asennus: `cargo install
 issuectl` (crates.io), `brew upgrade jarimustonen/issuectl/issuectl`, tai `cargo install
@@ -78,14 +98,14 @@ holdissa). issuectl → puhdas AI-first CLI. Kaikki kanban/web-featuret suljettu
 poisto ajetaan `@remove-web-ui`:n kautta **vasta kun seuraaja-ohjelman luonnos on arvioitu**
 (gate käsin, ks. Tila-blokki). Fokus CLI:ssä.
 
-**Seuraava askel:** **aktiivinen (ei-deferred) työjono on käytännössä tyhjä** — ainoa on
-`@awfully-courageous-attempt` (low, build-only-if — vain jos Codex-käyttö todistuu). Kaikki muu
-on `deferred`: portitettu `@remove-web-ui` (odottaa seuraaja-ohjelman luonnosta), CLI-only
-re-scopatut `@issue-graph-view` + `@epic-tree-view`, iso strateginen `@focus-areas` (ADR 0001
-valmis, koskee `schema.rs`), `@wire-oss-release-as-release-path` (blocked upstream-ossctl:llä),
-`@somewhat-heady-zephyr` (events.jsonl, build-only-if). Uusi rupeama alkaa siis backlogista
-nostamalla (todennäk. `@focus-areas`), uudesta intake-issuesta, tai — kun seuraaja-luonnos
-valmistuu — `@remove-web-ui`:n un-deferillä.
+**Seuraava askel:** aktiivinen (ei-deferred) jono: **`@ossctl-cut-no-publish`** (high, bug — mutta
+juurisyy upstream-ossctl:ssä; ei koodattavaa täällä ennen kuin ossctl korjaa, sitten poista AGENTS-
+caveat + re-point), **`@warn-reserved-notes-section`** (low, homebase-filaama feature — varoita kun
+issue-body käyttää varattua `## Notes`-sektiota), **`@codex-prompt-variants`** (low, build-only-if).
+Deferred: portitettu `@remove-web-ui` (odottaa seuraaja-luonnosta), CLI-only `@issue-graph-view` +
+`@epic-tree-view`, `@events-jsonl-log` (build-only-if). `@focus-areas` suljettu `wontfix` (ei tarvetta;
+ADR 0001 tallessa). Uusi rupeama nostaa jonosta (warn-reserved-notes-section on ainoa selkeästi
+koodattava) tai uudesta intakesta.
 
 ---
 
@@ -103,23 +123,22 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: dag-inprogress-spawnable
-LANE A — issuectl dag (dag.rs + schema.rs + cmd_dag in main.rs) — "dag-polish", yksi worktree tekee kaikki 3 sarjassa
-  ▶ dag-inprogress-spawnable       bug · dag raportoi spawnable=true vaikka status in-progress → kaksoisspawn-riski
-    dag-stable-intralane-order     feature · valinnainen lane_seq:<int> intra-lane-sort (ennen slug-tie-breakia); schema.rs-kenttä
-    dag-unlaned-parallel-sentinel  feature · ensiluokkainen confirmed-parallel-safe -merkki (varattu lane: unlaned) vs. puuttuva lane; schema.rs-kenttä
+GLOBAL HEAD-OF-LINE: warn-reserved-notes-section   ← ainoa selkeästi koodattava; ossctl-cut on upstream-blocked
+LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections
+    warn-reserved-notes-section  low · feature; varoita authoring-aikaan kun issue-body käyttää varattua ## Notes -sektiota (homebase-filaama)
 LANE B — skill install + templates/ + skill.rs (skill distribution)
     codex-prompt-variants  low · feature; Codex-prompt-variantit /issue-new + /issue-intakelle. Build-only-if: vain jos Codex-käyttö todistuu.
-LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl) — disjoint LANE A:sta, rinnakkaisturvallinen
-  ▶ wire-oss-release-as-release-path  feature · siirrä julkaisu /oss-release-polulle; ossctl valmis. Korjaa myös crates.io-manuaalitriggerin.
+LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
+    ossctl-cut-no-publish  high · bug; ossctl release cut ei julkaise oikeasti → manuaalinen cargo publish. BLOCKED upstream-ossctl:llä; kun korjattu, poista AGENTS-caveat + re-point releaset ossctliin.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: siivous-/linjausrupeaman jälkeen homebase-dogfood filasi 3 `dag-*`-gappia (committi
-`03ab843`) jotka hiovat 0.8.0:n `issuectl dag`-komentoa → **LANE A "dag-polish"** (bug + 2 schema-kenttää,
-yksi worktree sarjassa). ossctl valmistui → **`@wire-oss-release-as-release-path` un-deferoitu** LANE C:hen
-(rinnakkainen). Molemmat production-koodia → `/llm-review` ennen mergeä. `codex-prompt-variants` (ent.
-awfully-courageous-attempt) pysyy LANE B:ssä build-only-if-parkissa.
+Kaari-lyhyesti: rupeama alkoi siivouksena, laajeni: **dag-polish** (3 dag-gappia yhtenä worktreena) +
+**wire-oss** landasivat, **0.8.1 cutattiin** — mutta ossctl-release-polku osoittautui rikki, joten
+0.8.1 julkaistiin manuaalisesti `cargo publish`illa (bug `@ossctl-cut-no-publish`, high, upstream-
+blocked). dag-trio + wire-oss terminal → pudotettu DAG:sta. Tilalle nousi 2 uutta homebase-filaamaa:
+`warn-reserved-notes-section` (low, koodattava) + `ossctl-cut-no-publish` (high, upstream-blocked).
+`codex-prompt-variants` pysyy LANE B:ssä build-only-if-parkissa.
 
 ---
 
@@ -144,19 +163,15 @@ fiercely-colossal-rabbits.
 `@epic-tree-view` (ent. needlessly-slippery-pan) — `issuectl epic tree <slug>`.
 
 **Build-only-if (älä rakenna ennen kuin tarve todistuu):**
-`@somewhat-heady-zephyr` (events.jsonl — vain jos git-metriikat ei riitä).
+`@events-jsonl-log` (ent. somewhat-heady-zephyr; events.jsonl — vain jos git-metriikat ei riitä).
 
-**Strateginen (iso, aikatauluta kun on tilaa):**
-`@focus-areas` — päätös tehty (ADR 0001: `areas: []` skeemakenttä), valmis
-implementaatio-ADR:ää + rakentamista varten. Koskee `schema.rs`:ää.
+**Strateginen:** `@focus-areas` **suljettu `wontfix` (2026-08-10)** — ei nyt tarvetta. Ylätason
+päätös (ADR 0001: `areas: []` skeemakenttä) on tallessa; reopen + kirjoita implementaatio-ADR jos
+tarve palaa.
 
-**Blocked on tooling (ei voi tehdä ennen kuin ossctl valmis):**
-`@wire-oss-release-as-release-path` — siirrä julkaisu `/oss-release`-polulle
-(ossctl release-engine + cargo-dist backend, `publish-crates.yml` eläkkeelle).
-Odottaa upstream-ossctl-muutoksia (työn alla). Sivutulos: paljasti että
-crates.io-auto-julkaisu on nyt rikki (`GITHUB_TOKEN` ei laukaise
-`publish-crates.yml`:ää) → crates.io vaatii manuaalisen triggerin joka releasessa
-kunnes tämä tehty.
+_(`@wire-oss-release-as-release-path` on suljettu `done` — mutta paljasti `@ossctl-cut-no-publish`in:
+ossctl release cut ei julkaise oikeasti → releaset manuaalisesti, ks. Tila-blokki. Se bug on DAG:n
+LANE C:ssä, ei tässä.)_
 
 ---
 
