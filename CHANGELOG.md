@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Release path switched to the `ossctl` engine (`/oss-release` →
+  `ossctl release plan|cut`).** ossctl now owns the version bump,
+  CHANGELOG finalize, crates.io publish of both crates (adapter
+  `cargo-publish`), and the `vX.Y.Z` tag, per the approved `OSS-RELEASE.md`
+  contract. cargo-dist `.github/workflows/release.yml` is kept as a
+  binary-only backend (GitHub-Release binaries + shell installer + Homebrew
+  tap), fired by the tag ossctl pushes. Retired the broken
+  `.github/workflows/publish-crates.yml`, whose `release: [published]`
+  trigger never fired (cargo-dist publishes the Release with `GITHUB_TOKEN`,
+  which does not fire downstream workflows) — the crates.io publish is now
+  part of `ossctl release cut`, closing the standing manual-trigger gap.
+  Docs updated (`OSS-RELEASE.md`, `AGENTS.md`, `CONTRIBUTING.md`). No
+  behavioural change to the `issuectl` binary. (issue:
+  `@wire-oss-release-as-release-path`)
+
 ## [0.8.0] - 2026-08-10
 
 ### Added

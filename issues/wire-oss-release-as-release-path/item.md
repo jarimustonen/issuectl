@@ -4,6 +4,9 @@ updated: 2026-08-10
 type: feature
 status: in-progress
 priority: normal
+commits:
+- hash: 802cd81
+  summary: retire publish-crates.yml; ossctl release plan dry-run reconciled
 ---
 
 # Wire /oss-release as the release path (integrate ossctl release engine with cargo-dist)

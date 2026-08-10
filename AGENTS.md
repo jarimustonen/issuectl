@@ -313,34 +313,38 @@ Facts a `/stint` orchestrator needs. The work queue and session handoff
 live in [TODO.md](TODO.md); this section is the project's operating
 policy.
 
-- **What "deploy" means here.** This is a Rust CLI, not a server. A
-  release is: bump `version` in `Cargo.toml`, move `CHANGELOG.md`
-  `[Unreleased]` items to a dated `[X.Y.Z]` section, `git commit -am
-  "release: X.Y.Z"`, then `git tag -a vX.Y.Z -m "Release X.Y.Z" &&
-  git push --follow-tags`. The tag triggers `cargo-dist`
-  (`.github/workflows/release.yml`) → GitHub Release with binaries +
-  shell installer, and the Homebrew formula pushed to
-  `jarimustonen/homebrew-issuectl`. **crates.io does NOT publish on the
-  tag** — `publish-crates.yml` is `workflow_dispatch`-only and
-  `GITHUB_TOKEN` does not fire it, so every release needs a **manual
-  trigger** (`gh workflow run "Publish to crates.io"`) once the release
-  workflow succeeds. (This is the gap `@wire-oss-release-as-release-path`
-  will close.) Full steps: [CONTRIBUTING.md](CONTRIBUTING.md)
-  "Per-release steps".
+- **What "deploy" means here.** This is a Rust CLI, not a server. The
+  release path is the `ossctl` engine (`/oss-release` → `ossctl release
+  plan|cut`), reading the approved [OSS-RELEASE.md](OSS-RELEASE.md)
+  contract. A release is: `ossctl release plan --version X.Y.Z` (seals a
+  content-addressed dry-run plan; phases `dry-run-all → build-all →
+  publish-all → tag → dist`), then `ossctl release cut --plan <id>
+  --version X.Y.Z`. **ossctl owns** the `version` bump in `Cargo.toml`,
+  the `CHANGELOG.md` `[Unreleased] → [X.Y.Z]` finalize, the **crates.io
+  publish** of both crates (`issuectl-core` before `issuectl`, adapter
+  `cargo-publish`), and the `vX.Y.Z` tag. The tag then triggers
+  `cargo-dist` (`.github/workflows/release.yml`) → GitHub Release with
+  binaries + shell installer + the Homebrew formula pushed to
+  `jarimustonen/homebrew-issuectl`. `release.yml` is a **binary-only
+  backend** — it does NOT publish to crates.io, so there is no
+  double-publish and **no manual `gh workflow run` step**. (The old
+  `publish-crates.yml` was retired 2026-08-10 by
+  `@wire-oss-release-as-release-path`: its `release: [published]` trigger
+  never fired because cargo-dist publishes the Release with `GITHUB_TOKEN`,
+  which does not fire downstream workflows.) Full steps:
+  [CONTRIBUTING.md](CONTRIBUTING.md) "Per-release steps".
 - **Deploy/release autonomy: autonomous.** The conductor may cut and
   publish releases **without asking**, and may **decide autonomously
-  whether** a release is warranted — bump the version, roll the
-  CHANGELOG, commit, tag, `git push --follow-tags`, then fire the
-  crates.io manual trigger once `release.yml` is green (see the
-  crates.io caveat below). No go/no-go handoff is required. (Granted
-  2026-08-10; supersedes the earlier go/no-go rule.) Use judgement on
-  *timing* — batch trivial changes, don't tag a red or half-landed
-  `main` — but the decision itself is yours. **Autonomous crates.io
-  recipe:** after the tag push, background `gh run watch
-  <release-run-id> --exit-status && gh workflow run "Publish to
-  crates.io" --ref main` so the crates.io publish fires automatically
-  the moment `release.yml` goes green — this satisfies the manual-trigger
-  caveat without a human in the loop (used for 0.7.2).
+  whether** a release is warranted — run `ossctl release plan --version
+  X.Y.Z` then `ossctl release cut --plan <id> --version X.Y.Z`; the cut
+  bumps, rolls the CHANGELOG, publishes both crates to crates.io, and
+  pushes the tag (which fires `release.yml` for binaries). No go/no-go
+  handoff is required, and no separate crates.io trigger — the publish is
+  part of the cut. (Granted 2026-08-10; supersedes the earlier go/no-go
+  rule.) Use judgement on *timing* — batch trivial changes, don't release
+  off a red or half-landed `main` — but the decision itself is yours. If a
+  cut is interrupted, `ossctl release resume` reconciles and continues;
+  `ossctl release verify` is a read-only reconcile against the registry.
 - **Live-version check.** Shipped: `git tag --sort=-creatordate | head
   -1` and `grep '^version' Cargo.toml`. Published: crates.io / the
   Homebrew tap. Compare against `main` before recommending a release.

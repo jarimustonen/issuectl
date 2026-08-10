@@ -56,11 +56,12 @@ Patch-bumpeissa (0.8.0 → 0.8.1) ei tarvita; vain minor/major-rajan ylitys vaat
   konventionootti ("CLI default is random") päivitetty + `/issue`-skilltemplatet synkattu. 4-model
   /llm-review sovellettu.
 
-**⚠️ crates.io-caveat (ennallaan, muista JOKA release):** tag-push laukaisee cargo-dist
-(GitHub Release + Homebrew) mutta **crates.io-julkaisu vaatii manuaalisen triggerin**
-(`gh workflow run "Publish to crates.io"`) — `GITHUB_TOKEN` ei laukaise `publish-crates.yml`:ää.
-0.8.0:ssa (kuten 0.7.2:ssa) tämä hoidettiin taustawatcherilla joka triggeröi sen `release.yml`:n
-vihertyessä. (Korjaus odottaa `@wire-oss-release-as-release-path`ia.)
+**✅ crates.io-caveat POISTUNUT (`@wire-oss-release-as-release-path`, 2026-08-10):** julkaisupolku
+on nyt `ossctl release plan|cut` — se hoitaa version bumpin, CHANGELOGin, crates.io-julkaisun
+(molemmat cratet) **ja** tagin. Ei enää manuaalista `gh workflow run "Publish to crates.io"`
+-triggeriä. Tag laukaisee cargo-dist `release.yml`:n vain binääreille (GitHub Release + Homebrew).
+`publish-crates.yml` on eläkkeellä. Täydet stepit: CONTRIBUTING.md "Per-release steps" +
+AGENTS.md "Operating facts".
 
 **Dogfood:** Käyttäjä dogfoodaa issuectl:ää omissa projekteissaan. Asennus: `cargo install
 issuectl` (crates.io), `brew upgrade jarimustonen/issuectl/issuectl`, tai `cargo install
