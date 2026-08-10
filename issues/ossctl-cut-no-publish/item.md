@@ -74,3 +74,9 @@ the manual local publish is the only working route right now.
 - [ ] ossctl fix released; a real `ossctl release cut` publishes a version that
       becomes visible on crates.io.
 - [ ] AGENTS.md manual-fallback caveat removed; release path re-pointed at ossctl.
+
+## Comments
+
+### 2026-08-10T14:42:30Z · @agent-claude
+
+Root-cause fix tracked upstream in the ossctl repo: @release-cut-publish-noop (bug, high). The stale-lock recovery friction hit during the same cut is upstream @release-abandon-break-stale-lock. This issuectl-side issue stays as the release-path blocker: once ossctl ships the fix and a real cut is verified end-to-end, remove the reminder and confirm the ossctl path here.
