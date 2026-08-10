@@ -2,11 +2,14 @@
 created: 2026-08-06
 updated: 2026-08-10
 type: feature
-status: in-progress
+status: done
 priority: low
 commits:
 - hash: c423eff
   summary: ship Codex-prompt variants of /issue-new + /issue-intake; extend dogfood sync test to all six copies
+- hash: c61839c
+  summary: harden intake-variant sync guards per LLM review (dogfood existence, dedup hint, anchored split, order+content tests)
+closed: 2026-08-10
 ---
 
 # Ship Codex-prompt variants of /issue-new + /issue-intake
