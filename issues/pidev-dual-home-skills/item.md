@@ -3,7 +3,7 @@ created: 2026-08-11
 updated: 2026-08-11
 type: feature
 status: open
-priority: normal
+priority: high
 ---
 
 # Dual-home skills into pi.dev's skill dir (~/.pi/agent/skills)

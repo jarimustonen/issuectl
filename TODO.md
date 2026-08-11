@@ -118,11 +118,11 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: pidev-dual-home-skills   ← LENNOSSA (live worktree, toinen sessio); ei uutta spawnia. ossctl-cut = upstream-blocked
+GLOBAL HEAD-OF-LINE: pidev-dual-home-skills   ← high, KIIREELLINEN; issuectl-worktree spawnattu tässä sessiossa. ossctl-cut = upstream-blocked
 LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections
     (tyhjä — ei aktiivisia issueitä)
 LANE B — skill install + templates/ + skill.rs (skill distribution)
-    pidev-dual-home-skills  normal (käyttäjä pitää KIIREELLISENÄ 2026-08-11) · feature; dual-home skill install myös ~/.pi/agent/skills/iin (pi.dev-migraatio WS4). ⚠️ LIVE worktree `dual-home-skills` (toinen sessio) toteuttaa — ÄLÄ spawnaa toista. Bumppaa high vasta kun landannut (worker omistaa issue-tiedoston nyt).
+    pidev-dual-home-skills  high · feature; dual-home skill install myös ~/.pi/agent/skills/iin (pi.dev-migraatio WS4). issuectl-worktree spawnattu (LANE B, skill.rs). HUOM: orchestratectl tekee SAMAN muutoksen omaan repoonsa rinnalla (wt-01kzrmdadj, orchestratectl__worktrees) — eri repo, ei collisionia; sikäläinen ratkaisu on referenssi.
 LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
     ossctl-cut-no-publish  high · bug; ossctl release cut ei julkaise oikeasti → manuaalinen cargo publish. BLOCKED upstream-ossctl:llä; kun korjattu, poista AGENTS-caveat + re-point releaset ossctliin.
 ```
