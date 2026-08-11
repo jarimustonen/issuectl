@@ -4,6 +4,9 @@ updated: 2026-08-11
 type: feature
 status: in-progress
 priority: high
+commits:
+- hash: a15328f
+  summary: dual-home Claude SKILL.md into ~/.pi/agent/skills on install
 ---
 
 # Dual-home skills into pi.dev's skill dir (~/.pi/agent/skills)

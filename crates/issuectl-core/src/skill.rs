@@ -31,7 +31,14 @@ pub fn render_template(body: &str) -> String {
 /// binary resolves this and threads it into [`install_skill`]; tests pass an
 /// explicit root instead of touching the real home.
 pub fn pi_skills_root() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent/skills"))
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    // Guard against an empty or relative `HOME`: joining onto it would resolve
+    // `.pi/agent/skills` relative to the process CWD (typically the target
+    // repo), silently polluting it. Only an absolute home yields a pi root.
+    if !home.is_absolute() {
+        return None;
+    }
+    Some(home.join(".pi/agent/skills"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,7 +200,15 @@ pub fn install_skill_summary(
     // a Claude skill for `--agent claude`, a Codex prompt for `--agent codex`
     // — the same way `/issue` does, so the fleet-apply hook distributes them
     // to both fleets.
-    let mut results = Vec::with_capacity(agents.len() * (1 + IntakeSkill::ALL.len()) + 1);
+    // Capacity: scaffold + per-agent (/issue + intake skills), plus the pi
+    // mirrors (/issue + intake skills) when a Claude install has a pi root.
+    let per_agent = 1 + IntakeSkill::ALL.len();
+    let pi_slots = if pi_root.is_some() && agents.contains(&Agent::Claude) {
+        per_agent
+    } else {
+        0
+    };
+    let mut results = Vec::with_capacity(agents.len() * per_agent + 1 + pi_slots);
     results.push(install_issues_scaffold(repo_root, force)?);
     for agent in agents {
         results.push(install_agent_template(repo_root, *agent, force)?);
@@ -221,23 +236,26 @@ pub fn install_skill_summary(
     // present pi copy with a deleted Claude skill still lets a plain install
     // repair the Claude side (the pi copy is simply left in place unless
     // `--force`).
+    //
+    // Because pi is a derived convenience and NOT a hard requirement, a failed
+    // pi write (unwritable `$HOME`, read-only fs, quota) must never fail the
+    // whole install — by the time we get here the repo-local Claude/Codex
+    // targets are already on disk, and aborting would also skip the remaining
+    // `init` steps (hooks, merge driver). So each pi mirror error is warned to
+    // stderr and skipped, and the repo-local install still reports success.
     if let Some(pi_root) = pi_root {
         if agents.contains(&Agent::Claude) {
+            let mut mirror = |name: &str, template: &str| match install_pi_mirror(
+                pi_root, name, template, force,
+            ) {
+                Ok(r) => results.push(r),
+                Err(e) => eprintln!("  ! pi.dev skill mirror skipped for {name}: {e:#}"),
+            };
             if let Some(name) = Agent::Claude.skill_name() {
-                results.push(install_pi_mirror(
-                    pi_root,
-                    name,
-                    Agent::Claude.template(),
-                    force,
-                )?);
+                mirror(name, Agent::Claude.template());
             }
             for skill in IntakeSkill::ALL {
-                results.push(install_pi_mirror(
-                    pi_root,
-                    skill.slug(),
-                    skill.template(Agent::Claude),
-                    force,
-                )?);
+                mirror(skill.slug(), skill.template(Agent::Claude));
             }
         }
     }
@@ -1106,6 +1124,61 @@ mod tests {
         assert!(pi_issue.exists(), "the pi mirror must remain in place");
     }
 
+    /// When both the Claude skill AND its pi mirror are missing, a plain
+    /// (non-force) install recreates both.
+    #[test]
+    fn install_recreates_both_when_both_missing() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        install_skill(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+        let claude_issue = repo.path().join(".claude/skills/issue/SKILL.md");
+        let pi_issue = pi.path().join("issue/SKILL.md");
+        std::fs::remove_file(&claude_issue).unwrap();
+        std::fs::remove_file(&pi_issue).unwrap();
+
+        install_skill(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+        assert!(claude_issue.exists(), "Claude skill must be recreated");
+        assert!(pi_issue.exists(), "pi mirror must be recreated");
+    }
+
+    /// A failed pi mirror write (unwritable pi root) is non-fatal: the
+    /// repo-local Claude install still succeeds and `install_skill` returns
+    /// `Ok`. Simulated by planting a regular file where the pi skill dir would
+    /// go, so `create_dir_all` on `<pi_root>/issue/` fails.
+    #[test]
+    fn pi_mirror_failure_is_non_fatal() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        // A file at `<pi_root>/issue` blocks creating the `issue/` skill dir.
+        std::fs::write(pi.path().join("issue"), "not a dir").unwrap();
+
+        // Must not error even though the pi mirror for `/issue` cannot be
+        // written.
+        install_skill(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+
+        // The repo-local Claude skills are all installed regardless.
+        assert!(repo.path().join(".claude/skills/issue/SKILL.md").exists());
+        for skill in IntakeSkill::ALL {
+            assert!(skill.install_path(Agent::Claude, repo.path()).exists());
+        }
+        // The blocked pi entry is absent from the summary (skipped, not
+        // errored); the other pi mirrors that CAN be written still land.
+        let results =
+            install_skill_summary(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+        assert!(
+            !results
+                .iter()
+                .any(|r| r.path == pi.path().join("issue/SKILL.md")),
+            "the un-writable pi mirror must be skipped, not reported"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|r| r.path == pi.path().join("issue-new/SKILL.md")),
+            "writable pi mirrors must still be installed"
+        );
+    }
+
     /// `--force` refreshes a stale pi mirror to the current template.
     #[test]
     fn force_refreshes_pi_mirror() {
@@ -1169,6 +1242,11 @@ mod tests {
         let root = pi_skills_root().unwrap();
         assert!(root.ends_with(".pi/agent/skills"));
         assert!(root.starts_with("/home/example"));
+        // Empty or relative HOME must yield None (never a CWD-relative path).
+        std::env::set_var("HOME", "");
+        assert!(pi_skills_root().is_none(), "empty HOME must yield None");
+        std::env::set_var("HOME", "relative/home");
+        assert!(pi_skills_root().is_none(), "relative HOME must yield None");
         std::env::remove_var("HOME");
         assert!(pi_skills_root().is_none());
         match saved {
