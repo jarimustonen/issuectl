@@ -86,7 +86,13 @@ poisto ajetaan `@remove-web-ui`:n kautta **vasta kun seuraaja-ohjelman luonnos o
   → **minor-bump 0.8.1 → 0.9.0** (muista **caret-gotcha**: bumppaa myös `crates/issuectl/Cargo.toml`:n
   sisäinen dep `version =` 0.8.0 → 0.9.0, ks. gotcha yllä). **⚠️ ossctl `release cut` yhä rikki → julkaisu
   manuaalisella `cargo publish`-fallbackilla** kunnes `@ossctl-cut-no-publish` ratkeaa.
-- **Aktiivinen jono:** ainoa ei-deferred issue on **`@ossctl-cut-no-publish`** (high, bug — juurisyy
+- **🔴 LENNOSSA NYT — `@pidev-dual-home-skills`** (normal, käyttäjä pitää KIIREELLISENÄ; feature, LANE B):
+  `issuectl skill install` asentaa skillit vain `~/.claude/skills/`iin → eivät näy pi.dev-harnessissa; pitää
+  dual-hometa myös `~/.pi/agent/skills/`iin (pi.dev-migraatio WS4, homebasen filaama). **Live worktree
+  `dual-home-skills` (toinen sessio) toteuttaa parhaillaan** — status vielä `open`/0 commits mutta run
+  pending. ÄLÄ spawnaa toista. Kun landannut: verifioi, harkitse high-bump, päivitä CHANGELOG (release-pile
+  kasvaa 3:een). Issue-tiedosto on worker-omisteinen → älä muokkaa frontmatteria ennen landausta.
+- **Aktiivinen jono:** ei-deferred issuet: `@pidev-dual-home-skills` (yllä, lennossa) ja **`@ossctl-cut-no-publish`** (high, bug — juurisyy
   upstream-ossctl:ssä; ei koodattavaa täällä ennen kuin ossctl korjaa, sitten poista AGENTS-caveat +
   re-point releaset ossctliin). **Avoin C-päätös (käyttäjä ei vielä valinnut):** (1) jätä odottamaan
   ossctlin korjausta, vai (2) käynnistä verifiointi-worktree joka tarkistaa onko ossctl jo korjannut ja
@@ -112,11 +118,11 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: ossctl-cut-no-publish   ← ainoa aktiivinen node, MUTTA upstream-blocked (ei koodattavaa täällä)
+GLOBAL HEAD-OF-LINE: pidev-dual-home-skills   ← LENNOSSA (live worktree, toinen sessio); ei uutta spawnia. ossctl-cut = upstream-blocked
 LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections
     (tyhjä — ei aktiivisia issueitä)
 LANE B — skill install + templates/ + skill.rs (skill distribution)
-    (tyhjä — ei aktiivisia issueitä)
+    pidev-dual-home-skills  normal (käyttäjä pitää KIIREELLISENÄ 2026-08-11) · feature; dual-home skill install myös ~/.pi/agent/skills/iin (pi.dev-migraatio WS4). ⚠️ LIVE worktree `dual-home-skills` (toinen sessio) toteuttaa — ÄLÄ spawnaa toista. Bumppaa high vasta kun landannut (worker omistaa issue-tiedoston nyt).
 LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
     ossctl-cut-no-publish  high · bug; ossctl release cut ei julkaise oikeasti → manuaalinen cargo publish. BLOCKED upstream-ossctl:llä; kun korjattu, poista AGENTS-caveat + re-point releaset ossctliin.
 ```
