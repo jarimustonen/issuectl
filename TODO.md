@@ -13,13 +13,14 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-11, rinnakkaiskaista-rupeama):** **0.8.1 yhä live; 2 uutta featurea landasi `main`iin,
-EI vielä julkaistu.** Käyttäjä käynnisti kaikki 3 DAG-kaistaa rinnan; A ja B olivat toteutettavia ja
-**molemmat landasivat puhtaasti `main`iin** (`/llm-review` + `/assess-findings` ajettu ennen mergeä),
-yhdistetty green gate vihreä (fmt clean, 1070 testiä, ei uusia clippy-varoituksia). `main` on **7 committia
-originin edellä, pushattu tässä handoffissa** (`main == origin`), työpuu puhdas. **Release PIDETTIIN**
-(ei cutattu): molemmat featuret `low`-prio + CHANGELOG `[Unreleased]` **tyhjä** (workerit eivät lisänneet
-merkintöjä) + release-polku yhä rikki (ks. release-oppi). Batchataan seuraavaan releaseen.
+**Tila (2026-08-11, rinnakkaiskaista-rupeama):** **0.8.1 yhä live; 3 uutta featurea landasi `main`iin,
+EI vielä julkaistu.** Käyttäjä käynnisti ensin 3 DAG-kaistaa rinnan; `@warn-reserved-notes-section` (LANE A) +
+`@codex-prompt-variants` (LANE B) landasivat. Handoffin jälkeen nousi **kiireellinen `@pidev-dual-home-skills`**
+(pi.dev-migraation WS4) — spawnattiin issuectl-worktree, **landasi** (dual-home `~/.pi/agent/skills/`iin).
+Kaikki kolme: green gate vihreä (fmt clean, 1081 testiä, ei uusia clippy-varoituksia), `/llm-review` ajettu.
+`main == origin`, työpuu puhdas. **Release PIDETTIIN** (ei cutattu): featuret low/high-prio + CHANGELOG
+`[Unreleased]` **tyhjä** + release-polku yhä rikki (ks. release-oppi). Batchataan → seuraava rupeama cuttaa
+0.9.0:n (3 featurea). ⚠️ Huom: `@pidev-dual-home-skills` filasi follow-upin `@pidev-pi-skill-lifecycle`.
 
 **⚠️ RELEASE-OPPI (yhä voimassa): ossctl `release cut` EI julkaise oikeasti → 0.8.1 tehtiin `cargo publish`illa.**
 Real cut ei uploadannut crates.io:hon (raportoi 300s "index visibility" -timeoutin cratelle jota se ei
@@ -80,19 +81,21 @@ poisto ajetaan `@remove-web-ui`:n kautta **vasta kun seuraaja-ohjelman luonnos o
 (gate käsin, ks. Tila-blokki). Fokus CLI:ssä.
 
 **Seuraava askel:**
-- **RELEASE PENDING (2 landattua featurea odottaa):** kun release cutataan, ensin **täytä CHANGELOG
-  `[Unreleased]`** molemmilla featureilla (`@warn-reserved-notes-section` + `@codex-prompt-variants`;
-  workerit eivät lisänneet merkintöjä — `[Unreleased]` on tyhjä), sitten version-bump. Molemmat additiivisia
-  → **minor-bump 0.8.1 → 0.9.0** (muista **caret-gotcha**: bumppaa myös `crates/issuectl/Cargo.toml`:n
-  sisäinen dep `version =` 0.8.0 → 0.9.0, ks. gotcha yllä). **⚠️ ossctl `release cut` yhä rikki → julkaisu
-  manuaalisella `cargo publish`-fallbackilla** kunnes `@ossctl-cut-no-publish` ratkeaa.
-- **🔴 LENNOSSA NYT — `@pidev-dual-home-skills`** (normal, käyttäjä pitää KIIREELLISENÄ; feature, LANE B):
-  `issuectl skill install` asentaa skillit vain `~/.claude/skills/`iin → eivät näy pi.dev-harnessissa; pitää
-  dual-hometa myös `~/.pi/agent/skills/`iin (pi.dev-migraatio WS4, homebasen filaama). **Live worktree
-  `dual-home-skills` (toinen sessio) toteuttaa parhaillaan** — status vielä `open`/0 commits mutta run
-  pending. ÄLÄ spawnaa toista. Kun landannut: verifioi, harkitse high-bump, päivitä CHANGELOG (release-pile
-  kasvaa 3:een). Issue-tiedosto on worker-omisteinen → älä muokkaa frontmatteria ennen landausta.
-- **Aktiivinen jono:** ei-deferred issuet: `@pidev-dual-home-skills` (yllä, lennossa) ja **`@ossctl-cut-no-publish`** (high, bug — juurisyy
+- **RELEASE PENDING (3 landattua featurea odottaa):** kun release cutataan, ensin **täytä CHANGELOG
+  `[Unreleased]`** kaikilla kolmella (`@warn-reserved-notes-section` + `@codex-prompt-variants` +
+  `@pidev-dual-home-skills`; workerit eivät lisänneet merkintöjä — `[Unreleased]` on tyhjä), sitten
+  version-bump. Kaikki additiivisia → **minor-bump 0.8.1 → 0.9.0** (muista **caret-gotcha**: bumppaa myös
+  `crates/issuectl/Cargo.toml`:n sisäinen dep `version =` 0.8.0 → 0.9.0, ks. gotcha yllä). **⚠️ ossctl
+  `release cut` yhä rikki → julkaisu manuaalisella `cargo publish`-fallbackilla** kunnes
+  `@ossctl-cut-no-publish` ratkeaa.
+- **✅ `@pidev-dual-home-skills` LANDANNUT** (high, feature, `done`; commitit `a15328f`/`8ae1a85`/`408c999`,
+  green + 4-mallin `/llm-review`): `issuectl skill install` / `init` dual-homeaa nyt jokaisen Claude
+  `SKILL.md`:n myös `~/.pi/agent/skills/<name>/SKILL.md`:hen (home-global; repo-local Claude/Codex ennallaan;
+  vain SKILL.md peilataan; `skill::pi_skills_root`). Review korjasi fatal-pi-write-bugin + non-absolute-HOME-
+  footgunin. **Follow-up filattu: `@pidev-pi-skill-lifecycle`** (normal — pi-korpuksen prune/verify/version-
+  drift/uninstall; LANE B). Issuectl-osuus WS4:stä valmis; sisar-binäärit (orchestratectl ym.) tekevät omansa.
+- **Aktiivinen jono:** ei-deferred issuet: `@pidev-pi-skill-lifecycle` (normal, DAG head), `@doctor-fix-merge-notes-comments` +
+  `@note-missing-as-generic-error` (low, warn-notes-follow-upit) ja **`@ossctl-cut-no-publish`** (high, bug — juurisyy
   upstream-ossctl:ssä; ei koodattavaa täällä ennen kuin ossctl korjaa, sitten poista AGENTS-caveat +
   re-point releaset ossctliin). **Avoin C-päätös (käyttäjä ei vielä valinnut):** (1) jätä odottamaan
   ossctlin korjausta, vai (2) käynnistä verifiointi-worktree joka tarkistaa onko ossctl jo korjannut ja
@@ -118,11 +121,12 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: pidev-dual-home-skills   ← high, KIIREELLINEN; issuectl-worktree spawnattu tässä sessiossa. ossctl-cut = upstream-blocked
+GLOBAL HEAD-OF-LINE: pidev-pi-skill-lifecycle   ← ylin selkeästi koodattava (normal). ossctl-cut on high MUTTA upstream-blocked (ei koodattavaa täällä)
 LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections
-    (tyhjä — ei aktiivisia issueitä)
+    doctor-fix-merge-notes-comments  low · feature; doctor --fix auto-mergeää ## Notes → ## Comments myös kun molemmat olemassa (nyt "manual merge required"). Touches doctor/ + body_sections.
+    note-missing-as-generic-error  low · bug; `issuectl note` ilman --as printtaa geneerisen helpin clapin missing-arg-viestin sijaan. Touches main.rs clap + note-handler.
 LANE B — skill install + templates/ + skill.rs (skill distribution)
-    pidev-dual-home-skills  high · feature; dual-home skill install myös ~/.pi/agent/skills/iin (pi.dev-migraatio WS4). issuectl-worktree spawnattu (LANE B, skill.rs). HUOM: orchestratectl tekee SAMAN muutoksen omaan repoonsa rinnalla (wt-01kzrmdadj, orchestratectl__worktrees) — eri repo, ei collisionia; sikäläinen ratkaisu on referenssi.
+    pidev-pi-skill-lifecycle  normal · feature; pi-korpuksen (~/.pi/agent/skills/) lifecycle: version-drift-näkyvyys, prune (orphanit esim. /triage-bugs), doctor-verify, uninstall-gap. Follow-up dual-homelle. collision: doctor/ (LANE A). orchestratectl-repossa identtinen sisar-issue.
 LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
     ossctl-cut-no-publish  high · bug; ossctl release cut ei julkaise oikeasti → manuaalinen cargo publish. BLOCKED upstream-ossctl:llä; kun korjattu, poista AGENTS-caveat + re-point releaset ossctliin.
 ```
