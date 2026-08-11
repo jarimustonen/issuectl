@@ -397,6 +397,12 @@ policy.
   Two worktrees editing any one of these will collide on rebase.
 - **Test-account reset: n/a.** No external services or test accounts;
   tests are hermetic (`cargo test` uses tempdirs). No reset step.
+- **Parallelism preference: launch all disjoint lanes at once.** When the
+  DAG's lanes touch no shared hot file, default to spawning them all in
+  parallel rather than proposing one lane and waiting — and don't hold back
+  parked / low-priority (`build-only-if`) items when the user asks to "run
+  everything". The user favors maximal parallelism; sequence only genuine
+  hot-file collisions.
 
 ## When in doubt
 
