@@ -2,11 +2,14 @@
 created: 2026-08-11
 updated: 2026-08-11
 type: feature
-status: in-progress
+status: done
 priority: high
 commits:
 - hash: a15328f
   summary: dual-home Claude SKILL.md into ~/.pi/agent/skills on install
+- hash: 8ae1a85
+  summary: make pi mirror non-fatal + guard non-absolute HOME (review fixes)
+closed: 2026-08-11
 ---
 
 # Dual-home skills into pi.dev's skill dir (~/.pi/agent/skills)
