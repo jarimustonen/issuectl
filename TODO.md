@@ -13,43 +13,43 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-10, iltapäivän rupeama):** **0.8.1 JULKAISTU JA VARMISTETTU — kaikki 3 kanavaa vihreä.**
-crates.io molemmat cratet `200`, tag `v0.8.1` originissa, `release.yml`-run `31395041120`
-**completed/success** (binäärit + shell-installer + Homebrew). `main` == origin (`0b49850`), työpuu
-puhdas. Rupeama alkoi siivous-/linjausrupeamana, laajeni: dag-polish (2 featurea + 1 bugfix) + wire-oss
-landasivat ja **0.8.1 cutattiin — mutta manuaalisesti**, koska `ossctl release cut` osoittautui rikki.
+**Tila (2026-08-11, rinnakkaiskaista-rupeama):** **0.8.1 yhä live; 2 uutta featurea landasi `main`iin,
+EI vielä julkaistu.** Käyttäjä käynnisti kaikki 3 DAG-kaistaa rinnan; A ja B olivat toteutettavia ja
+**molemmat landasivat puhtaasti `main`iin** (`/llm-review` + `/assess-findings` ajettu ennen mergeä),
+yhdistetty green gate vihreä (fmt clean, 1070 testiä, ei uusia clippy-varoituksia). `main` on **7 committia
+originin edellä, pushattu tässä handoffissa** (`main == origin`), työpuu puhdas. **Release PIDETTIIN**
+(ei cutattu): molemmat featuret `low`-prio + CHANGELOG `[Unreleased]` **tyhjä** (workerit eivät lisänneet
+merkintöjä) + release-polku yhä rikki (ks. release-oppi). Batchataan seuraavaan releaseen.
 
-**⚠️ RELEASE-OPPI (tärkein): ossctl `release cut` EI julkaissut oikeasti → 0.8.1 tehtiin `cargo publish`illa.**
+**⚠️ RELEASE-OPPI (yhä voimassa): ossctl `release cut` EI julkaise oikeasti → 0.8.1 tehtiin `cargo publish`illa.**
 Real cut ei uploadannut crates.io:hon (raportoi 300s "index visibility" -timeoutin cratelle jota se ei
 koskaan uploadannut; crate 404:ssä 9 min, ei receiptejä). Juurisyy todennäk. ossctl:n publish-adapterin
 bug (dry-run/no-op oikeassa cutissa), jäi kiinni koska `@wire-oss-release-as-release-path` verifioi vain
-`release plan`-dry-runilla. 0.8.1 pelastettiin manuaalilla `cargo publish -p issuectl-core` → `-p issuectl`
-→ tag → push. **EI jätetä workaroundiksi:** bug filattu upstream-ossctl-reppuun **`release-cut-publish-noop`**
-(high) + downstream-tracker tässä **`@ossctl-cut-no-publish`** (high, DAG LANE C). AGENTS.md kuvaa taas
-`ossctl release cut`:n ainoana polkuna (workaround-stepit poistettu käyttäjän pyynnöstä — korjataan, ei
-kierretä). **Toinen 0.8.1-opetus (AGENTS.md:ssä):** `ossctl release cut` julkaisee PUUN version — se EI
-bumppaa; siksi bump + CHANGELOG-finalisointi + `release:`-commit tehdään ENNEN cutia.
-(Sekundäärifriktio: stale-lock esti `release abandon`in tapetun cutin jälkeen → ossctl
-`@release-abandon-break-stale-lock`, oli jo filattu, lisätty repro-kommentti.)
+`release plan`-dry-runilla. Bug filattu upstream-ossctl-reppuun **`release-cut-publish-noop`** (high) +
+downstream-tracker tässä **`@ossctl-cut-no-publish`** (high, DAG LANE C). AGENTS.md kuvaa `ossctl release
+cut`:n polkuna (workaround-stepit poistettu — korjataan, ei kierretä). **⚠️ Kunnes ossctl korjattu:
+seuraava release vaatii taas manuaalisen `cargo publish -p issuectl-core` → `-p issuectl` → tag → push
+-fallbackin** (samat stepit kuin 0.8.1:ssä). **Toinen opetus (AGENTS.md:ssä):** `ossctl release cut`
+julkaisee PUUN version — se EI bumppaa; siksi bump + CHANGELOG-finalisointi + `release:`-commit tehdään
+ENNEN cutia. (Sekundäärifriktio: stale-lock esti `release abandon`in → ossctl
+`@release-abandon-break-stale-lock`, filattu.)
 
-**Mitä tässä rupeamassa tehtiin:**
-- **0.8.1 sisältö (2 featurea + 1 bugfix, CHANGELOG `[0.8.1]`):** dag-polish — `issuectl dag` ei enää
-  raportoi `spawnable=true` in-progress-issuelle (`@dag-inprogress-spawnable`, fixed); uusi valinnainen
-  `lane_seq:<int>` intra-lane-sort + `update --lane-seq` (`@dag-stable-intralane-order`, done); `lane:
-  unlaned`-sentinel confirmed-parallel-safe (`@dag-unlaned-parallel-sentinel`, done). Molemmat schema-
-  kentät `closed_by`-precedentillä (canonical_hash vain kun set, ei schema-bumppia). + wire-oss:
-  `publish-crates.yml` eläkkeelle, docs `ossctl release`-polulle (`@wire-oss-release-as-release-path`,
-  done — mutta polku osoittautui rikki, ks. yllä). Molemmat 2 worktreeta landasivat, green gate vihreä.
-- **Phantom-bug suljettu:** `@json-show-omits-blocked-by` → `cannot-reproduce` (oli jo korjattu
-  0.7.2:ssa `project_blocked_by`-projektiolla; verifoitu nykykoodilla).
-- **Web-UI:n poisto linjattu.** Kaikki selain/kanban-featuret suljettu `obsolete` (13 kpl, ks.
-  alla), ja luotu portitettu poisto-issue **`@remove-web-ui`** (chore, deferred). **⛔ Gate:
-  poistoa EI tehdä ennen kuin web-toiminnot on arvioitu seuraaja-ohjelmaa varten** (luonnos
-  tekeillä toisessa repossa; gate hoidetaan käsin — un-defer + start vasta kun luonnos valmis).
-- **Kaksi web-issueä säilytettiin ja re-scopattiin CLI-only + nimettiin kunnon slugilla:**
-  `massively-periodic-surprise` → **`@issue-graph-view`** (`issuectl graph` -moottori + lensit;
-  lens 2 osin jo `issuectl dag`), `needlessly-slippery-pan` → **`@epic-tree-view`**
-  (`issuectl epic tree`). Molemmat pysyvät `deferred`.
+**Mitä tässä rupeamassa tehtiin (2 featurea, landattu `main`iin, EI releasea):**
+- **`@warn-reserved-notes-section`** (low, feature, `done`) — `issuectl new` ja `body set` varoittavat nyt
+  authoring-aikaan kun issue-body käyttää varattua `## Notes`-otsikkoa (jonka doctor migratoi `## Comments`iin).
+  Ei-fataali (ei blokkaa kirjoitusta), varoitus sekä human- (`emit_warnings_to_stderr`) että `--json`
+  `warnings`-kentässä. Detektointi single-sourced uudesta `body_sections::LEGACY_SECTION_ALIASES`-constista
+  (`reserved_section_warnings`, reuse fence-aware `all_h2_sections`-skanneri; ei uutta regexiä). Help-teksti
+  `new --body-file` + `body set` mainitsee varatut sektiot. 4 mallin `/llm-review` löysi yksimielisen
+  kriittisen bugin (false negative kun bodyssä `---` horizontal rule ennen `## Notes` + CRLF) → korjattu
+  (`do_new` skannaa raa'an bodyn, ei frontmatter-splitattua renderöityä docia).
+- **`@codex-prompt-variants`** (low, feature, `done`) — `/issue-new` + `/issue-intake` asentuvat nyt
+  molemmissa formaateissa kuten `/issue`: Claude-skill `.claude/skills/<slug>/SKILL.md` + Codex-prompt
+  `.codex/prompts/<slug>.md` (frontmatter strippattu, body identtinen). Uudet templatet
+  `issue-new-prompt.md` / `issue-intake-prompt.md` `include_str!`-embedattu; `IntakeSkill::{template,
+  install_path,label}` agent-parametrisoitu. Dogfood sync-testi vahtii nyt **6 kopiota** (oli 4) ja vaatii
+  niiden olemassaolon. AGENTS.md template-taulu + sync-sääntö + hot-files-lista päivitetty. `/llm-review`
+  (gemini-3.1-pro, gpt-5.6-sol, opus-4-7) + `/assess-findings`, 6 FIX-löydöstä sovellettu.
 
 **⚠️ Minor-bump-gotcha (UUSI, muista seuraavassa minor-releasessa):** 0.8.0-cut paljasti että
 `crates/issuectl/Cargo.toml`:n sisäinen dep `issuectl-core = { path = "…", version = "0.7.0" }`
@@ -79,18 +79,26 @@ holdissa). issuectl → puhdas AI-first CLI. Kaikki kanban/web-featuret suljettu
 poisto ajetaan `@remove-web-ui`:n kautta **vasta kun seuraaja-ohjelman luonnos on arvioitu**
 (gate käsin, ks. Tila-blokki). Fokus CLI:ssä.
 
-**Seuraava askel:** aktiivinen (ei-deferred) jono: **`@ossctl-cut-no-publish`** (high, bug — mutta
-juurisyy upstream-ossctl:ssä; ei koodattavaa täällä ennen kuin ossctl korjaa, sitten poista AGENTS-
-caveat + re-point), **`@warn-reserved-notes-section`** (low, homebase-filaama feature — varoita kun
-issue-body käyttää varattua `## Notes`-sektiota), **`@codex-prompt-variants`** (low, build-only-if).
-Deferred: portitettu `@remove-web-ui` (odottaa seuraaja-luonnosta), CLI-only `@issue-graph-view` +
-`@epic-tree-view`, `@events-jsonl-log` (build-only-if). `@focus-areas` suljettu `wontfix` (ei tarvetta;
-ADR 0001 tallessa). Uusi rupeama nostaa jonosta (warn-reserved-notes-section on ainoa selkeästi
-koodattava) tai uudesta intakesta.
+**Seuraava askel:**
+- **RELEASE PENDING (2 landattua featurea odottaa):** kun release cutataan, ensin **täytä CHANGELOG
+  `[Unreleased]`** molemmilla featureilla (`@warn-reserved-notes-section` + `@codex-prompt-variants`;
+  workerit eivät lisänneet merkintöjä — `[Unreleased]` on tyhjä), sitten version-bump. Molemmat additiivisia
+  → **minor-bump 0.8.1 → 0.9.0** (muista **caret-gotcha**: bumppaa myös `crates/issuectl/Cargo.toml`:n
+  sisäinen dep `version =` 0.8.0 → 0.9.0, ks. gotcha yllä). **⚠️ ossctl `release cut` yhä rikki → julkaisu
+  manuaalisella `cargo publish`-fallbackilla** kunnes `@ossctl-cut-no-publish` ratkeaa.
+- **Aktiivinen jono:** ainoa ei-deferred issue on **`@ossctl-cut-no-publish`** (high, bug — juurisyy
+  upstream-ossctl:ssä; ei koodattavaa täällä ennen kuin ossctl korjaa, sitten poista AGENTS-caveat +
+  re-point releaset ossctliin). **Avoin C-päätös (käyttäjä ei vielä valinnut):** (1) jätä odottamaan
+  ossctlin korjausta, vai (2) käynnistä verifiointi-worktree joka tarkistaa onko ossctl jo korjannut ja
+  tekee re-pointin. Tämä ratkaisee myös release-polun.
+- **Deferred:** portitettu `@remove-web-ui` (odottaa seuraaja-luonnosta), CLI-only `@issue-graph-view` +
+  `@epic-tree-view`, `@events-jsonl-log` (build-only-if). `@focus-areas` suljettu `wontfix` (ADR 0001
+  tallessa). Uusi rupeama: ei selkeästi koodattavaa jonossa (ossctl-cut on upstream-blocked) → nosta
+  deferredistä tai uudesta intakesta, tai cutataan pending-release.
 
 ---
 
-## Execution DAG (2026-08-10)
+## Execution DAG (2026-08-11)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge each round (drop landed, add active, keep existing order).
@@ -104,22 +112,22 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: warn-reserved-notes-section   ← ainoa selkeästi koodattava; ossctl-cut on upstream-blocked
+GLOBAL HEAD-OF-LINE: ossctl-cut-no-publish   ← ainoa aktiivinen node, MUTTA upstream-blocked (ei koodattavaa täällä)
 LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections
-    warn-reserved-notes-section  low · feature; varoita authoring-aikaan kun issue-body käyttää varattua ## Notes -sektiota (homebase-filaama)
+    (tyhjä — ei aktiivisia issueitä)
 LANE B — skill install + templates/ + skill.rs (skill distribution)
-    codex-prompt-variants  low · feature; Codex-prompt-variantit /issue-new + /issue-intakelle. Build-only-if: vain jos Codex-käyttö todistuu.
+    (tyhjä — ei aktiivisia issueitä)
 LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
     ossctl-cut-no-publish  high · bug; ossctl release cut ei julkaise oikeasti → manuaalinen cargo publish. BLOCKED upstream-ossctl:llä; kun korjattu, poista AGENTS-caveat + re-point releaset ossctliin.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: rupeama alkoi siivouksena, laajeni: **dag-polish** (3 dag-gappia yhtenä worktreena) +
-**wire-oss** landasivat, **0.8.1 cutattiin** — mutta ossctl-release-polku osoittautui rikki, joten
-0.8.1 julkaistiin manuaalisesti `cargo publish`illa (bug `@ossctl-cut-no-publish`, high, upstream-
-blocked). dag-trio + wire-oss terminal → pudotettu DAG:sta. Tilalle nousi 2 uutta homebase-filaamaa:
-`warn-reserved-notes-section` (low, koodattava) + `ossctl-cut-no-publish` (high, upstream-blocked).
-`codex-prompt-variants` pysyy LANE B:ssä build-only-if-parkissa.
+Kaari-lyhyesti: käyttäjä ajoi kaikki 3 kaistaa rinnan. **`warn-reserved-notes-section`** (LANE A) +
+**`codex-prompt-variants`** (LANE B) landasivat puhtaasti (green + `/llm-review`) → **terminal `done` →
+pudotettu DAG:sta**. **Release pidettiin** (low-prio + tyhjä CHANGELOG `[Unreleased]` + rikki release-polku).
+`ossctl-cut-no-publish` (LANE C) pysyy — upstream-blocked, ei koodattavaa täällä ennen ossctlin korjausta.
+Jäljellä vain yksi aktiivinen node, sekin blokattu → DAG käytännössä tyhjä; seuraava rupeama nostaa
+deferredistä / intakesta tai cutataan pending-release.
 
 ---
 
