@@ -2408,6 +2408,8 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 with_hooks,
                 with_merge_driver,
                 force,
+                // Dual-home Claude skills into pi.dev's skill dir; None = no HOME.
+                pi_root: skill::pi_skills_root(),
             };
             init_cmd::run(&root, opts, json_output)
         }
@@ -5663,7 +5665,10 @@ fn cmd_skill_install(agent: &str, force: bool) -> Result<()> {
         other => bail!("unknown agent {other:?}; expected claude, codex, or all"),
     };
     let root = find_root();
-    skill::install_skill(&root, &agents, force)
+    // Dual-home Claude skills into pi.dev's skill dir (~/.pi/agent/skills).
+    // Resolved from $HOME; `None` (HOME unset) simply skips the pi mirror.
+    let pi_root = skill::pi_skills_root();
+    skill::install_skill(&root, &agents, force, pi_root.as_deref())
 }
 
 fn cmd_skill_print(agent: &str) -> Result<()> {

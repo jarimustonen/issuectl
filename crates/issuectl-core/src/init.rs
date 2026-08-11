@@ -11,19 +11,25 @@
 //! `hooks`, `merge_driver`). This file only sequences them and shapes
 //! the report.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::{agents, hooks, merge_driver, schema, skill, transitions};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitOptions {
     pub agent: AgentSelection,
     pub with_hooks: bool,
     pub with_merge_driver: bool,
     pub force: bool,
+    /// pi.dev dual-home skill corpus (`~/.pi/agent/skills`), resolved from
+    /// `$HOME` by the binary via [`skill::pi_skills_root`]. When `Some` and a
+    /// Claude skill is installed, each Claude `SKILL.md` is mirrored there too.
+    /// `None` skips the pi mirror (HOME unset, or an in-process test that must
+    /// not write to the real home).
+    pub pi_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,8 +229,12 @@ pub fn run(root: &Path, opts: InitOptions, json: bool) -> Result<()> {
 
     // 3. Skill (one report covering all selected agents + scaffold).
     let skill_targets = opts.agent.agents();
-    let skill_results = skill::install_skill_summary(root, skill_targets, opts.force)
-        .context("installing skill templates")?;
+    // Dual-home Claude skills into pi.dev's skill dir (~/.pi/agent/skills),
+    // the same as `issuectl skill install`. The binary resolves the root from
+    // `$HOME`; `None` (HOME unset, or a test) skips the pi mirror.
+    let skill_results =
+        skill::install_skill_summary(root, skill_targets, opts.force, opts.pi_root.as_deref())
+            .context("installing skill templates")?;
     let artifacts: Vec<ArtifactReport> = skill_results
         .iter()
         .map(|r| ArtifactReport {
@@ -439,6 +449,8 @@ mod tests {
             with_hooks: false,
             with_merge_driver: false,
             force: false,
+            // Never mirror into the real `~/.pi` from an in-process init test.
+            pi_root: None,
         }
     }
 
@@ -461,7 +473,7 @@ mod tests {
         let mut o = opts();
         o.with_hooks = true;
         o.with_merge_driver = true;
-        run(tmp.path(), o, false).unwrap();
+        run(tmp.path(), o.clone(), false).unwrap();
 
         let snapshot = |p: &Path| std::fs::read_to_string(p).unwrap();
         let before = [
@@ -583,7 +595,7 @@ mod tests {
 
         let mut o = opts();
         o.with_merge_driver = true;
-        let err = run(tmp.path(), o, false).unwrap_err();
+        let err = run(tmp.path(), o.clone(), false).unwrap_err();
         assert!(
             err.to_string().contains("already set")
                 || err.chain().any(|c| c.to_string().contains("already set")),
@@ -612,6 +624,7 @@ mod tests {
             tmp.path(),
             &[skill::Agent::Claude, skill::Agent::Codex],
             false,
+            None,
         )
         .unwrap();
         let any_existing = results

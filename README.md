@@ -764,6 +764,19 @@ issuectl skill install --force           # refresh when binary > skill version
 issuectl skill print [--agent codex]     # preview without installing
 ```
 
+Whenever the Claude layout is installed (`skill install`, `--force`, or
+`--agent all`, and `issuectl init`), each Claude `SKILL.md` is additionally
+**dual-homed** into pi.dev's global skill corpus at
+`~/.pi/agent/skills/<name>/SKILL.md` — `issue`, `issue-new`, and `issue-intake`
+— so the skills are discoverable under the [pi.dev](https://pi.dev) harness
+(invoked there as `/skill:issue`). The mirror is byte-identical to the
+repo-local Claude copy; only the target differs, so no body/link rewrite is
+needed. **Only `SKILL.md` is mirrored** (matching homebase `dotfiles link`) —
+the Codex prompts are not, and a `--agent codex` install writes no pi copy. The
+repo-local Claude write is unchanged, and the pi mirror is independent: it never
+blocks a plain install from repairing a deleted Claude skill. The mirror is
+skipped when `$HOME` is unset.
+
 The skill instructs the agent to:
 
 - delegate Search / List / Show / Create / Update / Close to

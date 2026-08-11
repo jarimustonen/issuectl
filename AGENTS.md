@@ -65,6 +65,26 @@ template (and `standalone_intake_skills_are_wellformed` additionally pins the
 intake skills' filing/processing split). `/triage-bugs` is a repo-local-only
 deprecation alias — it is **not** a binary-shipped template.
 
+### pi.dev dual-home (`~/.pi/agent/skills/`)
+
+Whenever the Claude layout is installed (`skill install`, `--force`, `--agent
+all`, or `issuectl init`), each Claude `SKILL.md` is **also** written to pi.dev's
+global skill corpus at `~/.pi/agent/skills/<name>/SKILL.md` (`issue`,
+`issue-new`, `issue-intake`) so the skills are discoverable under the pi.dev
+harness (invoked there as `/skill:<name>`; bare `/name` cross-references resolve
+via pi's injected available-skills list, so **only the install target differs —
+no body/link rewrite**). The mirror is byte-identical to the repo-local Claude
+copy. **Vendored filter: only `SKILL.md` is mirrored** — the Codex prompts and
+the `issues/AGENTS.md` scaffold are not, matching homebase `dotfiles link`; a
+`--agent codex` install writes no pi copy. Note the asymmetry: the Claude/Codex
+targets are **repo-local** (rooted at the target repo), while the pi mirror is
+**home-global** (rooted at `$HOME`, resolved by the binary via
+`skill::pi_skills_root`; skipped when `$HOME` is unset). Each pi copy is written
+independently, so it never gates the repo-local install — a present pi copy
+still lets a plain install repair a deleted Claude skill (a non-force run leaves
+the pi copy in place; `--force` refreshes it). See `skill.rs`
+`install_skill_summary`.
+
 If a Claude/Codex pair would otherwise drift, regenerate the Codex one from
 the Claude one by stripping its YAML frontmatter:
 

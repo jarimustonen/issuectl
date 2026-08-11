@@ -10,11 +10,28 @@ const ISSUE_INTAKE_TEMPLATE: &str = include_str!("../templates/issue-intake-skil
 const ISSUE_INTAKE_CODEX_TEMPLATE: &str = include_str!("../templates/issue-intake-prompt.md");
 pub const ISSUES_AGENTS_TEMPLATE: &str = include_str!("../templates/issues-agents.md");
 
+/// Label for a skill copy mirrored into pi.dev's skill corpus.
+const PI_SKILL_LABEL: &str = "pi.dev skill";
+
 /// Substitute build-time tokens (currently `{{ISSUECTL_VERSION}}`) in a
 /// template body. Used at install time so the on-disk skill is pinned to
 /// the issuectl release that wrote it.
 pub fn render_template(body: &str) -> String {
     body.replace("{{ISSUECTL_VERSION}}", env!("CARGO_PKG_VERSION"))
+}
+
+/// The pi.dev skill-corpus directory under the user's home:
+/// `<HOME>/.pi/agent/skills`. The dual-home mirror writes each Claude-format
+/// `SKILL.md` to `<pi_skills_root>/<name>/SKILL.md` so the skill is also
+/// discoverable under the pi.dev harness (which invokes it as `/skill:name`).
+///
+/// Returns `None` when `HOME` is unset: the pi mirror is a derived convenience
+/// on top of the repo-local Claude install, never a hard requirement, so an
+/// unresolvable home simply skips it rather than failing the install. The
+/// binary resolves this and threads it into [`install_skill`]; tests pass an
+/// explicit root instead of touching the real home.
+pub fn pi_skills_root() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent/skills"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +60,19 @@ impl Agent {
         match self {
             Self::Claude => repo_root.join(".claude/skills/issue/SKILL.md"),
             Self::Codex => repo_root.join(".codex/prompts/issue.md"),
+        }
+    }
+
+    /// The `/issue` skill's directory name under a per-skill layout
+    /// (`.claude/skills/<name>/SKILL.md` and the pi.dev mirror
+    /// `~/.pi/agent/skills/<name>/SKILL.md`). `Some("issue")` for Claude;
+    /// Codex ships a flat `.codex/prompts/issue.md` with no per-skill dir and
+    /// is not a claude-format consumer, so it returns `None` and never
+    /// participates in the pi mirror.
+    pub fn skill_name(self) -> Option<&'static str> {
+        match self {
+            Self::Claude => Some("issue"),
+            Self::Codex => None,
         }
     }
 
@@ -145,10 +175,19 @@ pub struct InstallResult {
 /// input order, then each agent's intake skills (in [`IntakeSkill::ALL`]
 /// order) — again in input order. Callers (the CLI summary printer) rely on
 /// this ordering.
+///
+/// When `pi_root` is `Some` **and** the Claude layout is being installed, each
+/// Claude-format `SKILL.md` is additionally mirrored into
+/// `<pi_root>/<name>/SKILL.md` (the pi.dev dual-home). The pi mirrors are
+/// appended after the primary results, in a stable order: `/issue`, then the
+/// intake skills in [`IntakeSkill::ALL`] order. `pi_root` is `None` for a
+/// Codex-only selection or when `HOME` is unresolvable (see
+/// [`pi_skills_root`]).
 pub fn install_skill_summary(
     repo_root: &Path,
     agents: &[Agent],
     force: bool,
+    pi_root: Option<&Path>,
 ) -> Result<Vec<InstallResult>> {
     // The standalone intake skills ship in every selected agent's format —
     // a Claude skill for `--agent claude`, a Codex prompt for `--agent codex`
@@ -164,12 +203,56 @@ pub fn install_skill_summary(
             results.push(install_intake_skill(repo_root, skill, *agent, force)?);
         }
     }
+
+    // Dual-home into pi.dev's skill dir. Whenever the Claude layout is
+    // installed, mirror the SAME claude-format `SKILL.md` into
+    // `<pi_root>/<name>/SKILL.md` so the skill is discoverable under the
+    // pi.dev harness (pi loads it and invokes `/skill:name`; bare `/name`
+    // cross-references resolve via pi's injected available-skills list, so no
+    // link rewrite is needed — only the target). This is an ADDITIONAL target
+    // that never alters the repo-local Claude write.
+    //
+    // Vendored filter: mirror ONLY `SKILL.md`, never companion resources —
+    // matching homebase `dotfiles link`, which copies just the skill body into
+    // the pi corpus. The Codex prompts are not mirrored (a Codex-only install
+    // has no Claude `SKILL.md` to mirror, and `pi_root` is `None` there
+    // regardless). Each pi copy is written independently via
+    // [`install_rendered_file`], so it never gates the repo-local install: a
+    // present pi copy with a deleted Claude skill still lets a plain install
+    // repair the Claude side (the pi copy is simply left in place unless
+    // `--force`).
+    if let Some(pi_root) = pi_root {
+        if agents.contains(&Agent::Claude) {
+            if let Some(name) = Agent::Claude.skill_name() {
+                results.push(install_pi_mirror(
+                    pi_root,
+                    name,
+                    Agent::Claude.template(),
+                    force,
+                )?);
+            }
+            for skill in IntakeSkill::ALL {
+                results.push(install_pi_mirror(
+                    pi_root,
+                    skill.slug(),
+                    skill.template(Agent::Claude),
+                    force,
+                )?);
+            }
+        }
+    }
     Ok(results)
 }
 
 /// Install the issues/AGENTS.md scaffold and one or more agent skill files.
-pub fn install_skill(repo_root: &Path, agents: &[Agent], force: bool) -> Result<()> {
-    let results = install_skill_summary(repo_root, agents, force)?;
+/// See [`install_skill_summary`] for the `pi_root` dual-home semantics.
+pub fn install_skill(
+    repo_root: &Path,
+    agents: &[Agent],
+    force: bool,
+    pi_root: Option<&Path>,
+) -> Result<()> {
+    let results = install_skill_summary(repo_root, agents, force, pi_root)?;
     for r in &results {
         print_install_result(repo_root, r);
     }
@@ -186,6 +269,12 @@ pub fn install_skill(repo_root: &Path, agents: &[Agent], force: bool) -> Result<
     if !agents.is_empty() {
         println!(
             "  Use /issue-new to file an intake report and /issue-intake to process the queue."
+        );
+    }
+    // The pi mirror only fires for a Claude install with a resolved home.
+    if pi_root.is_some() && agents.contains(&Agent::Claude) {
+        println!(
+            "  The same skills are mirrored into ~/.pi/agent/skills for pi.dev (/skill:issue)."
         );
     }
     println!("  Or use `issuectl list` to browse issues from the command line.");
@@ -273,6 +362,24 @@ fn install_intake_skill(
     )
 }
 
+/// Mirror one Claude-format skill body into pi.dev's skill corpus at
+/// `<pi_root>/<name>/SKILL.md`. Byte-identical to the repo-local Claude
+/// `SKILL.md` (same template, same version substitution); `force` governs the
+/// overwrite the same way as every other install target.
+fn install_pi_mirror(
+    pi_root: &Path,
+    name: &str,
+    template: &str,
+    force: bool,
+) -> Result<InstallResult> {
+    install_rendered_file(
+        pi_root.join(name).join("SKILL.md"),
+        template,
+        PI_SKILL_LABEL,
+        force,
+    )
+}
+
 /// Render `template` (substituting build-time tokens) and write it to `path`,
 /// respecting `force` for the overwrite decision. Shared by the `/issue`
 /// agent templates and the standalone intake skills so they handle
@@ -349,7 +456,7 @@ mod tests {
     #[test]
     fn installed_skill_pins_current_version() {
         let tmp = tempfile::tempdir().unwrap();
-        install_skill(tmp.path(), &[Agent::Claude], false).unwrap();
+        install_skill(tmp.path(), &[Agent::Claude], false, None).unwrap();
         let installed =
             std::fs::read_to_string(tmp.path().join(".claude/skills/issue/SKILL.md")).unwrap();
         assert!(installed.contains(env!("CARGO_PKG_VERSION")));
@@ -607,7 +714,7 @@ mod tests {
     #[test]
     fn install_writes_claude_only() {
         let tmp = tempfile::tempdir().unwrap();
-        install_skill(tmp.path(), &[Agent::Claude], false).unwrap();
+        install_skill(tmp.path(), &[Agent::Claude], false, None).unwrap();
         assert!(tmp.path().join(".claude/skills/issue/SKILL.md").exists());
         assert!(!tmp.path().join(".codex/prompts/issue.md").exists());
         assert!(tmp.path().join("issues/AGENTS.md").exists());
@@ -616,7 +723,7 @@ mod tests {
     #[test]
     fn install_writes_codex_only() {
         let tmp = tempfile::tempdir().unwrap();
-        install_skill(tmp.path(), &[Agent::Codex], false).unwrap();
+        install_skill(tmp.path(), &[Agent::Codex], false, None).unwrap();
         assert!(!tmp.path().join(".claude/skills/issue/SKILL.md").exists());
         assert!(tmp.path().join(".codex/prompts/issue.md").exists());
     }
@@ -624,7 +731,7 @@ mod tests {
     #[test]
     fn install_claude_writes_intake_skills() {
         let tmp = tempfile::tempdir().unwrap();
-        install_skill(tmp.path(), &[Agent::Claude], false).unwrap();
+        install_skill(tmp.path(), &[Agent::Claude], false, None).unwrap();
         for skill in IntakeSkill::ALL {
             assert!(
                 skill.install_path(Agent::Claude, tmp.path()).exists(),
@@ -639,7 +746,7 @@ mod tests {
         // The intake skills now ship a Codex prompt too, so a Codex-only
         // install writes them under `.codex/prompts/<slug>.md`.
         let tmp = tempfile::tempdir().unwrap();
-        install_skill(tmp.path(), &[Agent::Codex], false).unwrap();
+        install_skill(tmp.path(), &[Agent::Codex], false, None).unwrap();
         for skill in IntakeSkill::ALL {
             let path = skill.install_path(Agent::Codex, tmp.path());
             assert!(
@@ -667,7 +774,7 @@ mod tests {
     #[test]
     fn installed_intake_skills_pin_current_version() {
         let tmp = tempfile::tempdir().unwrap();
-        install_skill(tmp.path(), &[Agent::Claude], false).unwrap();
+        install_skill(tmp.path(), &[Agent::Claude], false, None).unwrap();
         for skill in IntakeSkill::ALL {
             let installed =
                 std::fs::read_to_string(skill.install_path(Agent::Claude, tmp.path())).unwrap();
@@ -741,7 +848,7 @@ mod tests {
         // scaffold, each agent in input order, then the intake skills in
         // `IntakeSkill::ALL` order.
         let tmp = tempfile::tempdir().unwrap();
-        let results = install_skill_summary(tmp.path(), &[Agent::Claude], false).unwrap();
+        let results = install_skill_summary(tmp.path(), &[Agent::Claude], false, None).unwrap();
         assert_eq!(results.len(), 4);
         assert!(results[0].path.ends_with("issues/AGENTS.md"));
         assert!(results[1].path.ends_with(".claude/skills/issue/SKILL.md"));
@@ -760,7 +867,7 @@ mod tests {
         // `IntakeSkill::ALL` order — again in input order.
         let tmp = tempfile::tempdir().unwrap();
         let results =
-            install_skill_summary(tmp.path(), &[Agent::Claude, Agent::Codex], false).unwrap();
+            install_skill_summary(tmp.path(), &[Agent::Claude, Agent::Codex], false, None).unwrap();
         let expected = [
             "issues/AGENTS.md",
             ".claude/skills/issue/SKILL.md",
@@ -790,7 +897,7 @@ mod tests {
         std::fs::create_dir_all(issue.parent().unwrap()).unwrap();
         std::fs::write(&issue, "pre-existing").unwrap();
 
-        let results = install_skill_summary(tmp.path(), &[Agent::Claude], true).unwrap();
+        let results = install_skill_summary(tmp.path(), &[Agent::Claude], true, None).unwrap();
         let outcome = |needle: &str| {
             results
                 .iter()
@@ -823,11 +930,11 @@ mod tests {
             std::fs::write(&path, "user content").unwrap();
 
             // Without --force the user's copy is preserved.
-            install_skill(tmp.path(), &[agent], false).unwrap();
+            install_skill(tmp.path(), &[agent], false, None).unwrap();
             assert_eq!(std::fs::read_to_string(&path).unwrap(), "user content");
 
             // With --force it is regenerated from the template.
-            install_skill(tmp.path(), &[agent], true).unwrap();
+            install_skill(tmp.path(), &[agent], true, None).unwrap();
             assert_ne!(std::fs::read_to_string(&path).unwrap(), "user content");
         }
     }
@@ -835,7 +942,7 @@ mod tests {
     #[test]
     fn install_writes_both_with_all() {
         let tmp = tempfile::tempdir().unwrap();
-        install_skill(tmp.path(), &[Agent::Claude, Agent::Codex], false).unwrap();
+        install_skill(tmp.path(), &[Agent::Claude, Agent::Codex], false, None).unwrap();
         // All six copies land: `/issue` plus both intake skills, per agent.
         for p in [
             ".claude/skills/issue/SKILL.md",
@@ -856,7 +963,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "user content").unwrap();
 
-        install_skill(tmp.path(), &[Agent::Claude], false).unwrap();
+        install_skill(tmp.path(), &[Agent::Claude], false, None).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "user content");
     }
 
@@ -867,7 +974,206 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "user content").unwrap();
 
-        install_skill(tmp.path(), &[Agent::Claude], true).unwrap();
+        install_skill(tmp.path(), &[Agent::Claude], true, None).unwrap();
         assert_ne!(std::fs::read_to_string(&path).unwrap(), "user content");
+    }
+
+    // ── pi.dev dual-home ────────────────────────────────────────────────────
+
+    /// A Claude install with a pi root mirrors every Claude `SKILL.md` into
+    /// `<pi_root>/<name>/SKILL.md` byte-for-byte, and leaves the repo-local
+    /// Claude path untouched (regression guard for the primary target).
+    #[test]
+    fn install_dual_homes_claude_skills_into_pi() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        install_skill(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+
+        for (claude_rel, name) in [
+            (".claude/skills/issue/SKILL.md", "issue"),
+            (".claude/skills/issue-new/SKILL.md", "issue-new"),
+            (".claude/skills/issue-intake/SKILL.md", "issue-intake"),
+        ] {
+            // Claude path unchanged.
+            let claude_path = repo.path().join(claude_rel);
+            assert!(claude_path.exists(), "{claude_rel} must still be installed");
+
+            // pi mirror present and byte-identical to the Claude copy.
+            let pi_path = pi.path().join(name).join("SKILL.md");
+            assert!(
+                pi_path.exists(),
+                "{name} must be mirrored into the pi corpus"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&pi_path).unwrap(),
+                std::fs::read_to_string(&claude_path).unwrap(),
+                "{name} pi mirror must be byte-identical to the Claude SKILL.md"
+            );
+        }
+    }
+
+    /// Vendored filter: ONLY `SKILL.md` is mirrored. The Codex prompts and the
+    /// `issues/AGENTS.md` scaffold are never written into the pi corpus.
+    #[test]
+    fn pi_mirror_only_carries_skill_md() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        install_skill(
+            repo.path(),
+            &[Agent::Claude, Agent::Codex],
+            false,
+            Some(pi.path()),
+        )
+        .unwrap();
+
+        // Only three per-skill dirs, each holding exactly one SKILL.md.
+        let mut names: Vec<String> = std::fs::read_dir(pi.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["issue", "issue-intake", "issue-new"]);
+        for name in &names {
+            let entries: Vec<_> = std::fs::read_dir(pi.path().join(name))
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                entries,
+                ["SKILL.md"],
+                "{name} pi dir must hold only SKILL.md"
+            );
+        }
+    }
+
+    /// The pi mirror is Claude-format only: a Codex-only install writes no pi
+    /// copies even when a pi root is supplied.
+    #[test]
+    fn codex_only_install_skips_pi_mirror() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        install_skill(repo.path(), &[Agent::Codex], false, Some(pi.path())).unwrap();
+        assert!(
+            std::fs::read_dir(pi.path()).unwrap().next().is_none(),
+            "a Codex-only install must not write into the pi corpus"
+        );
+    }
+
+    /// `pi_root = None` (HOME unset) installs the Claude skills but writes no
+    /// pi mirror — the mirror is a derived convenience, never required.
+    #[test]
+    fn no_pi_root_installs_claude_without_mirror() {
+        let repo = tempfile::tempdir().unwrap();
+        install_skill(repo.path(), &[Agent::Claude], false, None).unwrap();
+        assert!(repo.path().join(".claude/skills/issue/SKILL.md").exists());
+    }
+
+    /// Idempotency: a second non-force install leaves the pi mirror in place
+    /// (reported `AlreadyExists`); `--force` refreshes it. And a present pi
+    /// copy never blocks repairing a deleted Claude skill — the pi write is
+    /// independent, so the Claude side is recreated while pi is left as-is.
+    #[test]
+    fn pi_mirror_is_idempotent_and_never_gates_claude_repair() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        let pi_issue = pi.path().join("issue/SKILL.md");
+        let claude_issue = repo.path().join(".claude/skills/issue/SKILL.md");
+
+        // First install writes both.
+        install_skill(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+        assert!(pi_issue.exists() && claude_issue.exists());
+
+        // Second non-force install is idempotent: the pi copy is reported
+        // AlreadyExists, not rewritten or errored.
+        let results =
+            install_skill_summary(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+        let pi_outcome = results
+            .iter()
+            .find(|r| r.path == pi_issue)
+            .expect("pi issue mirror present in summary");
+        assert_eq!(pi_outcome.outcome, InstallOutcome::AlreadyExists);
+        assert_eq!(pi_outcome.label, PI_SKILL_LABEL);
+
+        // Delete the Claude skill but keep the pi copy. A plain (non-force)
+        // install must repair the Claude side without being blocked by the
+        // pre-existing pi mirror.
+        std::fs::remove_file(&claude_issue).unwrap();
+        install_skill(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+        assert!(
+            claude_issue.exists(),
+            "the deleted Claude skill must be repaired even with a present pi mirror"
+        );
+        assert!(pi_issue.exists(), "the pi mirror must remain in place");
+    }
+
+    /// `--force` refreshes a stale pi mirror to the current template.
+    #[test]
+    fn force_refreshes_pi_mirror() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        let pi_issue = pi.path().join("issue/SKILL.md");
+        std::fs::create_dir_all(pi_issue.parent().unwrap()).unwrap();
+        std::fs::write(&pi_issue, "stale pi content").unwrap();
+
+        install_skill(repo.path(), &[Agent::Claude], true, Some(pi.path())).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&pi_issue).unwrap(),
+            render_template(Agent::Claude.template()),
+            "--force must refresh the pi mirror to the current template"
+        );
+    }
+
+    /// The dual-home summary appends pi mirrors after the primary results, in
+    /// a stable order: `/issue`, then the intake skills in `IntakeSkill::ALL`
+    /// order.
+    #[test]
+    fn pi_mirrors_appended_in_stable_order() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        let results =
+            install_skill_summary(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+        // scaffold + issue + 2 intake + 3 pi mirrors.
+        assert_eq!(results.len(), 7);
+        assert!(results[4].path.ends_with("issue/SKILL.md"));
+        assert!(results[5].path.ends_with("issue-new/SKILL.md"));
+        assert!(results[6].path.ends_with("issue-intake/SKILL.md"));
+        for r in &results[4..] {
+            assert!(
+                r.path.starts_with(pi.path()),
+                "pi mirrors live under pi_root"
+            );
+        }
+    }
+
+    /// The pi mirror pins the running binary's version, same as every other
+    /// installed copy.
+    #[test]
+    fn pi_mirror_pins_current_version() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        install_skill(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+        let body = std::fs::read_to_string(pi.path().join("issue/SKILL.md")).unwrap();
+        assert!(body.contains(env!("CARGO_PKG_VERSION")));
+        assert!(!body.contains("{{ISSUECTL_VERSION}}"));
+    }
+
+    /// `pi_skills_root()` roots the corpus at `<HOME>/.pi/agent/skills` and
+    /// yields `None` when `HOME` is unset.
+    #[test]
+    fn pi_skills_root_resolves_from_home() {
+        // Serialized via a process-global env mutation guard is unnecessary
+        // here: we snapshot, mutate, assert, and restore within the test, and
+        // no other test reads HOME.
+        let saved = std::env::var_os("HOME");
+        std::env::set_var("HOME", "/home/example");
+        let root = pi_skills_root().unwrap();
+        assert!(root.ends_with(".pi/agent/skills"));
+        assert!(root.starts_with("/home/example"));
+        std::env::remove_var("HOME");
+        assert!(pi_skills_root().is_none());
+        match saved {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
     }
 }
