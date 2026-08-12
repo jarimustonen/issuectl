@@ -249,11 +249,16 @@ pub fn install_skill_summary(
         if agents.contains(&Agent::Claude) {
             // Serialize the whole pi block — mirror writes AND the manifest
             // read-modify-write — against a concurrent install/prune from
-            // another repo sharing the same global corpus. Like every other pi
-            // failure here, a lock we cannot acquire is warned and the pi
-            // mirror skipped rather than failing an install whose repo-local
-            // targets are already on disk. Held until the end of this scope so
-            // `record_pi_provenance` runs under it (see `acquire_pi_lock`).
+            // another repo sharing the same global corpus. Acquisition BLOCKS
+            // if a peer holds the lock (the flock discipline the rest of
+            // `mutate/` uses): concurrent writers wait and serialize, they do
+            // not skip. The `Err` arm therefore fires only on a genuine failure
+            // to create/open the lock file (unwritable `$HOME`, read-only fs,
+            // permissions) — which, like every other pi failure here, is warned
+            // and the mirror skipped rather than failing an install whose
+            // repo-local targets are already on disk. Held until the end of this
+            // scope so `record_pi_provenance` runs under it (see
+            // `acquire_pi_lock`).
             let _pi_lock = match acquire_pi_lock(pi_root) {
                 Ok(lock) => lock,
                 Err(e) => {
@@ -676,18 +681,36 @@ fn load_pi_manifest(pi_root: &Path) -> PiManifest {
 /// same-directory temp file, then rename over the destination. The rename is
 /// atomic on POSIX, so a concurrent reader or an interrupted write never sees a
 /// torn/empty manifest (which the lenient loader would misread as "no owned
-/// entries"). A unique temp name per process avoids colliding with a racing
-/// writer's temp file. Not a substitute for a cross-process lock — concurrent
-/// read-modify-write can still lose a row (documented follow-up) — but it does
-/// guarantee the file on disk is always a complete manifest.
+/// entries").
+///
+/// The temp name mixes the process id with a per-call atomic counter, so it is
+/// unique across processes *and* across threads/successive calls within one
+/// process. The cross-process lock ([`acquire_pi_lock`]) already serializes the
+/// real write paths, but the per-thread uniqueness matters for the in-process
+/// concurrency tests: without it, two threads would collide on one
+/// `…<pid>.tmp` path and a lock regression would surface as a temp-file race
+/// rather than the true lost update it is meant to expose.
+///
+/// This is not itself a substitute for the lock — an unlocked read-modify-write
+/// can still lose a row (the atomic rename only guarantees the file on disk is
+/// always a complete manifest, never torn). Runs under a held [`acquire_pi_lock`]
+/// on every production path.
 fn save_pi_manifest(pi_root: &Path, manifest: &PiManifest) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
     let path = pi_root.join(PI_MANIFEST_FILE);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
     let body = serde_json::to_string_pretty(manifest).context("serialize pi manifest")?;
-    let tmp = pi_root.join(format!("{}.{}.tmp", PI_MANIFEST_FILE, std::process::id()));
+    let tmp = pi_root.join(format!(
+        "{}.{}.{}.tmp",
+        PI_MANIFEST_FILE,
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(&tmp, format!("{body}\n"))
         .with_context(|| format!("cannot write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path).with_context(|| {
@@ -2558,6 +2581,16 @@ mod tests {
                 "shipped skill `{name}` lost from manifest under concurrent install+prune"
             );
         }
+        // The load-bearing serializability check: whichever order the lock
+        // imposes, `retired-skill` (a Missing orphan row) ends up *gone* — under
+        // serial [install, prune] prune clears it; under [prune, install]
+        // install preserves only the managed set and never re-adds it. Its
+        // survival would mean a stale install save landed after prune's delete —
+        // a non-serializable result the lock exists to prevent.
+        assert!(
+            !manifest.skills.contains_key("retired-skill"),
+            "pruned orphan row was resurrected by a racing install save — lock did not serialize"
+        );
         // No temp residue from a half-finished atomic write.
         let residue: Vec<_> = std::fs::read_dir(&pi_root)
             .unwrap()
