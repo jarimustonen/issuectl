@@ -111,16 +111,15 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: pi-corpus-symlink-traversal   ← HIGH bug in freshly-shipped pi feature (path escape). LANE B (pi-corpus) ‖ LANE A (mutate/main.rs) run disjoint. ossctl-cut high but upstream-blocked.
+GLOBAL HEAD-OF-LINE: pi-corpus-metadata-error-misclass   ← last HIGH bug in shipped pi feature (pi_prune drops manifest row = data loss). LANE B (pi-corpus) ‖ LANE A (mutate/main.rs) run disjoint. ossctl-cut high but upstream-blocked.
 LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections  (RUUHKAINEN — sarjata)
+    flock-write-lock  normal · bug; flaky test — write_lock_released_after_failed_mutation intermittently fails under the full parallel suite (introduced Wave 2 by flock-write-test-coverage). Make deterministic. MUST be green before next release. Touches mutate/ tests.
     configsource-load-return-value  normal · improvement; collapse-seam-review-spinoff — return schema/transitions load BY VALUE now that the cache is gone. Touches mutate/ + config load.
     load-once-thread-schema  normal · improvement; collapse-seam-review-spinoff — thread loaded schema/rules through mutate helpers to stop redundant re-parses. Touches mutate/ + schema.
-    dag-lists-closed-issues  normal · bug; issuectl dag listaa suljetut/terminaali-issuet unscheduledissa → filtteröi ei-terminaaleihin. Touches crate::dag (+ ehkä cmd_dag).
     epic-tree-view  normal · feature; `issuectl epic tree <slug>` — epic+lapset puuna. Uusi main.rs-subcommand + moduuli. Kevyt.
     action-verb-json-echo-mutation  normal · improvement; update/label/close --json-tulos ei echoa mutatoitua kenttää (.priority/.labels/.status = null). Echo resulting value. Touches cmd_* action-verb handlerit main.rs:ssä + result-objektit.
     new-and-update-blocked-by  normal · feature (RE-SCOPED 2026-08-12 → only `new --blocked-by` at creation; `update --add-blocked-by` half already done via `depend add/remove`, 6e95b07). Touches main.rs clap + mutate/.
 LANE B — skill install + templates/ + skill.rs + pi-corpus lifecycle (skill distribution)  (RUUHKAINEN — pi-review-cascade, sarjata; all touch pi-corpus/skill.rs)
-    pi-corpus-symlink-traversal  high · bug; pi-manifest-lock-review-spinoff — prune/install follow directory symlinks → delete/overwrite can escape the corpus. Path-escape in shipped code.
     pi-corpus-metadata-error-misclass  high · bug; pi-manifest-lock-review-spinoff — metadata errors misclassified as Missing → pi_prune drops the manifest row (data loss).
     pi-prune-digest-gate  normal · improvement; pidev-lifecycle-review-spinoff — gate pi-prune on a content digest before removing. Touches skill.rs/pi prune.
     pi-manifest-fsync-durability  normal · improvement; pi-lock-review-spinoff — save_pi_manifest lacks fsync durability.
