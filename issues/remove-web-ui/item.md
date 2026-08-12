@@ -2,11 +2,14 @@
 created: 2026-08-10
 updated: 2026-08-12
 type: chore
-status: in-progress
+status: done
 priority: normal
 commits:
 - hash: 8a69c097522f75c851b7ab24c96f051540b33bd0
   summary: remove web UI + HTTP surface (serve, /api, kanban, watcher, RepoConfigCache, hub plumbing); prune deps; docs
+- hash: c1cfe2ad41b5f48374422bbbee1ed598aa686820
+  summary: review (4-model llm-review), doc fix, file 2 follow-up spin-offs
+closed: 2026-08-12
 ---
 
 # Remove browser/web UI from issuectl
