@@ -2,8 +2,9 @@
 created: 2026-08-12
 updated: 2026-08-12
 type: task
-status: in-progress
+status: done
 priority: normal
+closed: 2026-08-12
 ---
 
 # Re-establish write-under-flock test coverage
