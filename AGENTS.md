@@ -85,6 +85,53 @@ still lets a plain install repair a deleted Claude skill (a non-force run leaves
 the pi copy in place; `--force` refreshes it). See `skill.rs`
 `install_skill_summary`.
 
+#### pi corpus lifecycle (provenance · drift · prune)
+
+The global pi copies are otherwise unmanaged, so `skill.rs` adds an
+observability layer on top of the mirror (issue `pidev-pi-skill-lifecycle`):
+
+- **Provenance manifest.** Every pi mirror pass also writes
+  `~/.pi/agent/skills/.issuectl-manifest.json` (`PI_MANIFEST_FILE`) — a
+  tool-namespaced JSON map of `skill name → { version }` recording which corpus
+  entries issuectl wrote and at which version. This is out-of-band: the
+  `SKILL.md` bodies stay byte-identical to the Claude copies, so provenance
+  lives in the manifest, not a marker inside the skill. `orchestratectl` keeps
+  its **own** `.orchestratectl-manifest.json`; neither tool prunes the other's
+  entries. The version is read from the on-disk copy's install marker
+  (`pinned_version`), so it stays truthful even for a copy an older binary wrote
+  and a non-force install left in place.
+- **`issuectl skill pi-status`** (read-only) classifies every corpus entry:
+  `up-to-date` · `stale` (issuectl-owned, on-disk differs, recorded version ≠
+  running — a different binary wrote it) · `modified` (differs but recorded
+  version == running — hand-edited/corrupted) · `missing` (manifest row, file
+  gone) · `orphan` (manifest row for a skill issuectl no longer ships, e.g.
+  `/triage-bugs`) · `unmanaged` (on disk, not in the manifest — hand-authored or
+  another tool's). Supports `--json`.
+- **`issuectl skill pi-prune`** removes `orphan` entries (deletes the mirrored
+  `SKILL.md`, drops the dir only if now empty, clears the manifest row) and
+  clears `missing` rows. **Dry-run by default; `--force` applies.** It never
+  touches `unmanaged` entries and never deletes a *current* skill — a `stale` or
+  `modified` copy is refreshed via `skill install --force`, not pruned.
+
+**Reconciliation policy: always-on-force (not overwrite-only-if-newer).** The
+write path is deliberately unchanged — a non-force install leaves an existing pi
+copy alone; `--force` overwrites it unconditionally to the running binary's
+version. This matches the repo-local Claude/Codex targets exactly (force means
+force) and avoids both a surprising "your `--force` did nothing" outcome and
+brittle version-ordering at write time. The known cost — an *older* binary's
+`--force` can rewrite the global copy to an older version — is handled by making
+drift **visible** (`pi-status` flags a recorded-version mismatch) and
+**reversible** (re-run `skill install --force` from the newest binary, or
+`pi-prune` for orphans), not by guarding the write. Chosen because the pi corpus
+is a derived convenience whose ground truth is any repo's current binary; a
+write-time newer-only guard would add a second, subtly-different overwrite rule
+for one of the several install targets and still couldn't order dev builds
+reliably.
+
+The **`uninstall` gap** (no `skill uninstall`, and what it should do with the
+shared global pi copy that can't be reference-counted across repos) is a
+documented follow-up, out of scope for this lifecycle layer.
+
 If a Claude/Codex pair would otherwise drift, regenerate the Codex one from
 the Claude one by stripping its YAML frontmatter:
 

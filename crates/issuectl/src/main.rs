@@ -1611,6 +1611,20 @@ enum SkillAction {
         #[arg(short = 'a', long, default_value = "claude", value_parser = PossibleValuesParser::new(["claude", "codex"]))]
         agent: String,
     },
+    /// Report the state of the global pi.dev skill corpus
+    /// (~/.pi/agent/skills): which issuectl-owned entries are up to date,
+    /// stale (a different binary wrote them), hand-modified, missing,
+    /// orphaned (a skill issuectl no longer ships, e.g. /triage-bugs), or
+    /// unmanaged (not written by issuectl). Read-only.
+    PiStatus,
+    /// Prune the pi.dev skill corpus: remove orphaned issuectl-owned entries
+    /// and clear manifest rows whose copy is gone. Dry-run by default — pass
+    /// --force to apply. Never touches unmanaged (hand-authored) entries.
+    PiPrune {
+        /// Apply the removals (default is a dry run that only reports them)
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// The `--kind` axis of `intake reject`, mapped onto the
@@ -2370,6 +2384,8 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
         Command::Skill { action } => match action {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
             SkillAction::Print { agent } => cmd_skill_print(&agent),
+            SkillAction::PiStatus => cmd_skill_pi_status(json_output),
+            SkillAction::PiPrune { force } => cmd_skill_pi_prune(json_output, force),
         },
         Command::Fmt { slugs, check, diff } => cmd_fmt(json_output, slugs, check, diff),
         Command::MergeDriver {
@@ -5565,6 +5581,123 @@ fn cmd_skill_install(agent: &str, force: bool) -> Result<()> {
 fn cmd_skill_print(agent: &str) -> Result<()> {
     let resolved = skill::Agent::from_str(agent)?;
     skill::print_skill(resolved)
+}
+
+/// Resolve the pi.dev corpus root, erroring with a clear message when `$HOME`
+/// is unresolvable (the same condition under which the install-time mirror is
+/// silently skipped — but here the user explicitly asked to inspect it).
+fn pi_corpus_root() -> Result<std::path::PathBuf> {
+    skill::pi_skills_root()
+        .context("cannot resolve the pi.dev skill corpus root: $HOME is unset or not absolute")
+}
+
+fn cmd_skill_pi_status(json: bool) -> Result<()> {
+    let pi_root = pi_corpus_root()?;
+    let report = skill::pi_status(&pi_root)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("pi.dev skill corpus  {}", report.root);
+    println!("Running issuectl {}", report.version);
+    println!();
+    if report.skills.is_empty() {
+        println!("  (no skill entries found)");
+        return Ok(());
+    }
+    let width = report
+        .skills
+        .iter()
+        .map(|s| s.name.len())
+        .max()
+        .unwrap_or(0);
+    for s in &report.skills {
+        let mark = match s.state {
+            skill::PiSkillState::UpToDate => "✓",
+            skill::PiSkillState::Unmanaged => "·",
+            skill::PiSkillState::Stale | skill::PiSkillState::Modified => "⚠",
+            skill::PiSkillState::Missing | skill::PiSkillState::Orphan => "✗",
+        };
+        let detail = match s.state {
+            skill::PiSkillState::Stale => {
+                let from = s.recorded_version.as_deref().unwrap_or("unknown");
+                format!(" (written by {from}; run `issuectl skill install --force` to refresh)")
+            }
+            skill::PiSkillState::Modified => {
+                " (hand-edited since install; run `issuectl skill install --force` to restore)"
+                    .to_string()
+            }
+            skill::PiSkillState::Orphan => {
+                " (no longer shipped; run `issuectl skill pi-prune --force` to remove)".to_string()
+            }
+            skill::PiSkillState::Missing => {
+                " (copy gone; run `issuectl skill pi-prune --force` to clear the record)"
+                    .to_string()
+            }
+            skill::PiSkillState::Unmanaged => " (not written by issuectl)".to_string(),
+            skill::PiSkillState::UpToDate => String::new(),
+        };
+        println!(
+            "  {mark} {:width$}  {}{}",
+            s.name,
+            s.state.label(),
+            detail,
+            width = width
+        );
+    }
+    if !report.has_findings() {
+        println!();
+        println!("  Everything issuectl owns is up to date.");
+    }
+    Ok(())
+}
+
+fn cmd_skill_pi_prune(json: bool, force: bool) -> Result<()> {
+    let pi_root = pi_corpus_root()?;
+    let outcome = skill::pi_prune(&pi_root, force)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+        return Ok(());
+    }
+
+    if outcome.removed.is_empty() {
+        println!("Nothing to prune — the pi.dev skill corpus has no orphaned issuectl entries.");
+        return Ok(());
+    }
+    if outcome.applied {
+        println!(
+            "Removed {} entr{} from the pi.dev skill corpus:",
+            outcome.removed.len(),
+            if outcome.removed.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        );
+    } else {
+        println!(
+            "Dry run — would remove {} entr{} (pass --force to apply):",
+            outcome.removed.len(),
+            if outcome.removed.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        );
+    }
+    for item in &outcome.removed {
+        let kind = match item.kind {
+            skill::PiPruneKind::Orphan => "orphan",
+            skill::PiPruneKind::Missing => "missing record",
+        };
+        println!("  - {} ({kind})", item.name);
+    }
+    if !outcome.applied {
+        println!();
+        println!("  Re-run with `issuectl skill pi-prune --force` to apply.");
+    }
+    Ok(())
 }
 
 // ── Triage / pick / completions / scan-todos ───────────────────────────────

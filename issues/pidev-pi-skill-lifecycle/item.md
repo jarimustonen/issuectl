@@ -1,9 +1,10 @@
 ---
-title: "pi.dev skill lifecycle: doctor drift-detection + prune for global ~/.pi mirrors"
+title: 'pi.dev skill lifecycle: doctor drift-detection + prune for global ~/.pi mirrors'
 type: feature
 priority: normal
-status: open
+status: in-progress
 slug: pidev-pi-skill-lifecycle
+updated: 2026-08-12
 ---
 
 ## Context
