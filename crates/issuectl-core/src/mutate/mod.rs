@@ -6619,4 +6619,238 @@ body_ops:
         assert!(after.contains("go with option B"));
         assert!(!after.contains("## Comments"));
     }
+
+    // ── write-under-flock coverage ──────────────────────────────────────
+    //
+    // `remove-web-ui` deleted the six `*_publishes_before_releasing_flock`
+    // server tests plus their `install_lock_probe` helpers. Those were the
+    // only coverage for the repo-wide serialization invariant: every
+    // mutation writes to disk while holding `.issuectl/write.lock`
+    // (`WriteLock::acquire` at the top of each entry point in this module).
+    // The publish seam left with the web UI; these tests restore the
+    // underlying flock guarantees directly at the library level, without an
+    // EventHub probe. They are hermetic (tempdir only) and deterministic:
+    // each is written so that removing `WriteLock` makes it fail, not hang.
+
+    /// Returns `true` iff the repo-wide write lock is currently
+    /// unheld. Uses a non-blocking `try_lock_exclusive` on a fresh fd so
+    /// a leaked lock reports `false` instead of hanging the test.
+    fn write_lock_is_free(root: &Path) -> bool {
+        let path = root.join(".issuectl/write.lock");
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("lock file should exist after a mutation");
+        match f.try_lock_exclusive() {
+            Ok(()) => {
+                let _ = FileExt::unlock(&f);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn held_write_lock_serializes_a_second_writer() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "race-target-here", "open");
+        let root = tmp.path().to_path_buf();
+
+        // Main thread holds the flock. A concurrent mutation must not be
+        // able to complete its write until we release it.
+        let lock = WriteLock::acquire(tmp.path()).unwrap();
+
+        let started = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let handle = {
+            let started = Arc::clone(&started);
+            let done = Arc::clone(&done);
+            let root = root.clone();
+            thread::spawn(move || {
+                started.store(true, Ordering::SeqCst);
+                let req = UpdateIssueRequest {
+                    priority: Patch::Set("high".into()),
+                    ..Default::default()
+                };
+                update_issue(&root, "race-target-here", req).unwrap();
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+
+        // Wait until the writer thread is actually running, then give it
+        // ample time to reach (and block on) `WriteLock::acquire`. If the
+        // lock were removed the mutation would finish inside this window.
+        while !started.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(250));
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "a mutation completed while the write lock was held — writes are not serialized under the flock"
+        );
+
+        // Release; the blocked writer must now proceed to completion.
+        drop(lock);
+        handle.join().unwrap();
+        assert!(
+            done.load(Ordering::SeqCst),
+            "writer did not complete after the flock was released"
+        );
+        let after = fs::read_to_string(tmp.path().join("issues/race-target-here/item.md")).unwrap();
+        assert!(after.contains("priority: high"), "{after}");
+    }
+
+    #[test]
+    fn write_lock_released_after_successful_mutation() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "release-ok-here", "open");
+        let req = UpdateIssueRequest {
+            priority: Patch::Set("high".into()),
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "release-ok-here", req).unwrap();
+        assert!(
+            write_lock_is_free(tmp.path()),
+            "flock must be released once a successful mutation returns"
+        );
+    }
+
+    #[test]
+    fn write_lock_released_after_failed_mutation() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "release-err-here", "open");
+        // A stale `expected_version` fails the optimistic-concurrency
+        // check — an error raised *while the flock is held* (the version
+        // compare runs after `WriteLock::acquire`). The guard must still
+        // drop on the error path.
+        let req = UpdateIssueRequest {
+            expected_version: Some("sha256:staleversionvalue".into()),
+            priority: Patch::Set("high".into()),
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "release-err-here", req).unwrap_err();
+        assert!(matches!(err, MutateError::VersionMismatch { .. }), "{err}");
+        assert!(
+            write_lock_is_free(tmp.path()),
+            "flock must be released even when a mutation errors under the lock"
+        );
+    }
+
+    #[test]
+    fn write_lock_serializes_racing_read_modify_write() {
+        use std::thread;
+        use std::time::Duration;
+
+        // Strong mutual-exclusion proof. Each iteration does a
+        // read-modify-write of a shared counter *under the flock* with a
+        // deliberate pause between read and write. With serialization the
+        // final count is exact; without it the pause guarantees lost
+        // updates. This is the test that fails if `WriteLock` is removed.
+        let tmp = fresh_repo();
+        fs::create_dir_all(tmp.path().join(".issuectl")).unwrap();
+        let counter = tmp.path().join(".issuectl/race-counter");
+        fs::write(&counter, "0").unwrap();
+        let root = tmp.path().to_path_buf();
+
+        const THREADS: u64 = 4;
+        const ITERS: u64 = 25;
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let root = root.clone();
+                let counter = counter.clone();
+                thread::spawn(move || {
+                    for _ in 0..ITERS {
+                        let _lock = WriteLock::acquire(&root).unwrap();
+                        let cur: u64 = fs::read_to_string(&counter)
+                            .unwrap()
+                            .trim()
+                            .parse()
+                            .unwrap();
+                        // Widen the interleaving window; harmless when the
+                        // lock is doing its job, fatal to correctness when
+                        // it isn't.
+                        thread::yield_now();
+                        thread::sleep(Duration::from_micros(50));
+                        fs::write(&counter, (cur + 1).to_string()).unwrap();
+                        // `_lock` drops here → flock released.
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_count: u64 = fs::read_to_string(&counter)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            final_count,
+            THREADS * ITERS,
+            "lost updates: WriteLock did not serialize concurrent read-modify-write"
+        );
+    }
+
+    #[test]
+    fn optimistic_version_under_contention_yields_exactly_one_winner() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        // Two writers both capture the same base version and then race,
+        // each asserting `expected_version == v0`. Serialization forces
+        // one to run first (bumping the version) so the second's
+        // optimistic check fails: exactly one Ok, exactly one
+        // VersionMismatch.
+        let tmp = fresh_repo();
+        let v0 = seed_issue(tmp.path(), "open", "opt-contend-here", "open");
+        let root = tmp.path().to_path_buf();
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Classify inside the thread and return a small tag rather than
+        // the large `Result<UpdateOutcome, MutateError>` (which trips
+        // clippy::result_large_err when returned across the thread
+        // boundary): "ok" won the compare, "mismatch" lost it, anything
+        // else is an unexpected error we surface in the assertion.
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let root = root.clone();
+                let v0 = v0.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let req = UpdateIssueRequest {
+                        expected_version: Some(v0),
+                        priority: Patch::Set("high".into()),
+                        ..Default::default()
+                    };
+                    barrier.wait();
+                    match update_issue(&root, "opt-contend-here", req) {
+                        Ok(_) => "ok",
+                        Err(MutateError::VersionMismatch { .. }) => "mismatch",
+                        Err(_) => "error",
+                    }
+                })
+            })
+            .collect();
+
+        let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let winners = outcomes.iter().filter(|o| **o == "ok").count();
+        let mismatches = outcomes.iter().filter(|o| **o == "mismatch").count();
+        assert_eq!(
+            winners, 1,
+            "exactly one racing writer should win the version compare (outcomes: {outcomes:?})"
+        );
+        assert_eq!(
+            mismatches, 1,
+            "the losing writer must be rejected with VersionMismatch (outcomes: {outcomes:?})"
+        );
+    }
 }
