@@ -433,12 +433,57 @@ fn install_pi_mirror(
     template: &str,
     force: bool,
 ) -> Result<InstallResult> {
+    // Path-traversal gate: refuse to write when the entry dir or its `SKILL.md`
+    // is a symlink out of the corpus, so a `--force` mirror never overwrites a
+    // file outside `pi_root` (see [`ensure_pi_mirror_target_within_corpus`]).
+    // Propagated `Err` is caught by the caller loop, which warns and skips the
+    // one mirror — the repo-local Claude install still succeeds.
+    ensure_pi_mirror_target_within_corpus(pi_root, name)?;
     install_rendered_file(
         pi_root.join(name).join("SKILL.md"),
         template,
         PI_SKILL_LABEL,
         force,
     )
+}
+
+/// Refuse to mirror into a skill-entry path that would let the write escape the
+/// corpus root. The mirror target is `<pi_root>/<name>/SKILL.md`; a symlink at
+/// the intermediate `<pi_root>/<name>` directory OR at the final `SKILL.md`
+/// would make `std::fs::write` follow the link and overwrite a file *outside*
+/// the corpus ([`is_valid_skill_name`] vets only the manifest key, never the
+/// on-disk shape of the path it names). Both components are inspected with
+/// `symlink_metadata`, which never follows the final component, so a directory
+/// symlink is seen as a symlink rather than as its (external) target.
+///
+/// A not-yet-existing entry is fine — the install creates a real directory and
+/// a real file. A pre-existing regular file where the entry dir belongs is
+/// refused (it can't hold a `SKILL.md`); the caller warns and skips, exactly as
+/// the old `create_dir_all` failure did.
+fn ensure_pi_mirror_target_within_corpus(pi_root: &Path, name: &str) -> Result<()> {
+    let dir = pi_root.join(name);
+    match dir.symlink_metadata() {
+        Ok(m) if m.file_type().is_symlink() => anyhow::bail!(
+            "{} is a symlink out of the corpus; refusing to write through it",
+            dir.display()
+        ),
+        Ok(m) if !m.is_dir() => {
+            anyhow::bail!("{} exists but is not a directory", dir.display())
+        }
+        Ok(_) => {}                                              // real directory
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // fresh install
+        Err(e) => return Err(e).with_context(|| format!("cannot stat {}", dir.display())),
+    }
+    let skill_md = dir.join("SKILL.md");
+    if let Ok(m) = skill_md.symlink_metadata() {
+        if m.file_type().is_symlink() {
+            anyhow::bail!(
+                "{} is a symlink out of the corpus; refusing to overwrite through it",
+                skill_md.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Render `template` (substituting build-time tokens) and write it to `path`,
@@ -995,6 +1040,24 @@ pub struct PiPruneOutcome {
 /// reference files, so a dir with siblings is left for the user rather than
 /// having its `SKILL.md` silently torn out.
 fn orphan_is_safely_removable(dir: &Path, skill_md: &Path) -> bool {
+    // Path-traversal gate (checked FIRST, before the `skill_md`/`read_dir`
+    // inspection below): the entry dir must be a REAL directory physically
+    // under the corpus, never a symlink. `is_valid_skill_name` proves only that
+    // the manifest *key* is a single safe component — it says nothing about the
+    // on-disk shape of `<pi_root>/<name>`. If that dir has been replaced by a
+    // symlink (`triage-bugs -> /external/dir`), the `skill_md.symlink_metadata`
+    // and `read_dir(dir)` below — and the eventual `remove_file(skill_md)` in
+    // `pi_prune` — all resolve THROUGH the link to an arbitrary target outside
+    // the corpus, turning prune into an arbitrary-delete. `symlink_metadata`
+    // does not follow the final component, so a directory symlink is reported
+    // as a symlink here and refused (reported in `skipped`, never deleted).
+    match dir.symlink_metadata() {
+        Ok(m) if m.file_type().is_symlink() => return false, // dir symlink → never follow
+        Ok(m) if !m.is_dir() => return false,                // not a real dir → refuse
+        Ok(_) => {}                                          // genuine directory → inspect
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true, // no dir → row-only drop is safe
+        Err(_) => return false, // unreadable → refuse to act blind
+    }
     match skill_md.symlink_metadata() {
         Ok(m) if !m.is_file() => return false, // symlink or dir at SKILL.md → refuse
         Ok(_) => {}
@@ -2303,6 +2366,145 @@ mod tests {
         assert!(
             outside.join("SKILL.md").exists(),
             "prune must never touch a path outside the corpus"
+        );
+    }
+
+    /// Path-traversal (symlink) regression: an issuectl-owned orphan entry whose
+    /// `<pi_root>/<name>` directory has been REPLACED by a symlink pointing at a
+    /// directory OUTSIDE the corpus must never be followed by prune —
+    /// `is_valid_skill_name` vets only the key, not the on-disk shape. Prune
+    /// must skip it (report it under `skipped`) and leave the external file
+    /// untouched, rather than `remove_file`-ing through the link. Hermetic: two
+    /// tempdirs, never the real `~/.pi/`.
+    #[cfg(unix)]
+    #[test]
+    fn pi_prune_refuses_to_follow_directory_symlink_out_of_corpus() {
+        let pi = tempfile::tempdir().unwrap();
+        // A precious victim OUTSIDE the corpus root, in its own tempdir.
+        let outside = tempfile::tempdir().unwrap();
+        let external = outside.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let victim = external.join("SKILL.md");
+        std::fs::write(&victim, "precious external file").unwrap();
+
+        // Replace a would-be orphan entry dir with a symlink to the external
+        // dir: `<pi_root>/triage-bugs -> <outside>/external`.
+        std::os::unix::fs::symlink(&external, pi.path().join("triage-bugs")).unwrap();
+
+        // Own it in the manifest so it classifies as an Orphan (retired skill).
+        let mut manifest = PiManifest::empty();
+        manifest.skills.insert(
+            "triage-bugs".into(),
+            PiManifestEntry {
+                version: "0.9.0".into(),
+            },
+        );
+        save_pi_manifest(pi.path(), &manifest).unwrap();
+
+        // Apply-prune must NOT follow the symlink and delete the external file.
+        let outcome = pi_prune(pi.path(), true).unwrap();
+        assert!(
+            victim.exists(),
+            "prune must not delete a file outside the corpus via a directory symlink"
+        );
+        assert!(
+            outcome.removed.iter().all(|i| i.name != "triage-bugs"),
+            "a symlinked entry dir must never be reported removed"
+        );
+        assert!(
+            outcome.skipped.iter().any(|i| i.name == "triage-bugs"),
+            "a symlinked entry dir must be reported skipped for the user to resolve"
+        );
+        // The symlink itself is left in place (prune never touches it).
+        assert!(pi.path().join("triage-bugs").symlink_metadata().is_ok());
+    }
+
+    /// Companion to the dir-symlink case: a REAL orphan entry dir whose
+    /// `SKILL.md` is a symlink to a file outside the corpus must also be
+    /// skipped, never followed by `remove_file`.
+    #[cfg(unix)]
+    #[test]
+    fn pi_prune_refuses_symlinked_skill_md_out_of_corpus() {
+        let pi = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("secret");
+        std::fs::write(&victim, "secret contents").unwrap();
+
+        // Real dir, but SKILL.md points OUT of the corpus.
+        let dir = pi.path().join("triage-bugs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("SKILL.md")).unwrap();
+
+        let mut manifest = PiManifest::empty();
+        manifest.skills.insert(
+            "triage-bugs".into(),
+            PiManifestEntry {
+                version: "0.9.0".into(),
+            },
+        );
+        save_pi_manifest(pi.path(), &manifest).unwrap();
+
+        let outcome = pi_prune(pi.path(), true).unwrap();
+        assert!(
+            victim.exists(),
+            "prune must not delete a symlinked SKILL.md's external target"
+        );
+        assert!(outcome.skipped.iter().any(|i| i.name == "triage-bugs"));
+    }
+
+    /// Install-side twin of the prune symlink guard: a `--force` install whose
+    /// `<pi_root>/<name>` entry dir is a symlink to an external directory must
+    /// NOT write the mirror through the link and overwrite the external
+    /// `SKILL.md`. The mirror is skipped (non-fatal); the repo-local Claude
+    /// install still succeeds.
+    #[cfg(unix)]
+    #[test]
+    fn install_refuses_to_mirror_through_directory_symlink() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let external = outside.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let victim = external.join("SKILL.md");
+        std::fs::write(&victim, "external precious").unwrap();
+
+        // `<pi_root>/issue -> <outside>/external`
+        std::os::unix::fs::symlink(&external, pi.path().join("issue")).unwrap();
+
+        install_skill(repo.path(), &[Agent::Claude], true, Some(pi.path())).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "external precious",
+            "install --force must not write through a corpus dir symlink"
+        );
+        // The repo-local Claude side is unaffected, and the writable mirrors
+        // (issue-new, issue-intake) still land inside the corpus.
+        assert!(repo.path().join(".claude/skills/issue/SKILL.md").exists());
+        assert!(pi.path().join("issue-new/SKILL.md").exists());
+    }
+
+    /// Install-side twin for a symlinked final `SKILL.md`: a real entry dir
+    /// whose `SKILL.md` is a symlink to a file outside the corpus (the classic
+    /// `issue/SKILL.md -> ~/.ssh/config`) must not be overwritten through the
+    /// link by a `--force` install.
+    #[cfg(unix)]
+    #[test]
+    fn install_refuses_to_overwrite_symlinked_skill_md() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("ssh_config");
+        std::fs::write(&victim, "Host *\n  secret\n").unwrap();
+
+        let dir = pi.path().join("issue");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("SKILL.md")).unwrap();
+
+        install_skill(repo.path(), &[Agent::Claude], true, Some(pi.path())).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "Host *\n  secret\n",
+            "install --force must not overwrite a symlinked SKILL.md's external target"
         );
     }
 
