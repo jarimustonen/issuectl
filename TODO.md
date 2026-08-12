@@ -118,6 +118,7 @@ LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections  (RUUHKAINEN 
     new-and-update-blocked-by  normal · feature; `new --blocked-by` + `update --add-blocked-by`. Touches main.rs clap + mutate/.
     dag-lists-closed-issues  normal · bug; issuectl dag listaa suljetut/terminaali-issuet unscheduledissa → filtteröi ei-terminaaleihin. Touches crate::dag (+ ehkä cmd_dag).
     epic-tree-view  normal · feature; `issuectl epic tree <slug>` — epic+lapset puuna. Uusi main.rs-subcommand + moduuli. Kevyt.
+    action-verb-json-echo-mutation  normal · improvement; update/label/close --json-tulos ei echoa mutatoitua kenttää (.priority/.labels/.status = null). Echo resulting value. Touches cmd_* action-verb handlerit main.rs:ssä + result-objektit.
 LANE B — skill install + templates/ + skill.rs (skill distribution)
     pidev-pi-skill-lifecycle  normal · feature; pi-korpuksen (~/.pi/agent/skills/) lifecycle: version-drift-näkyvyys, prune (orphanit esim. /triage-bugs), doctor-verify, uninstall-gap. Follow-up dual-homelle. collision: doctor/ (LANE A). orchestratectl-repossa identtinen sisar-issue.
 LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
