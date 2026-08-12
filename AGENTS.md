@@ -423,6 +423,14 @@ policy.
   parked / low-priority (`build-only-if`) items when the user asks to "run
   everything". The user favors maximal parallelism; sequence only genuine
   hot-file collisions.
+- **A same-titled `orchestratectl` run in a sibling repo is NOT this repo's
+  issue.** Cross-repo campaigns (e.g. the pi.dev-migration WS4 "propagate to
+  every binary-owned skill installer") spawn a *separately-titled-alike* run in
+  each binary's repo. Verify which repo a run targets with `git worktree list`
+  (in this repo) and the run's tmux-pane cwd — **never infer from the run
+  title**. A live `dual-home-skills` worktree under `orchestratectl__worktrees/`
+  does **not** mean issuectl's `pidev-dual-home-skills` is being worked; each
+  binary needs its own worktree here. (Learned the hard way twice, 2026-08-11.)
 
 ## When in doubt
 
