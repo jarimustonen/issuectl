@@ -69,7 +69,6 @@ pub mod refs;
 #[doc(hidden)]
 pub mod repo;
 #[doc(hidden)]
-#[doc(hidden)]
 pub mod report;
 #[doc(hidden)]
 pub mod schema;

@@ -995,6 +995,22 @@ mod tests {
         assert!(allowed.iter().any(|a| a == "bug"));
     }
 
+    // `load` re-parses on every call — it does NOT memoize. This is the
+    // invariant that made collapsing the `ConfigSource`/`UncachedConfig`
+    // seam behavior-preserving (the sole impl was always this fresh
+    // re-parse). Guarding it here keeps a future caching change from
+    // silently altering that contract; the assertion moved here when
+    // `repo_config.rs` was deleted.
+    #[test]
+    fn load_re_parses_on_every_call() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("issues")).unwrap();
+        let a = load(root).unwrap();
+        let b = load(root).unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+    }
+
     /// `DEFAULT_SCHEMA_YAML` embeds the priority enum as a hand-written
     /// YAML literal (a static string cannot reference `PRIORITIES` at
     /// compile time), so nothing but this test keeps the two in step.

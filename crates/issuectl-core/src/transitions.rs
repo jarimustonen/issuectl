@@ -503,6 +503,20 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // `load` re-parses on every call — it does NOT memoize. This is the
+    // invariant that made collapsing the `ConfigSource`/`UncachedConfig`
+    // seam behavior-preserving; the assertion moved here when
+    // `repo_config.rs` was deleted. See the twin test in `schema.rs`.
+    #[test]
+    fn load_re_parses_on_every_call() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("issues")).unwrap();
+        let a = load(root).unwrap();
+        let b = load(root).unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+    }
+
     fn make_issue(status: &str, issue_type: &str, body: &str) -> Issue {
         Issue {
             slug: "x".into(),
