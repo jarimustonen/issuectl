@@ -2,9 +2,13 @@
 created: 2026-08-12
 updated: 2026-08-12
 type: bug
-status: in-progress
+status: fixed
 priority: high
 labels: [ci]
+commits:
+- hash: '2924529'
+  summary: make rate-limit test deterministic via injectable clock seam
+closed: 2026-08-12
 ---
 
 # CI: put_body_rate_limit_fires_with_retry_after flaky (expected 429 after burst)
