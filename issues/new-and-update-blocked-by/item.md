@@ -1,0 +1,25 @@
+---
+created: 2026-08-12
+updated: 2026-08-12
+type: feature
+status: open
+priority: normal
+labels: [cli]
+---
+
+# Set blocked_by at creation (new --blocked-by) + light update --add-blocked-by
+
+## Description
+
+Setting a dependency currently requires either a full versioned `apply` YAML patch or hand-editing `blocked_by:` frontmatter — there is no lightweight path.
+
+Observed this session (bootstrapping a new repo's dependency-ordered backlog, 5 issues):
+- `issuectl new --slug X --type feature --blocked-by Y` → `error: unexpected argument '--blocked-by' found`.
+- `issuectl update X --add-blocked-by Y` → no such flag (only `--lane` / `--no-lane` exist for dag metadata).
+- So deps had to be set by hand-editing frontmatter (fragile) or by assembling a versioned `apply` patch (heavy for a one-field add).
+
+Request:
+1. `issuectl new --blocked-by <slug>` (repeatable) — set deps at creation, so a backlog can be filed with its DAG in one pass.
+2. `issuectl update <slug> --add-blocked-by <slug>` / `--remove-blocked-by <slug>` (repeatable) — the same single-field convenience the other dag fields (`--lane`) already have.
+
+Both should validate the target resolves to a real issue and reject self/cycle deps (same checks `issuectl dag` relies on). Consider mirroring for `--related` at creation if not already present.
