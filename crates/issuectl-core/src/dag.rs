@@ -283,9 +283,15 @@ pub struct DagIssue {
 #[derive(Debug, Clone, Serialize)]
 pub struct DagLane {
     pub lane: String,
-    /// First not-done issue in `issues` order, or null when the lane is
-    /// fully done.
+    /// First *runnable* issue in `issues` order — not done and with every
+    /// `blocked_by` dependency satisfied — or null when no member is
+    /// currently runnable (all done, or every not-done member is still
+    /// blocked). This is the work-conserving head, not merely the first
+    /// not-done issue: a stuck front member is skipped.
     pub head_of_line: Option<String>,
+    /// The lane's issues in scheduling order. Terminal (closing-status)
+    /// members are excluded — a fully-done lane produces no `DagLane` at
+    /// all, so every rendered row is live scheduling work.
     pub issues: Vec<DagIssue>,
 }
 
@@ -297,7 +303,8 @@ pub struct DagView {
     pub schema_version: u32,
     /// Whether a caller-supplied reservations set was applied.
     pub reservations_applied: bool,
-    /// Lanes, ordered by lane name.
+    /// Lanes, ordered by lane name. Terminal (closing-status) issues are
+    /// excluded from every lane (see [`DagLane::issues`]).
     pub lanes: Vec<DagLane>,
     /// Issues without a lane, each independent. Terminal (closing-status)
     /// issues are excluded — this is a scheduling view, and a closed issue
@@ -340,26 +347,29 @@ pub fn compute(issues: &[Issue], schema: &Schema, reservations: Option<&Reservat
     // the row echoes (`lane: "unlaned"` vs `null`), so a caller can tell
     // "confirmed parallel-safe" from "unclassified".
     //
-    // Terminal (closing-status) issues are excluded from the unscheduled
-    // bucket: `dag` is a scheduling view, and a done/wontfix/obsolete issue
-    // can never be scheduled — dumping it here is noise that has misled
-    // readers into treating shipped-and-closed work as open backlog. The
-    // closing classification is the schema-aware `done` set (so a project's
+    // Terminal (closing-status) issues are excluded from the scheduling
+    // view entirely — lanes and unscheduled alike. `dag` is a *scheduling*
+    // view, and a done/wontfix/obsolete issue can never be scheduled, so
+    // rendering it is noise that has misled readers into treating
+    // shipped-and-closed work as open backlog. Excluding them everywhere
+    // (rather than only from the unscheduled bucket) also keeps completed
+    // work out of `order_lane`'s intra-lane topological sort: a closed
+    // lane member left in the roster still carries its `blocked_by` edges
+    // and priority into the Kahn ordering, where it can demote a
+    // higher-priority *runnable* member out of head-of-line. The closing
+    // classification is the schema-aware `done` set (so a project's
     // `status_classes` override is honoured), computed above over the full
-    // issue set — closing issues stay in that set for blocker resolution,
-    // they are just not surfaced as schedulable rows. Lane members are left
-    // untouched: a done member is contextualised by its lane's head-of-line
-    // (which is always the first not-done, runnable issue) rather than
-    // presented as loose, ready-looking work.
+    // issue set — closing issues stay in that set (and in `graph` /
+    // `all_slugs`) for blocker resolution, so a done dependency still reads
+    // as satisfied; they are only dropped from the rendered rows.
     let mut by_lane: BTreeMap<&str, Vec<&Issue>> = BTreeMap::new();
     let mut unscheduled: Vec<&Issue> = Vec::new();
     for i in issues {
+        if done.contains(i.slug.as_str()) {
+            continue;
+        }
         match i.lane.as_deref() {
-            Some(UNLANED) | None => {
-                if !done.contains(i.slug.as_str()) {
-                    unscheduled.push(i);
-                }
-            }
+            Some(UNLANED) | None => unscheduled.push(i),
             Some(lane) => by_lane.entry(lane).or_default().push(i),
         }
     }
@@ -377,15 +387,14 @@ pub fn compute(issues: &[Issue], schema: &Schema, reservations: Option<&Reservat
         .collect();
 
     // Unscheduled issues are independent (no lane mutual-exclusion); order
-    // them by the same tiebreak and render each as its own head-of-line
-    // when not done. `spawnable` still requires blockers to be satisfied.
+    // them by the same tiebreak and render each as its own head-of-line.
+    // Terminal issues were already filtered out of the bucket above, so
+    // every unscheduled issue is a non-done, independent head; `spawnable`
+    // still requires blockers to be satisfied.
     let unscheduled = tiebreak_sorted(&unscheduled)
         .iter()
         .enumerate()
-        .map(|(pos, i)| {
-            let is_head = !ctx.done.contains(i.slug.as_str());
-            ctx.make_issue(i, pos, None, is_head)
-        })
+        .map(|(pos, i)| ctx.make_issue(i, pos, None, true))
         .collect();
 
     DagView {
@@ -721,12 +730,16 @@ mod tests {
         ];
         let v = compute(&issues, &default_schema(), None);
         let l = lane(&v, "schema");
+        // The done member is excluded from the rendered lane, so only the
+        // two live issues remain and `b-open` is the head.
+        assert_eq!(l.issues.len(), 2, "closed member excluded");
         assert_eq!(l.head_of_line.as_deref(), Some("b-open"));
-        let b = &l.issues[1];
+        let b = &l.issues[0];
         assert_eq!(b.slug, "b-open");
         assert!(b.is_head_of_line && b.spawnable);
         // c is behind the head in the same lane → not head, not spawnable.
-        let c = &l.issues[2];
+        let c = &l.issues[1];
+        assert_eq!(c.slug, "c-open");
         assert!(!c.is_head_of_line && !c.spawnable);
     }
 
@@ -812,15 +825,20 @@ mod tests {
     }
 
     #[test]
-    fn fully_done_lane_has_no_head() {
+    fn fully_done_lane_is_omitted_entirely() {
+        // Every member closing → the lane is pure history with no
+        // schedulable work, so it is dropped from the view rather than
+        // rendered as a zombie lane full of done rows.
         let issues = vec![
             with_lane(mk("a-done", "done", "normal"), "schema"),
             with_lane(mk("b-done", "fixed", "normal"), "schema"),
         ];
         let v = compute(&issues, &default_schema(), None);
-        let l = lane(&v, "schema");
-        assert_eq!(l.head_of_line, None);
-        assert!(l.issues.iter().all(|i| !i.is_head_of_line && !i.spawnable));
+        assert!(
+            v.lanes.iter().all(|l| l.lane != "schema"),
+            "a fully-done lane produces no DagLane"
+        );
+        assert!(v.unscheduled.is_empty());
     }
 
     #[test]
@@ -996,6 +1014,98 @@ mod tests {
     }
 
     #[test]
+    fn closed_lane_member_is_excluded_but_still_satisfies_intra_lane_blocker() {
+        // A closed lane member is dropped from the rendered lane, yet still
+        // counts as a satisfied dependency for a later member that was
+        // blocked by it: the dependent is head and spawnable.
+        let issues = vec![
+            with_lane(mk("a-done", "done", "normal"), "schema"),
+            with_lane(
+                with_blocked_by(mk("b-open", "open", "normal"), &["a-done"]),
+                "schema",
+            ),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let l = lane(&v, "schema");
+        assert_eq!(l.issues.len(), 1, "closed member excluded from lane");
+        assert_eq!(l.issues[0].slug, "b-open");
+        assert_eq!(l.head_of_line.as_deref(), Some("b-open"));
+        assert!(
+            l.issues[0].blockers_open.is_empty() && l.issues[0].spawnable,
+            "closed dep still counts as done"
+        );
+    }
+
+    #[test]
+    fn closed_lane_blocker_does_not_demote_high_priority_runnable_member() {
+        // Regression: a closed lane member left in the roster carries its
+        // `blocked_by` edge and priority into `order_lane`'s Kahn sort,
+        // where it can push a higher-priority *runnable* member out of
+        // head-of-line. `high-ready` is blocked by the closed `done-low`
+        // (so it is runnable, since the blocker is done) and outranks the
+        // independent `normal-ready`; it must be the head. If the closed
+        // member were not excluded, the intra-lane edge would delay
+        // `high-ready` behind `normal-ready`.
+        let issues = vec![
+            with_lane(mk("done-low", "done", "low"), "x"),
+            with_lane(
+                with_blocked_by(mk("high-ready", "open", "high"), &["done-low"]),
+                "x",
+            ),
+            with_lane(mk("normal-ready", "open", "normal"), "x"),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let l = lane(&v, "x");
+        assert_eq!(l.head_of_line.as_deref(), Some("high-ready"));
+        assert_eq!(l.issues[0].slug, "high-ready", "high-ready leads the lane");
+        assert!(l.issues[0].spawnable);
+    }
+
+    #[test]
+    fn custom_closing_status_is_excluded_via_schema_override() {
+        // The exclusion is schema-aware: a project can classify an
+        // otherwise-unknown status as closing (`status_classes: { archived:
+        // closing }`) and it must be dropped from the scheduling view, while
+        // a status the project overrides *back* to active (`done: active`)
+        // stays visible.
+        let mut schema = default_schema();
+        schema
+            .status_classes
+            .insert("archived".to_string(), StatusClass::Closing);
+        schema
+            .status_classes
+            .insert("done".to_string(), StatusClass::Active);
+        let issues = vec![
+            mk("a-archived", "archived", "normal"),
+            mk("b-done-but-active", "done", "normal"),
+            mk("c-open", "open", "normal"),
+        ];
+        let v = compute(&issues, &schema, None);
+        let slugs: Vec<&str> = v.unscheduled.iter().map(|i| i.slug.as_str()).collect();
+        assert_eq!(
+            slugs,
+            vec!["b-done-but-active", "c-open"],
+            "custom closing excluded; done-reclassified-active retained"
+        );
+    }
+
+    #[test]
+    fn empty_and_all_closed_repos_render_empty_view() {
+        let empty = compute(&[], &default_schema(), None);
+        assert!(empty.lanes.is_empty() && empty.unscheduled.is_empty());
+
+        let all_closed = vec![
+            mk("a-done", "done", "normal"),
+            with_lane(mk("b-fixed", "fixed", "normal"), "x"),
+        ];
+        let v = compute(&all_closed, &default_schema(), None);
+        assert!(
+            v.lanes.is_empty() && v.unscheduled.is_empty(),
+            "a repo of only closed issues renders an empty scheduling view"
+        );
+    }
+
+    #[test]
     fn closed_unscheduled_issue_still_satisfies_a_blocker() {
         // Excluding closed issues from the unscheduled *display* must not
         // drop them from the `done` set used for blocker resolution: a lane
@@ -1013,7 +1123,10 @@ mod tests {
             "the closed blocker is not shown as unscheduled"
         );
         let a = &lane(&v, "schema").issues[0];
-        assert!(a.blockers_open.is_empty(), "closed dep still counts as done");
+        assert!(
+            a.blockers_open.is_empty(),
+            "closed dep still counts as done"
+        );
         assert!(a.spawnable, "head is runnable — its blocker is satisfied");
     }
 
