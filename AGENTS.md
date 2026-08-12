@@ -97,9 +97,16 @@ observability layer on top of the mirror (issue `pidev-pi-skill-lifecycle`):
   `SKILL.md` bodies stay byte-identical to the Claude copies, so provenance
   lives in the manifest, not a marker inside the skill. `orchestratectl` keeps
   its **own** `.orchestratectl-manifest.json`; neither tool prunes the other's
-  entries. The version is read from the on-disk copy's install marker
-  (`pinned_version`), so it stays truthful even for a copy an older binary wrote
-  and a non-force install left in place.
+  entries. **Provenance follows real write events, never on-disk existence:**
+  `record_pi_provenance` records only the skills a run actually created/
+  overwrote (threaded via a `written` set from the mirror loop), stamped with
+  the running version. A managed-name file that already existed and was left in
+  place — a non-force install, or a hand-authored copy — is **not** adopted, so
+  `pi-prune` can never later delete a file issuectl did not write. The manifest
+  is written atomically (temp + rename); manifest keys are validated to safe
+  single path components on load (`is_valid_skill_name`) so a tampered key can't
+  steer a delete outside the corpus, and the strict loader refuses a corrupt/
+  foreign/unsupported manifest rather than acting on an empty misread of it.
 - **`issuectl skill pi-status`** (read-only) classifies every corpus entry:
   `up-to-date` · `stale` (issuectl-owned, on-disk differs, recorded version ≠
   running — a different binary wrote it) · `modified` (differs but recorded
@@ -111,7 +118,11 @@ observability layer on top of the mirror (issue `pidev-pi-skill-lifecycle`):
   `SKILL.md`, drops the dir only if now empty, clears the manifest row) and
   clears `missing` rows. **Dry-run by default; `--force` applies.** It never
   touches `unmanaged` entries and never deletes a *current* skill — a `stale` or
-  `modified` copy is refreshed via `skill install --force`, not pruned.
+  `modified` copy is refreshed via `skill install --force`, not pruned. Deletion
+  is guarded: only a regular-file `SKILL.md` in a dir holding nothing else is
+  removed; a symlinked or sibling-laden orphan is reported under `skipped` and
+  left for the user. Prune refuses to run at all on a corrupt/untrusted
+  manifest.
 
 **Reconciliation policy: always-on-force (not overwrite-only-if-newer).** The
 write path is deliberately unchanged — a non-force install leaves an existing pi
