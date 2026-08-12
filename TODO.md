@@ -13,18 +13,24 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-11, rinnakkaiskaista-rupeama):** **0.8.1 yhä live; 3 uutta featurea landasi `main`iin,
-EI vielä julkaistu.** Käyttäjä käynnisti ensin 3 DAG-kaistaa rinnan; `@warn-reserved-notes-section` (LANE A) +
-`@codex-prompt-variants` (LANE B) landasivat. Handoffin jälkeen nousi **kiireellinen `@pidev-dual-home-skills`**
-(pi.dev-migraation WS4) — spawnattiin issuectl-worktree, **landasi** (dual-home `~/.pi/agent/skills/`iin).
-Kaikki kolme: green gate vihreä (fmt clean, 1081 testiä, ei uusia clippy-varoituksia), `/llm-review` ajettu.
-`main == origin`, työpuu puhdas paikallisesti. **⚠️ MUTTA main CI on PUNAINEN:** viimeisen landauksen
-(`75670fa`) jälkeen CI (run 31509473175) punainen yhdestä flaky-testistä `put_body_rate_limit_fires_with_retry_after`
-(1080 pass / 1 fail; odotti 429, sai 200 — ajoitusflake server/mod.rs:ssä). **Paikallinen `cargo test` menee
-läpi** (1081) koska flake on aikariippuvainen → jäi kiinni vain CI:ssä. Filattu `@rate-limit-test-flaky`
-(high, ci), DAG head-of-line. **Release PIDETTIIN** ja on nyt **tuplagate**: CHANGELOG `[Unreleased]` **tyhjä**
-JA CI punainen (+ release-polku yhä rikki, ks. release-oppi). Ennen 0.9.0-cutia: korjaa flake → vihreä CI →
-täytä CHANGELOG. ⚠️ Huom: `@pidev-dual-home-skills` filasi follow-upin `@pidev-pi-skill-lifecycle`.
+**Tila (2026-08-12, iso rupeama — KAKSI releasea):** **0.10.0 LIVE ja varmistettu.** Tag `v0.10.0`
+originissa, molemmat cratet crates.io:ssa (`cargo publish`-fallback, ossctl yhä rikki), **`release.yml`
+completed/success sekä 0.9.0:lle että 0.10.0:lle** (binäärit + shell-installer + Homebrew). `main == origin`,
+työpuu puhdas, `v0.10.0` == `Cargo.toml`. **8 issueä suljettu/shipattu, kaksi releasea:**
+- **0.9.0** = 4 featurea + 1 fix: `@warn-reserved-notes-section`, `@codex-prompt-variants`,
+  `@pidev-dual-home-skills` (pi.dev WS4 dual-home), `@doctor-fix-merge-notes-comments`, ja fix
+  `@rate-limit-test-flaky` (deterministinen limiter-testi injektoitavalla kellolla). `@note-missing-as-generic-error`
+  suljettiin `fixed` (ei toistunut HEADilla → vain regressiotestit). `@events-jsonl-log` → `wontfix`.
+- **0.10.0** = **BREAKING: `@remove-web-ui`** — koko selain/web-UI poistettu (`issuectl serve`, server/HTTP-layer,
+  `/api`, kanban-frontend, SSE/watcher, user-boards, RepoConfigCache, `issuectl docs`). issuectl on nyt
+  **puhdas AI-first CLI**. 12 web-only-deppiä pruunattu; 4-mallin `/llm-review` ei löytänyt korrektiusbugia.
+  Review filasi 3 follow-upia (ks. Seuraava askel).
+
+Rupeaman kaari: käyttäjä ajoi ensin 3 kaistaa rinnan (warn-notes + codex-variants landasivat), sitten
+kiireellinen pidev-dual-home (WS4) landasi. CI meni hetkeksi punaiseksi flaky rate-limit-testistä →
+korjattiin (injektoitava kello) → vihreä. Cutattiin **0.9.0** (3+1 featurea + fix). Sitten käyttäjä antoi
+go:n web-UI:n poistolle → `@remove-web-ui` landasi → cutattiin **0.10.0** (breaking). Molemmat manuaalisella
+`cargo publish`illa (ossctl-cut yhä rikki). **Ei release-gejä auki** — molemmat cutattu ja varmistettu.
 
 **⚠️ RELEASE-OPPI (yhä voimassa): ossctl `release cut` EI julkaise oikeasti → 0.8.1 tehtiin `cargo publish`illa.**
 Real cut ei uploadannut crates.io:hon (raportoi 300s "index visibility" -timeoutin cratelle jota se ei
@@ -39,22 +45,8 @@ julkaisee PUUN version — se EI bumppaa; siksi bump + CHANGELOG-finalisointi + 
 ENNEN cutia. (Sekundäärifriktio: stale-lock esti `release abandon`in → ossctl
 `@release-abandon-break-stale-lock`, filattu.)
 
-**Mitä tässä rupeamassa tehtiin (3 featurea landattu `main`iin, EI releasea — `pidev-dual-home-skills` ks. Tila + Seuraava askel):**
-- **`@warn-reserved-notes-section`** (low, feature, `done`) — `issuectl new` ja `body set` varoittavat nyt
-  authoring-aikaan kun issue-body käyttää varattua `## Notes`-otsikkoa (jonka doctor migratoi `## Comments`iin).
-  Ei-fataali (ei blokkaa kirjoitusta), varoitus sekä human- (`emit_warnings_to_stderr`) että `--json`
-  `warnings`-kentässä. Detektointi single-sourced uudesta `body_sections::LEGACY_SECTION_ALIASES`-constista
-  (`reserved_section_warnings`, reuse fence-aware `all_h2_sections`-skanneri; ei uutta regexiä). Help-teksti
-  `new --body-file` + `body set` mainitsee varatut sektiot. 4 mallin `/llm-review` löysi yksimielisen
-  kriittisen bugin (false negative kun bodyssä `---` horizontal rule ennen `## Notes` + CRLF) → korjattu
-  (`do_new` skannaa raa'an bodyn, ei frontmatter-splitattua renderöityä docia).
-- **`@codex-prompt-variants`** (low, feature, `done`) — `/issue-new` + `/issue-intake` asentuvat nyt
-  molemmissa formaateissa kuten `/issue`: Claude-skill `.claude/skills/<slug>/SKILL.md` + Codex-prompt
-  `.codex/prompts/<slug>.md` (frontmatter strippattu, body identtinen). Uudet templatet
-  `issue-new-prompt.md` / `issue-intake-prompt.md` `include_str!`-embedattu; `IntakeSkill::{template,
-  install_path,label}` agent-parametrisoitu. Dogfood sync-testi vahtii nyt **6 kopiota** (oli 4) ja vaatii
-  niiden olemassaolon. AGENTS.md template-taulu + sync-sääntö + hot-files-lista päivitetty. `/llm-review`
-  (gemini-3.1-pro, gpt-5.6-sol, opus-4-7) + `/assess-findings`, 6 FIX-löydöstä sovellettu.
+**Shipatun sisällön täydet muutokset:** CHANGELOG `[0.9.0]` (2026-08-12) + `[0.10.0]` (2026-08-12,
+breaking web-removal). Ei toisteta tässä.
 
 **⚠️ Minor-bump-gotcha (UUSI, muista seuraavassa minor-releasessa):** 0.8.0-cut paljasti että
 `crates/issuectl/Cargo.toml`:n sisäinen dep `issuectl-core = { path = "…", version = "0.7.0" }`
@@ -79,41 +71,29 @@ kaikki `issuectl skill install`ista; bugit/feature-pyynnöt sisään `issuectl i
 **OSS-init (ennallaan):** `OSS-RELEASE.md` **approved** (`mvp`). cargo-dist pysyy
 release-engineinä — `/oss-release-cut` EI regeneroi `release.yml`:ää.
 
-**Iso linjaus (PÄIVITETTY tässä rupeamassa):** **web/selain-UI POISTETAAN** (ei enää vain
-holdissa). issuectl → puhdas AI-first CLI. Kaikki kanban/web-featuret suljettu `obsolete`;
-poisto ajetaan `@remove-web-ui`:n kautta **vasta kun seuraaja-ohjelman luonnos on arvioitu**
-(gate käsin, ks. Tila-blokki). Fokus CLI:ssä.
+**Iso linjaus (TOTEUTETTU 2026-08-12):** **web/selain-UI POISTETTU** — `@remove-web-ui` landasi ja
+julkaistiin 0.10.0:ssa (breaking). issuectl on nyt puhdas AI-first CLI (ei `serve`ä, ei `/api`ta, ei
+kanbania). Gate purettiin käyttäjän go:lla. Poiston `/llm-review` filasi 3 siivous-follow-upia:
+`@collapse-configsource-seam`, `@flock-write-test-coverage`, `@new-and-update-blocked-by` (kaikki DAG:ssa).
 
-**Seuraava askel:**
-- **🔴 HEAD-OF-LINE — `@rate-limit-test-flaky`** (high, ci-bug): **main CI on PUNAINEN.**
-  `put_body_rate_limit_fires_with_retry_after` (server/mod.rs) on ajoitusflake — odotti 429, sai 200.
-  Korjaa deterministiseksi (mock-clock / kiinteä token-budjetti / yksiselitteinen burst) TAI, koska koko
-  server poistuu `@remove-web-ui`:n mukana, harkitse testin poistoa sen yhteydessä. **Vihreä CI on
-  0.9.0-releasen edellytys.** Paikallinen `cargo test` ei paljasta tätä (aikariippuvainen) — verifioi CI:stä.
-- **RELEASE PENDING (3 landattua featurea odottaa; tuplagate: punainen CI + tyhjä CHANGELOG):** kun release cutataan, ensin **täytä CHANGELOG
-  `[Unreleased]`** kaikilla kolmella (`@warn-reserved-notes-section` + `@codex-prompt-variants` +
-  `@pidev-dual-home-skills`; workerit eivät lisänneet merkintöjä — `[Unreleased]` on tyhjä), sitten
-  version-bump. Kaikki additiivisia → **minor-bump 0.8.1 → 0.9.0** (muista **caret-gotcha**: bumppaa myös
-  `crates/issuectl/Cargo.toml`:n sisäinen dep `version =` 0.8.0 → 0.9.0, ks. gotcha yllä). **⚠️ ossctl
-  `release cut` yhä rikki → julkaisu manuaalisella `cargo publish`-fallbackilla** kunnes
-  `@ossctl-cut-no-publish` ratkeaa.
-- **✅ `@pidev-dual-home-skills` LANDANNUT** (high, feature, `done`; commitit `a15328f`/`8ae1a85`/`408c999`,
-  green + 4-mallin `/llm-review`): `issuectl skill install` / `init` dual-homeaa nyt jokaisen Claude
-  `SKILL.md`:n myös `~/.pi/agent/skills/<name>/SKILL.md`:hen (home-global; repo-local Claude/Codex ennallaan;
-  vain SKILL.md peilataan; `skill::pi_skills_root`). Review korjasi fatal-pi-write-bugin + non-absolute-HOME-
-  footgunin. **Follow-up filattu: `@pidev-pi-skill-lifecycle`** (normal — pi-korpuksen prune/verify/version-
-  drift/uninstall; LANE B). Issuectl-osuus WS4:stä valmis; sisar-binäärit (orchestratectl ym.) tekevät omansa.
-- **Aktiivinen jono:** ei-deferred issuet: `@pidev-pi-skill-lifecycle` (normal, DAG head), `@doctor-fix-merge-notes-comments` +
-  `@note-missing-as-generic-error` (low, warn-notes-follow-upit) ja **`@ossctl-cut-no-publish`** (high, bug — juurisyy
-  upstream-ossctl:ssä; ei koodattavaa täällä ennen kuin ossctl korjaa, sitten poista AGENTS-caveat +
-  re-point releaset ossctliin). **Avoin C-päätös (käyttäjä ei vielä valinnut):** (1) jätä odottamaan
-  ossctlin korjausta, vai (2) käynnistä verifiointi-worktree joka tarkistaa onko ossctl jo korjannut ja
-  tekee re-pointin. Tämä ratkaisee myös release-polun.
-- **Deferred:** portitettu `@remove-web-ui` (odottaa seuraaja-luonnosta), CLI-only `@issue-graph-view` +
-  `@epic-tree-view`, `@events-jsonl-log` (build-only-if). `@focus-areas` suljettu `wontfix` (ADR 0001
-  tallessa). Uusi rupeama: **koodattavaa on** — head-of-line `@rate-limit-test-flaky` (high, punainen CI),
-  sitten `@pidev-pi-skill-lifecycle` (normal) + 2 warn-notes-follow-upia (low). ossctl-cut pysyy
-  upstream-blocked. Järjestys: korjaa CI vihreäksi → cuttaa 0.9.0 → muut jonosta.
+**Seuraava askel:** **Ei releasea auki** (0.9.0 + 0.10.0 molemmat cutattu ja varmistettu). Aktiivinen jono
+on 6 ei-deferred-issueä — kaikki `normal` paitsi upstream-blocked ossctl. **GLOBAL HEAD-OF-LINE:
+`@pidev-pi-skill-lifecycle`** (LANE B, parallel-safe, oli käyttäjän "5 asap"-setissä). LANE A on ruuhkainen
+(5 issueä, jakavat main.rs/mutate/-hotfileja → sarjataan):
+- **`@pidev-pi-skill-lifecycle`** (normal, LANE B) — pi-korpuksen (~/.pi/agent/skills/) lifecycle:
+  version-drift-näkyvyys, prune (orphanit esim. /triage-bugs), doctor-verify, uninstall-gap. collision: doctor/.
+- **remove-web-ui-siivous-follow-upit (LANE A, 0.10.0-jälkipyykki):** `@collapse-configsource-seam`
+  (improvement — nyt kun server poissa, single-impl ConfigSource-seam voi romahtaa), `@flock-write-test-coverage`
+  (task — palauta write-under-flock-testikattavuus jonka server-testit ennen antoivat), `@new-and-update-blocked-by`
+  (feature — `new --blocked-by` + `update --add-blocked-by`).
+- **`@dag-lists-closed-issues`** (bug, LANE A) — `issuectl dag` listaa suljetut/terminaali-issuet
+  "unscheduled"-osiossa; filtteröi ei-terminaaleihin. (Tämä hämäsi toista agenttia luulemaan shipattuja
+  bugeja avoimiksi.)
+- **`@epic-tree-view`** (feature, LANE A — un-deferattu tässä rupeamassa) — `issuectl epic tree <slug>`.
+  Kevyt CLI-lisäys.
+- **`@ossctl-cut-no-publish`** (high, bug) — yhä upstream-blocked; ei koodattavaa täällä ennen ossctlin
+  korjausta. **Avoin C-päätös:** (1) jätä odottamaan, vai (2) verifiointi-worktree joka tarkistaa onko
+  ossctl korjattu ja re-pointaa. Kunnes korjattu, seuraavakin release tarvitsee manuaalisen `cargo publish`in.
 
 ---
 
@@ -131,27 +111,28 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: rate-limit-test-flaky   ← high; main CI PUNAINEN + BLOKKAA 0.9.0-releasen. Korjaa (tai poista testi remove-web-ui:n mukana) ensin.
-LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections
-    doctor-fix-merge-notes-comments  low · feature; doctor --fix auto-mergeää ## Notes → ## Comments myös kun molemmat olemassa (nyt "manual merge required"). Touches doctor/ + body_sections.
-    note-missing-as-generic-error  low · bug; `issuectl note` ilman --as printtaa geneerisen helpin clapin missing-arg-viestin sijaan. Touches main.rs clap + note-handler.
+GLOBAL HEAD-OF-LINE: pidev-pi-skill-lifecycle   ← LANE B, parallel-safe, oli käyttäjän "5 asap"-setissä. ossctl-cut on high mutta upstream-blocked.
+LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections  (RUUHKAINEN — 5 issueä, sarjata)
+    collapse-configsource-seam  normal · improvement; server poissa → single-impl ConfigSource-seam voi romahtaa. Touches mutate/ + repo read paths.
+    flock-write-test-coverage  normal · task; palauta write-under-flock-testikattavuus (server-testit antoivat sen ennen). Touches mutate/ tests.
+    new-and-update-blocked-by  normal · feature; `new --blocked-by` + `update --add-blocked-by`. Touches main.rs clap + mutate/.
+    dag-lists-closed-issues  normal · bug; issuectl dag listaa suljetut/terminaali-issuet unscheduledissa → filtteröi ei-terminaaleihin. Touches crate::dag (+ ehkä cmd_dag).
+    epic-tree-view  normal · feature; `issuectl epic tree <slug>` — epic+lapset puuna. Uusi main.rs-subcommand + moduuli. Kevyt.
 LANE B — skill install + templates/ + skill.rs (skill distribution)
     pidev-pi-skill-lifecycle  normal · feature; pi-korpuksen (~/.pi/agent/skills/) lifecycle: version-drift-näkyvyys, prune (orphanit esim. /triage-bugs), doctor-verify, uninstall-gap. Follow-up dual-homelle. collision: doctor/ (LANE A). orchestratectl-repossa identtinen sisar-issue.
 LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
     ossctl-cut-no-publish  high · bug; ossctl release cut ei julkaise oikeasti → manuaalinen cargo publish. BLOCKED upstream-ossctl:llä; kun korjattu, poista AGENTS-caveat + re-point releaset ossctliin.
-UNLANED — confirmed no shared hot files, run anytime:
-    rate-limit-test-flaky  high · bug (ci); `put_body_rate_limit_fires_with_retry_after` flaky (odotti 429, sai 200) — ajoitusherkkä server/mod.rs:ssä. main CI PUNAINEN (run 31509473175 @75670fa). Fix: deterministinen limiter-testi (mock-clock / kiinteä token-budjetti). ⚠️ latentti collision vain deferred @remove-web-ui:n kanssa (koko server poistuu). Confined to crates/issuectl-core/src/server/mod.rs.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: **3 featurea landasi** — `warn-reserved-notes-section` (LANE A) + `codex-prompt-variants`
-(LANE B) rinnakkain, sitten kiireellinen `pidev-dual-home-skills` (WS4) → kaikki `done`, pudotettu DAG:sta.
-Landaukset paljastivat/toivat 4 follow-upia jotka ovat nyt DAG:ssa: `pidev-pi-skill-lifecycle` (B),
-`doctor-fix-merge-notes-comments` + `note-missing-as-generic-error` (A), ja **`rate-limit-test-flaky`
-(UNLANED, high) — main CI meni PUNAISEKSI viimeisen landauksen (`75670fa`) jälkeen flaky rate-limit-testistä**.
-`ossctl-cut-no-publish` (LANE C) pysyy upstream-blocked. **Release pidettiin** ja on nyt tuplagate:
-tyhjä CHANGELOG **JA** punainen CI. Seuraava rupeama: korjaa rate-limit-flake (head-of-line) → sitten
-0.9.0-cut (3 featurea), tai nosta muuta jonosta.
+Kaari-lyhyesti: iso rupeama, **2 releasea**. Wave 1 (warn-notes + codex-variants) + kiireellinen pidev-dual-home
+landasivat → flaky CI korjattiin → **0.9.0 cut**. Sitten `remove-web-ui` (breaking) landasi → **0.10.0 cut**.
+8 issueä terminaaliksi → pudotettu DAG:sta (`warn-reserved-notes-section`, `codex-prompt-variants`,
+`pidev-dual-home-skills`, `doctor-fix-merge-notes-comments`, `note-missing-as-generic-error`,
+`rate-limit-test-flaky`, `events-jsonl-log`, `remove-web-ui`). Tilalle 5 uutta aktiivia: 3 remove-web-ui-
+siivous-follow-upia (`collapse-configsource-seam`, `flock-write-test-coverage`, `new-and-update-blocked-by`)
++ `dag-lists-closed-issues` (bug) + `epic-tree-view` (un-deferattu). LANE A on ruuhkainen (5) → sarjata;
+`pidev-pi-skill-lifecycle` (LANE B) ajaa rinnalla. `ossctl-cut-no-publish` (LANE C) yhä upstream-blocked.
 
 ---
 
@@ -160,23 +141,16 @@ tyhjä CHANGELOG **JA** punainen CI. Seuraava rupeama: korjaa rate-limit-flake (
 Kaikki alla on labeloitu `deferred` issuectl:ssä (2026-08-04), joten ne eivät ole DAG-lanella
 eivätkä laukaise drift-checkiä. Poista `deferred`-label kun otat takaisin peliin.
 
-**Web/selain-UI: POISTETAAN (portitettu):**
-`@remove-web-ui` (chore, deferred) — poistaa `issuectl serve` + web-server + `/api` + kanban-
-frontend + web-only watcher. **⛔ Gate:** ei ennen kuin web-toiminnot on arvioitu seuraaja-
-ohjelmaa varten (luonnos tekeillä toisessa repossa; hoidetaan käsin). Kaikki entiset kanban/web-
-enhancement-issuet (13 kpl) suljettu `obsolete` tässä rupeamassa (2026-08-10): intensely-teeny-ink,
-genuinely-cloistered-current, truly-somber-payment, needlessly-flimsy-scarecrow, partially-nasty-sack,
-fiercely-juicy-kettle, almost-homely-decision, somewhat-flawless-letter, perfectly-white-linen,
-needlessly-mysterious-volcano, practically-truculent-music, supremely-accurate-body,
-fiercely-colossal-rabbits.
+**Web/selain-UI: POISTETTU (`@remove-web-ui` done, 0.10.0).** Ei enää backlogissa. Kaikki entiset
+kanban/web-enhancement-issuet (13 kpl) oli jo suljettu `obsolete` (2026-08-10).
 
-**Web-issueistä CLI-only re-scopatut (SÄILYVÄT):**
+**CLI-only visualisointi (deferred):**
 `@issue-graph-view` (ent. massively-periodic-surprise) — `issuectl graph` -moottori + lensit
-(deps / worktree-planning / epic-rollup); lens 2 osin jo `issuectl dag`:ssä.
-`@epic-tree-view` (ent. needlessly-slippery-pan) — `issuectl epic tree <slug>`.
+(deps / worktree-planning / epic-rollup); lens 2 osin jo `issuectl dag`:ssä. **EI kevyt** (koko graph-
+moottori + mermaid/dot/svg); arvioitu tässä rupeamassa → pidetään deferred, jos tarve konkretisoituu tee
+vain lens 1 (dep→mermaid). (`@epic-tree-view` un-deferattiin — nyt DAG:ssa, ei enää tässä.)
 
-**Build-only-if (älä rakenna ennen kuin tarve todistuu):**
-`@events-jsonl-log` (ent. somewhat-heady-zephyr; events.jsonl — vain jos git-metriikat ei riitä).
+_(`@events-jsonl-log` suljettu `wontfix` 2026-08-12 — ei tullut tarpeen.)_
 
 **Strateginen:** `@focus-areas` **suljettu `wontfix` (2026-08-10)** — ei nyt tarvetta. Ylätason
 päätös (ADR 0001: `areas: []` skeemakenttä) on tallessa; reopen + kirjoita implementaatio-ADR jos
