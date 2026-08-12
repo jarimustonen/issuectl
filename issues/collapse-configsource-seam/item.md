@@ -2,8 +2,9 @@
 created: 2026-08-12
 updated: 2026-08-12
 type: improvement
-status: in-progress
+status: done
 priority: normal
+closed: 2026-08-12
 ---
 
 # Collapse single-impl ConfigSource seam (post-web-UI cleanup)
