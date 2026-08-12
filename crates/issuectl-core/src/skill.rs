@@ -886,11 +886,13 @@ pub enum PiSkillState {
     /// another tool, or written by a pre-manifest issuectl. Reported for
     /// visibility; never touched by `pi-prune`.
     Unmanaged,
-    /// The `SKILL.md` could not be stat'd for a reason OTHER than absence
-    /// (permission denied, I/O error, ELOOP, a transient failure). Presence and
-    /// content are unknown, so the entry must NOT be treated as `Missing` — that
-    /// would let `pi-prune` drop the manifest row for a skill whose file may
-    /// still exist, losing provenance. Reported for visibility; never pruned.
+    /// An issuectl-owned entry whose `SKILL.md` (or its containing dir) could
+    /// not be stat'd OR read for a reason OTHER than absence (permission denied,
+    /// I/O error, ELOOP, a transient failure). Presence and content are unknown,
+    /// so the entry must NOT be treated as `Missing` — that would let `pi-prune`
+    /// drop the manifest row for a skill whose file may still exist, losing
+    /// provenance. Reported for visibility; never pruned. (An UNOWNED entry with
+    /// the same failure has no manifest row at risk and stays `Unmanaged`.)
     Inaccessible,
 }
 
@@ -1003,8 +1005,9 @@ fn classify_pi_corpus(pi_root: &Path, manifest: &PiManifest) -> Vec<PiSkillStatu
         // (visible, but never read through and never prune-eligible — prune only
         // ever acts on `Orphan`/`Missing`), so classification and prune agree
         // that a symlinked entry is off-limits without following it.
-        if dir
-            .symlink_metadata()
+        let dir_meta = dir.symlink_metadata();
+        if dir_meta
+            .as_ref()
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false)
         {
@@ -1019,27 +1022,48 @@ fn classify_pi_corpus(pi_root: &Path, manifest: &PiManifest) -> Vec<PiSkillStatu
         }
 
         // Presence via `symlink_metadata` (does NOT follow symlinks). Only a
-        // genuine `NotFound` counts as absent; a stat that fails for ANY other
-        // reason (permission, I/O, ELOOP, a transient failure) leaves presence
-        // *unknown* — classifying it as `Missing` would let `pi_prune` drop the
-        // manifest row for a skill whose file may still exist, losing
-        // provenance. Such an entry is surfaced as `Inaccessible` and never
-        // pruned. Content is read only for a plain regular file.
+        // genuine `NotFound` counts as absent; a stat (of the entry dir OR the
+        // `SKILL.md`) or a content read that fails for ANY other reason
+        // (permission, I/O, ELOOP, a transient failure) leaves presence/content
+        // *unknown*. Folding such an entry into `Missing` would let `pi_prune`
+        // drop the manifest row for a skill whose file may still exist, losing
+        // provenance — so an OWNED entry we could not fully inspect is surfaced
+        // as `Inaccessible` and never pruned. The dir stat is folded in too (its
+        // own symlink check above uses `unwrap_or(false)`, which would otherwise
+        // let a non-`NotFound` dir-stat error fall through to a possibly-racing
+        // child stat). Content is read only for a plain regular file.
+        let dir_inaccessible =
+            matches!(&dir_meta, Err(e) if e.kind() != std::io::ErrorKind::NotFound);
         let meta = skill_md.symlink_metadata();
-        let inaccessible = matches!(&meta, Err(e) if e.kind() != std::io::ErrorKind::NotFound);
+        let mut inaccessible =
+            dir_inaccessible || matches!(&meta, Err(e) if e.kind() != std::io::ErrorKind::NotFound);
         let present = meta.is_ok();
         let is_regular = meta.as_ref().map(|m| m.is_file()).unwrap_or(false);
+        // Read raw bytes so a genuine I/O/permission failure (→ `Inaccessible`)
+        // is told apart from non-UTF-8 content (real drift, compared as bytes).
         let on_disk = if is_regular {
-            std::fs::read_to_string(&skill_md).ok()
+            match std::fs::read(&skill_md) {
+                Ok(bytes) => Some(bytes),
+                Err(_) => {
+                    inaccessible = true;
+                    None
+                }
+            }
         } else {
             None
         };
-        let on_disk_version = on_disk.as_deref().and_then(pinned_version);
+        let on_disk_version = on_disk
+            .as_deref()
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .and_then(pinned_version);
 
-        let state = if inaccessible {
-            // Stat failed with something other than `NotFound`: presence and
-            // content are unknown. Never fold this into `Missing` (which prune
-            // clears) — report it as `Inaccessible` and leave the entry alone.
+        let state = if inaccessible && recorded.is_some() {
+            // An OWNED entry whose stat/read failed with something other than
+            // `NotFound`: presence and content are unknown. Never fold this into
+            // `Missing` (which prune clears) — report it as `Inaccessible` and
+            // leave the entry alone. An UNOWNED inaccessible entry has no
+            // manifest row at risk, so it falls through to `Unmanaged` below
+            // (unchanged behavior).
             PiSkillState::Inaccessible
         } else if recorded.is_some() && !present {
             // Owned but the copy is truly gone (a genuine `NotFound`; checked
@@ -1054,7 +1078,7 @@ fn classify_pi_corpus(pi_root: &Path, manifest: &PiManifest) -> Vec<PiSkillStatu
             // now. A non-regular file (symlink/dir) or divergent content is
             // drift; the recorded version splits hand-modification from an
             // other-binary copy.
-            if is_regular && on_disk.as_deref() == Some(render_template(template).as_str()) {
+            if is_regular && on_disk.as_deref() == Some(render_template(template).as_bytes()) {
                 PiSkillState::UpToDate
             } else if recorded.map(|e| e.version.as_str()) == Some(running) {
                 PiSkillState::Modified
@@ -2351,19 +2375,20 @@ mod tests {
     }
 
     /// REGRESSION (`pi-corpus-metadata-error-misclass`): an owned entry whose
-    /// `SKILL.md` cannot be stat'd for a reason OTHER than `NotFound` must NOT
-    /// be misclassified as `Missing` and pruned — its provenance row must
-    /// survive. Here the manifest owns `issue`, but `<pi>/issue` is a regular
-    /// file rather than a directory, so `<pi>/issue/SKILL.md`'s stat fails with
-    /// `ENOTDIR` (a non-`NotFound` I/O error — the same class as a permission or
-    /// transient failure) while presence stays genuinely unknown. The entry must
-    /// classify as `Inaccessible` and `pi_prune(apply=true)` must leave the row
-    /// (and, being outside our control, the on-disk path) untouched.
+    /// `SKILL.md` stat fails for a reason OTHER than `NotFound` must NOT be
+    /// misclassified as `Missing` and pruned — its provenance row must survive.
+    /// Here the manifest owns `issue` but `<pi>/issue` is a regular file rather
+    /// than a directory, so stat of `<pi>/issue/SKILL.md` fails with `ENOTDIR`
+    /// (a non-`NotFound` error). The corpus layout is anomalous — issuectl did
+    /// not create this shape — so presence of a valid entry cannot be confirmed;
+    /// we refuse to prune and surface it for the user to reconcile. `#[cfg(unix)]`
+    /// because the `ENOTDIR` error-kind mapping is POSIX-specific.
+    #[cfg(unix)]
     #[test]
     fn inaccessible_entry_is_not_pruned_as_missing() {
         let pi = tempfile::tempdir().unwrap();
         // `<pi>/issue` is a FILE, so any stat of `<pi>/issue/SKILL.md` errors
-        // with ENOTDIR rather than ENOENT — presence is unknowable.
+        // with ENOTDIR rather than ENOENT — a non-NotFound stat error.
         std::fs::write(pi.path().join("issue"), "not a directory").unwrap();
         let mut manifest = PiManifest::empty();
         manifest.skills.insert(
@@ -2384,17 +2409,64 @@ mod tests {
         );
         assert!(report.has_findings());
 
-        // Prune must keep the row: dropping it would lose provenance for a skill
-        // whose file we could not even inspect.
+        // Prune must be a complete no-op on the entry: neither removed NOR
+        // merely skipped — `Inaccessible` is invisible to prune, so the row
+        // (and provenance) survives untouched.
         let outcome = pi_prune(pi.path(), true).unwrap();
-        assert!(
-            outcome.removed.iter().all(|i| i.name != "issue"),
-            "an inaccessible entry must never be pruned"
-        );
+        assert!(outcome.removed.is_empty(), "nothing may be removed");
+        assert!(outcome.skipped.is_empty(), "nothing may even be skipped");
         assert!(
             load_pi_manifest(pi.path()).skills.contains_key("issue"),
             "the manifest row must survive a metadata-read error"
         );
+    }
+
+    /// Companion regression: an owned entry whose `SKILL.md` stats fine as a
+    /// regular file but whose CONTENT cannot be read (permission denied) must
+    /// also classify `Inaccessible`, not fabricated drift (`Modified`/`Stale`),
+    /// and must survive prune. Exercises the read-failure → `Inaccessible` path.
+    /// `#[cfg(unix)]` + a runtime probe: mode bits are honored only for a
+    /// non-root owner (root — or an unusual filesystem — bypasses permission
+    /// checks, so the read would succeed); the probe skips the assertions in
+    /// that case rather than depending on a uid syscall crate.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_content_classifies_inaccessible_not_drift() {
+        use std::os::unix::fs::PermissionsExt;
+        let pi = tempfile::tempdir().unwrap();
+        let dir = pi.path().join("issue");
+        std::fs::create_dir_all(&dir).unwrap();
+        let skill_md = dir.join("SKILL.md");
+        std::fs::write(&skill_md, "some body").unwrap();
+        // Write-only (0o200): stat succeeds (regular file) but read → EACCES.
+        std::fs::set_permissions(&skill_md, std::fs::Permissions::from_mode(0o200)).unwrap();
+        // If the read still succeeds (running as root, or a filesystem that
+        // ignores mode bits), the scenario cannot be constructed here — skip.
+        if std::fs::read(&skill_md).is_ok() {
+            return;
+        }
+        let mut manifest = PiManifest::empty();
+        manifest.skills.insert(
+            "issue".into(),
+            PiManifestEntry {
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
+        );
+        save_pi_manifest(pi.path(), &manifest).unwrap();
+
+        let report = pi_status(pi.path()).unwrap();
+        assert_eq!(
+            row(&report, "issue").state,
+            PiSkillState::Inaccessible,
+            "an unreadable regular file must classify Inaccessible, not drift"
+        );
+
+        let outcome = pi_prune(pi.path(), true).unwrap();
+        assert!(outcome.removed.is_empty() && outcome.skipped.is_empty());
+        assert!(load_pi_manifest(pi.path()).skills.contains_key("issue"));
+
+        // Restore permissions so the tempdir cleanup can remove the file.
+        std::fs::set_permissions(&skill_md, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     /// A re-install after an orphan prune records provenance truthfully from
