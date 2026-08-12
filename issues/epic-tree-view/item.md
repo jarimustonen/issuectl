@@ -1,13 +1,13 @@
 ---
 created: 2026-05-06
-updated: 2026-08-10
+updated: 2026-08-12
 type: feature
 status: open
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
-labels: [v0.6.0-candidate, visualization, deferred]
+labels: [v0.6.0-candidate, visualization]
 ---
 
 # Epic tree view in CLI
