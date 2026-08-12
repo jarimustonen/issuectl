@@ -2,8 +2,10 @@
 created: 2026-08-12
 updated: 2026-08-12
 type: bug
-status: open
+status: wontfix
 priority: normal
+closed: 2026-08-12
+closed_by: jari
 ---
 
 # issuectl --json create emits a FLAT object, not a {data:…} envelope (inconsistent with ls/update + orchestratectl)
@@ -46,3 +48,9 @@ until a script hits it.
   `--json`'s help and AGENTS.md so callers know `create` is the exception.
 
 Found 2026-08-12 in the 3dbear-monorepo `/stint` flow.
+
+## Resolution
+
+### 2026-08-12T15:09:48Z · @jari
+
+Wontfix: issuectl's --json create contract is INTENTIONALLY a flat object (per AGENTS.md), not orchestratectl's {data:…} envelope. Reporter (parallel session) conflated the two family contracts. No change.

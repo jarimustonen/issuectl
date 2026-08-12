@@ -23,3 +23,9 @@ Request:
 2. `issuectl update <slug> --add-blocked-by <slug>` / `--remove-blocked-by <slug>` (repeatable) — the same single-field convenience the other dag fields (`--lane`) already have.
 
 Both should validate the target resolves to a real issue and reject self/cycle deps (same checks `issuectl dag` relies on). Consider mirroring for `--related` at creation if not already present.
+
+## Comments
+
+### 2026-08-12T15:09:48Z · @jari
+
+RE-SCOPE (2026-08-12): the 'update --add-blocked-by' half is effectively DONE — commit 6e95b07 landed a 'depend add/remove <slug> --blocked-by' subcommand giving the same lightweight dep-set-without-apply-patch convenience. Remaining scope = ONLY 'new --blocked-by' at CREATION (file an issue with its deps in one pass; depend-add requires the issue to already exist). Consider closing if the creation-time sliver isn't worth it.

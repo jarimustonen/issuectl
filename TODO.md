@@ -115,11 +115,10 @@ GLOBAL HEAD-OF-LINE: pidev-pi-skill-lifecycle   ← LANE B, parallel-safe, oli k
 LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections  (RUUHKAINEN — 5 issueä, sarjata)
     collapse-configsource-seam  normal · improvement; server poissa → single-impl ConfigSource-seam voi romahtaa. Touches mutate/ + repo read paths.
     flock-write-test-coverage  normal · task; palauta write-under-flock-testikattavuus (server-testit antoivat sen ennen). Touches mutate/ tests.
-    new-and-update-blocked-by  normal · feature; `new --blocked-by` + `update --add-blocked-by`. Touches main.rs clap + mutate/.
+    new-and-update-blocked-by  normal · feature (RE-SCOPED 2026-08-12 → only `new --blocked-by` at creation; `update --add-blocked-by` half already done via `depend add/remove`, 6e95b07). Touches main.rs clap + mutate/.
     dag-lists-closed-issues  normal · bug; issuectl dag listaa suljetut/terminaali-issuet unscheduledissa → filtteröi ei-terminaaleihin. Touches crate::dag (+ ehkä cmd_dag).
     epic-tree-view  normal · feature; `issuectl epic tree <slug>` — epic+lapset puuna. Uusi main.rs-subcommand + moduuli. Kevyt.
     action-verb-json-echo-mutation  normal · improvement; update/label/close --json-tulos ei echoa mutatoitua kenttää (.priority/.labels/.status = null). Echo resulting value. Touches cmd_* action-verb handlerit main.rs:ssä + result-objektit.
-    issuectl-json-create  normal · bug (⚠️ TRIAGE — todennäk. INVALID); rinnakkaissessio filasi: väittää että `--json create` pitäisi antaa {data:…}-envelope. MUTTA issuectl:n AGENTS.md-kontrakti on TAHALLAAN flat-objekti (ei orchestratectl-enveloppia). Tarkista/triageaa: luultavasti wontfix (raportoija sekoittaa issuectl vs orchestratectl -kontraktit).
 LANE B — skill install + templates/ + skill.rs (skill distribution)
     pidev-pi-skill-lifecycle  normal · feature; pi-korpuksen (~/.pi/agent/skills/) lifecycle: version-drift-näkyvyys, prune (orphanit esim. /triage-bugs), doctor-verify, uninstall-gap. Follow-up dual-homelle. collision: doctor/ (LANE A). orchestratectl-repossa identtinen sisar-issue.
 LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
