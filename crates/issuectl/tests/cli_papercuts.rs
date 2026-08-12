@@ -356,8 +356,11 @@ fn note_flag_order_is_insensitive() {
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
 }
 
-/// Omitting the required `--as` yields a targeted usage error that names
-/// `--as`, not a generic "reorder your args" failure.
+/// Omitting the required `--as` yields clap's *specific* missing-argument
+/// diagnostic — an `error:` line naming `--as` — not the bare generic
+/// "For more information, try '--help'." fallback that a custom
+/// clap-error remap could otherwise leave behind. Regression guard for
+/// @note-missing-as-generic-error.
 #[test]
 fn note_missing_as_names_the_flag() {
     let tmp = fresh_repo();
@@ -366,14 +369,51 @@ fn note_missing_as_names_the_flag() {
         &["new", "Anchor", "--type", "bug", "--slug", "an-chor"],
     );
 
-    let out = run(
-        tmp.path(),
-        &["note", "an-chor", "orphan note", "--decision"],
-    );
+    let out = run(tmp.path(), &["note", "an-chor", "orphan note"]);
     assert_eq!(out.status.code(), Some(2), "{}", dump(&out));
     let stderr = String::from_utf8_lossy(&out.stderr);
+    // Two conditions, both of which the buggy "For more information, try
+    // '--help'." fallback fails: it must be a rendered `error:` (clap's
+    // stable diagnostic prefix — the help/usage fallback carries none),
+    // and it must name the missing `--as` flag. We match the durable
+    // `error:` prefix + flag name rather than clap's full English
+    // sentence, whose exact wording clap can revise across versions (see
+    // the note in `new_rejects_both_positional_and_flag_title`).
     assert!(
-        stderr.contains("--as"),
-        "missing-author error must name --as; got:\n{stderr}"
+        stderr.contains("error:") && stderr.contains("--as"),
+        "missing-author error must be a clap `error:` naming --as, not the generic help fallback; got:\n{stderr}"
+    );
+}
+
+/// The same missing-`--as` failure under `--json` renders the unified
+/// `{"error":{code:"usage-error"}}` envelope (exit 1) on stderr, with
+/// clap's diagnostic preserved inside `message` — the `--json` output
+/// contract must not degrade to the generic help line either.
+#[test]
+fn note_missing_as_json_emits_usage_error_envelope() {
+    let tmp = fresh_repo();
+    run_ok(
+        tmp.path(),
+        &["new", "Anchor", "--type", "bug", "--slug", "an-chor"],
+    );
+
+    let out = run(tmp.path(), &["--json", "note", "an-chor", "orphan note"]);
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("json usage error on stderr");
+    assert_eq!(
+        envelope["error"]["code"],
+        "usage-error",
+        "expected usage-error envelope; got:\n{}",
+        dump(&out)
+    );
+    let message = envelope["error"]["message"]
+        .as_str()
+        .expect("error.message string");
+    // Same durable signal as the human-mode test: the envelope must wrap
+    // clap's `error:` diagnostic naming `--as`, not the generic help line.
+    assert!(
+        message.contains("error:") && message.contains("--as"),
+        "envelope message must preserve clap's error diagnostic naming --as; got:\n{message}"
     );
 }
