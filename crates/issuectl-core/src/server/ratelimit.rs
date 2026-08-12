@@ -13,9 +13,51 @@
 //! itself idle, keeping the map size bounded under churn.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+
+/// Monotonic time source for the limiter. Production reads the OS
+/// clock; tests inject a frozen clock so token refill is deterministic
+/// regardless of how long each request takes under load (the source of
+/// the `put_body_rate_limit_fires_with_retry_after` CI flake).
+pub trait Clock: Send + Sync + std::fmt::Debug {
+    fn now(&self) -> Instant;
+}
+
+/// Real monotonic clock used by `serve()`.
+#[derive(Debug)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+/// Clock frozen at construction: every `now()` returns the same
+/// instant, so `check` observes zero elapsed time on each call and no
+/// tokens refill mid-burst. With capacity `C`, the first `C` calls are
+/// allowed and call `C + 1` rejects — deterministically, no matter how
+/// slow the surrounding request path is.
+#[cfg(test)]
+#[derive(Debug)]
+pub struct FrozenClock(Instant);
+
+#[cfg(test)]
+impl FrozenClock {
+    pub fn new() -> Self {
+        FrozenClock(Instant::now())
+    }
+}
+
+#[cfg(test)]
+impl Clock for FrozenClock {
+    fn now(&self) -> Instant {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Decision {
@@ -39,10 +81,17 @@ pub struct TokenBucketLimiter {
     /// longer than any realistic burst pattern but short enough that
     /// `serve` doesn't accumulate buckets indefinitely.
     idle_ttl: Duration,
+    clock: Arc<dyn Clock>,
 }
 
 impl TokenBucketLimiter {
     pub fn new(capacity: f64, refill_per_sec: f64) -> Self {
+        Self::with_clock(capacity, refill_per_sec, Arc::new(SystemClock))
+    }
+
+    /// Construct with an explicit clock. Production calls `new` (real
+    /// clock); tests pass a `FrozenClock` to make refill deterministic.
+    pub fn with_clock(capacity: f64, refill_per_sec: f64, clock: Arc<dyn Clock>) -> Self {
         assert!(capacity > 0.0);
         assert!(refill_per_sec > 0.0);
         TokenBucketLimiter {
@@ -50,6 +99,7 @@ impl TokenBucketLimiter {
             capacity,
             refill_per_sec,
             idle_ttl: Duration::from_secs(300),
+            clock,
         }
     }
 
@@ -57,7 +107,7 @@ impl TokenBucketLimiter {
     /// Returns `allowed=true` on success and `allowed=false` with a
     /// `Retry-After` hint otherwise.
     pub fn check(&self, key: &str) -> Decision {
-        let now = Instant::now();
+        let now = self.clock.now();
         let mut g = self.inner.lock();
         // Cheap O(n) prune. With at most a few hundred slugs in a real
         // repo this stays well under a millisecond per call.

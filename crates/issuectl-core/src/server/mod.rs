@@ -1777,32 +1777,48 @@ mod tests {
     async fn put_body_rate_limit_fires_with_retry_after() {
         let tmp = tempfile::tempdir().unwrap();
         seed_open_issue(tmp.path(), "body-rate-limit1");
-        let r = make_router(tmp.path());
-        let mut last = None;
-        // Burst capacity is 10 in the default limiter; the 11th in
-        // rapid succession on the same slug should trip 429.
-        for _ in 0..12 {
+        // Freeze the limiter's clock so no tokens refill mid-burst.
+        // Wall-clock refill (4/s) is what made this flaky: under CI
+        // load each request took long enough that the bucket topped up
+        // and the 11th could still be allowed. With a frozen clock the
+        // first 10 (capacity) requests are allowed and the 11th
+        // rejects, deterministically regardless of request timing.
+        let mut state = AppState::for_test(tmp.path().to_path_buf());
+        state.body_limiter = Arc::new(ratelimit::TokenBucketLimiter::with_clock(
+            10.0,
+            4.0,
+            Arc::new(ratelimit::FrozenClock::new()),
+        ));
+        let r = router(state);
+
+        let put = |r: axum::Router| async move {
             let payload = serde_json::json!({ "body": "# rate test\n\nmore content here.\n" });
-            let resp = r
-                .clone()
-                .oneshot(
-                    Request::put("/api/issues/body-rate-limit1/body")
-                        .header("content-type", "application/json")
-                        .body(Body::from(payload.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            last = Some(resp);
-            if last.as_ref().unwrap().status() == StatusCode::TOO_MANY_REQUESTS {
-                break;
-            }
+            r.oneshot(
+                Request::put("/api/issues/body-rate-limit1/body")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        };
+
+        // Capacity is 10: the first 10 requests on the same slug must
+        // all be allowed.
+        for i in 1..=10 {
+            let resp = put(r.clone()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "request {i} within capacity should be allowed"
+            );
         }
-        let resp = last.unwrap();
+        // The 11th exhausts the bucket and must trip 429 + Retry-After.
+        let resp = put(r.clone()).await;
         assert_eq!(
             resp.status(),
             StatusCode::TOO_MANY_REQUESTS,
-            "expected 429 after burst"
+            "11th request should exceed burst capacity"
         );
         assert!(resp.headers().get("retry-after").is_some());
     }
