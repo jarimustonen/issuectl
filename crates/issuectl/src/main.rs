@@ -5179,7 +5179,6 @@ fn print_dag_row(mark: &str, i: &dag::DagIssue) {
 /// the tree structurally — a single node object for one epic, an array of
 /// nodes for the no-slug forest — matching how `show`/`ls` shape theirs.
 fn cmd_epic_tree(json: bool, slug: Option<&str>) -> Result<()> {
-    let root = find_root();
     let issues = load();
 
     let Some(slug) = slug else {
@@ -5203,6 +5202,7 @@ fn cmd_epic_tree(json: bool, slug: Option<&str>) -> Result<()> {
     // Prefix / `@` expansion, mirroring `show`: a unique prefix resolves,
     // an ambiguous one surfaces its error under the unified contract, and
     // a no-match returns the input unchanged so the not-found path fires.
+    let root = find_root();
     let resolved = match repo::resolve_slug_input(&root, slug) {
         Ok(s) => s,
         Err(e) => fail(

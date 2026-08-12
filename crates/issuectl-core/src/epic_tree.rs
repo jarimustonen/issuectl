@@ -15,12 +15,26 @@
 //! surface). The nested `children` array is the one place the flat-object
 //! `--json` contract gives way to structure: a tree cannot be flat, and
 //! the issue's `--json` variant is specified to emit the tree structurally.
+//!
+//! Both entry points index the parent→children relation once (`children_by_parent`)
+//! and traverse the index, so building a tree over `N` issues is `O(N)`, not
+//! the `O(N²)` a per-node linear rescan would cost. Recursion depth is capped
+//! at [`MAX_DEPTH`]: issue files are user-editable, so a pathologically deep
+//! `epic:` chain must not be able to stack-overflow the CLI — beyond the cap a
+//! node is emitted as a leaf rather than expanded further.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
 use crate::models::Issue;
+
+/// Maximum epic-nesting depth expanded before a node is left as a leaf.
+/// Real epic hierarchies are a handful of levels deep; this only ever trips
+/// on malformed/adversarial data, where it trades a truncated view for a
+/// guaranteed-terminating, stack-safe walk. Also bounds the depth of the
+/// tree the human renderer and `descendant_count` later recurse over.
+pub const MAX_DEPTH: usize = 256;
 
 /// One node in the epic tree: an issue plus its (recursively expanded)
 /// child issues. Field names reuse the shared vocabulary (`slug`,
@@ -52,67 +66,138 @@ impl TreeNode {
     }
 }
 
+/// Index the parent→children relation in a single `O(N)` pass: map each
+/// `epic:` slug to the issues that back-reference it. A self-reference
+/// (`epic: <own slug>`) is dropped so an issue is never its own child.
+/// Each child vector is sorted by slug so output is deterministic
+/// regardless of input order (`load()` sorts already, but the module does
+/// not depend on that invariant).
+fn children_by_parent(issues: &[Issue]) -> HashMap<&str, Vec<&Issue>> {
+    let mut map: HashMap<&str, Vec<&Issue>> = HashMap::new();
+    for issue in issues {
+        if let Some(parent) = issue.epic.as_deref() {
+            if parent != issue.slug {
+                map.entry(parent).or_default().push(issue);
+            }
+        }
+    }
+    for kids in map.values_mut() {
+        kids.sort_by(|a, b| a.slug.cmp(&b.slug));
+    }
+    map
+}
+
 /// Build the tree rooted at `root_slug`. Returns `None` when no issue
 /// carries that slug (the caller maps that to the shared `not-found`
 /// error). The root need not be `type: epic` — the children relation is
-/// what matters — but in practice it is.
+/// what matters, so `epic tree <task>` deliberately renders the subtree
+/// rooted at any explicitly-named issue — but in practice it is an epic.
 pub fn build(issues: &[Issue], root_slug: &str) -> Option<TreeNode> {
     let root = issues.iter().find(|i| i.slug == root_slug)?;
+    let children = children_by_parent(issues);
     let mut visited: HashSet<&str> = HashSet::new();
-    Some(build_node(issues, root, &mut visited))
+    Some(build_node(root, &children, &mut visited, 0))
 }
 
-/// Build a forest of every top-level epic: each `type: epic` issue whose
-/// own `epic:` back-reference is absent or dangling (so a nested epic is
-/// not also surfaced as its own root — it appears under its parent).
-/// Roots are sorted by slug. Used by `epic tree` with no slug argument.
+/// Build a forest of every top-level epic. A `type: epic` issue is a forest
+/// root when it is not nested under another *present epic* — i.e. its
+/// `epic:` is absent, points to itself, dangles, or points to a non-epic
+/// issue (a non-epic parent has no tree to hang under, so the epic would
+/// otherwise vanish). Epics tangled in a pure cycle (`a↔b`, no external
+/// root) have no such root, so a final sweep adds the lowest-slug member of
+/// each still-unreached epic component as a representative root rather than
+/// silently dropping the whole component. Roots come out sorted by slug.
 pub fn build_forest(issues: &[Issue]) -> Vec<TreeNode> {
-    let mut roots: Vec<&Issue> = issues
+    let children = children_by_parent(issues);
+    let epic_slugs: HashSet<&str> = issues
         .iter()
-        .filter(|i| i.issue_type == "epic" && !has_present_epic_parent(issues, i))
+        .filter(|i| i.issue_type == "epic")
+        .map(|i| i.slug.as_str())
         .collect();
-    roots.sort_by(|a, b| a.slug.cmp(&b.slug));
-    roots
-        .into_iter()
-        .map(|root| {
-            let mut visited: HashSet<&str> = HashSet::new();
-            build_node(issues, root, &mut visited)
-        })
-        .collect()
+
+    // `issues` is slug-sorted, so both the root pass and the cycle sweep
+    // visit epics in slug order — the forest is deterministic. `reached`
+    // owns its slugs (built nodes own their strings), keyed for `&str`
+    // lookups via `Borrow`.
+    let mut forest = Vec::new();
+    let mut reached: HashSet<String> = HashSet::new();
+
+    // Pass 1: proper roots (epics not nested under another present epic).
+    for issue in issues.iter().filter(|i| is_forest_root(i, &epic_slugs)) {
+        let mut visited: HashSet<&str> = HashSet::new();
+        let node = build_node(issue, &children, &mut visited, 0);
+        mark_reached(&node, &mut reached);
+        forest.push(node);
+    }
+
+    // Pass 2: sweep epics left unreached by any root — these form pure
+    // cycles. Surface each component once via its lowest-slug member. The
+    // `reached` check is inside the loop body (not an iterator filter) so
+    // it can be updated as each swept component is marked.
+    for issue in issues.iter() {
+        if issue.issue_type != "epic" || reached.contains(issue.slug.as_str()) {
+            continue;
+        }
+        let mut visited: HashSet<&str> = HashSet::new();
+        let node = build_node(issue, &children, &mut visited, 0);
+        mark_reached(&node, &mut reached);
+        forest.push(node);
+    }
+
+    // Deterministic order independent of input order and of which pass
+    // produced each root.
+    forest.sort_by(|a, b| a.slug.cmp(&b.slug));
+    forest
 }
 
-/// True when `issue.epic` points at another issue that is present in the
-/// set. A dangling or absent back-reference makes the issue a forest root.
-fn has_present_epic_parent(issues: &[Issue], issue: &Issue) -> bool {
+/// Whether an epic is a top-level forest root: only epics qualify, and one
+/// is a root unless its `epic:` names another *present epic* (that is not
+/// itself). Absent / self / dangling / non-epic parents all make it a root.
+fn is_forest_root(issue: &Issue, epic_slugs: &HashSet<&str>) -> bool {
+    if issue.issue_type != "epic" {
+        return false;
+    }
     match issue.epic.as_deref() {
-        Some(parent) => issues.iter().any(|i| i.slug == parent),
-        None => false,
+        None => true,
+        Some(parent) if parent == issue.slug => true,
+        Some(parent) => !epic_slugs.contains(parent),
     }
 }
 
-/// Recursively assemble a node and its children. `visited` guards against
-/// an `epic:` cycle (`a.epic = b`, `b.epic = a`) so the walk terminates —
-/// a slug already on the current path contributes a leaf, never a second
-/// expansion.
+/// Record every slug in an already-built subtree as reached, so the forest
+/// cycle-sweep does not re-root an epic that already appears under a root.
+fn mark_reached(node: &TreeNode, reached: &mut HashSet<String>) {
+    reached.insert(node.slug.clone());
+    for child in &node.children {
+        mark_reached(child, reached);
+    }
+}
+
+/// Recursively assemble a node and its children from the prebuilt `children`
+/// index. `visited` is a path set: a slug already on the current path yields
+/// a leaf (breaking an `epic:` cycle), and `depth` caps expansion at
+/// [`MAX_DEPTH`] so a pathologically deep chain cannot overflow the stack.
 fn build_node<'a>(
-    issues: &'a [Issue],
     issue: &'a Issue,
+    children: &HashMap<&'a str, Vec<&'a Issue>>,
     visited: &mut HashSet<&'a str>,
+    depth: usize,
 ) -> TreeNode {
     let mut node = TreeNode::leaf(issue);
+    if depth >= MAX_DEPTH {
+        // Depth cap reached — stop expanding, leave this node a leaf.
+        return node;
+    }
     if !visited.insert(issue.slug.as_str()) {
         // Already on the path above us — stop here to break the cycle.
         return node;
     }
-    let mut children: Vec<&Issue> = issues
-        .iter()
-        .filter(|c| c.epic.as_deref() == Some(issue.slug.as_str()) && c.slug != issue.slug)
-        .collect();
-    children.sort_by(|a, b| a.slug.cmp(&b.slug));
-    node.children = children
-        .into_iter()
-        .map(|c| build_node(issues, c, visited))
-        .collect();
+    if let Some(kids) = children.get(issue.slug.as_str()) {
+        node.children = kids
+            .iter()
+            .map(|c| build_node(c, children, visited, depth + 1))
+            .collect();
+    }
     visited.remove(issue.slug.as_str());
     node
 }
@@ -252,6 +337,68 @@ mod tests {
         let forest = build_forest(&issues);
         assert_eq!(forest.len(), 1);
         assert_eq!(forest[0].slug, "orphan-epic");
+    }
+
+    #[test]
+    fn forest_surfaces_self_parented_epic() {
+        // A self-parent (`a.epic = a`) must not make the epic vanish from
+        // the forest — it is treated as a root.
+        let issues = vec![issue("self-epic", "epic", Some("self-epic"))];
+        let forest = build_forest(&issues);
+        assert_eq!(forest.len(), 1);
+        assert_eq!(forest[0].slug, "self-epic");
+        // Self-reference never becomes a child of itself.
+        assert!(forest[0].children.is_empty());
+    }
+
+    #[test]
+    fn forest_surfaces_epic_under_non_epic_parent() {
+        // An epic whose `epic:` points at a *task* has no epic to hang
+        // under, so it must appear as its own forest root rather than
+        // disappearing (the task is never a forest root).
+        let issues = vec![
+            issue("host-task", "task", None),
+            issue("stranded-epic", "epic", Some("host-task")),
+        ];
+        let forest = build_forest(&issues);
+        let roots: Vec<_> = forest.iter().map(|n| n.slug.as_str()).collect();
+        assert_eq!(roots, vec!["stranded-epic"]);
+    }
+
+    #[test]
+    fn forest_surfaces_pure_epic_cycle_via_lowest_slug() {
+        // a↔b with no external root: the whole component must not vanish.
+        // The sweep surfaces it once, via its lowest-slug member.
+        let issues = vec![
+            issue("cycle-a", "epic", Some("cycle-b")),
+            issue("cycle-b", "epic", Some("cycle-a")),
+        ];
+        let forest = build_forest(&issues);
+        // Exactly one representative root, the lowest slug.
+        assert_eq!(forest.len(), 1);
+        assert_eq!(forest[0].slug, "cycle-a");
+        // And it terminates (cycle broken as a leaf), not looping forever.
+        assert_eq!(forest[0].children[0].slug, "cycle-b");
+    }
+
+    #[test]
+    fn build_caps_recursion_depth() {
+        // A linear `epic:` chain longer than MAX_DEPTH must not overflow the
+        // stack: expansion stops at the cap, leaving a bounded tree. Chain:
+        // node-0 is the root, node-{k} has epic node-{k-1}.
+        let len = MAX_DEPTH + 5;
+        let mut issues: Vec<Issue> = Vec::with_capacity(len);
+        issues.push(issue("node-00000", "epic", None));
+        for k in 1..len {
+            // Zero-pad so `load()`-style slug sorting matches numeric order.
+            let slug = format!("node-{k:05}");
+            let parent = format!("node-{:05}", k - 1);
+            issues.push(issue(&slug, "epic", Some(&parent)));
+        }
+        let tree = build(&issues, "node-00000").expect("root present");
+        // Deepest expanded node sits at depth == MAX_DEPTH; beyond that the
+        // chain is left unexpanded, so exactly MAX_DEPTH descendants appear.
+        assert_eq!(descendant_count(&tree), MAX_DEPTH);
     }
 
     #[test]
