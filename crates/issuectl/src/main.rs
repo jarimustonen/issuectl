@@ -5621,8 +5621,15 @@ fn cmd_skill_pi_status(json: bool) -> Result<()> {
         };
         let detail = match s.state {
             skill::PiSkillState::Stale => {
+                // Direction-neutral: recorded and running versions differ, but
+                // we don't order them (a downgrade is possible), so we don't
+                // claim the copy is "older" — just that `--force` rewrites it to
+                // the running version.
                 let from = s.recorded_version.as_deref().unwrap_or("unknown");
-                format!(" (written by {from}; run `issuectl skill install --force` to refresh)")
+                format!(
+                    " (recorded {from} ≠ running {}; `issuectl skill install --force` rewrites it to {})",
+                    report.version, report.version
+                )
             }
             skill::PiSkillState::Modified => {
                 " (hand-edited since install; run `issuectl skill install --force` to restore)"
@@ -5661,39 +5668,53 @@ fn cmd_skill_pi_prune(json: bool, force: bool) -> Result<()> {
         return Ok(());
     }
 
-    if outcome.removed.is_empty() {
+    let kind_label = |k: skill::PiPruneKind| match k {
+        skill::PiPruneKind::Orphan => "orphan",
+        skill::PiPruneKind::Missing => "missing record",
+    };
+    let plural = |n: usize| if n == 1 { "y" } else { "ies" };
+
+    if outcome.removed.is_empty() && outcome.skipped.is_empty() {
         println!("Nothing to prune — the pi.dev skill corpus has no orphaned issuectl entries.");
         return Ok(());
     }
-    if outcome.applied {
-        println!(
-            "Removed {} entr{} from the pi.dev skill corpus:",
-            outcome.removed.len(),
-            if outcome.removed.len() == 1 {
-                "y"
-            } else {
-                "ies"
-            }
-        );
-    } else {
-        println!(
-            "Dry run — would remove {} entr{} (pass --force to apply):",
-            outcome.removed.len(),
-            if outcome.removed.len() == 1 {
-                "y"
-            } else {
-                "ies"
-            }
-        );
+
+    if !outcome.removed.is_empty() {
+        // `force` (the input) distinguishes an applied run from a dry run —
+        // `outcome.applied` is also false for a no-op, so it's not the right
+        // signal for the header.
+        if force {
+            println!(
+                "Removed {} entr{} from the pi.dev skill corpus:",
+                outcome.removed.len(),
+                plural(outcome.removed.len())
+            );
+        } else {
+            println!(
+                "Dry run — would remove {} entr{} (pass --force to apply):",
+                outcome.removed.len(),
+                plural(outcome.removed.len())
+            );
+        }
+        for item in &outcome.removed {
+            println!("  - {} ({})", item.name, kind_label(item.kind));
+        }
     }
-    for item in &outcome.removed {
-        let kind = match item.kind {
-            skill::PiPruneKind::Orphan => "orphan",
-            skill::PiPruneKind::Missing => "missing record",
-        };
-        println!("  - {} ({kind})", item.name);
+
+    if !outcome.skipped.is_empty() {
+        println!();
+        println!(
+            "Left {} orphan entr{} in place for safety (symlink, extra files, or unremovable):",
+            outcome.skipped.len(),
+            plural(outcome.skipped.len())
+        );
+        for item in &outcome.skipped {
+            println!("  - {} ({})", item.name, item.path);
+        }
+        println!("  Inspect and remove these by hand if you want them gone.");
     }
-    if !outcome.applied {
+
+    if !force && !outcome.removed.is_empty() {
         println!();
         println!("  Re-run with `issuectl skill pi-prune --force` to apply.");
     }

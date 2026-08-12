@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -247,20 +247,29 @@ pub fn install_skill_summary(
     // stderr and skipped, and the repo-local install still reports success.
     if let Some(pi_root) = pi_root {
         if agents.contains(&Agent::Claude) {
-            let mut mirror = |name: &str, template: &str| match install_pi_mirror(
-                pi_root, name, template, force,
-            ) {
-                Ok(r) => results.push(r),
-                Err(e) => eprintln!("  ! pi.dev skill mirror skipped for {name}: {e:#}"),
-            };
-            if let Some(name) = Agent::Claude.skill_name() {
-                mirror(name, Agent::Claude.template());
-            }
-            for skill in IntakeSkill::ALL {
-                mirror(skill.slug(), skill.template(Agent::Claude));
+            // Iterate the single authoritative managed-skill set so the mirror
+            // write and the lifecycle layer can never disagree about which
+            // skills issuectl ships (see `managed_pi_skills`). Track the names
+            // this run actually *wrote* (created or overwrote) so provenance is
+            // recorded only for real writes — never inferred from a file that
+            // merely happens to exist on disk.
+            let mut written: BTreeSet<String> = BTreeSet::new();
+            for (name, template) in managed_pi_skills() {
+                match install_pi_mirror(pi_root, name, template, force) {
+                    Ok(r) => {
+                        if matches!(
+                            r.outcome,
+                            InstallOutcome::Created | InstallOutcome::Overwritten
+                        ) {
+                            written.insert(name.to_string());
+                        }
+                        results.push(r);
+                    }
+                    Err(e) => eprintln!("  ! pi.dev skill mirror skipped for {name}: {e:#}"),
+                }
             }
 
-            // Record out-of-band provenance for the mirrored copies. The
+            // Record out-of-band provenance for the copies THIS run wrote. The
             // manifest (`<pi_root>/.issuectl-manifest.json`) is what lets the
             // lifecycle layer (`skill pi-status` / `skill pi-prune`)
             // distinguish issuectl-owned entries from hand-authored ones
@@ -268,7 +277,7 @@ pub fn install_skill_summary(
             // mirror writes, a manifest failure is warned and skipped so it
             // never fails an install that has already put the repo-local
             // targets on disk.
-            if let Err(e) = record_pi_provenance(pi_root) {
+            if let Err(e) = record_pi_provenance(pi_root, &written) {
                 eprintln!("  ! pi.dev skill manifest update skipped: {e:#}");
             }
         }
@@ -543,7 +552,9 @@ pub fn managed_pi_skills() -> Vec<(&'static str, &'static str)> {
 /// Extract the issuectl version a skill body was rendered for, from the
 /// `` This skill was installed for `issuectl X` `` marker every template
 /// carries. Returns `None` when the marker is absent (e.g. a hand-authored
-/// skill that never went through [`render_template`]).
+/// skill that never went through [`render_template`]). Display/diagnostic only
+/// — provenance/ownership is tracked in the manifest at write time, never
+/// inferred from this mutable content.
 pub fn pinned_version(body: &str) -> Option<String> {
     let marker = "This skill was installed for `issuectl ";
     let start = body.find(marker)? + marker.len();
@@ -552,19 +563,82 @@ pub fn pinned_version(body: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-/// Load the provenance manifest from `<pi_root>/.issuectl-manifest.json`,
-/// returning an empty manifest when it is absent, unreadable, unparseable, or
-/// stamped with a different tool. A corrupt manifest is not fatal — the corpus
-/// contents on disk are the ground truth the manifest merely annotates.
+/// Whether `name` is a safe single-component skill directory name — the only
+/// shape a manifest key or corpus dir may take. Rejects anything that could
+/// escape `pi_root` when joined: path separators, `.`/`..`, absolute paths,
+/// and dotfiles. This is the containment gate that keeps a corrupt or tampered
+/// manifest from steering a delete outside the corpus.
+fn is_valid_skill_name(name: &str) -> bool {
+    if name.is_empty() || name.starts_with('.') {
+        return false;
+    }
+    let mut components = Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(c)), None) if !c.is_empty()
+    )
+}
+
+/// Strictly load the provenance manifest:
+/// - `Ok(None)` when the file is absent (`NotFound`) — the normal "no manifest
+///   yet" case;
+/// - `Ok(Some(manifest))` when it parses, is stamped with our tool, and carries
+///   a supported schema version — with any structurally-unsafe skill keys
+///   dropped ([`is_valid_skill_name`]);
+/// - `Err(..)` when the file is present but unreadable, corrupt (bad JSON),
+///   owned by another tool, or an unsupported schema version.
+///
+/// The write/delete paths use this so they refuse to act on a manifest they
+/// can't trust — silently treating a corrupt manifest as empty would drop every
+/// provenance row and, for prune, act on a misread view of what issuectl owns.
+fn try_load_pi_manifest(pi_root: &Path) -> Result<Option<PiManifest>> {
+    let path = pi_root.join(PI_MANIFEST_FILE);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let mut manifest: PiManifest = serde_json::from_str(&raw)
+        .with_context(|| format!("{} is corrupt (invalid JSON)", path.display()))?;
+    if manifest.tool != PI_MANIFEST_TOOL {
+        anyhow::bail!(
+            "{} is owned by another tool ({:?}), not issuectl",
+            path.display(),
+            manifest.tool
+        );
+    }
+    if manifest.manifest_version != PI_MANIFEST_VERSION {
+        anyhow::bail!(
+            "{} has unsupported manifest version {} (this issuectl understands {})",
+            path.display(),
+            manifest.manifest_version,
+            PI_MANIFEST_VERSION
+        );
+    }
+    // Never trust an unsafe key into a filesystem join.
+    manifest.skills.retain(|name, _| is_valid_skill_name(name));
+    Ok(Some(manifest))
+}
+
+/// Lenient load for read-only paths ([`pi_status`]): any failure — absent,
+/// unreadable, corrupt, foreign, or unsupported — collapses to an empty
+/// manifest so a status readout never crashes. The write/delete paths use
+/// [`try_load_pi_manifest`] instead, which refuses to act on an untrusted file.
 fn load_pi_manifest(pi_root: &Path) -> PiManifest {
-    std::fs::read_to_string(pi_root.join(PI_MANIFEST_FILE))
+    try_load_pi_manifest(pi_root)
         .ok()
-        .and_then(|s| serde_json::from_str::<PiManifest>(&s).ok())
-        .filter(|m| m.tool == PI_MANIFEST_TOOL)
+        .flatten()
         .unwrap_or_else(PiManifest::empty)
 }
 
-/// Persist the provenance manifest, pretty-printed with a trailing newline.
+/// Persist the provenance manifest atomically: serialize, write to a
+/// same-directory temp file, then rename over the destination. The rename is
+/// atomic on POSIX, so a concurrent reader or an interrupted write never sees a
+/// torn/empty manifest (which the lenient loader would misread as "no owned
+/// entries"). A unique temp name per process avoids colliding with a racing
+/// writer's temp file. Not a substitute for a cross-process lock — concurrent
+/// read-modify-write can still lose a row (documented follow-up) — but it does
+/// guarantee the file on disk is always a complete manifest.
 fn save_pi_manifest(pi_root: &Path, manifest: &PiManifest) -> Result<()> {
     let path = pi_root.join(PI_MANIFEST_FILE);
     if let Some(parent) = path.parent() {
@@ -572,29 +646,56 @@ fn save_pi_manifest(pi_root: &Path, manifest: &PiManifest) -> Result<()> {
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
     let body = serde_json::to_string_pretty(manifest).context("serialize pi manifest")?;
-    std::fs::write(&path, format!("{body}\n"))
-        .with_context(|| format!("cannot write {}", path.display()))?;
+    let tmp = pi_root.join(format!("{}.{}.tmp", PI_MANIFEST_FILE, std::process::id()));
+    std::fs::write(&tmp, format!("{body}\n"))
+        .with_context(|| format!("cannot write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| {
+        // Best-effort cleanup of the temp file on a failed rename.
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot atomically replace {}", path.display())
+    })?;
     Ok(())
 }
 
-/// Refresh the provenance manifest so every managed skill currently on disk in
-/// the pi corpus has an entry recording the version that wrote it. The version
-/// is read straight from each on-disk `SKILL.md` (falling back to the running
-/// binary's version if the marker is somehow missing), so the manifest stays
-/// truthful even for a copy an *older* binary wrote and a non-force install
-/// left in place. Managed skills not on disk are left out; entries for skills
-/// no longer managed (orphans) are preserved — only [`pi_prune`] removes those.
-fn record_pi_provenance(pi_root: &Path) -> Result<()> {
-    let mut manifest = load_pi_manifest(pi_root);
+/// Record provenance for the skills THIS install run actually wrote (the
+/// `written` set, populated only for `Created`/`Overwritten` mirror outcomes),
+/// stamping each with the running binary's version — the version we just wrote,
+/// known for certain rather than parsed back out of mutable file content.
+///
+/// Crucially, it never *adopts* a file it did not write: a managed-name copy
+/// that already existed and was left in place (a non-force install, or a
+/// hand-authored file at a managed path) is claimed **only if it already had a
+/// manifest row**. A previously-unowned file stays unowned — so `pi-prune` can
+/// never later delete a hand-authored skill it silently appropriated. Existing
+/// rows for skills this run did not rewrite are preserved untouched; orphan rows
+/// are preserved too (only [`pi_prune`] removes those).
+///
+/// Uses the strict loader so it refuses to clobber a present-but-corrupt
+/// manifest with a freshly-rebuilt one.
+fn record_pi_provenance(pi_root: &Path, written: &BTreeSet<String>) -> Result<()> {
+    // Nothing to record and no risk of clobber if we wrote nothing this run and
+    // there is no manifest yet — but still load to preserve/validate an
+    // existing one.
+    let mut manifest = try_load_pi_manifest(pi_root)?.unwrap_or_else(PiManifest::empty);
+    let running = env!("CARGO_PKG_VERSION");
     for (name, _template) in managed_pi_skills() {
-        let Ok(body) = std::fs::read_to_string(pi_root.join(name).join("SKILL.md")) else {
-            continue; // not mirrored (this skill's write was skipped)
-        };
-        let version =
-            pinned_version(&body).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-        manifest
-            .skills
-            .insert(name.to_string(), PiManifestEntry { version });
+        if written.contains(name) {
+            // We (re)wrote this copy just now → stamp the running version.
+            manifest.skills.insert(
+                name.to_string(),
+                PiManifestEntry {
+                    version: running.to_string(),
+                },
+            );
+        }
+        // Skipped-but-already-owned rows are left as-is; skipped-and-unowned
+        // files are deliberately NOT adopted.
+    }
+    // Only touch disk if we have something to persist (a fresh install always
+    // writes at least the scaffold copies; a pure no-op non-force re-run over
+    // an unowned corpus writes nothing).
+    if written.is_empty() && !pi_root.join(PI_MANIFEST_FILE).exists() {
+        return Ok(());
     }
     save_pi_manifest(pi_root, &manifest)
 }
@@ -681,8 +782,10 @@ impl PiStatusReport {
 }
 
 /// Directory names of the current skill entries physically present under
-/// `pi_root` (each `<name>/` holding a mirrored skill). The manifest file and
-/// any stray non-directory entries are ignored.
+/// `pi_root` (each `<name>/` holding a mirrored skill). The manifest file, any
+/// stray non-directory entries, and any name that is not a safe single
+/// component ([`is_valid_skill_name`], which also excludes dotfiles) are
+/// ignored.
 fn on_disk_skill_dirs(pi_root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(pi_root) else {
         return Vec::new();
@@ -690,23 +793,26 @@ fn on_disk_skill_dirs(pi_root: &Path) -> Vec<String> {
     let mut names = Vec::new();
     for entry in entries.flatten() {
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            names.push(entry.file_name().to_string_lossy().into_owned());
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if is_valid_skill_name(&name) {
+                names.push(name);
+            }
         }
     }
     names
 }
 
-/// Inspect the pi skill corpus rooted at `pi_root` and classify every entry —
-/// both those the manifest records as issuectl-owned and any skill dirs
-/// physically present — into a [`PiSkillState`]. Read-only: never writes.
-pub fn pi_status(pi_root: &Path) -> Result<PiStatusReport> {
-    let manifest = load_pi_manifest(pi_root);
+/// Classify every entry in the corpus — manifest rows plus on-disk skill dirs —
+/// against `manifest`, the caller-supplied snapshot. Splitting this out (rather
+/// than re-reading the manifest inside [`pi_status`]) lets [`pi_prune`] act on
+/// exactly the same snapshot it will mutate, so a read-then-classify race can't
+/// open between the two. Read-only.
+fn classify_pi_corpus(pi_root: &Path, manifest: &PiManifest) -> Vec<PiSkillStatus> {
     let managed: BTreeMap<&str, &str> = managed_pi_skills().into_iter().collect();
     let running = env!("CARGO_PKG_VERSION");
 
-    // Union of every name we might have something to say about: manifest rows
-    // plus skill dirs on disk. A BTreeSet keeps the report stably name-sorted.
-    let mut names: std::collections::BTreeSet<String> = manifest.skills.keys().cloned().collect();
+    // Union of every name we might have something to say about, name-sorted.
+    let mut names: BTreeSet<String> = manifest.skills.keys().cloned().collect();
     names.extend(on_disk_skill_dirs(pi_root));
 
     let mut skills = Vec::with_capacity(names.len());
@@ -714,27 +820,35 @@ pub fn pi_status(pi_root: &Path) -> Result<PiStatusReport> {
         let recorded = manifest.skills.get(&name);
         let managed_template = managed.get(name.as_str()).copied();
         let skill_md = pi_root.join(&name).join("SKILL.md");
-        let on_disk = std::fs::read_to_string(&skill_md).ok();
+
+        // Presence via `symlink_metadata` (does NOT follow symlinks): only a
+        // genuine `NotFound` counts as absent, so a present-but-unreadable file
+        // (permission, a symlink, invalid UTF-8) is never misreported as a
+        // `Missing` copy that prune would then clear. Content is read only for a
+        // plain regular file.
+        let meta = skill_md.symlink_metadata();
+        let present = meta.is_ok();
+        let is_regular = meta.map(|m| m.is_file()).unwrap_or(false);
+        let on_disk = if is_regular {
+            std::fs::read_to_string(&skill_md).ok()
+        } else {
+            None
+        };
         let on_disk_version = on_disk.as_deref().and_then(pinned_version);
 
-        let state = if recorded.is_some() && managed_template.is_none() {
-            // issuectl-owned but no longer a shipped skill → orphan (whether or
-            // not the file still exists; prune clears both dir and row).
+        let state = if recorded.is_some() && !present {
+            // Owned but the copy is truly gone (checked before orphan, so a
+            // retired skill whose file already vanished reads as Missing).
+            PiSkillState::Missing
+        } else if recorded.is_some() && managed_template.is_none() {
+            // issuectl-owned but no longer a shipped skill → orphan.
             PiSkillState::Orphan
-        } else if on_disk.is_none() {
-            // No file. A manifest row with no file is a missing copy; a name
-            // that only came from an on-disk scan can't reach here.
-            if recorded.is_some() {
-                PiSkillState::Missing
-            } else {
-                continue;
-            }
-        } else if let (Some(template), true) = (managed_template, recorded.is_some()) {
-            // Managed + issuectl-owned + on disk: compare against what we'd
-            // write now to tell up-to-date from drifted, and use the recorded
-            // version to split hand-modification from a stale older-binary copy.
-            let body = on_disk.as_deref().unwrap_or_default();
-            if body == render_template(template) {
+        } else if let Some(template) = managed_template.filter(|_| recorded.is_some()) {
+            // Managed + issuectl-owned + present: compare against what we'd write
+            // now. A non-regular file (symlink/dir) or divergent content is
+            // drift; the recorded version splits hand-modification from an
+            // other-binary copy.
+            if is_regular && on_disk.as_deref() == Some(render_template(template).as_str()) {
                 PiSkillState::UpToDate
             } else if recorded.map(|e| e.version.as_str()) == Some(running) {
                 PiSkillState::Modified
@@ -742,8 +856,9 @@ pub fn pi_status(pi_root: &Path) -> Result<PiStatusReport> {
                 PiSkillState::Stale
             }
         } else {
-            // On disk but not recorded as issuectl-owned (hand-authored, another
-            // tool, or a pre-manifest install). Never our business to prune.
+            // On disk (or a stray dir) but not recorded as issuectl-owned:
+            // hand-authored, another tool, or a pre-manifest install. Never our
+            // business to prune.
             PiSkillState::Unmanaged
         };
 
@@ -755,11 +870,19 @@ pub fn pi_status(pi_root: &Path) -> Result<PiStatusReport> {
             path: skill_md.to_string_lossy().into_owned(),
         });
     }
+    skills
+}
 
+/// Inspect the pi skill corpus rooted at `pi_root` and classify every entry
+/// into a [`PiSkillState`]. Read-only: never writes. Uses the lenient manifest
+/// loader so a status readout never fails on a corrupt manifest (it just shows
+/// entries as `unmanaged`); the mutating [`pi_prune`] is stricter.
+pub fn pi_status(pi_root: &Path) -> Result<PiStatusReport> {
+    let manifest = load_pi_manifest(pi_root);
     Ok(PiStatusReport {
-        version: running.to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
         root: pi_root.to_string_lossy().into_owned(),
-        skills,
+        skills: classify_pi_corpus(pi_root, &manifest),
     })
 }
 
@@ -788,49 +911,107 @@ pub struct PiPruneItem {
 /// The outcome of a [`pi_prune`] pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PiPruneOutcome {
-    /// `false` for a dry run (nothing was written), `true` when changes landed.
+    /// `false` for a dry run OR an apply that changed nothing; `true` only when
+    /// changes actually landed on disk.
     pub applied: bool,
     /// Entries removed, or — in dry-run — that would be removed.
     pub removed: Vec<PiPruneItem>,
+    /// Orphan entries deliberately left alone for safety: a symlinked or
+    /// non-regular `SKILL.md`, a dir that also holds sibling files a user added,
+    /// or an entry whose file could not be removed. The user must resolve these
+    /// by hand — prune never force-deletes them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<PiPruneItem>,
+}
+
+/// Whether an orphan entry is safe to auto-remove. It is safe only when the
+/// `SKILL.md` (if it exists) is a plain **regular file** — never a symlink
+/// (whose target could be anywhere) or a directory — **and** the entry dir
+/// contains nothing but that `SKILL.md`. Claude's skill format permits bundled
+/// reference files, so a dir with siblings is left for the user rather than
+/// having its `SKILL.md` silently torn out.
+fn orphan_is_safely_removable(dir: &Path, skill_md: &Path) -> bool {
+    match skill_md.symlink_metadata() {
+        Ok(m) if !m.is_file() => return false, // symlink or dir at SKILL.md → refuse
+        Ok(_) => {}
+        Err(_) => {} // no SKILL.md — the (stray) dir/row is still safe to drop
+    }
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .flatten()
+            .all(|e| e.file_name().to_str() == Some("SKILL.md")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true, // no dir at all
+        Err(_) => false, // can't inspect the dir → refuse to delete blindly
+    }
 }
 
 /// Prune the pi corpus: remove orphaned issuectl-owned entries (skills the
 /// running binary no longer ships) and clear manifest rows whose copy is gone.
 /// Dry-run when `apply` is false (reports what it *would* do, touches nothing).
 ///
-/// Only entries the manifest marks as issuectl-owned are ever removed —
-/// `Unmanaged` dirs (hand-authored or another tool's) are left strictly
-/// alone, and current skills (`UpToDate`/`Stale`/`Modified`) are refreshed via
-/// `skill install --force`, never deleted. An orphan removal drops only the
-/// mirrored `SKILL.md` and then the dir *if it is now empty*, so any unexpected
-/// sibling file a user added is preserved rather than recursively deleted.
+/// Safety properties (this deletes files under the user's `$HOME`):
+/// - **Only issuectl-owned entries** are ever touched. `Unmanaged` dirs
+///   (hand-authored or another tool's) are left strictly alone, and current
+///   skills (`UpToDate`/`Stale`/`Modified`) are refreshed via `skill install
+///   --force`, never deleted.
+/// - It **refuses to act on an untrusted manifest** (corrupt, foreign, or an
+///   unsupported version) via the strict loader — acting on the empty view a
+///   lenient load would produce could drop provenance or misjudge ownership.
+/// - Manifest keys are validated to safe single path components at load time
+///   ([`is_valid_skill_name`]), so a tampered key like `../../x` can never steer
+///   a delete outside the corpus.
+/// - An orphan removal drops **only** a regular-file `SKILL.md` and then the dir
+///   *if it is now empty*; a symlinked/odd `SKILL.md` or a dir with sibling
+///   files is reported in `skipped`, not deleted (see
+///   [`orphan_is_safely_removable`]).
 pub fn pi_prune(pi_root: &Path, apply: bool) -> Result<PiPruneOutcome> {
-    let report = pi_status(pi_root)?;
-    let mut manifest = load_pi_manifest(pi_root);
+    // Deletion gate: refuse to act on a manifest we cannot fully trust. An
+    // absent manifest means nothing is owned, so nothing to prune.
+    let mut manifest = match try_load_pi_manifest(pi_root)? {
+        Some(m) => m,
+        None => {
+            return Ok(PiPruneOutcome {
+                applied: false,
+                removed: Vec::new(),
+                skipped: Vec::new(),
+            })
+        }
+    };
+
+    // Classify against the same snapshot we will mutate (no intervening reload).
+    let statuses = classify_pi_corpus(pi_root, &manifest);
     let mut removed = Vec::new();
+    let mut skipped = Vec::new();
     let mut dirty = false;
 
-    for entry in &report.skills {
+    for entry in &statuses {
         match entry.state {
             PiSkillState::Orphan => {
                 let dir = pi_root.join(&entry.name);
                 let skill_md = dir.join("SKILL.md");
+                let item = PiPruneItem {
+                    name: entry.name.clone(),
+                    kind: PiPruneKind::Orphan,
+                    path: skill_md.to_string_lossy().into_owned(),
+                };
+                if !orphan_is_safely_removable(&dir, &skill_md) {
+                    skipped.push(item);
+                    continue;
+                }
                 if apply {
-                    if skill_md.exists() {
-                        std::fs::remove_file(&skill_md)
-                            .with_context(|| format!("cannot remove {}", skill_md.display()))?;
+                    // Remove the file (ignoring an already-absent one); on a hard
+                    // removal error leave the row so the manifest keeps
+                    // reflecting reality, and report it as skipped.
+                    if skill_md.exists() && std::fs::remove_file(&skill_md).is_err() {
+                        skipped.push(item);
+                        continue;
                     }
-                    // Drop the dir only if empty — never recursively, so a
-                    // stray sibling file survives.
+                    // Drop the dir only if empty — never recursively.
                     let _ = std::fs::remove_dir(&dir);
                     manifest.skills.remove(&entry.name);
                     dirty = true;
                 }
-                removed.push(PiPruneItem {
-                    name: entry.name.clone(),
-                    kind: PiPruneKind::Orphan,
-                    path: skill_md.to_string_lossy().into_owned(),
-                });
+                removed.push(item);
             }
             PiSkillState::Missing => {
                 if apply {
@@ -851,8 +1032,9 @@ pub fn pi_prune(pi_root: &Path, apply: bool) -> Result<PiPruneOutcome> {
         save_pi_manifest(pi_root, &manifest)?;
     }
     Ok(PiPruneOutcome {
-        applied: apply,
+        applied: apply && dirty,
         removed,
+        skipped,
     })
 }
 
@@ -1968,24 +2150,231 @@ mod tests {
         );
     }
 
-    /// Provenance is truthful for a copy an older binary wrote and a non-force
-    /// install left in place: the manifest records the *on-disk* version, not
-    /// the running one.
+    /// Provenance records the running version for skills THIS run wrote, and
+    /// never adopts a pre-existing file it did not write. A hand-authored file
+    /// at a managed path (`issue`) that a non-force install leaves in place must
+    /// NOT gain a manifest row — otherwise a later prune could delete it.
     #[test]
-    fn provenance_records_on_disk_version_not_running() {
+    fn install_never_adopts_a_preexisting_unowned_file() {
+        let repo = tempfile::tempdir().unwrap();
         let pi = tempfile::tempdir().unwrap();
+        // Hand-authored `issue` copy already in the corpus, with an old marker.
         let issue = pi.path().join("issue/SKILL.md");
         std::fs::create_dir_all(issue.parent().unwrap()).unwrap();
         std::fs::write(
             &issue,
-            "body\nThis skill was installed for `issuectl 0.0.1`.\n",
+            "hand body\nThis skill was installed for `issuectl 0.0.1`.\n",
         )
         .unwrap();
-        record_pi_provenance(pi.path()).unwrap();
-        assert_eq!(
-            load_pi_manifest(pi.path()).skills["issue"].version,
-            "0.0.1",
-            "manifest must reflect the version actually on disk"
+
+        // Non-force install: the mirror leaves `issue` in place but freshly
+        // writes the two intake skills.
+        install_skill(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+
+        let manifest = load_pi_manifest(pi.path());
+        assert!(
+            !manifest.skills.contains_key("issue"),
+            "a pre-existing unowned file must NOT be adopted into the manifest"
         );
+        assert!(
+            manifest.skills.contains_key("issue-new")
+                && manifest.skills.contains_key("issue-intake"),
+            "freshly-written skills are recorded"
+        );
+        // Status shows the un-adopted file as unmanaged (never prune-eligible).
+        assert_eq!(
+            row(&pi_status(pi.path()).unwrap(), "issue").state,
+            PiSkillState::Unmanaged
+        );
+        let outcome = pi_prune(pi.path(), true).unwrap();
+        assert!(outcome.removed.iter().all(|i| i.name != "issue"));
+        assert!(issue.exists(), "the hand-authored file must survive prune");
+    }
+
+    /// A tampered/corrupt manifest key that would escape the corpus
+    /// (`../../outside`, absolute paths, `.`/`..`) is dropped at load time and
+    /// never reaches a filesystem join, so prune can't delete outside pi_root.
+    #[test]
+    fn manifest_path_traversal_keys_are_rejected() {
+        for bad in ["../../outside", "/etc/evil", "..", ".", "a/b", ".hidden"] {
+            assert!(!is_valid_skill_name(bad), "{bad:?} must be rejected");
+        }
+        for ok in ["issue", "issue-new", "triage-bugs", "a_b-c"] {
+            assert!(is_valid_skill_name(ok), "{ok:?} must be accepted");
+        }
+
+        let pi = tempfile::tempdir().unwrap();
+        // Plant a would-be victim OUTSIDE the corpus and a manifest that points
+        // at it via `../`.
+        let outside = pi.path().join("victim");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("SKILL.md"), "precious").unwrap();
+        let corpus = pi.path().join("skills");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::write(
+            corpus.join(PI_MANIFEST_FILE),
+            r#"{"manifest_version":1,"tool":"issuectl","skills":{"../victim":{"version":"1"}}}"#,
+        )
+        .unwrap();
+
+        // The unsafe key is filtered on load, so it is invisible to status/prune.
+        assert!(try_load_pi_manifest(&corpus)
+            .unwrap()
+            .unwrap()
+            .skills
+            .is_empty());
+        let outcome = pi_prune(&corpus, true).unwrap();
+        assert!(outcome.removed.is_empty());
+        assert!(
+            outside.join("SKILL.md").exists(),
+            "prune must never touch a path outside the corpus"
+        );
+    }
+
+    /// The deletion gate refuses to act on a corrupt manifest rather than
+    /// treating it as empty and clobbering it.
+    #[test]
+    fn pi_prune_refuses_corrupt_manifest() {
+        let pi = tempfile::tempdir().unwrap();
+        std::fs::write(pi.path().join(PI_MANIFEST_FILE), "{ not json").unwrap();
+        assert!(
+            pi_prune(pi.path(), true).is_err(),
+            "prune must error on a corrupt manifest, not silently no-op"
+        );
+        // The corrupt file is left intact (not clobbered with an empty manifest).
+        assert_eq!(
+            std::fs::read_to_string(pi.path().join(PI_MANIFEST_FILE)).unwrap(),
+            "{ not json"
+        );
+    }
+
+    /// A future/unsupported manifest schema version is refused by the strict
+    /// loader (old binaries must not destructively reinterpret a newer file).
+    #[test]
+    fn unsupported_manifest_version_is_refused() {
+        let pi = tempfile::tempdir().unwrap();
+        std::fs::write(
+            pi.path().join(PI_MANIFEST_FILE),
+            r#"{"manifest_version":999,"tool":"issuectl","skills":{}}"#,
+        )
+        .unwrap();
+        assert!(try_load_pi_manifest(pi.path()).is_err());
+        assert!(pi_prune(pi.path(), true).is_err());
+    }
+
+    /// An orphan dir that also holds sibling files (Claude skills may bundle
+    /// references) is left in place: its SKILL.md is NOT torn out, and the
+    /// entry is reported under `skipped`.
+    #[test]
+    fn pi_prune_skips_orphan_with_sibling_files() {
+        let pi = tempfile::tempdir().unwrap();
+        let dir = pi.path().join("triage-bugs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "retired").unwrap();
+        std::fs::write(dir.join("reference.md"), "user reference").unwrap();
+        let mut manifest = PiManifest::empty();
+        manifest.skills.insert(
+            "triage-bugs".into(),
+            PiManifestEntry {
+                version: "0.9.0".into(),
+            },
+        );
+        save_pi_manifest(pi.path(), &manifest).unwrap();
+
+        let outcome = pi_prune(pi.path(), true).unwrap();
+        assert!(
+            outcome.removed.is_empty(),
+            "must not remove a dir with siblings"
+        );
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].name, "triage-bugs");
+        assert!(dir.join("SKILL.md").exists(), "SKILL.md must survive");
+        assert!(dir.join("reference.md").exists(), "sibling must survive");
+        // The manifest row stays so the entry remains visible.
+        assert!(load_pi_manifest(pi.path())
+            .skills
+            .contains_key("triage-bugs"));
+    }
+
+    /// A retired skill whose file is already gone reads as `Missing` (checked
+    /// before orphan), and prune clears the row.
+    #[test]
+    fn retired_skill_with_missing_file_is_missing_not_orphan() {
+        let pi = tempfile::tempdir().unwrap();
+        let mut manifest = PiManifest::empty();
+        manifest.skills.insert(
+            "triage-bugs".into(),
+            PiManifestEntry {
+                version: "0.9.0".into(),
+            },
+        );
+        save_pi_manifest(pi.path(), &manifest).unwrap();
+
+        assert_eq!(
+            row(&pi_status(pi.path()).unwrap(), "triage-bugs").state,
+            PiSkillState::Missing
+        );
+        let outcome = pi_prune(pi.path(), true).unwrap();
+        assert_eq!(outcome.removed.len(), 1);
+        assert_eq!(outcome.removed[0].kind, PiPruneKind::Missing);
+        assert!(!load_pi_manifest(pi.path())
+            .skills
+            .contains_key("triage-bugs"));
+    }
+
+    /// A present-but-unreadable owned copy (here: SKILL.md replaced by a
+    /// directory) is NOT classified `Missing`, so prune never clears its
+    /// provenance row for a file that still exists.
+    #[test]
+    fn present_but_nonregular_copy_is_not_missing() {
+        let pi = tempfile::tempdir().unwrap();
+        // `issue/SKILL.md` is a directory, not a regular file.
+        std::fs::create_dir_all(pi.path().join("issue/SKILL.md")).unwrap();
+        let mut manifest = PiManifest::empty();
+        manifest.skills.insert(
+            "issue".into(),
+            PiManifestEntry {
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
+        );
+        save_pi_manifest(pi.path(), &manifest).unwrap();
+
+        let state = row(&pi_status(pi.path()).unwrap(), "issue").state;
+        assert_ne!(
+            state,
+            PiSkillState::Missing,
+            "a present entry is not Missing"
+        );
+    }
+
+    /// `applied` is only true when changes actually landed: a `--force` prune of
+    /// a clean corpus reports `applied == false`.
+    #[test]
+    fn prune_applied_is_false_on_noop_force() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        install_skill(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+        let outcome = pi_prune(pi.path(), true).unwrap();
+        assert!(outcome.removed.is_empty());
+        assert!(
+            !outcome.applied,
+            "a no-op --force must not claim changes landed"
+        );
+    }
+
+    /// The manifest is written atomically (temp + rename): no `*.tmp` residue is
+    /// left behind after a successful install.
+    #[test]
+    fn manifest_write_leaves_no_temp_residue() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        install_skill(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+        let residue: Vec<_> = std::fs::read_dir(pi.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(residue.is_empty(), "atomic write must not leave temp files");
+        assert!(pi.path().join(PI_MANIFEST_FILE).is_file());
     }
 }
