@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **The web UI and its entire HTTP surface (breaking).** `issuectl serve` —
+  the local Trello-style kanban web board — is gone, along with the web
+  server, all `/api/*` endpoints (issue list, board views, PATCH/POST write
+  paths), the kanban frontend and its static assets, the live-reload file
+  watcher / SSE edit-sync machinery, user-defined boards
+  (`.issuectl/boards/`), and the server-only `RepoConfigCache` per-request
+  schema/transitions cache. `issuectl` is now a pure AI-first CLI: the
+  domain, mutate, schema, and all `cmd_*` paths are unchanged. The bundled
+  `issuectl docs kanban` topic (and the now-empty `issuectl docs` command)
+  are removed with it. Dropped the web-only dependencies (`axum`, `tokio`,
+  `tokio-stream`, `futures-util`, `ammonia`, `notify`,
+  `notify-debouncer-full`, `parking_lot`, `uuid`). (issue: `@remove-web-ui`)
+
 ## [0.9.0] - 2026-08-12
 
 ### Added

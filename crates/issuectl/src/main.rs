@@ -9,9 +9,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::repo_config::UncachedConfig;
 use issuectl_core::{
-    agents, body_sections, canonical, context, cycle as cycle_mod, dag, docs, doctor, duplicates,
+    agents, body_sections, canonical, context, cycle as cycle_mod, dag, doctor, duplicates,
     estimate as estimate_mod, fmt, hooks, init as init_cmd, merge_driver, models, mutate, query,
-    recurrence, repo, report as report_mod, schema, server, skill, slug, sync_commits,
+    recurrence, repo, report as report_mod, schema, skill, slug, sync_commits,
 };
 
 const TOP_LEVEL_HELP: &str = "\
@@ -37,9 +37,6 @@ Examples:
   issuectl doctor                          Health-check the repo
   issuectl doctor --fix                    Migrate legacy numbered issues
   issuectl skill install                   Install /issue (+ /issue-new, /issue-intake) skills
-  issuectl serve                           Run a local Trello-style web board
-  issuectl docs                            List bundled documentation topics
-  issuectl docs kanban                     Print the kanban / web-board doc
 ";
 
 #[derive(Parser)]
@@ -1027,60 +1024,6 @@ enum Command {
     Skill {
         #[command(subcommand)]
         action: SkillAction,
-    },
-
-    /// Print bundled long-form documentation. Run without an argument to
-    /// list available topics.
-    Docs {
-        /// Topic name (e.g. `kanban`). Omit to list topics.
-        topic: Option<String>,
-    },
-
-    /// Run a local read-only web board (Trello-style) for the current repo
-    Serve {
-        /// Port to listen on
-        #[arg(long, default_value_t = 7878)]
-        port: u16,
-
-        /// Host/interface to bind to (default: 127.0.0.1, local-only)
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-
-        /// Disable the filesystem watcher (no live updates; manual page
-        /// reload only). Useful when running over a filesystem where
-        /// `notify` is unreliable, or for read-only diagnostics.
-        #[arg(long)]
-        no_watch: bool,
-
-        /// Number of distinct slugs touched in a single debounce window
-        /// above which per-issue events collapse into a single Resync
-        /// (e.g. `git checkout` of a feature branch).
-        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
-        watch_bulk_threshold: u32,
-
-        /// Force the polling watcher backend with the given interval in
-        /// milliseconds. Use this on network filesystems (NFS/SMB)
-        /// where `notify`'s native backend misses events. Default off:
-        /// the platform-native backend is used.
-        ///
-        /// Floor 500ms because the advertised use case is network
-        /// filesystems, where aggressive polling is exactly the wrong
-        /// default — recursive 50ms stat()s over NFS would make the
-        /// board itself the source of filesystem load. Upper bound
-        /// 60s prevents typos like `--watch-poll-ms 6000000` from
-        /// silently disabling polling. Tests build `WatcherBackend::
-        /// Poll` directly without going through clap, so this floor
-        /// does not affect test runtime.
-        #[arg(long, value_name = "MS",
-              conflicts_with = "no_watch",
-              value_parser = clap::value_parser!(u64).range(500..=60_000))]
-        watch_poll_ms: Option<u64>,
-
-        /// Enable PATCH/POST writes when bound to a non-loopback
-        /// address. Default off: non-loopback binds are read-only.
-        /// Loopback binds always allow writes.
-        #[arg(long)]
-        allow_remote_writes: bool,
     },
 
     /// Normalize `item.md` files: canonical key order, sorted arrays,
@@ -2429,25 +2372,6 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
             SkillAction::Print { agent } => cmd_skill_print(&agent),
         },
-        Command::Docs { topic } => docs::run(topic),
-        Command::Serve {
-            port,
-            host,
-            no_watch,
-            watch_bulk_threshold,
-            watch_poll_ms,
-            allow_remote_writes,
-        } => server::run(
-            find_root(),
-            host,
-            port,
-            server::ServeOptions {
-                watch_enabled: !no_watch,
-                watch_bulk_threshold: watch_bulk_threshold as usize,
-                watch_poll_interval: watch_poll_ms.map(std::time::Duration::from_millis),
-                allow_remote_writes,
-            },
-        ),
         Command::Fmt { slugs, check, diff } => cmd_fmt(json_output, slugs, check, diff),
         Command::MergeDriver {
             base,
@@ -4581,8 +4505,8 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
         req.custom_fields.insert(k, mutate::Patch::Clear);
     }
 
-    let outcome = mutate::update_issue(root, &args.slug, req, None, &UncachedConfig)
-        .map_err(anyhow::Error::new)?;
+    let outcome =
+        mutate::update_issue(root, &args.slug, req, &UncachedConfig).map_err(anyhow::Error::new)?;
     Ok(UpdateOutcome {
         final_dir: outcome.issue_dir,
         moved_to_closed: outcome.moved_to_closed,
@@ -4667,7 +4591,6 @@ pub(crate) fn do_close(
         comment,
         commit_specs,
         expected_version,
-        None,
         &UncachedConfig,
     )
     .map_err(anyhow::Error::new)?;
@@ -5038,7 +4961,6 @@ fn cmd_note(
         message,
         section,
         expected_version,
-        None,
         dry_run,
         &UncachedConfig,
     )
@@ -5083,8 +5005,8 @@ fn cmd_set(
         }
     }
     let root = find_root();
-    let outcome = mutate::update_issue(&root, slug, req, None, &UncachedConfig)
-        .map_err(anyhow::Error::new)?;
+    let outcome =
+        mutate::update_issue(&root, slug, req, &UncachedConfig).map_err(anyhow::Error::new)?;
     finish_mutation(json, slug, &outcome, dry_run, "Updated")
 }
 
@@ -5101,7 +5023,6 @@ fn cmd_check(
         slug,
         task,
         expected_version,
-        None,
         dry_run,
         &UncachedConfig,
     )
@@ -5127,8 +5048,8 @@ fn cmd_label(
         LabelOp::Remove => req.remove_labels.push(label.to_string()),
     }
     let root = find_root();
-    let outcome = mutate::update_issue(&root, slug, req, None, &UncachedConfig)
-        .map_err(anyhow::Error::new)?;
+    let outcome =
+        mutate::update_issue(&root, slug, req, &UncachedConfig).map_err(anyhow::Error::new)?;
     finish_mutation(json, slug, &outcome, dry_run, "Updated labels for")
 }
 
@@ -5237,8 +5158,8 @@ fn cmd_depend(
         req.remove_blocked_by = blocked_by;
     }
     let root = find_root();
-    let outcome = mutate::update_issue(&root, slug, req, None, &UncachedConfig)
-        .map_err(anyhow::Error::new)?;
+    let outcome =
+        mutate::update_issue(&root, slug, req, &UncachedConfig).map_err(anyhow::Error::new)?;
     let verb = if add {
         "Added blockers for"
     } else {
@@ -5254,8 +5175,8 @@ fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
         .with_context(|| format!("cannot parse patch fields in {}", patch_path.display()))?;
     req.dry_run = dry_run;
     let root = find_root();
-    let outcome = mutate::update_issue(&root, &slug, req, None, &UncachedConfig)
-        .map_err(anyhow::Error::new)?;
+    let outcome =
+        mutate::update_issue(&root, &slug, req, &UncachedConfig).map_err(anyhow::Error::new)?;
     finish_mutation(json, &slug, &outcome, dry_run, "Applied patch to")
 }
 
@@ -5391,7 +5312,6 @@ pub(crate) fn bulk_apply(
         &slugs,
         |dr| build_bulk_request(spec, dr),
         dry_run,
-        None,
         &UncachedConfig,
     )
     .map_err(anyhow::Error::new)?;
@@ -5632,16 +5552,8 @@ fn cmd_body_set(
     // `update_body` re-adds the canonical leading newline.
     let body = body.trim_end().to_string();
     let root = find_root();
-    let outcome = mutate::update_body(
-        &root,
-        slug,
-        expected_version,
-        body,
-        None,
-        false,
-        &UncachedConfig,
-    )
-    .map_err(anyhow::Error::new)?;
+    let outcome = mutate::update_body(&root, slug, expected_version, body, false, &UncachedConfig)
+        .map_err(anyhow::Error::new)?;
     if json {
         let report = serde_json::json!({
             "slug": slug,
@@ -6825,7 +6737,6 @@ mod tests {
             &n.slug,
             None,
             "fresh body\n\n## Notes\n\nlegacy".into(),
-            None,
             false,
             &UncachedConfig,
         )
@@ -6847,7 +6758,6 @@ mod tests {
             &n.slug,
             None,
             "fresh body\n\n## Comments\n\nfine".into(),
-            None,
             false,
             &UncachedConfig,
         )

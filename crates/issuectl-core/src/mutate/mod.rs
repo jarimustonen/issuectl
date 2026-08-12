@@ -12,11 +12,9 @@
 //! directory rename. If the slug is found at a legacy path, the
 //! mutation moves it to flat layout in-line under the same flock.
 //!
-//! The CLI (`do_update`, `do_close`, `do_new`) and the axum PATCH/POST
-//! handlers both call into this module so a) every writer obtains the
-//! same `flock`, b) every writer emits the same canonical version
-//! token, and c) the web server never has to fork a second process to
-//! mutate state.
+//! The CLI entry points (`do_update`, `do_close`, `do_new`) all call
+//! into this module so a) every writer obtains the same `flock` and
+//! b) every writer emits the same canonical version token.
 
 pub mod archive;
 pub mod attach;
@@ -25,19 +23,16 @@ pub mod intake_migrate;
 pub mod new_issue;
 pub mod triage;
 
-use std::fs::{self, File, OpenOptions};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
 use anyhow::{anyhow, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Deserializer};
+use std::fs::{self, File, OpenOptions};
+use std::path::{Path, PathBuf};
 
 use crate::canonical::canonical_hash;
 use crate::models::Issue;
-use crate::repo::{self, folder_for_status, IssueSummary};
+use crate::repo::{self, folder_for_status};
 use crate::repo_config::ConfigSource;
-use crate::server::events::{EventHub, EventPayload};
 use crate::write::{self, ItemFile};
 
 /// Three-state field patch from the design's §3.5.
@@ -164,11 +159,11 @@ pub struct UpdateIssueRequest {
     /// the key; a string sets it. Built-in keys (`status`, `priority`,
     /// dates, etc.) are reserved here — use the dedicated request slots.
     ///
-    /// Duplicate keys in the wire payload are rejected during
-    /// deserialization, mirroring `NewIssueRequest::custom_fields` so
-    /// `PATCH /api/issues/<slug>` enforces the same invariant the CLI
-    /// `--field foo=a --field foo=b` rejection enforces — without this
-    /// gate `serde_json` silently keeps whichever value the parser
+    /// Duplicate keys in the deserialized payload are rejected during
+    /// deserialization, mirroring `NewIssueRequest::custom_fields` so the
+    /// JSON/YAML patch input (`issuectl apply`) enforces the same invariant
+    /// the CLI `--field foo=a --field foo=b` rejection enforces — without
+    /// this gate `serde_json` silently keeps whichever value the parser
     /// happens to see last.
     #[serde(default, deserialize_with = "deserialize_patch_map_no_dups")]
     pub custom_fields: std::collections::BTreeMap<String, Patch<String>>,
@@ -859,15 +854,11 @@ impl WriteLock {
 // ── Public entry points ─────────────────────────────────────────────────
 
 /// PATCH-style update of an existing issue. The slug comes from the
-/// caller (URL path or CLI arg); the request body carries the rest.
-/// `hub` is `Some` for server callers (so the SSE clients see a
-/// synthetic `IssueUpserted` published before flock release) and
-/// `None` for CLI callers (the watcher will pick up the change).
+/// caller (CLI arg); the request body carries the rest.
 pub fn update_issue(
     root: &Path,
     slug: &str,
     req: UpdateIssueRequest,
-    hub: Option<&Arc<EventHub>>,
     config: &dyn ConfigSource,
 ) -> Result<UpdateOutcome, MutateError> {
     if !crate::slug::is_valid(slug) {
@@ -972,7 +963,7 @@ pub fn update_issue(
         .schema(root)
         .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let rules = load_validated_rules(root, &schema, config)?;
-    update_issue_under_lock(root, slug, item_path, req, hub, &schema, &rules)
+    update_issue_under_lock(root, slug, item_path, req, &schema, &rules)
 }
 
 /// Load `.issuectl/transitions.yaml` and cross-validate every status
@@ -1035,7 +1026,6 @@ fn update_issue_under_lock(
     slug: &str,
     item_path: PathBuf,
     req: UpdateIssueRequest,
-    hub: Option<&Arc<EventHub>>,
     schema: &crate::schema::Schema,
     rules: &crate::transitions::TransitionRules,
 ) -> Result<UpdateOutcome, MutateError> {
@@ -1465,16 +1455,6 @@ fn update_issue_under_lock(
     new_issue.folder = folder_for_status(schema, &new_issue.status).to_string();
     let new_version = canonical_hash(&new_issue);
 
-    // 7) publish while still inside the lock so seq order matches
-    //    disk order.
-    if let Some(hub) = hub {
-        hub.publish(EventPayload::IssueUpserted {
-            slug: slug.to_string(),
-            version: new_version.clone(),
-            issue: Box::new(IssueSummary::from(new_issue.clone())),
-        });
-    }
-
     Ok(UpdateOutcome {
         issue: new_issue,
         version: new_version,
@@ -1522,7 +1502,6 @@ pub fn close_issue(
     comment: Option<String>,
     commits: Vec<CommitSpec>,
     expected_version: Option<String>,
-    hub: Option<&Arc<EventHub>>,
     config: &dyn ConfigSource,
 ) -> Result<UpdateOutcome, MutateError> {
     if !crate::slug::is_valid(slug) {
@@ -1642,7 +1621,7 @@ pub fn close_issue(
     req_normalized.remove_related = normalized_remove_related;
     req_normalized.validate()?;
     let rules = load_validated_rules(root, &schema, config)?;
-    update_issue_under_lock(root, slug, item_path, req_normalized, hub, &schema, &rules)
+    update_issue_under_lock(root, slug, item_path, req_normalized, &schema, &rules)
 }
 
 /// Apply the *same* mutation to many issues under a single repo-wide
@@ -1675,7 +1654,6 @@ pub fn bulk_update(
     slugs: &[String],
     mut make_req: impl FnMut(bool) -> UpdateIssueRequest,
     dry_run: bool,
-    hub: Option<&Arc<EventHub>>,
     config: &dyn ConfigSource,
 ) -> Result<Vec<UpdateOutcome>, MutateError> {
     for slug in slugs {
@@ -1699,7 +1677,7 @@ pub fn bulk_update(
     for slug in slugs {
         let req = prepare_bulk_req(make_req(true))?;
         let item_path = locate_for_dry_run(root, slug)?;
-        let outcome = update_issue_under_lock(root, slug, item_path, req, hub, &schema, &rules)
+        let outcome = update_issue_under_lock(root, slug, item_path, req, &schema, &rules)
             .map_err(|e| with_slug_context(slug, e))?;
         planned.push(outcome);
     }
@@ -1713,7 +1691,7 @@ pub fn bulk_update(
     for (i, slug) in slugs.iter().enumerate() {
         let req = prepare_bulk_req(make_req(false))?;
         let item_path = locate_for_dry_run(root, slug)?;
-        match update_issue_under_lock(root, slug, item_path, req, hub, &schema, &rules) {
+        match update_issue_under_lock(root, slug, item_path, req, &schema, &rules) {
             Ok(o) => outcomes.push(o),
             Err(e) => {
                 let written = slugs[..i]
@@ -1773,14 +1751,12 @@ fn with_slug_context(slug: &str, e: MutateError) -> MutateError {
 /// PUT-style replacement of an issue's body markdown. Same lock and
 /// optimistic-concurrency contract as `update_issue`, but only the body
 /// (and `updated:`) change. Status/folder are untouched, so this never
-/// causes a directory rename. `hub` follows the same `Some` server /
-/// `None` CLI convention as `update_issue`.
+/// causes a directory rename.
 pub fn update_body(
     root: &Path,
     slug: &str,
     expected_version: Option<String>,
     body: String,
-    hub: Option<&Arc<EventHub>>,
     dry_run: bool,
     config: &dyn ConfigSource,
 ) -> Result<UpdateOutcome, MutateError> {
@@ -1907,14 +1883,6 @@ pub fn update_body(
     new_issue.folder = folder_for_status(&schema, &new_issue.status).to_string();
     let new_version = canonical_hash(&new_issue);
 
-    if let Some(hub) = hub {
-        hub.publish(EventPayload::IssueUpserted {
-            slug: slug.to_string(),
-            version: new_version.clone(),
-            issue: Box::new(IssueSummary::from(new_issue.clone())),
-        });
-    }
-
     Ok(UpdateOutcome {
         issue: new_issue,
         version: new_version,
@@ -1942,7 +1910,6 @@ pub fn note_issue(
     message: &str,
     section: &str,
     expected_version: Option<String>,
-    hub: Option<&Arc<EventHub>>,
     dry_run: bool,
     config: &dyn ConfigSource,
 ) -> Result<UpdateOutcome, MutateError> {
@@ -2056,14 +2023,6 @@ pub fn note_issue(
     new_issue.folder = folder_for_status(&schema, &new_issue.status).to_string();
     let new_version = canonical_hash(&new_issue);
 
-    if let Some(hub) = hub {
-        hub.publish(EventPayload::IssueUpserted {
-            slug: slug.to_string(),
-            version: new_version.clone(),
-            issue: Box::new(IssueSummary::from(new_issue.clone())),
-        });
-    }
-
     Ok(UpdateOutcome {
         issue: new_issue,
         version: new_version,
@@ -2089,7 +2048,6 @@ pub fn toggle_checkbox(
     slug: &str,
     substring: &str,
     expected_version: Option<String>,
-    hub: Option<&Arc<EventHub>>,
     dry_run: bool,
     config: &dyn ConfigSource,
 ) -> Result<UpdateOutcome, MutateError> {
@@ -2185,14 +2143,6 @@ pub fn toggle_checkbox(
     let mut new_issue = after.issue;
     new_issue.folder = folder_for_status(&schema, &new_issue.status).to_string();
     let new_version = canonical_hash(&new_issue);
-
-    if let Some(hub) = hub {
-        hub.publish(EventPayload::IssueUpserted {
-            slug: slug.to_string(),
-            version: new_version.clone(),
-            issue: Box::new(IssueSummary::from(new_issue.clone())),
-        });
-    }
 
     Ok(UpdateOutcome {
         issue: new_issue,
@@ -2852,7 +2802,7 @@ fn fsync_dir(dir: &Path) -> std::io::Result<()> {
 
 // ── Create / close ──────────────────────────────────────────────────────
 
-/// Request body for `POST /api/issues`. Mirrors `cmd_new`'s flag set.
+/// Deserializable create request (used by `import`). Mirrors `cmd_new`'s flag set.
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct NewIssueRequest {
@@ -2886,8 +2836,8 @@ pub struct NewIssueRequest {
     /// mode the CLI `--field` flag was added to fix.
     ///
     /// JSON shape: an object (`{"team": "payments"}`). Duplicate keys
-    /// in the wire payload are rejected during deserialization so
-    /// `POST /api/issues` enforces the same invariant the CLI
+    /// in the deserialized payload are rejected during deserialization so
+    /// the JSON create input enforces the same invariant the CLI
     /// `--field foo=a --field foo=b` rejection enforces — calling
     /// agents need a deterministic error rather than silent last-write-
     /// wins behavior.
@@ -2996,7 +2946,6 @@ pub struct NewOutcome {
 pub fn new_issue(
     root: &Path,
     req: NewIssueRequest,
-    hub: Option<&Arc<EventHub>>,
     config: &dyn ConfigSource,
 ) -> Result<NewOutcome, MutateError> {
     if req.title.trim().is_empty() {
@@ -3066,14 +3015,6 @@ pub fn new_issue(
     issue.folder = folder_for_status(&schema, &issue.status).to_string();
     let version = canonical_hash(&issue);
 
-    if let Some(hub) = hub {
-        hub.publish(EventPayload::IssueUpserted {
-            slug: outcome.slug.clone(),
-            version: version.clone(),
-            issue: Box::new(IssueSummary::from(issue.clone())),
-        });
-    }
-
     let result = NewOutcome {
         issue_dir: outcome.item_path.parent().unwrap().to_path_buf(),
         issue,
@@ -3123,7 +3064,7 @@ mod tests {
             add_blocked_by: vec!["@blocker-one-here".into()],
             ..Default::default()
         };
-        update_issue(tmp.path(), "subject-issue-here", req, None, &UncachedConfig).unwrap();
+        update_issue(tmp.path(), "subject-issue-here", req, &UncachedConfig).unwrap();
         let after =
             fs::read_to_string(tmp.path().join("issues/subject-issue-here/item.md")).unwrap();
         // Normalization strips the sigil before writing.
@@ -3142,19 +3083,12 @@ mod tests {
             add_blocked_by: vec!["blocker-one-here".into()],
             ..Default::default()
         };
-        update_issue(tmp.path(), "subject-issue-here", add, None, &UncachedConfig).unwrap();
+        update_issue(tmp.path(), "subject-issue-here", add, &UncachedConfig).unwrap();
         let remove = UpdateIssueRequest {
             remove_blocked_by: vec!["blocker-one-here".into()],
             ..Default::default()
         };
-        update_issue(
-            tmp.path(),
-            "subject-issue-here",
-            remove,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap();
+        update_issue(tmp.path(), "subject-issue-here", remove, &UncachedConfig).unwrap();
         let after =
             fs::read_to_string(tmp.path().join("issues/subject-issue-here/item.md")).unwrap();
         assert!(
@@ -3171,8 +3105,7 @@ mod tests {
             add_blocked_by: vec!["loop-target-here".into()],
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "loop-target-here", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "loop-target-here", req, &UncachedConfig).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("cannot block itself"), "got: {msg}");
     }
@@ -3186,8 +3119,7 @@ mod tests {
             remove_blocked_by: vec!["blocker-x-here".into()],
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "subject-issue-here", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "subject-issue-here", req, &UncachedConfig).unwrap_err();
         assert!(matches!(err, MutateError::ConflictingIntent(_)));
     }
 
@@ -3200,7 +3132,7 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "test-slug-one", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "test-slug-one", req, &UncachedConfig).unwrap();
         assert!(out.version.starts_with("sha256:"));
         let after = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
         assert!(after.contains("priority: high"));
@@ -3232,8 +3164,7 @@ mod tests {
             status: Patch::Set("done".into()),
             ..Default::default()
         };
-        let out =
-            update_issue(tmp.path(), "done-active-target", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "done-active-target", req, &UncachedConfig).unwrap();
         // Now `done` is active, so the lifecycle treats this as
         // active→active → no moved_to_closed, and `closed:` should be
         // dropped because the new status is classified Active.
@@ -3265,8 +3196,7 @@ mod tests {
             status: Patch::Set("pizza".into()),
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "no-enum-target", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "no-enum-target", req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => {
                 assert!(
@@ -3297,7 +3227,7 @@ mod tests {
             status: Patch::Set("archived".into()),
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "archive-target", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "archive-target", req, &UncachedConfig).unwrap();
         assert!(
             out.moved_to_closed,
             "active→archived must report moved_to_closed"
@@ -3330,14 +3260,8 @@ mod tests {
             status: Patch::Set("done".into()),
             ..Default::default()
         };
-        let err = update_issue(
-            tmp.path(),
-            "empty-closed-target",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap_err();
+        let err =
+            update_issue(tmp.path(), "empty-closed-target", req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => {
                 assert!(
@@ -3369,14 +3293,7 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let out = update_issue(
-            tmp.path(),
-            "unrelated-edit-target",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap();
+        let out = update_issue(tmp.path(), "unrelated-edit-target", req, &UncachedConfig).unwrap();
         let after = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
         assert!(after.contains("priority: high"));
     }
@@ -3390,8 +3307,7 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "test-slug-two", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "test-slug-two", req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::VersionMismatch { current, version } => {
                 assert_eq!(current.slug, "test-slug-two");
@@ -3508,14 +3424,7 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let out = update_issue(
-            tmp.path(),
-            "concurrent-distinct",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap();
+        let out = update_issue(tmp.path(), "concurrent-distinct", req, &UncachedConfig).unwrap();
         assert_eq!(out.issue.priority, "high");
         // Both unknown keys must survive the mutation round-trip.
         let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
@@ -3562,14 +3471,8 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let err = update_issue(
-            tmp.path(),
-            "concurrent-same-key",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap_err();
+        let err =
+            update_issue(tmp.path(), "concurrent-same-key", req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::VersionMismatch { current, .. } => {
                 assert_eq!(current.slug, "concurrent-same-key");
@@ -3617,14 +3520,8 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let err = update_issue(
-            tmp.path(),
-            "concurrent-delete-key",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap_err();
+        let err =
+            update_issue(tmp.path(), "concurrent-delete-key", req, &UncachedConfig).unwrap_err();
         assert!(
             matches!(err, MutateError::VersionMismatch { .. }),
             "expected VersionMismatch on stale view after unknown-key delete, got {err:?}"
@@ -3655,8 +3552,7 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "bad-nested-key", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "bad-nested-key", req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::Corrupt { warnings } => {
                 assert!(
@@ -3671,10 +3567,10 @@ mod tests {
 
     #[test]
     fn status_only_patch_leaves_other_fields_untouched() {
-        // Drag-and-drop kanban moves PATCH only `status`. Other fields
+        // A status-only update touches `status` alone. Other fields
         // (priority, assignee, epic, …) must round-trip unchanged via
-        // `Patch::Unspecified` — without this the web UI would silently
-        // clobber metadata on every column move.
+        // `Patch::Unspecified` — without this a status change would
+        // silently clobber the rest of the frontmatter.
         let tmp = fresh_repo();
         let dir = tmp.path().join("issues/dnd-status-only");
         fs::create_dir_all(&dir).unwrap();
@@ -3689,7 +3585,7 @@ mod tests {
             status: Patch::Set("in-progress".into()),
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "dnd-status-only", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "dnd-status-only", req, &UncachedConfig).unwrap();
         assert_eq!(out.issue.status, "in-progress");
         assert_eq!(out.issue.priority, "high");
         assert_eq!(out.issue.assignee.as_deref(), Some("alice"));
@@ -3703,10 +3599,10 @@ mod tests {
 
     #[test]
     fn reopening_a_closed_issue_clears_closed_date() {
-        // Drag-and-drop allows moving a card out of the closed column
-        // back to an active status. The frontmatter `closed:` date must
-        // be removed in the same write so the issue isn't left in a
-        // contradictory "status: open, closed: 2026-01-01" state.
+        // Reopening moves an issue from a closed status back to an
+        // active status. The frontmatter `closed:` date must be removed
+        // in the same write so the issue isn't left in a contradictory
+        // "status: open, closed: 2026-01-01" state.
         let tmp = fresh_repo();
         let dir = tmp.path().join("issues/reopen-me");
         fs::create_dir_all(&dir).unwrap();
@@ -3721,7 +3617,7 @@ mod tests {
             status: Patch::Set("open".into()),
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "reopen-me", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "reopen-me", req, &UncachedConfig).unwrap();
         assert!(out.moved_to_open);
         assert_eq!(out.issue.status, "open");
         assert!(
@@ -3770,7 +3666,7 @@ mod tests {
             status: Patch::Set("open".into()),
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "old-archived-fox", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "old-archived-fox", req, &UncachedConfig).unwrap();
 
         assert!(out.moved_to_open);
         assert_eq!(out.issue.status, "open");
@@ -3811,7 +3707,7 @@ mod tests {
             status: Patch::Set("wontfix".into()),
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "still-closed-elk", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "still-closed-elk", req, &UncachedConfig).unwrap();
 
         assert!(!out.moved_to_open);
         assert!(archived_dir.join("item.md").is_file(), "stays archived");
@@ -3852,8 +3748,7 @@ mod tests {
             status: Patch::Set("open".into()),
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "dup-slug-newt", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "dup-slug-newt", req, &UncachedConfig).unwrap_err();
         // Ambiguous locate fires before the write; either way both copies
         // survive untouched.
         assert!(matches!(err, MutateError::AmbiguousSlug { .. }));
@@ -3916,7 +3811,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "dry-reopen-fox", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "dry-reopen-fox", req, &UncachedConfig).unwrap();
         assert_eq!(out.issue_dir, tmp.path().join("issues/dry-reopen-fox"));
         // Dry-run wrote nothing: still physically archived.
         assert!(tmp
@@ -3944,7 +3839,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "dry-stay-elk", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "dry-stay-elk", req, &UncachedConfig).unwrap();
         assert_eq!(
             out.issue_dir, archived,
             "non-reopen dry-run must predict the archive dir"
@@ -3966,7 +3861,7 @@ mod tests {
             status: Patch::Set("open".into()),
             ..Default::default()
         };
-        update_issue(tmp.path(), "lonely-newt", req, None, &UncachedConfig).unwrap();
+        update_issue(tmp.path(), "lonely-newt", req, &UncachedConfig).unwrap();
         // The slug was the only occupant, so its month/year buckets prune.
         assert!(!tmp.path().join("issues/archive/2020/01").exists());
         assert!(!tmp.path().join("issues/archive/2020").exists());
@@ -3995,7 +3890,7 @@ mod tests {
             status: Patch::Set("open".into()),
             ..Default::default()
         };
-        update_issue(tmp.path(), "reopen-this-fox", req, None, &UncachedConfig).unwrap();
+        update_issue(tmp.path(), "reopen-this-fox", req, &UncachedConfig).unwrap();
         // Bucket still holds the sibling, so it must NOT be pruned.
         assert!(tmp.path().join("issues/archive/2020/01").exists());
         assert!(sibling.join("item.md").is_file());
@@ -4015,7 +3910,7 @@ mod tests {
             status: Patch::Set("fixed".into()),
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "close-me-now", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "close-me-now", req, &UncachedConfig).unwrap();
         // Status transition flag still flips, but the dir does not move.
         assert!(out.moved_to_closed);
         assert_eq!(out.issue_dir, flat_dir);
@@ -4048,8 +3943,7 @@ mod tests {
         let before = fs::read_to_string(legacy.join("item.md")).unwrap();
 
         let req = UpdateIssueRequest::default();
-        let out =
-            update_issue(tmp.path(), "empty-patch-legacy", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "empty-patch-legacy", req, &UncachedConfig).unwrap();
 
         // Legacy directory is preserved (no migration on a no-op).
         assert!(legacy.is_dir(), "legacy dir must remain untouched");
@@ -4074,14 +3968,7 @@ mod tests {
             status: Patch::Set("wontfix".into()),
             ..Default::default()
         };
-        let _ = update_issue(
-            tmp.path(),
-            "preserve-closed-date",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap();
+        let _ = update_issue(tmp.path(), "preserve-closed-date", req, &UncachedConfig).unwrap();
         let after = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(after.contains("closed: 2026-01-15"), "got:\n{after}");
         assert!(after.contains("status: wontfix"));
@@ -4103,7 +3990,7 @@ mod tests {
             status: Patch::Set("wontfix".into()),
             ..Default::default()
         };
-        let _ = update_issue(tmp.path(), "backfill-closed", req, None, &UncachedConfig).unwrap();
+        let _ = update_issue(tmp.path(), "backfill-closed", req, &UncachedConfig).unwrap();
         let after = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(
             after.contains("closed:"),
@@ -4134,7 +4021,7 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "legacy-one-here", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "legacy-one-here", req, &UncachedConfig).unwrap();
         assert!(out
             .issue_dir
             .to_string_lossy()
@@ -4164,8 +4051,7 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "dual-path-here", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "dual-path-here", req, &UncachedConfig).unwrap_err();
         assert!(matches!(err, MutateError::AmbiguousSlug { .. }));
     }
 
@@ -4183,7 +4069,7 @@ mod tests {
             epic: Patch::Clear,
             ..Default::default()
         };
-        let _ = update_issue(tmp.path(), "has-epic-here", req, None, &UncachedConfig).unwrap();
+        let _ = update_issue(tmp.path(), "has-epic-here", req, &UncachedConfig).unwrap();
         let after = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(!after.contains("epic:"));
     }
@@ -4202,7 +4088,7 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let _ = update_issue(tmp.path(), "keep-epic-as-is", req, None, &UncachedConfig).unwrap();
+        let _ = update_issue(tmp.path(), "keep-epic-as-is", req, &UncachedConfig).unwrap();
         let after = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(after.contains("epic: stay-here"));
         assert!(after.contains("priority: high"));
@@ -4256,7 +4142,7 @@ mod tests {
         let mut req = UpdateIssueRequest::default();
         req.custom_fields
             .insert("triage".into(), Patch::Set("P1".into()));
-        let out = update_issue(tmp.path(), "cf-set", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "cf-set", req, &UncachedConfig).unwrap();
         let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
         assert!(on_disk.contains("triage: P1"), "got: {on_disk}");
         assert_eq!(
@@ -4278,7 +4164,7 @@ mod tests {
         .unwrap();
         let mut req = UpdateIssueRequest::default();
         req.custom_fields.insert("owner_team".into(), Patch::Clear);
-        let out = update_issue(tmp.path(), "cf-clear", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "cf-clear", req, &UncachedConfig).unwrap();
         let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
         assert!(
             !on_disk.contains("owner_team:"),
@@ -4302,7 +4188,7 @@ mod tests {
         let req: UpdateIssueRequest =
             serde_json::from_str(r#"{"custom_fields": {"triage": "P1", "owner_team": null}}"#)
                 .unwrap();
-        let out = update_issue(tmp.path(), "cf-mixed", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "cf-mixed", req, &UncachedConfig).unwrap();
         let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
         assert!(on_disk.contains("triage: P1"));
         assert!(!on_disk.contains("owner_team:"));
@@ -4357,7 +4243,7 @@ mod tests {
         let mut req = UpdateIssueRequest::default();
         req.custom_fields
             .insert("triage".into(), Patch::Set("P9".into()));
-        let err = update_issue(tmp.path(), "cf-schema", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "cf-schema", req, &UncachedConfig).unwrap_err();
         assert!(
             matches!(err, MutateError::SchemaViolation(_)),
             "got: {err:?}"
@@ -4373,7 +4259,7 @@ mod tests {
         let mut req = UpdateIssueRequest::default();
         req.custom_fields
             .insert("triage".into(), Patch::Set("P1".into()));
-        let out = update_issue(tmp.path(), "cf-bump", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "cf-bump", req, &UncachedConfig).unwrap();
         assert_ne!(v0, out.version, "custom-field PATCH must change the hash");
     }
 
@@ -4387,7 +4273,7 @@ mod tests {
         };
         req.custom_fields
             .insert("triage".into(), Patch::Set("P1".into()));
-        let err = update_issue(tmp.path(), "cf-stale", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "cf-stale", req, &UncachedConfig).unwrap_err();
         assert!(matches!(err, MutateError::VersionMismatch { .. }));
     }
 
@@ -4413,7 +4299,6 @@ mod tests {
                 priority: Patch::Set("high".into()),
                 ..Default::default()
             },
-            None,
             &UncachedConfig,
         )
         .unwrap_err();
@@ -4426,8 +4311,7 @@ mod tests {
         let mut req = UpdateIssueRequest::default();
         req.custom_fields
             .insert("team".into(), Patch::Set("payments".into()));
-        let out =
-            update_issue(tmp.path(), "cf-required-repair", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "cf-required-repair", req, &UncachedConfig).unwrap();
         assert_eq!(
             out.issue.extra.get("team"),
             Some(&serde_json::Value::String("payments".into()))
@@ -4481,8 +4365,8 @@ mod tests {
 
     #[test]
     fn validate_custom_field_key_rejects_invalid_shape_and_reserved() {
-        // Single source of truth for the four create/update paths.
-        // Each call site (CLI/API × new/update) wraps this in its own
+        // Single source of truth for the create/update paths.
+        // Each call site (new/update) wraps this in its own
         // typed error variant, so the message must stay stable.
         assert!(validate_custom_field_key("team").is_ok());
         let err = validate_custom_field_key("bad key").unwrap_err();
@@ -4522,7 +4406,7 @@ mod tests {
         req.title = "Sneaky".into();
         req.priority = "normal".into();
         req.custom_fields = vec![("status".into(), "fake".into())];
-        let err = new_issue(tmp.path(), req, None, &UncachedConfig).unwrap_err();
+        let err = new_issue(tmp.path(), req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::Validation(msg) => assert!(
                 msg.contains("status") && msg.contains("built-in"),
@@ -4557,7 +4441,7 @@ mod tests {
         req.title = "Blank value".into();
         req.priority = "normal".into();
         req.custom_fields = vec![("team".into(), "   ".into())];
-        let err = new_issue(tmp.path(), req, None, &UncachedConfig).unwrap_err();
+        let err = new_issue(tmp.path(), req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::Validation(msg) => assert!(
                 msg.contains("team") && msg.contains("empty-string Set"),
@@ -4575,7 +4459,7 @@ mod tests {
         req.title = "Padded value".into();
         req.priority = "normal".into();
         req.custom_fields = vec![("team".into(), " payments".into())];
-        let err = new_issue(tmp.path(), req, None, &UncachedConfig).unwrap_err();
+        let err = new_issue(tmp.path(), req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::Validation(msg) => assert!(
                 msg.contains("team") && msg.contains("whitespace"),
@@ -4593,7 +4477,7 @@ mod tests {
         req.title = "Bad shape".into();
         req.priority = "normal".into();
         req.custom_fields = vec![("bad key".into(), "x".into())];
-        let err = new_issue(tmp.path(), req, None, &UncachedConfig).unwrap_err();
+        let err = new_issue(tmp.path(), req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::Validation(msg) => assert!(
                 msg.contains("bad key") && msg.contains("alphanumeric"),
@@ -4612,7 +4496,6 @@ mod tests {
             "body-roundtrip-x",
             Some(v0.clone()),
             "# rewrite\n\nnew body".into(),
-            None,
             false,
             &UncachedConfig,
         )
@@ -4632,7 +4515,6 @@ mod tests {
             "body-stale-here",
             Some("sha256:deadbeef".into()),
             "x".into(),
-            None,
             false,
             &UncachedConfig,
         )
@@ -4655,7 +4537,7 @@ mod tests {
             status: Patch::Set("open".into()),
             ..Default::default()
         };
-        let _ = update_issue(tmp.path(), "reopen-section", req, None, &UncachedConfig).unwrap();
+        let _ = update_issue(tmp.path(), "reopen-section", req, &UncachedConfig).unwrap();
         let on_disk = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(
             on_disk.contains("## Reopen Notes —"),
@@ -4681,7 +4563,6 @@ mod tests {
             "first thought",
             crate::body_sections::COMMENTS,
             None,
-            None,
             false,
             &UncachedConfig,
         )
@@ -4696,7 +4577,6 @@ mod tests {
             "bob",
             "second thought",
             crate::body_sections::COMMENTS,
-            None,
             None,
             false,
             &UncachedConfig,
@@ -4724,7 +4604,6 @@ mod tests {
             "hi",
             crate::body_sections::COMMENTS,
             Some("sha256:deadbeef".into()),
-            None,
             false,
             &UncachedConfig,
         )
@@ -4774,7 +4653,7 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        update_issue(tmp.path(), "bootstrap-target", req, None, &UncachedConfig).unwrap();
+        update_issue(tmp.path(), "bootstrap-target", req, &UncachedConfig).unwrap();
         assert!(
             tmp.path().join("issues/.schema.yaml").is_file(),
             "schema file should be auto-written on first mutation"
@@ -4795,8 +4674,7 @@ mod tests {
             add_labels: vec!["bogus".into()],
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "label-enum-target", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "label-enum-target", req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => assert!(
                 msg.contains("labels") && msg.contains("bogus"),
@@ -4822,7 +4700,6 @@ mod tests {
             "body-schema-target",
             Some(v0),
             "# new body\n".into(),
-            None,
             false,
             &UncachedConfig,
         )
@@ -4846,7 +4723,7 @@ mod tests {
         req.title = "API new with custom field".into();
         req.priority = "normal".into();
         req.custom_fields.push(("team".into(), "payments".into()));
-        let outcome = new_issue(tmp.path(), req, None, &UncachedConfig).unwrap();
+        let outcome = new_issue(tmp.path(), req, &UncachedConfig).unwrap();
         let on_disk = fs::read_to_string(outcome.issue_dir.join("item.md")).unwrap();
         assert!(on_disk.contains("team: payments"), "got {on_disk}");
     }
@@ -4938,7 +4815,7 @@ mod tests {
         req.issue_type = "bug".into();
         req.title = "Missing team".into();
         req.priority = "normal".into();
-        let err = new_issue(tmp.path(), req, None, &UncachedConfig).unwrap_err();
+        let err = new_issue(tmp.path(), req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => assert!(
                 msg.contains("team"),
@@ -4966,7 +4843,7 @@ mod tests {
         req.title = "Conflict".into();
         req.priority = "normal".into();
         req.slug = Some("taken-slug".into());
-        let err = new_issue(tmp.path(), req, None, &UncachedConfig).unwrap_err();
+        let err = new_issue(tmp.path(), req, &UncachedConfig).unwrap_err();
         assert!(
             matches!(err, MutateError::ConflictingIntent(_)),
             "got {err:?}"
@@ -4989,7 +4866,7 @@ mod tests {
         req.title = "Legacy conflict".into();
         req.priority = "normal".into();
         req.slug = Some("legacy-slug".into());
-        let err = new_issue(tmp.path(), req, None, &UncachedConfig).unwrap_err();
+        let err = new_issue(tmp.path(), req, &UncachedConfig).unwrap_err();
         assert!(
             matches!(err, MutateError::ConflictingIntent(_)),
             "got {err:?}"
@@ -5007,7 +4884,7 @@ mod tests {
         req.title = "Owner on non-epic".into();
         req.priority = "normal".into();
         req.owner = Some("alice".into());
-        let err = new_issue(tmp.path(), req, None, &UncachedConfig).unwrap_err();
+        let err = new_issue(tmp.path(), req, &UncachedConfig).unwrap_err();
         assert!(matches!(err, MutateError::Validation(_)), "got {err:?}");
     }
 
@@ -5028,7 +4905,7 @@ mod tests {
         req.issue_type = "bug".into();
         req.title = "Bad schema".into();
         req.priority = "normal".into();
-        let err = new_issue(tmp.path(), req, None, &UncachedConfig).unwrap_err();
+        let err = new_issue(tmp.path(), req, &UncachedConfig).unwrap_err();
         assert!(matches!(err, MutateError::SchemaConfig(_)), "got {err:?}");
     }
 
@@ -5084,146 +4961,9 @@ mod tests {
         req.title = "Cannot write".into();
         req.priority = "normal".into();
         req.slug = Some("io-fail-slug".into());
-        let err = new_issue(tmp.path(), req, None, &UncachedConfig).unwrap_err();
+        let err = new_issue(tmp.path(), req, &UncachedConfig).unwrap_err();
 
         assert!(matches!(err, MutateError::Io(_)), "got {err:?}");
-    }
-
-    // ── publish-before-release helpers ──────────────────────────────────
-    //
-    // web-edit-sync §3.1 step 8: every server-mediated mutation must publish
-    // its IssueUpserted event WHILE the repo flock is still held, so global
-    // seq order matches on-disk write order. The pre-fix `new_issue`
-    // delegated to `do_new` (which acquired and released the lock
-    // internally) and then published OUTSIDE the lock — a fast-following
-    // PATCH could land an event with a smaller seq, breaking dedupe-by-
-    // version on the client. The same contract binds `update_issue`,
-    // `update_body`, `note_issue`, and `close_issue`; the helpers below
-    // exercise the invariant on each.
-    //
-    // The probe re-opens `.issuectl/write.lock` on a fresh fd and tries a
-    // non-blocking `flock(LOCK_EX)`. POSIX `flock(2)` on Linux and macOS is
-    // per open-file-description, so a separate `open()` from the same
-    // process conflicts. We match `ErrorKind::WouldBlock` exactly so that
-    // any *other* error (permission, ENOENT, or a hypothetical `fs2`
-    // backend switch to per-process `fcntl` record locks) panics loudly
-    // instead of silently passing.
-
-    const PROBE_UNSEEN: u8 = 0;
-    const PROBE_HELD: u8 = 1;
-    const PROBE_RELEASED: u8 = 2;
-
-    fn install_lock_probe(
-        hub: &Arc<EventHub>,
-        lock_path: std::path::PathBuf,
-    ) -> Arc<std::sync::atomic::AtomicU8> {
-        use fs2::FileExt;
-        use std::sync::atomic::{AtomicU8, Ordering};
-
-        let observed = Arc::new(AtomicU8::new(PROBE_UNSEEN));
-        let probe_state = observed.clone();
-        hub.set_on_publish_for_test(Arc::new(move |_evt| {
-            let f = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&lock_path)
-                .expect("lock file must exist by publish time");
-            match f.try_lock_exclusive() {
-                Ok(()) => {
-                    let _ = FileExt::unlock(&f);
-                    probe_state.store(PROBE_RELEASED, Ordering::SeqCst);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    probe_state.store(PROBE_HELD, Ordering::SeqCst);
-                }
-                Err(e) => panic!(
-                    "unexpected error from try_lock_exclusive in publish probe: {e} \
-                     (kind={:?}); the test cannot tell whether the flock was held — \
-                     fix the probe or investigate fs2 lock semantics on this platform",
-                    e.kind()
-                ),
-            }
-        }));
-        observed
-    }
-
-    fn assert_probe_saw_held(observed: &std::sync::atomic::AtomicU8, mutation: &str) {
-        use std::sync::atomic::Ordering;
-        match observed.load(Ordering::SeqCst) {
-            PROBE_HELD => {}
-            PROBE_RELEASED => panic!(
-                "{mutation}: IssueUpserted was published AFTER the repo flock was released — \
-                 violates web-edit-sync §3.1 step 8 (publish-before-release)"
-            ),
-            _ => panic!(
-                "{mutation}: publish hook never fired — \
-                 mutation did not publish IssueUpserted"
-            ),
-        }
-    }
-
-    #[test]
-    fn new_issue_publishes_before_releasing_flock() {
-        let tmp = fresh_repo();
-        let hub = Arc::new(EventHub::new());
-        let observed = install_lock_probe(&hub, tmp.path().join(".issuectl/write.lock"));
-
-        let req = NewIssueRequest {
-            issue_type: "bug".into(),
-            title: "publish under flock".into(),
-            priority: "normal".into(),
-            ..Default::default()
-        };
-        new_issue(tmp.path(), req, Some(&hub), &UncachedConfig).unwrap();
-
-        assert_probe_saw_held(&observed, "new_issue");
-    }
-
-    #[test]
-    fn update_issue_publishes_before_releasing_flock() {
-        let tmp = fresh_repo();
-        let v0 = seed_issue(tmp.path(), "open", "patch-publish-flock", "open");
-        let hub = Arc::new(EventHub::new());
-        let observed = install_lock_probe(&hub, tmp.path().join(".issuectl/write.lock"));
-
-        let req = UpdateIssueRequest {
-            expected_version: Some(v0),
-            priority: Patch::Set("high".into()),
-            ..Default::default()
-        };
-        update_issue(
-            tmp.path(),
-            "patch-publish-flock",
-            req,
-            Some(&hub),
-            &UncachedConfig,
-        )
-        .unwrap();
-
-        assert_probe_saw_held(&observed, "update_issue");
-    }
-
-    #[test]
-    fn close_issue_publishes_before_releasing_flock() {
-        let tmp = fresh_repo();
-        let v0 = seed_issue(tmp.path(), "open", "close-publish-flock", "open");
-        let hub = Arc::new(EventHub::new());
-        let observed = install_lock_probe(&hub, tmp.path().join(".issuectl/write.lock"));
-
-        close_issue(
-            tmp.path(),
-            "close-publish-flock",
-            None,
-            None,
-            None,
-            Vec::new(),
-            Some(v0),
-            Some(&hub),
-            &UncachedConfig,
-        )
-        .unwrap();
-
-        assert_probe_saw_held(&observed, "close_issue");
     }
 
     #[test]
@@ -5238,7 +4978,6 @@ mod tests {
             Some("jari".into()),
             None,
             Vec::new(),
-            None,
             None,
             &UncachedConfig,
         )
@@ -5275,7 +5014,6 @@ mod tests {
             None,
             Vec::new(),
             None,
-            None,
             &UncachedConfig,
         )
         .unwrap();
@@ -5297,7 +5035,6 @@ mod tests {
             Some("has space".into()),
             None,
             Vec::new(),
-            None,
             None,
             &UncachedConfig,
         )
@@ -5321,7 +5058,6 @@ mod tests {
             None,
             Vec::new(),
             None,
-            None,
             &UncachedConfig,
         )
         .unwrap();
@@ -5332,14 +5068,7 @@ mod tests {
             status: Patch::Set("open".into()),
             ..Default::default()
         };
-        update_issue(
-            tmp.path(),
-            "reopen-clears-closer",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap();
+        update_issue(tmp.path(), "reopen-clears-closer", req, &UncachedConfig).unwrap();
 
         let after =
             fs::read_to_string(tmp.path().join("issues/reopen-clears-closer/item.md")).unwrap();
@@ -5363,7 +5092,6 @@ mod tests {
             Some("jari".into()),
             None,
             Vec::new(),
-            None,
             None,
             &UncachedConfig,
         )
@@ -5391,7 +5119,6 @@ mod tests {
             None,
             Vec::new(),
             None,
-            None,
             &UncachedConfig,
         )
         .unwrap();
@@ -5402,8 +5129,7 @@ mod tests {
         };
         req.custom_fields
             .insert("closed_by".into(), Patch::Set("mallory".into()));
-        let err =
-            update_issue(tmp.path(), "reopen-smuggle", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "reopen-smuggle", req, &UncachedConfig).unwrap_err();
         assert!(matches!(err, MutateError::Validation(_)), "{err:?}");
     }
 
@@ -5419,7 +5145,7 @@ mod tests {
         let mut req = UpdateIssueRequest::default();
         req.custom_fields
             .insert("closed_by".into(), Patch::Set("mallory".into()));
-        let err = update_issue(tmp.path(), "plant-closer", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "plant-closer", req, &UncachedConfig).unwrap_err();
         assert!(matches!(err, MutateError::Validation(_)), "{err:?}");
         let after = fs::read_to_string(tmp.path().join("issues/plant-closer/item.md")).unwrap();
         assert!(!after.contains("closed_by"), "{after}");
@@ -5439,7 +5165,6 @@ mod tests {
             None,
             Vec::new(),
             None,
-            None,
             &UncachedConfig,
         )
         .unwrap();
@@ -5448,7 +5173,7 @@ mod tests {
             status: Patch::Set("wontfix".into()),
             ..Default::default()
         };
-        update_issue(tmp.path(), "restatus-closer", req, None, &UncachedConfig).unwrap();
+        update_issue(tmp.path(), "restatus-closer", req, &UncachedConfig).unwrap();
 
         let after = fs::read_to_string(tmp.path().join("issues/restatus-closer/item.md")).unwrap();
         assert!(after.contains("status: wontfix"), "{after}");
@@ -5478,7 +5203,6 @@ mod tests {
             None,
             Vec::new(),
             None,
-            None,
             &UncachedConfig,
         )
         .unwrap();
@@ -5503,7 +5227,6 @@ mod tests {
             Some("alice".into()),
             Some("Shipped in v1.2; superseded the manual workaround.".into()),
             Vec::new(),
-            None,
             None,
             &UncachedConfig,
         )
@@ -5551,7 +5274,6 @@ mod tests {
             Some("Root cause was a stale cache; cleared and verified.".into()),
             Vec::new(),
             None,
-            None,
             &UncachedConfig,
         )
         .unwrap();
@@ -5580,7 +5302,6 @@ mod tests {
             None,
             Vec::new(),
             None,
-            None,
             &UncachedConfig,
         )
         .unwrap();
@@ -5604,90 +5325,12 @@ mod tests {
             Some("   ".into()),
             Vec::new(),
             None,
-            None,
             &UncachedConfig,
         )
         .unwrap_err();
         assert!(matches!(err, MutateError::Validation(_)), "{err:?}");
         let after = fs::read_to_string(tmp.path().join("issues/close-empty-note/item.md")).unwrap();
         assert!(after.contains("status: open"), "{after}");
-    }
-
-    #[test]
-    fn update_body_publishes_before_releasing_flock() {
-        let tmp = fresh_repo();
-        let v0 = seed_issue(tmp.path(), "open", "body-publish-flock", "open");
-        let hub = Arc::new(EventHub::new());
-        let observed = install_lock_probe(&hub, tmp.path().join(".issuectl/write.lock"));
-
-        update_body(
-            tmp.path(),
-            "body-publish-flock",
-            Some(v0),
-            "# Replaced body\n".into(),
-            Some(&hub),
-            false,
-            &UncachedConfig,
-        )
-        .unwrap();
-
-        assert_probe_saw_held(&observed, "update_body");
-    }
-
-    #[test]
-    fn note_issue_publishes_before_releasing_flock() {
-        let tmp = fresh_repo();
-        let v0 = seed_issue(tmp.path(), "open", "note-publish-flock", "open");
-        let hub = Arc::new(EventHub::new());
-        let observed = install_lock_probe(&hub, tmp.path().join(".issuectl/write.lock"));
-
-        note_issue(
-            tmp.path(),
-            "note-publish-flock",
-            "alice",
-            "hello from a probe",
-            crate::body_sections::COMMENTS,
-            Some(v0),
-            Some(&hub),
-            false,
-            &UncachedConfig,
-        )
-        .unwrap();
-
-        assert_probe_saw_held(&observed, "note_issue");
-    }
-
-    #[test]
-    fn new_issue_does_not_publish_on_error_path() {
-        // Symmetric guarantee: when the mutation fails (here: a schema
-        // violation rejected before any write), no IssueUpserted may be
-        // emitted. Otherwise the API would announce a state change that
-        // never landed on disk.
-        use std::sync::atomic::Ordering;
-
-        let tmp = fresh_repo();
-        fs::write(
-            tmp.path().join("issues/.schema.yaml"),
-            "version: 1\nfields:\n  team:\n    required: true\n",
-        )
-        .unwrap();
-        let hub = Arc::new(EventHub::new());
-        let observed = install_lock_probe(&hub, tmp.path().join(".issuectl/write.lock"));
-
-        let req = NewIssueRequest {
-            issue_type: "bug".into(),
-            title: "missing required team".into(),
-            priority: "normal".into(),
-            ..Default::default()
-        };
-        let err = new_issue(tmp.path(), req, Some(&hub), &UncachedConfig).unwrap_err();
-        assert!(matches!(err, MutateError::SchemaViolation(_)));
-        assert_eq!(
-            observed.load(Ordering::SeqCst),
-            PROBE_UNSEEN,
-            "new_issue published an IssueUpserted on an error path — \
-             the API would announce a write that never happened"
-        );
     }
 
     #[test]
@@ -5706,7 +5349,6 @@ mod tests {
                 priority: Patch::Set("high".into()),
                 ..Default::default()
             },
-            None,
             &UncachedConfig,
         )
         .unwrap_err();
@@ -5732,8 +5374,7 @@ mod tests {
             issue_type: Patch::Set("feature".into()),
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "type-reject-target", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "type-reject-target", req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => {
                 assert!(
@@ -5774,7 +5415,7 @@ mod tests {
             issue_type: Patch::Set("feature".into()),
             ..Default::default()
         };
-        update_issue(tmp.path(), "type-ok-target", req, None, &UncachedConfig).unwrap();
+        update_issue(tmp.path(), "type-ok-target", req, &UncachedConfig).unwrap();
         let content = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(content.contains("type: feature"));
         // Body untouched: counts unchanged, content preserved.
@@ -5808,14 +5449,8 @@ mod tests {
             issue_type: Patch::Set("bug".into()),
             ..Default::default()
         };
-        let err = update_issue(
-            tmp.path(),
-            "type-overlap-target",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap_err();
+        let err =
+            update_issue(tmp.path(), "type-overlap-target", req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => {
                 assert!(msg.contains("Repro Steps"), "got {msg}");
@@ -5848,7 +5483,7 @@ mod tests {
             issue_type: Patch::Set("task".into()),
             ..Default::default()
         };
-        update_issue(tmp.path(), "type-loose-target", req, None, &UncachedConfig).unwrap();
+        update_issue(tmp.path(), "type-loose-target", req, &UncachedConfig).unwrap();
         let content = fs::read_to_string(dir.join("item.md")).unwrap();
         assert!(content.contains("type: task"));
         // Old stubs from `feature` remain — by design.
@@ -5882,7 +5517,7 @@ mod tests {
             issue_type: Patch::Set("feature".into()),
             ..Default::default()
         };
-        update_issue(tmp.path(), "type-same-target", req, None, &UncachedConfig).unwrap();
+        update_issue(tmp.path(), "type-same-target", req, &UncachedConfig).unwrap();
     }
 
     #[test]
@@ -5911,8 +5546,7 @@ mod tests {
             issue_type: Patch::Set("feature".into()),
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "type-reopen-target", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "type-reopen-target", req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::Validation(msg) => {
                 assert!(msg.contains("reopen"), "got {msg}");
@@ -5941,8 +5575,7 @@ mod tests {
             issue_type: Patch::Set("epic".into()),
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "type-d1-target", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "type-d1-target", req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::Validation(msg) => {
                 assert!(
@@ -5969,14 +5602,8 @@ mod tests {
             issue_type: Patch::Set("task".into()),
             ..Default::default()
         };
-        let err = update_issue(
-            tmp.path(),
-            "type-d1-epic-target",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap_err();
+        let err =
+            update_issue(tmp.path(), "type-d1-epic-target", req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::Validation(msg) => {
                 assert!(msg.contains("owner"), "got {msg}");
@@ -6003,7 +5630,7 @@ mod tests {
             issue_type: Patch::Set("spike".into()),
             ..Default::default()
         };
-        update_issue(tmp.path(), "type-custom-target", req, None, &UncachedConfig).unwrap();
+        update_issue(tmp.path(), "type-custom-target", req, &UncachedConfig).unwrap();
         let content =
             fs::read_to_string(tmp.path().join("issues/type-custom-target/item.md")).unwrap();
         assert!(content.contains("type: spike"), "got {content}");
@@ -6051,14 +5678,8 @@ mod tests {
             priority: Patch::Set("high".into()),
             ..Default::default()
         };
-        let err = update_issue(
-            tmp.path(),
-            "custom-required-target",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap_err();
+        let err =
+            update_issue(tmp.path(), "custom-required-target", req, &UncachedConfig).unwrap_err();
         match err {
             MutateError::SchemaViolation(msg) => assert!(
                 msg.contains("team"),
@@ -6097,7 +5718,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "dryrun-target-x", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "dryrun-target-x", req, &UncachedConfig).unwrap();
         assert!(out.pending_serialized.is_some());
         let pending = out.pending_serialized.unwrap();
         assert!(pending.contains("priority: high"));
@@ -6114,7 +5735,6 @@ mod tests {
             tmp.path(),
             "checkbox-target-y",
             "deploy",
-            None,
             None,
             false,
             &UncachedConfig,
@@ -6137,7 +5757,6 @@ mod tests {
             "checkbox-amb-z",
             "missing",
             None,
-            None,
             false,
             &UncachedConfig,
         )
@@ -6147,7 +5766,6 @@ mod tests {
             tmp.path(),
             "checkbox-amb-z",
             "task",
-            None,
             None,
             false,
             &UncachedConfig,
@@ -6166,7 +5784,6 @@ mod tests {
             tmp.path(),
             "checkbox-dry-q",
             "only one",
-            None,
             None,
             true,
             &UncachedConfig,
@@ -6187,7 +5804,7 @@ mod tests {
                 add_labels: vec!["backend".into()],
                 ..Default::default()
             };
-            update_issue(tmp.path(), "label-idem-w", req, None, &UncachedConfig).unwrap();
+            update_issue(tmp.path(), "label-idem-w", req, &UncachedConfig).unwrap();
         }
         let after = fs::read_to_string(tmp.path().join("issues/label-idem-w/item.md")).unwrap();
         assert_eq!(after.matches("backend").count(), 1);
@@ -6211,8 +5828,7 @@ mod tests {
             add_labels: vec!["backend".into()],
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "apply-rollback-q", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "apply-rollback-q", req, &UncachedConfig).unwrap_err();
         assert!(matches!(err, MutateError::SchemaViolation(_)));
         let after = fs::read_to_string(tmp.path().join("issues/apply-rollback-q/item.md")).unwrap();
         assert_eq!(
@@ -6246,7 +5862,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "body-ops-mix", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "body-ops-mix", req, &UncachedConfig).unwrap();
         assert!(out.version.starts_with("sha256:"));
         let after = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
         assert!(after.contains("status: testing"));
@@ -6271,7 +5887,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "body-ops-dry", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "body-ops-dry", req, &UncachedConfig).unwrap();
         let pending = out.pending_serialized.expect("dry-run carries pending");
         assert!(pending.contains("- [x] only one"));
         assert!(out.before_serialized.is_some());
@@ -6298,8 +5914,7 @@ mod tests {
             })],
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "body-ops-rollback", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "body-ops-rollback", req, &UncachedConfig).unwrap_err();
         assert!(
             matches!(&err, MutateError::Validation(s) if s.contains("body_ops[0]") && s.contains("no checkbox")),
             "got {err:?}"
@@ -6347,9 +5962,9 @@ body_ops:
 
     #[test]
     fn body_ops_deserialize_external_tag_json_shape() {
-        // PATCH /api/issues/<slug> body must accept the same external-
-        // tag shape over JSON. Pin both arms so the server contract
-        // round-trips with the YAML one above.
+        // The JSON `apply` input must accept the same external-tag
+        // shape. Pin both arms so the JSON contract round-trips with
+        // the YAML one above.
         let json = r#"{
             "body_ops": [
                 {"set_checkbox": {"match": "ship it", "checked": false}},
@@ -6438,8 +6053,7 @@ body_ops:
             body_ops: huge,
             ..Default::default()
         };
-        let err =
-            update_issue(tmp.path(), "body-ops-too-many", req, None, &UncachedConfig).unwrap_err();
+        let err = update_issue(tmp.path(), "body-ops-too-many", req, &UncachedConfig).unwrap_err();
         assert!(
             matches!(&err, MutateError::Validation(s) if s.contains("body_ops length") && s.contains("exceeds")),
             "got {err:?}"
@@ -6467,7 +6081,6 @@ body_ops:
             tmp.path(),
             "body-ops-no-schema-bootstrap",
             req,
-            None,
             &UncachedConfig,
         )
         .unwrap_err();
@@ -6496,14 +6109,7 @@ body_ops:
             })],
             ..Default::default()
         };
-        let _ = update_issue(
-            tmp.path(),
-            "body-ops-no-migrate",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap_err();
+        let _ = update_issue(tmp.path(), "body-ops-no-migrate", req, &UncachedConfig).unwrap_err();
         assert!(
             legacy_dir.join("item.md").exists(),
             "failed body op must leave legacy directory in place"
@@ -6549,7 +6155,6 @@ body_ops:
             "hi",
             crate::body_sections::COMMENTS,
             None,
-            None,
             false,
             &UncachedConfig,
         )
@@ -6580,7 +6185,6 @@ body_ops:
             "cbx-legacy-defer",
             "no-such-substring",
             None,
-            None,
             false,
             &UncachedConfig,
         )
@@ -6608,15 +6212,9 @@ body_ops:
         let _ = seed_with_body(tmp.path(), "set-cbx-version-stable", body);
         let v0 = {
             let req = UpdateIssueRequest::default();
-            update_issue(
-                tmp.path(),
-                "set-cbx-version-stable",
-                req,
-                None,
-                &UncachedConfig,
-            )
-            .unwrap()
-            .version
+            update_issue(tmp.path(), "set-cbx-version-stable", req, &UncachedConfig)
+                .unwrap()
+                .version
         };
         let req = UpdateIssueRequest {
             body_ops: vec![BodyOp::SetCheckbox(SetCheckboxOp {
@@ -6625,15 +6223,9 @@ body_ops:
             })],
             ..Default::default()
         };
-        let v1 = update_issue(
-            tmp.path(),
-            "set-cbx-version-stable",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap()
-        .version;
+        let v1 = update_issue(tmp.path(), "set-cbx-version-stable", req, &UncachedConfig)
+            .unwrap()
+            .version;
         assert_eq!(
             v0, v1,
             "no-op set_checkbox must not bump the canonical version (retry-safety contract)"
@@ -6654,14 +6246,7 @@ body_ops:
             })],
             ..Default::default()
         };
-        update_issue(
-            tmp.path(),
-            "set-cbx-uncheck-idem",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap();
+        update_issue(tmp.path(), "set-cbx-uncheck-idem", req, &UncachedConfig).unwrap();
         let after =
             fs::read_to_string(tmp.path().join("issues/set-cbx-uncheck-idem/item.md")).unwrap();
         assert!(after.contains("- [ ] already off"));
@@ -6701,7 +6286,6 @@ body_ops:
             "alice",
             "hi",
             crate::body_sections::COMMENTS,
-            None,
             None,
             false,
             &UncachedConfig,
@@ -6744,7 +6328,6 @@ body_ops:
             "warn-cbx",
             "flip me",
             None,
-            None,
             false,
             &UncachedConfig,
         )
@@ -6778,7 +6361,7 @@ body_ops:
             })],
             ..Default::default()
         };
-        update_issue(tmp.path(), "set-cbx-idem", req, None, &UncachedConfig).unwrap();
+        update_issue(tmp.path(), "set-cbx-idem", req, &UncachedConfig).unwrap();
         let after = fs::read_to_string(tmp.path().join("issues/set-cbx-idem/item.md")).unwrap();
         assert!(
             after.contains("- [x] already checked"),
@@ -6798,14 +6381,8 @@ body_ops:
             })],
             ..Default::default()
         };
-        let err = update_issue(
-            tmp.path(),
-            "body-ops-bad-author",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap_err();
+        let err =
+            update_issue(tmp.path(), "body-ops-bad-author", req, &UncachedConfig).unwrap_err();
         assert!(matches!(err, MutateError::Validation(s) if s.contains("body_ops[0].author")));
     }
 
@@ -6823,7 +6400,7 @@ body_ops:
             dry_run: true,
             ..Default::default()
         };
-        let _ = update_issue(tmp.path(), "dryrun-no-schema-x", req, None, &UncachedConfig).unwrap();
+        let _ = update_issue(tmp.path(), "dryrun-no-schema-x", req, &UncachedConfig).unwrap();
         assert!(
             !schema_path.exists(),
             "dry-run must not create issues/.schema.yaml"
@@ -6850,14 +6427,7 @@ body_ops:
             dry_run: true,
             ..Default::default()
         };
-        let _ = update_issue(
-            tmp.path(),
-            "dryrun-no-migrate-y",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap();
+        let _ = update_issue(tmp.path(), "dryrun-no-migrate-y", req, &UncachedConfig).unwrap();
         assert!(legacy_dir.exists(), "dry-run must not move the legacy dir");
         assert!(
             !flat_dir.exists(),
@@ -6877,7 +6447,7 @@ body_ops:
             dry_run: true,
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "dryrun-before-w", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "dryrun-before-w", req, &UncachedConfig).unwrap();
         let before = out.before_serialized.expect("dry-run must capture before");
         let after = out.pending_serialized.expect("dry-run must capture after");
         assert!(before.contains("priority: normal"));
@@ -6914,7 +6484,6 @@ body_ops:
             "fence-target-z",
             "example",
             None,
-            None,
             false,
             &UncachedConfig,
         )
@@ -6925,7 +6494,6 @@ body_ops:
             tmp.path(),
             "fence-target-z",
             "real",
-            None,
             None,
             false,
             &UncachedConfig,
@@ -6955,7 +6523,6 @@ body_ops:
             "hello",
             crate::body_sections::COMMENTS,
             None,
-            None,
             false,
             &UncachedConfig,
         )
@@ -6981,7 +6548,6 @@ body_ops:
             tmp.path(),
             "check-schema-target-r",
             "only one",
-            None,
             None,
             false,
             &UncachedConfig,
@@ -7043,7 +6609,7 @@ body_ops:
             },
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "apply-happy-path", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "apply-happy-path", req, &UncachedConfig).unwrap();
         assert_ne!(out.version, v0);
         let after = fs::read_to_string(tmp.path().join("issues/apply-happy-path/item.md")).unwrap();
         assert!(after.contains("priority: high"));
@@ -7075,14 +6641,8 @@ body_ops:
             status: Patch::Clear,
             ..Default::default()
         };
-        let err = update_issue(
-            tmp.path(),
-            "status-clear-legacy",
-            req,
-            None,
-            &UncachedConfig,
-        )
-        .unwrap_err();
+        let err =
+            update_issue(tmp.path(), "status-clear-legacy", req, &UncachedConfig).unwrap_err();
         assert!(matches!(err, MutateError::Validation(_)));
 
         assert!(
@@ -7119,7 +6679,7 @@ body_ops:
             dry_run: true,
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "raw-bytes-target", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "raw-bytes-target", req, &UncachedConfig).unwrap();
         let before = out.before_serialized.expect("dry-run captures before");
         assert_eq!(
             before, raw,
@@ -7155,7 +6715,7 @@ body_ops:
             dry_run: true,
             ..Default::default()
         };
-        let out = update_issue(tmp.path(), "legacy-finaldir", req, None, &UncachedConfig).unwrap();
+        let out = update_issue(tmp.path(), "legacy-finaldir", req, &UncachedConfig).unwrap();
         assert_eq!(
             out.issue_dir,
             tmp.path().join("issues/legacy-finaldir"),
@@ -7175,7 +6735,6 @@ body_ops:
             "alice",
             "go with option B",
             crate::body_sections::DECISIONS,
-            None,
             None,
             false,
             &UncachedConfig,

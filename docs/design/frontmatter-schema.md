@@ -97,9 +97,8 @@ rejected (mutations) or reported (doctor).
   the field in `issues/.schema.yaml` with a wider `enum`; the
   built-in default stays intentionally narrow.
 
-- **API surface for custom fields.** Both `issuectl new --field
-  key=value` (CLI) and `POST /api/issues` with `"custom_fields":
-  {...}` (web) accept arbitrary scalar custom fields. Built-in
+- **API surface for custom fields.** `issuectl new --field
+  key=value` accepts arbitrary scalar custom fields. Built-in
   keys (`type`, `priority`, ...) are reserved and must use their
   dedicated flag/field to keep clap-level validation in play.
 

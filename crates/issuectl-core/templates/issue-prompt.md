@@ -251,7 +251,7 @@ as `update`; body-only mutation.
   compare-and-swap): when passed, the write fails on a version mismatch;
   it is enforced whenever passed. **Pass it** when your flow is
   read-then-write and another writer could interleave (multiple agents,
-  human + agent, CLI + web board) — fetch the token from `show --json`
+  human + agent) — fetch the token from `show --json`
   and pass it back unchanged. Omit it only when you are the sole writer;
   omitting it is an unguarded write (a concurrent update can be lost —
   `flock` still prevents a corrupt/torn file, but it does not detect a
@@ -547,21 +547,6 @@ status at `open`. Reception filing goes through `issuectl intake file`.
 The `/issue-intake` skill drives the developer/PM side (queue → drive
 `/worktree-bug-analysis` on unclear items → PO briefing → stop; the disposition
 is the user's).
-
-### Action: View visually (kanban board)
-
-If the user wants to **see** issues — "show me the board", "open the
-kanban", "let me browse them visually" — start the read-only web board
-and hand them the URL:
-
-```
-issuectl serve
-# then open http://127.0.0.1:7878
-```
-
-The board is read-only; keep using the CLI for any create / update /
-close action. For details (port/host flags, security model, routes),
-run `issuectl docs kanban`.
 
 ### Action: Render an agent context bundle
 

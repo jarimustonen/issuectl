@@ -244,11 +244,8 @@ pub fn load(root: &Path) -> Result<Arc<TransitionRules>> {
     Ok(Arc::new(load_uncached(root)?))
 }
 
-/// Direct, unconditional parse. Used by `repo_config::RepoConfigCache`
-/// to populate cache entries — calling `load` from inside the cache
-/// would re-enter the cache lookup and defeat the point. Also the
-/// path `load` takes for every read now that the activation
-/// thread-local has been removed.
+/// Direct, unconditional parse. The value carrier behind [`load`] and
+/// the [`ConfigSource`](crate::repo_config::ConfigSource) implementation.
 pub(crate) fn load_uncached(root: &Path) -> Result<TransitionRules> {
     let path = rules_path(root);
     if !path.is_file() {

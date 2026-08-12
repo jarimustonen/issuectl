@@ -383,20 +383,15 @@ pub fn default_schema() -> Schema {
 /// constrain `labels.enum` without losing the rest of the defaults.
 /// Returns the default schema unchanged when the file is missing.
 ///
-/// Always re-parses. Callers that want cross-request caching
-/// (server mode) construct a `repo_config::RepoConfigCache` and
-/// call its `schema()` method directly via the `ConfigSource`
-/// trait. Returns `Arc<Schema>` so the result is interchangeable
-/// with the cache's snapshot for downstream consumers.
+/// Always re-parses. Returns `Arc<Schema>` so the result is
+/// interchangeable across downstream consumers.
 pub fn load(root: &Path) -> Result<Arc<Schema>> {
     Ok(Arc::new(load_uncached(root)?))
 }
 
-/// Direct, unconditional parse of `issues/.schema.yaml`. Used by
-/// `repo_config::RepoConfigCache` to populate cache entries — calling
-/// `load` from inside the cache would re-enter the thread-local and
-/// defeat the point. Also the fallback `load` uses when no cache is
-/// active.
+/// Direct, unconditional parse of `issues/.schema.yaml`. The value
+/// carrier behind [`load`] and the [`ConfigSource`](crate::repo_config::ConfigSource)
+/// implementation.
 pub(crate) fn load_uncached(root: &Path) -> Result<Schema> {
     let path = schema_path(root);
     if !path.is_file() {

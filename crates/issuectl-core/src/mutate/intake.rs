@@ -506,7 +506,7 @@ fn apply_locked(
     }
     req.validate().map_err(IntakeError::from)?;
     let rules = super::load_validated_rules(root, schema, config).map_err(IntakeError::from)?;
-    super::update_issue_under_lock(root, slug, item_path, req, None, schema, &rules)
+    super::update_issue_under_lock(root, slug, item_path, req, schema, &rules)
         .map_err(IntakeError::from)
 }
 
@@ -1293,9 +1293,8 @@ mod tests {
             status: Patch::Set("in-progress".into()),
             ..Default::default()
         };
-        let err =
-            super::super::update_issue(tmp.path(), "queue-jumper", req, None, &UncachedConfig)
-                .unwrap_err();
+        let err = super::super::update_issue(tmp.path(), "queue-jumper", req, &UncachedConfig)
+            .unwrap_err();
         assert!(matches!(err, MutateError::TransitionViolation(_)), "{err}");
     }
 

@@ -151,11 +151,6 @@ terminal too, but the design centre is the agent.
 - `sync-commits` — walk git history and attach commits to issues via
   `Refs-Issue:` / `Fixes-Issue:` trailers.
 
-**Web view.** `serve` — Trello-style kanban board at
-`http://127.0.0.1:7878` with drag-and-drop status changes and an
-in-browser body editor (read-only when bound to a non-loopback
-address).
-
 **Cross-repo & customisation.**
 - `--root <PATH>` — operate on an external repo from any working
   directory.
@@ -561,25 +556,6 @@ issuectl export json    > snapshot.json
 issuectl export markdown > status-report.md
 issuectl export csv     > export.csv
 ```
-
-### Web view
-
-```sh
-issuectl serve                           # http://127.0.0.1:7878
-issuectl serve --port 9000               # different port
-issuectl serve --host 0.0.0.0            # LAN access (no auth, no TLS — trusted networks only)
-```
-
-`serve` renders `issues/` as a Trello-style kanban (Open /
-In progress / Testing / Closed + an "Other" catchall). On a loopback
-bind, cards can be dragged between columns (PATCH-back to the on-disk
-frontmatter) and bodies edited inline in the browser. Filter by type /
-assignee / epic / label / cycle / reviewer; search across slug + title;
-URL-encoded state survives reloads. The board falls back to read-only
-when bound to a non-loopback address (no auth, no TLS, so writes are
-gated to local-only by default — opt in explicitly for LAN access).
-For the full security model and write semantics, run
-`issuectl docs kanban`.
 
 ### Pointing to an external repo
 

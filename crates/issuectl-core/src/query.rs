@@ -1,5 +1,5 @@
-//! Shared query language for the CLI (`ls`, `search`), web filters
-//! (`/api/issues?q=`), and future surfaces (saved queries, reports).
+//! Shared query language for the CLI (`ls`, `search`) and future
+//! surfaces (saved queries, reports).
 //!
 //! Grammar (v1):
 //!

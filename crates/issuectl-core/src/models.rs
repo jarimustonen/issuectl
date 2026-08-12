@@ -100,8 +100,8 @@ pub struct Issue {
     /// issue, not just writes that touch the offending key. The
     /// user has to hand-edit the file to repair it. This is the
     /// conservative default — a partial `extra` would let the hash
-    /// lie about file contents — but it does mean the web/API has
-    /// no path to fix a typo'd custom key. Tracked for revisit if
+    /// lie about file contents — but it does mean there is no
+    /// programmatic path to fix a typo'd custom key. Tracked for revisit if
     /// users hit it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, JsonValue>,

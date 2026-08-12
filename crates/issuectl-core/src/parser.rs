@@ -215,8 +215,7 @@ pub fn parse_item_md_text_with_warnings(
     };
 
     // Surface legacy numeric epic refs as a warning instead of an
-    // unconditional stderr print — the doctor --fix pass migrates these
-    // and the web UI flags them inline.
+    // unconditional stderr print — the doctor --fix pass migrates these.
     if let Some(ref e) = fm.epic {
         if !e.is_empty() && e.chars().all(|c| c.is_ascii_digit()) {
             warnings.push(format!(

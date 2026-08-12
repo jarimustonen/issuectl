@@ -235,8 +235,8 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
   the random path retries internally in `claim_random_slug`. The
   non-`new` programmatic callers choose deliberately: `intake file` and
   recurring occurrences force `slug_random` (untrusted/sensitive titles;
-  many occurrences of one title), while `import` and the server `new`
-  endpoint inherit the title-derived default.
+  many occurrences of one title), while `import` inherits the
+  title-derived default.
 - **Doctor `--fix` is forward-progress only.** When the apply
   pipeline mutates the repo (flat-layout migration, status
   reconciliation, notes rename, ...) and a *later* phase finds a new
@@ -278,18 +278,17 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
   continues to work.
 - **Config reads go through `ConfigSource`, not bare `schema::load`.**
   Every mutate entry point (`update_issue`, `new_issue`, `update_body`,
-  `close_issue`, `note_issue`, `toggle_checkbox`, `do_new`) and every
-  server-side read path (`repo::load_issues_with_warnings_via`,
-  `boards::load`) takes a `&dyn ConfigSource` parameter. CLI callers
-  pass `&UncachedConfig`; server handlers pass `&*state.config` (their
-  `Arc<RepoConfigCache>`) into `spawn_blocking`. `schema::load(root)`
-  and `transitions::load(root)` are the CLI-uncached fallback — do
-  **not** call them from a new server hot path or a new mutate
-  helper, or you'll silently bypass the per-request cache (this is
-  exactly the regression `@hugely-madly-haircut` was meant to
-  eliminate). For new read helpers, follow the
-  `load_issues_with_warnings_via(root, config)` pattern: optional
-  `_via` variant takes the config; the no-config alias delegates to
+  `close_issue`, `note_issue`, `toggle_checkbox`, `do_new`) and the
+  config-taking read paths (`repo::load_issues_with_warnings_via`,
+  `repo::load_issues_with_config`) take a `&dyn ConfigSource`
+  parameter. The sole implementation is `UncachedConfig` (re-parse on
+  every call — fine for a short-lived CLI process); callers pass
+  `&UncachedConfig`. `schema::load(root)` and `transitions::load(root)`
+  are the uncached value carriers behind it. The trait is kept as the
+  load-site seam so a future caching implementation can be slotted in
+  without re-threading every signature. For new read helpers, follow
+  the `load_issues_with_warnings_via(root, config)` pattern: the `_via`
+  variant takes the config; the no-config alias delegates to
   `UncachedConfig` for CLI ergonomics.
 - **Schema `required_when` + status/type aliases drive `doctor --fix`
   coercion.** A `FieldSpec.required_when: { status_class: <class> }`

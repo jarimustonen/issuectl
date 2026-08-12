@@ -50,7 +50,7 @@ pub enum LoadWarningCode {
 /// Load the schema for read-side lifecycle classification, or fall
 /// back to the built-in default after recording a `SchemaParseError`
 /// warning. The fallback path keeps the reader functional (issues
-/// still load, the kanban board still renders) but the warning makes
+/// still load, `list`/`export` still render) but the warning makes
 /// the silent feature regression visible — without it, a typo in
 /// `.schema.yaml` would invisibly bucket custom-closing statuses as
 /// open. Mutations correctly hard-fail on the same error; readers
@@ -112,9 +112,9 @@ pub enum LayoutState {
     },
 }
 
-/// Slimmer projection of `Issue` for list endpoints — same fields minus the
-/// markdown body. The web board renders cards from frontmatter + title, so
-/// shipping bodies in `/api/issues` is wasted bandwidth and parse cost.
+/// Slimmer projection of `Issue` for list/export paths — same fields minus
+/// the markdown body. `list`/`export`/`sync-commits` render from
+/// frontmatter + title, so carrying bodies is wasted read and parse cost.
 #[derive(Debug, Clone, Serialize)]
 pub struct IssueSummary {
     pub slug: String,
@@ -134,9 +134,9 @@ pub struct IssueSummary {
     pub closed: Option<String>,
     pub commits: Option<Vec<crate::models::Commit>>,
     pub title: String,
-    /// Canonical content hash. Lets the web client send `expected_version`
-    /// on PATCHes (drag-and-drop kanban writes) without a per-card GET to
-    /// fetch the version separately.
+    /// Canonical content hash. Lets a caller pass `expected_version` on a
+    /// follow-up update (opt-in compare-and-swap) without a separate read
+    /// to fetch the version.
     pub version: String,
 }
 
@@ -202,7 +202,7 @@ pub fn find_repo_root(start: Option<&Path>) -> PathBuf {
 
 /// Folder bucket derived from frontmatter status. The on-disk layout is
 /// flat (`issues/<slug>/item.md`); `folder` survives in payloads as a
-/// computed kanban-bucket label so existing CLI/web filters keep working.
+/// computed kanban-bucket label so existing CLI filters keep working.
 ///
 /// Schema-aware: a project that declares a custom closing status (e.g.
 /// `archived`) via `status_classes:` in `issues/.schema.yaml` gets that
@@ -507,8 +507,8 @@ pub fn load_issues(repo_root: &Path) -> Vec<Issue> {
     load_issues_with_config(repo_root, &crate::repo_config::UncachedConfig)
 }
 
-/// Same as `load_issues` but with explicit config source. Server paths
-/// pass their `Arc<RepoConfigCache>`; the CLI passes `&UncachedConfig`.
+/// Same as `load_issues` but with an explicit config source (the CLI
+/// passes `&UncachedConfig`).
 pub fn load_issues_with_config(
     repo_root: &Path,
     config: &dyn crate::repo_config::ConfigSource,
@@ -555,18 +555,14 @@ pub fn load_issues_with_config(
     result
 }
 
-/// Load all issues plus per-file parse warnings. Re-parses schema each
-/// call (CLI default). Server callers should use
-/// [`load_issues_with_warnings_via`] and pass their `RepoConfigCache`
-/// to get cross-request reuse.
+/// Load all issues plus per-file parse warnings. Re-parses the schema
+/// on each call.
 pub fn load_issues_with_warnings(repo_root: &Path) -> (Vec<Issue>, Vec<LoadWarning>) {
     load_issues_with_warnings_via(repo_root, &crate::repo_config::UncachedConfig)
 }
 
 /// Same as `load_issues_with_warnings` but uses the supplied
-/// `ConfigSource` for the schema parse. Server endpoints route their
-/// `Arc<RepoConfigCache>` through this so the per-request schema reuse
-/// the cache enforces.
+/// `ConfigSource` for the schema parse.
 pub fn load_issues_with_warnings_via(
     repo_root: &Path,
     config: &dyn crate::repo_config::ConfigSource,
@@ -689,7 +685,7 @@ fn push_issue_with_parse(
     issues.push(issue);
 }
 
-/// Body-free projection used by `GET /api/issues` when the query
+/// Body-free projection used by `list`/`search` when the query
 /// has no `text:` term — saves a per-issue body read+allocate.
 pub fn load_issue_summaries(repo_root: &Path) -> (Vec<IssueSummary>, Vec<LoadWarning>) {
     let (issues, warnings) = load_issues_with_warnings(repo_root);

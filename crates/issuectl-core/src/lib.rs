@@ -21,8 +21,6 @@
 #[doc(hidden)]
 pub mod agents;
 #[doc(hidden)]
-pub mod boards;
-#[doc(hidden)]
 pub mod body;
 #[doc(hidden)]
 pub mod body_sections;
@@ -34,8 +32,6 @@ pub mod context;
 pub mod cycle;
 #[doc(hidden)]
 pub mod dag;
-#[doc(hidden)]
-pub mod docs;
 #[doc(hidden)]
 pub mod doctor;
 #[doc(hidden)]
@@ -78,8 +74,6 @@ pub mod repo_config;
 pub mod report;
 #[doc(hidden)]
 pub mod schema;
-#[doc(hidden)]
-pub mod server;
 #[doc(hidden)]
 pub mod skill;
 #[doc(hidden)]

@@ -37,10 +37,9 @@
 //!   the body, the frontmatter, or both) — the driver never produces
 //!   a parseable "merged" file with hidden conflicts.
 //!
-//! Coordination with `issuectl serve`: the driver acquires the repo
-//! `WriteLock` before writing the output and uses `write_item_atomic`,
-//! so a concurrent web mutation cannot race the merge result. The
-//! lock is held briefly per `serve` PATCH, so this never deadlocks.
+//! Concurrency: the driver acquires the repo `WriteLock` before writing
+//! the output and uses `write_item_atomic`, so a concurrent `issuectl`
+//! mutation cannot race the merge result.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
