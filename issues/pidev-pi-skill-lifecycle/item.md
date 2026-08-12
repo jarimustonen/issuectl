@@ -2,9 +2,10 @@
 title: 'pi.dev skill lifecycle: doctor drift-detection + prune for global ~/.pi mirrors'
 type: feature
 priority: normal
-status: in-progress
+status: done
 slug: pidev-pi-skill-lifecycle
 updated: 2026-08-12
+closed: 2026-08-12
 ---
 
 ## Context
@@ -48,3 +49,38 @@ same name.
 
 The dual-home write itself (done in `pidev-dual-home-skills`). This issue is
 purely the lifecycle/observability layer on top.
+
+## Comments
+
+### 2026-08-12T16:10:39Z · @jari
+
+#### Delivered
+
+**Surface chosen: dedicated `issuectl skill pi-status` / `skill pi-prune`
+subcommands** (not an extension of `issuectl doctor`). Rationale: the pi corpus
+is **home-global** (`~/.pi/agent/skills/`), whereas `doctor` is repo-scoped and
+requires a repo root (`find_root`). Housing the lifecycle commands under the
+`skill` group — which already owns the pi mirror write — keeps the global-scope
+concern out of the repo-scope tool and lets the commands run from anywhere.
+
+**Provenance:** an out-of-band, tool-namespaced manifest
+`~/.pi/agent/skills/.issuectl-manifest.json` (`skill name -> {version}`).
+Bodies stay byte-identical to the Claude copies; ownership lives in the
+manifest. Provenance follows real write events (only skills a run
+created/overwrote are recorded) — a pre-existing or hand-authored file is never
+adopted, so prune can never delete a file issuectl didn't write.
+
+**pi-status** classifies each entry (up-to-date / stale / modified / missing /
+orphan / unmanaged, `--json`). **pi-prune** removes orphans + clears missing
+rows, dry-run by default, guarded (regular-file SKILL.md in an otherwise-empty
+dir only; symlink/sibling -> `skipped`), and refuses a corrupt manifest.
+
+**Reconciliation policy: always-on-force (NOT overwrite-only-if-newer).**
+Non-force leaves an existing pi copy alone; `--force` overwrites unconditionally
+to the running version. Matches the repo-local targets and avoids brittle
+version-ordering at write time. Drift is made visible (pi-status) and reversible
+(re-install --force / prune), not guarded at write time.
+
+Hardened per a 4-model /llm-review. Follow-ups filed: pi-manifest-locking,
+pi-prune-digest-gate, pi-status-check-exit; skill uninstall remains a documented
+follow-up. Green gate: cargo test / clippy / fmt all clean.
