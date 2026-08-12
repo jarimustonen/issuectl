@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-12
+
 ### Removed
 - **The web UI and its entire HTTP surface (breaking).** `issuectl serve` —
   the local Trello-style kanban web board — is gone, along with the web
