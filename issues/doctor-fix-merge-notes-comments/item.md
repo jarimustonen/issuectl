@@ -2,11 +2,12 @@
 created: 2026-08-11
 updated: 2026-08-12
 type: feature
-status: in-progress
+status: done
 priority: low
 commits:
 - hash: 4ce8055
   summary: 'auto-merge ## Notes into ## Comments in doctor --fix'
+closed: 2026-08-12
 ---
 
 # doctor --fix: auto-merge ## Notes into ## Comments when both exist
