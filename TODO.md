@@ -118,6 +118,8 @@ LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections  (RUUHKAINEN 
     load-once-thread-schema  normal · improvement; collapse-seam-review-spinoff — thread loaded schema/rules through mutate helpers to stop redundant re-parses. Touches mutate/ + schema.
     dag-inprogress-schema-aware  normal · improvement; dag-review-spinoff — schema-aware in-progress/underway classification. Touches crate::dag.
     dag-reservations-run-id-object-shape  normal · improvement; dag-review-spinoff — dag reservations accept run_id object shape, not only array-of-holds. Touches crate::dag.
+    epic-tree-human-render-control-chars  normal · improvement; epic-tree-review-spinoff — sanitize control chars in human tree/list output. Touches epic tree render.
+    epic-tree-view-filters  normal · improvement; epic-tree-review-spinoff — optional --depth/--status/--limit filters for epic tree. Touches main.rs clap + epic tree.
     action-verb-json-echo-mutation  normal · improvement; update/label/close --json-tulos ei echoa mutatoitua kenttää (.priority/.labels/.status = null). Echo resulting value. Touches cmd_* action-verb handlerit main.rs:ssä + result-objektit.
     new-and-update-blocked-by  normal · feature (RE-SCOPED 2026-08-12 → only `new --blocked-by` at creation; `update --add-blocked-by` half already done via `depend add/remove`, 6e95b07). Touches main.rs clap + mutate/.
 LANE B — skill install + templates/ + skill.rs + pi-corpus lifecycle (skill distribution)  (RUUHKAINEN — pi-review-cascade, sarjata; all touch pi-corpus/skill.rs)
@@ -128,6 +130,8 @@ LANE B — skill install + templates/ + skill.rs + pi-corpus lifecycle (skill di
     pi-status-check-exit  low · improvement; pidev-lifecycle-review-spinoff — pi-status exit-code semantics for drift/orphans.
     pi-mirror-hint-accuracy  low · bug; pi-lock-review-spinoff — install prints "skills mirrored" hint even when pi block skipped.
     pi-status-shared-lock  low · improvement; pi-lock-review-spinoff — pi_status reads lock-free → can report a torn snapshot.
+    pi-owned-symlink-unmanaged-hidden  low · improvement; pi-metadata-review-spinoff — manifest-owned entry replaced by a symlink hides from has_findings (Unmanaged).
+    pi-prune-report-inaccessible  low · improvement; pi-metadata-review-spinoff — pi_prune should report owned Inaccessible entries instead of a silent no-op.
     pi-corpus-cross-tool-lock  low · improvement; pi-lock-review-spinoff — issuectl and orchestratectl hold separate locks; no cross-tool serialization on shared skill dirs.
 LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
     ossctl-cut-no-publish  high · bug; ossctl release cut ei julkaise oikeasti → manuaalinen cargo publish. BLOCKED upstream-ossctl:llä; kun korjattu, poista AGENTS-caveat + re-point releaset ossctliin.
