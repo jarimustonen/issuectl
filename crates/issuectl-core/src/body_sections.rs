@@ -814,32 +814,46 @@ pub fn reserved_section_warnings(body: &str) -> Vec<String> {
 /// entries into the canonical section instead of demanding a manual
 /// merge.
 ///
-/// Entry order is preserved in **document order**: when `from` appears
-/// before `into` its content is prepended to `into`'s content;
-/// otherwise it is appended. Every other section — including any
-/// section sitting between the two — is preserved in place, with only
-/// its border blank lines normalised. Detection is fence-aware, so a
-/// `## …` line inside a code fence is content, not a heading.
+/// Ordering guarantee: the relative order of the two merged sections'
+/// entries is preserved. When `from` appears before `into` its content
+/// is prepended to `into`'s content; otherwise it is appended. The
+/// canonical `into` section stays in its original document position, so
+/// any section sitting *between* the two ends up on the far side of the
+/// folded-in content — a deliberate consequence of collapsing to a
+/// single section rather than a reordering bug. Every other section is
+/// preserved in place (only its border blank lines are normalised) and
+/// the `into` heading is re-emitted in canonical form. Detection is
+/// fence-aware, so a `## …` line inside a code fence is content.
 ///
-/// Precondition (caller-enforced via `classify_notes`): exactly one
-/// `from` heading and one `into` heading. If either is absent the body
-/// is returned unchanged.
+/// Precondition (normally established by `classify_notes`): exactly one
+/// `from` heading and one `into` heading, and `from != into`. The
+/// function verifies this itself — if it does not hold (either heading
+/// absent, duplicated, or the two names equal) the body is returned
+/// unchanged, so a precondition violation degrades to a safe no-op
+/// rather than partial/among-duplicates corruption. Callers detect the
+/// no-op via `new == old` and leave the file untouched.
 pub fn merge_h2_section(body: &str, from: &str, into: &str) -> String {
+    if from == into {
+        return body.to_string();
+    }
     let lines: Vec<&str> = body.split('\n').collect();
     let h2_indices = scan_outside_fences(&lines, |_, l| is_any_h2(l));
 
     let name_at = |idx: usize| lines[idx].strip_prefix("## ").map(|r| r.trim_end());
-    let from_idx = h2_indices
-        .iter()
-        .copied()
-        .find(|&i| name_at(i) == Some(from));
-    let into_idx = h2_indices
-        .iter()
-        .copied()
-        .find(|&i| name_at(i) == Some(into));
-    let (Some(from_idx), Some(into_idx)) = (from_idx, into_idx) else {
+    let matches = |name: &str| -> Vec<usize> {
+        h2_indices
+            .iter()
+            .copied()
+            .filter(|&i| name_at(i) == Some(name))
+            .collect()
+    };
+    let (from_matches, into_matches) = (matches(from), matches(into));
+    // Enforce exact cardinality: merging among duplicates would drop the
+    // second occurrence and produce a body still carrying the alias.
+    let ([from_idx], [into_idx]) = (from_matches.as_slice(), into_matches.as_slice()) else {
         return body.to_string();
     };
+    let (from_idx, into_idx) = (*from_idx, *into_idx);
 
     // Section span = heading+1 .. next H2 heading (or EOF).
     let span_end = |start: usize| {
@@ -868,13 +882,22 @@ pub fn merge_h2_section(body: &str, from: &str, into: &str) -> String {
         if idx == from_idx {
             continue;
         }
-        let sec_body = if idx == into_idx {
-            merged_body.clone()
+        let (heading, sec_body) = if idx == into_idx {
+            // Re-emit the target heading canonically (`## <into>`) so a
+            // non-canonical source (e.g. `## Comments ` with a trailing
+            // space) doesn't leave the merged body needing another pass
+            // through `fmt`. Passthrough headings are left verbatim —
+            // reformatting unrelated sections is `fmt`'s job, not the
+            // migration's.
+            (format!("## {into}"), merged_body.clone())
         } else {
             let end = h2_indices.get(pos + 1).copied().unwrap_or(lines.len());
-            trim_blank_borders(&lines[idx + 1..end])
+            (
+                lines[idx].to_string(),
+                trim_blank_borders(&lines[idx + 1..end]),
+            )
         };
-        let mut sec = lines[idx].to_string();
+        let mut sec = heading;
         if !sec_body.is_empty() {
             sec.push_str("\n\n");
             sec.push_str(&sec_body);
@@ -982,6 +1005,77 @@ mod tests {
         let once = merge_h2_section(body, "Notes", COMMENTS);
         let twice = merge_h2_section(&once, "Notes", COMMENTS);
         assert_eq!(once, twice, "merging an already-merged body is a no-op");
+    }
+
+    #[test]
+    fn merge_h2_is_noop_when_source_equals_target() {
+        // A precondition violation (from == into) must NOT drop the
+        // section — it degrades to a safe no-op.
+        let body = "## Comments\n\ny\n";
+        assert_eq!(merge_h2_section(body, COMMENTS, COMMENTS), body);
+    }
+
+    #[test]
+    fn merge_h2_is_noop_on_duplicate_source_or_target() {
+        // Duplicate `from` (two `## Notes`) — merging would strand the
+        // second occurrence, so refuse and return unchanged.
+        let dup_from = "## Notes\n\na\n\n## Notes\n\nb\n\n## Comments\n\nc\n";
+        assert_eq!(merge_h2_section(dup_from, "Notes", COMMENTS), dup_from);
+        // Duplicate `into` (two `## Comments`) — ambiguous target.
+        let dup_into = "## Notes\n\na\n\n## Comments\n\nb\n\n## Comments\n\nc\n";
+        assert_eq!(merge_h2_section(dup_into, "Notes", COMMENTS), dup_into);
+    }
+
+    #[test]
+    fn merge_h2_canonicalises_target_heading() {
+        // A trailing-space `## Comments ` target is re-emitted canonical
+        // so the merged body doesn't need a second `fmt` pass.
+        let body = "## Notes\n\nx\n\n## Comments \n\ny\n";
+        let out = merge_h2_section(body, "Notes", COMMENTS);
+        assert_eq!(out, "## Comments\n\nx\n\ny\n");
+    }
+
+    #[test]
+    fn merge_h2_preserves_fenced_pseudo_heading_in_third_section() {
+        // A fenced `## Notes` inside an unrelated section is content and
+        // must survive verbatim; only the real `## Notes` is folded away.
+        let body = "## Notes\n\nreal\n\n## Decisions\n\n```\n## Notes\n```\n\n\
+                    ## Comments\n\nc\n";
+        let out = merge_h2_section(body, "Notes", COMMENTS);
+        assert!(
+            out.contains("```\n## Notes\n```"),
+            "fenced heading kept: {out}"
+        );
+        assert!(out.contains("real") && out.contains("c"));
+        // Exactly one `## Notes` remains — the fenced (content) one.
+        assert_eq!(
+            out.matches("## Notes").count(),
+            1,
+            "only fenced Notes: {out}"
+        );
+    }
+
+    #[test]
+    fn merge_h2_folds_empty_source_body() {
+        // `## Notes` with no entries: drop the heading, keep Comments.
+        let body = "## Notes\n\n## Comments\n\ny\n";
+        assert_eq!(
+            merge_h2_section(body, "Notes", COMMENTS),
+            "## Comments\n\ny\n"
+        );
+    }
+
+    #[test]
+    fn merge_h2_output_round_trips_through_fmt() {
+        // The merged full-item text must be a fixed point of the real
+        // formatter — otherwise `doctor --fix` would leave work for the
+        // next `fmt` run and the two would ping-pong.
+        let item = "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n\
+                    # Title\n\n## Notes\n\n### 2026-01-01T00:00:00Z · @a\n\nold\n\n\
+                    ## Comments\n\n### 2026-02-01T00:00:00Z · @b\n\nnew\n";
+        let merged = merge_h2_section(item, "Notes", COMMENTS);
+        let formatted = crate::fmt::format_text(&merged).expect("fmt");
+        assert_eq!(formatted, merged, "merge output must be fmt-canonical");
     }
 
     #[test]

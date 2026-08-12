@@ -4,6 +4,9 @@ updated: 2026-08-12
 type: feature
 status: in-progress
 priority: low
+commits:
+- hash: 4ce8055
+  summary: 'auto-merge ## Notes into ## Comments in doctor --fix'
 ---
 
 # doctor --fix: auto-merge ## Notes into ## Comments when both exist

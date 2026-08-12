@@ -4351,9 +4351,19 @@ mod tests {
             "no manual-merge leftovers: {:?}",
             outcome.notes_conflicts_at_apply
         );
-        // A second doctor run is a clean no-op (idempotent merge).
-        let r2 = scan(tmp.path()).unwrap();
+        // A second doctor run is a clean no-op (idempotent merge) and
+        // leaves the file byte-for-byte unchanged.
+        let mut r2 = scan(tmp.path()).unwrap();
         assert!(r2.notes_to_rename.is_empty() && r2.notes_conflicts.is_empty());
+        let actions2 = DoctorActions::from_findings(&mut r2);
+        apply(
+            tmp.path(),
+            actions2,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        let after_second = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert_eq!(after, after_second, "second --fix must not mutate the file");
     }
 
     #[test]
