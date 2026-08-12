@@ -111,16 +111,19 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: pidev-pi-skill-lifecycle   ← LANE B, parallel-safe, oli käyttäjän "5 asap"-setissä. ossctl-cut on high mutta upstream-blocked.
-LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections  (RUUHKAINEN — 5 issueä, sarjata)
-    collapse-configsource-seam  normal · improvement; server poissa → single-impl ConfigSource-seam voi romahtaa. Touches mutate/ + repo read paths.
+GLOBAL HEAD-OF-LINE: flock-write-test-coverage   ← LANE A head (pidev + collapse landed). LANE A (mutate/main.rs) ‖ LANE B (skill.rs/pi) run disjoint. ossctl-cut high but upstream-blocked.
+LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections  (RUUHKAINEN — sarjata)
     flock-write-test-coverage  normal · task; palauta write-under-flock-testikattavuus (server-testit antoivat sen ennen). Touches mutate/ tests.
+    configsource-load-return-value  normal · improvement; collapse-seam-review-spinoff — return schema/transitions load BY VALUE now that the cache is gone. Touches mutate/ + config load.
+    load-once-thread-schema  normal · improvement; collapse-seam-review-spinoff — thread loaded schema/rules through mutate helpers to stop redundant re-parses. Touches mutate/ + schema.
     new-and-update-blocked-by  normal · feature (RE-SCOPED 2026-08-12 → only `new --blocked-by` at creation; `update --add-blocked-by` half already done via `depend add/remove`, 6e95b07). Touches main.rs clap + mutate/.
     dag-lists-closed-issues  normal · bug; issuectl dag listaa suljetut/terminaali-issuet unscheduledissa → filtteröi ei-terminaaleihin. Touches crate::dag (+ ehkä cmd_dag).
     epic-tree-view  normal · feature; `issuectl epic tree <slug>` — epic+lapset puuna. Uusi main.rs-subcommand + moduuli. Kevyt.
     action-verb-json-echo-mutation  normal · improvement; update/label/close --json-tulos ei echoa mutatoitua kenttää (.priority/.labels/.status = null). Echo resulting value. Touches cmd_* action-verb handlerit main.rs:ssä + result-objektit.
-LANE B — skill install + templates/ + skill.rs (skill distribution)
-    pidev-pi-skill-lifecycle  normal · feature; pi-korpuksen (~/.pi/agent/skills/) lifecycle: version-drift-näkyvyys, prune (orphanit esim. /triage-bugs), doctor-verify, uninstall-gap. Follow-up dual-homelle. collision: doctor/ (LANE A). orchestratectl-repossa identtinen sisar-issue.
+LANE B — skill install + templates/ + skill.rs + pi-corpus lifecycle (skill distribution)
+    pi-manifest-locking  normal · improvement; pidev-lifecycle-review-spinoff — lock the pi-corpus provenance manifest for concurrent writers. Touches skill.rs/pi lifecycle.
+    pi-prune-digest-gate  normal · improvement; pidev-lifecycle-review-spinoff — gate pi-prune on a content digest before removing. Touches skill.rs/pi prune.
+    pi-status-check-exit  low · improvement; pidev-lifecycle-review-spinoff — pi-status exit-code semantics for drift/orphans. Touches skill.rs/pi status.
 LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
     ossctl-cut-no-publish  high · bug; ossctl release cut ei julkaise oikeasti → manuaalinen cargo publish. BLOCKED upstream-ossctl:llä; kun korjattu, poista AGENTS-caveat + re-point releaset ossctliin.
 ```
