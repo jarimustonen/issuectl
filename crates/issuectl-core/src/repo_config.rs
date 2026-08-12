@@ -18,11 +18,12 @@ use crate::schema::{self, Schema};
 use crate::transitions::{self, TransitionRules};
 
 /// Read-side abstraction over "where do `schema` and `transitions`
-/// come from for this call?". The sole implementation is
-/// [`UncachedConfig`] (re-parse on every call — fine for short-lived
-/// CLI commands). The trait is kept as the load-site seam: every
-/// mutate entry point takes a `&dyn ConfigSource` parameter, so the
-/// config load reaches the load site through the function signature.
+/// come from for this call?". The only implementation provided by
+/// `issuectl-core` is [`UncachedConfig`] (re-parse on every call —
+/// fine for short-lived CLI commands). The trait is kept as the
+/// load-site seam: every mutate entry point takes a `&dyn ConfigSource`
+/// parameter, so the config load reaches the load site through the
+/// function signature.
 pub trait ConfigSource: Send + Sync {
     /// Return a snapshot of the parsed schema for `root`.
     fn schema(&self, root: &Path) -> Result<Arc<Schema>>;
