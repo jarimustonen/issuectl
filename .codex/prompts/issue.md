@@ -136,6 +136,13 @@ Use the CLI rather than greppa hakemistoa. The CLI knows the frontmatter schema.
     behavior.
 - Include closed: `--all` (both) or `--closed` (only closed)
 - Show details for one: `issuectl --json show <slug>`
+- Epic hierarchy as a tree: `issuectl --json epic tree <slug>` renders the
+  epic plus its child issues (issues whose `epic:` points at it; a child
+  epic is expanded in turn). Read-only. `--json` emits it structurally —
+  a node object `{slug,title,status,priority,type,children:[…]}` for one
+  epic, or an array of such nodes for every top-level epic when the slug
+  is omitted (`issuectl --json epic tree`). A missing slug exits `1` with
+  the `not-found` error envelope.
 - Search (same query syntax; bareword shorthand): `issuectl --json search KEYWORD [--all]`
   - Also: `issuectl --json search "deadlock text:flock"`
 - Stats: `issuectl --json stats`

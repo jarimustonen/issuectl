@@ -9,8 +9,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::{
     agents, body_sections, canonical, context, cycle as cycle_mod, dag, doctor, duplicates,
-    estimate as estimate_mod, fmt, hooks, init as init_cmd, merge_driver, models, mutate, query,
-    recurrence, repo, report as report_mod, schema, skill, slug, sync_commits,
+    epic_tree, estimate as estimate_mod, fmt, hooks, init as init_cmd, merge_driver, models,
+    mutate, query, recurrence, repo, report as report_mod, schema, skill, slug, sync_commits,
 };
 
 const TOP_LEVEL_HELP: &str = "\
@@ -1272,6 +1272,15 @@ enum Command {
         reservations: Option<String>,
     },
 
+    /// Epic navigation views (read-only).
+    ///
+    /// Epics gather child issues via each child's `epic:` back-reference.
+    /// `epic tree <slug>` renders that hierarchy as an indented tree.
+    Epic {
+        #[command(subcommand)]
+        action: EpicAction,
+    },
+
     /// Linear-style lightweight cycles (iterations).
     ///
     /// Issues opt in via an optional `cycle:` frontmatter label
@@ -1340,6 +1349,23 @@ impl From<ExportFmt> for issuectl_core::transfer::ExportFormat {
             ExportFmt::Csv => Self::Csv,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum EpicAction {
+    /// Print an epic and its child issues as an indented tree. Children
+    /// are the issues whose `epic:` back-reference points at the epic;
+    /// a child that is itself an epic is expanded in turn. Read-only.
+    ///
+    /// With a `<slug>`, roots the tree at that issue. Without one, prints
+    /// a forest of every top-level epic. `--json` emits the tree
+    /// structurally (a nested `children` array per node).
+    Tree {
+        /// Epic to render. Accepts a bare slug or `@<slug>`, and a unique
+        /// prefix. Omit to render all top-level epics.
+        #[arg(value_parser = parse_slug_arg)]
+        slug: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2431,6 +2457,9 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             } => cmd_depend(json_output, &slug, blocked_by, false, expected_version),
         },
         Command::Dag { reservations } => cmd_dag(json_output, reservations),
+        Command::Epic { action } => match action {
+            EpicAction::Tree { slug } => cmd_epic_tree(json_output, slug.as_deref()),
+        },
         Command::Workload => cmd_workload(json_output),
         Command::Burndown { cycle } => cmd_burndown(json_output, &cycle),
         Command::Cycle { action } => match action {
@@ -5141,6 +5170,98 @@ fn print_dag_row(mark: &str, i: &dag::DagIssue) {
     println!(
         "  {mark} {:<28} {:<12} {}{}",
         i.slug, i.status, i.title, suffix
+    );
+}
+
+/// Render an epic (or, with no slug, every top-level epic) and its child
+/// issues as a tree. Read-only: children are derived on read from each
+/// issue's `epic:` back-reference via `epic_tree::build`. `--json` emits
+/// the tree structurally — a single node object for one epic, an array of
+/// nodes for the no-slug forest — matching how `show`/`ls` shape theirs.
+fn cmd_epic_tree(json: bool, slug: Option<&str>) -> Result<()> {
+    let root = find_root();
+    let issues = load();
+
+    let Some(slug) = slug else {
+        // No slug → forest of every top-level epic.
+        let forest = epic_tree::build_forest(&issues);
+        if json {
+            println!("{}", serde_json::to_string_pretty(&forest)?);
+        } else if forest.is_empty() {
+            println!("(no epics)");
+        } else {
+            for (idx, node) in forest.iter().enumerate() {
+                if idx > 0 {
+                    println!();
+                }
+                print_epic_tree(node);
+            }
+        }
+        return Ok(());
+    };
+
+    // Prefix / `@` expansion, mirroring `show`: a unique prefix resolves,
+    // an ambiguous one surfaces its error under the unified contract, and
+    // a no-match returns the input unchanged so the not-found path fires.
+    let resolved = match repo::resolve_slug_input(&root, slug) {
+        Ok(s) => s,
+        Err(e) => fail(
+            json,
+            1,
+            "ambiguous-slug",
+            &format!("{e:#}"),
+            serde_json::Value::Null,
+        ),
+    };
+
+    match epic_tree::build(&issues, &resolved) {
+        Some(tree) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&tree)?);
+            } else {
+                print_epic_tree(&tree);
+            }
+            Ok(())
+        }
+        None => fail(
+            json,
+            1,
+            "not-found",
+            &format!("issue {slug} not found"),
+            serde_json::Value::Null,
+        ),
+    }
+}
+
+/// Human-readable epic tree. The root prints flush-left; descendants use
+/// box-drawing connectors (`├─`/`└─`) with a per-level prefix so the
+/// hierarchy is visible at a glance. `--json` is the machine contract.
+fn print_epic_tree(root: &epic_tree::TreeNode) {
+    print_epic_tree_row("", "", root);
+    print_epic_tree_children("", root);
+    let n = epic_tree::descendant_count(root);
+    let label = if n == 1 { "descendant" } else { "descendants" };
+    println!("\n{n} {label}");
+}
+
+/// Emit each child of `node`, tracking last-child so the connectors and
+/// continuation prefix (`│  ` vs. three spaces) line up.
+fn print_epic_tree_children(prefix: &str, node: &epic_tree::TreeNode) {
+    let last = node.children.len().saturating_sub(1);
+    for (idx, child) in node.children.iter().enumerate() {
+        let is_last = idx == last;
+        let connector = if is_last { "└─ " } else { "├─ " };
+        print_epic_tree_row(prefix, connector, child);
+        let child_prefix = format!("{prefix}{}", if is_last { "   " } else { "│  " });
+        print_epic_tree_children(&child_prefix, child);
+    }
+}
+
+/// One tree row: `<prefix><connector>@slug  [type/status/priority]  title`.
+fn print_epic_tree_row(prefix: &str, connector: &str, node: &epic_tree::TreeNode) {
+    println!(
+        "{prefix}{connector}@{}  [{}/{}/{}]  {}",
+        node.slug, node.issue_type, node.status, node.priority, node.title
     );
 }
 

@@ -37,6 +37,8 @@ pub mod doctor;
 #[doc(hidden)]
 pub mod duplicates;
 #[doc(hidden)]
+pub mod epic_tree;
+#[doc(hidden)]
 pub mod estimate;
 #[doc(hidden)]
 pub mod fmt;
