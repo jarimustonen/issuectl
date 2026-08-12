@@ -7,7 +7,6 @@ use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
-use issuectl_core::repo_config::UncachedConfig;
 use issuectl_core::{
     agents, body_sections, canonical, context, cycle as cycle_mod, dag, doctor, duplicates,
     estimate as estimate_mod, fmt, hooks, init as init_cmd, merge_driver, models, mutate, query,
@@ -2509,7 +2508,7 @@ fn dispatch_intake(json: bool, action: IntakeAction) -> Result<()> {
         } => intake_render(
             json,
             &slug,
-            mutate::intake::accept(&find_root(), &slug, assignee, priority, &UncachedConfig),
+            mutate::intake::accept(&find_root(), &slug, assignee, priority),
         ),
         IntakeAction::Defer {
             slug,
@@ -2518,27 +2517,27 @@ fn dispatch_intake(json: bool, action: IntakeAction) -> Result<()> {
         } => intake_render(
             json,
             &slug,
-            mutate::intake::defer(&find_root(), &slug, &reason, until, &UncachedConfig),
+            mutate::intake::defer(&find_root(), &slug, &reason, until),
         ),
         IntakeAction::NeedInfo { slug, reason } => intake_render(
             json,
             &slug,
-            mutate::intake::need_info(&find_root(), &slug, &reason, &UncachedConfig),
+            mutate::intake::need_info(&find_root(), &slug, &reason),
         ),
         IntakeAction::Reject { slug, reason, kind } => intake_render(
             json,
             &slug,
-            mutate::intake::reject(&find_root(), &slug, kind.into(), &reason, &UncachedConfig),
+            mutate::intake::reject(&find_root(), &slug, kind.into(), &reason),
         ),
         IntakeAction::CannotReproduce { slug, reason } => intake_render(
             json,
             &slug,
-            mutate::intake::cannot_reproduce(&find_root(), &slug, &reason, &UncachedConfig),
+            mutate::intake::cannot_reproduce(&find_root(), &slug, &reason),
         ),
         IntakeAction::Duplicate { slug, of } => intake_render(
             json,
             &slug,
-            mutate::intake::duplicate(&find_root(), &slug, &of, &UncachedConfig),
+            mutate::intake::duplicate(&find_root(), &slug, &of),
         ),
         IntakeAction::Obsolete {
             slug,
@@ -2547,22 +2546,22 @@ fn dispatch_intake(json: bool, action: IntakeAction) -> Result<()> {
         } => intake_render(
             json,
             &slug,
-            mutate::intake::obsolete(&find_root(), &slug, &reason, superseded_by, &UncachedConfig),
+            mutate::intake::obsolete(&find_root(), &slug, &reason, superseded_by),
         ),
         IntakeAction::Retype { slug, to } => intake_render(
             json,
             &slug,
-            mutate::intake::retype(&find_root(), &slug, &to, &UncachedConfig),
+            mutate::intake::retype(&find_root(), &slug, &to),
         ),
         IntakeAction::Reopen { slug, to, reason } => intake_render(
             json,
             &slug,
-            mutate::intake::reopen(&find_root(), &slug, to, &reason, &UncachedConfig),
+            mutate::intake::reopen(&find_root(), &slug, to, &reason),
         ),
         IntakeAction::Withdraw { slug, reason } => intake_render(
             json,
             &slug,
-            mutate::intake::withdraw(&find_root(), &slug, &reason, &UncachedConfig),
+            mutate::intake::withdraw(&find_root(), &slug, &reason),
         ),
         IntakeAction::Migrate { apply } => cmd_intake_migrate(json, apply),
     }
@@ -2602,7 +2601,7 @@ fn intake_render(
 }
 
 fn cmd_intake_file(json: bool, req: mutate::intake::FileRequest) -> Result<()> {
-    match mutate::intake::file(&find_root(), req, &UncachedConfig) {
+    match mutate::intake::file(&find_root(), req) {
         Ok(out) => {
             if json {
                 let report = serde_json::json!({
@@ -2640,7 +2639,7 @@ fn cmd_intake_file(json: bool, req: mutate::intake::FileRequest) -> Result<()> {
 /// and makes the command exit `1` — an ambiguous item is expected, a failed
 /// write is not.
 fn cmd_intake_migrate(json: bool, apply: bool) -> Result<()> {
-    let report = match mutate::intake_migrate::migrate(&find_root(), apply, &UncachedConfig) {
+    let report = match mutate::intake_migrate::migrate(&find_root(), apply) {
         Ok(r) => r,
         Err(e) => fail(
             json,
@@ -3857,7 +3856,7 @@ fn cmd_schedule_list(json: bool) -> Result<()> {
 
 fn cmd_schedule_run(json: bool, dry_run: bool) -> Result<()> {
     let root = find_root();
-    let report = recurrence::run_now(&root, &UncachedConfig, dry_run)?;
+    let report = recurrence::run_now(&root, dry_run)?;
     if json {
         // Custom-shape so `path` flattens to a plain string instead
         // of PathBuf's debug rendering — matches the rest of the
@@ -4201,7 +4200,7 @@ fn cmd_new(json: bool, args: NewArgs, check_duplicates: bool) -> Result<()> {
         // A strong match was found and printed; refuse to create.
         std::process::exit(2);
     }
-    let out = do_new(&root, args, &UncachedConfig)?;
+    let out = do_new(&root, args)?;
     if json {
         let report = serde_json::json!({
             "slug": out.slug,
@@ -4278,7 +4277,7 @@ fn run_import(
     for rec in records {
         let title = rec.title.clone();
         let args = rec.into_new_args(default_type);
-        match do_new(&root, args, &UncachedConfig) {
+        match do_new(&root, args) {
             Ok(out) => outcome.created.push((out.slug, out.title)),
             Err(e) => outcome.failed.push((title, format!("{e:#}"))),
         }
@@ -4505,8 +4504,7 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
         req.custom_fields.insert(k, mutate::Patch::Clear);
     }
 
-    let outcome =
-        mutate::update_issue(root, &args.slug, req, &UncachedConfig).map_err(anyhow::Error::new)?;
+    let outcome = mutate::update_issue(root, &args.slug, req).map_err(anyhow::Error::new)?;
     Ok(UpdateOutcome {
         final_dir: outcome.issue_dir,
         moved_to_closed: outcome.moved_to_closed,
@@ -4591,7 +4589,6 @@ pub(crate) fn do_close(
         comment,
         commit_specs,
         expected_version,
-        &UncachedConfig,
     )
     .map_err(anyhow::Error::new)?;
     Ok(UpdateOutcome {
@@ -4670,8 +4667,8 @@ fn cmd_stale(json: bool, days: i64) -> Result<()> {
 
 fn cmd_archive(json: bool, older_than: i64, dry_run: bool) -> Result<()> {
     let root = find_root();
-    let report = mutate::archive::archive_closed(&root, older_than, dry_run, &UncachedConfig)
-        .map_err(anyhow::Error::new)?;
+    let report =
+        mutate::archive::archive_closed(&root, older_than, dry_run).map_err(anyhow::Error::new)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -4962,7 +4959,6 @@ fn cmd_note(
         section,
         expected_version,
         dry_run,
-        &UncachedConfig,
     )
     .map_err(anyhow::Error::new)?;
     finish_mutation(json, slug, &outcome, dry_run, "Appended note to")
@@ -5005,8 +5001,7 @@ fn cmd_set(
         }
     }
     let root = find_root();
-    let outcome =
-        mutate::update_issue(&root, slug, req, &UncachedConfig).map_err(anyhow::Error::new)?;
+    let outcome = mutate::update_issue(&root, slug, req).map_err(anyhow::Error::new)?;
     finish_mutation(json, slug, &outcome, dry_run, "Updated")
 }
 
@@ -5018,15 +5013,8 @@ fn cmd_check(
     expected_version: Option<String>,
 ) -> Result<()> {
     let root = find_root();
-    let outcome = mutate::toggle_checkbox(
-        &root,
-        slug,
-        task,
-        expected_version,
-        dry_run,
-        &UncachedConfig,
-    )
-    .map_err(anyhow::Error::new)?;
+    let outcome = mutate::toggle_checkbox(&root, slug, task, expected_version, dry_run)
+        .map_err(anyhow::Error::new)?;
     finish_mutation(json, slug, &outcome, dry_run, "Toggled checkbox in")
 }
 
@@ -5048,8 +5036,7 @@ fn cmd_label(
         LabelOp::Remove => req.remove_labels.push(label.to_string()),
     }
     let root = find_root();
-    let outcome =
-        mutate::update_issue(&root, slug, req, &UncachedConfig).map_err(anyhow::Error::new)?;
+    let outcome = mutate::update_issue(&root, slug, req).map_err(anyhow::Error::new)?;
     finish_mutation(json, slug, &outcome, dry_run, "Updated labels for")
 }
 
@@ -5158,8 +5145,7 @@ fn cmd_depend(
         req.remove_blocked_by = blocked_by;
     }
     let root = find_root();
-    let outcome =
-        mutate::update_issue(&root, slug, req, &UncachedConfig).map_err(anyhow::Error::new)?;
+    let outcome = mutate::update_issue(&root, slug, req).map_err(anyhow::Error::new)?;
     let verb = if add {
         "Added blockers for"
     } else {
@@ -5175,8 +5161,7 @@ fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
         .with_context(|| format!("cannot parse patch fields in {}", patch_path.display()))?;
     req.dry_run = dry_run;
     let root = find_root();
-    let outcome =
-        mutate::update_issue(&root, &slug, req, &UncachedConfig).map_err(anyhow::Error::new)?;
+    let outcome = mutate::update_issue(&root, &slug, req).map_err(anyhow::Error::new)?;
     finish_mutation(json, &slug, &outcome, dry_run, "Applied patch to")
 }
 
@@ -5307,14 +5292,8 @@ pub(crate) fn bulk_apply(
         return Ok(Vec::new());
     }
 
-    let outcomes = mutate::bulk_update(
-        root,
-        &slugs,
-        |dr| build_bulk_request(spec, dr),
-        dry_run,
-        &UncachedConfig,
-    )
-    .map_err(anyhow::Error::new)?;
+    let outcomes = mutate::bulk_update(root, &slugs, |dr| build_bulk_request(spec, dr), dry_run)
+        .map_err(anyhow::Error::new)?;
 
     let results = slugs
         .into_iter()
@@ -5552,7 +5531,7 @@ fn cmd_body_set(
     // `update_body` re-adds the canonical leading newline.
     let body = body.trim_end().to_string();
     let root = find_root();
-    let outcome = mutate::update_body(&root, slug, expected_version, body, false, &UncachedConfig)
+    let outcome = mutate::update_body(&root, slug, expected_version, body, false)
         .map_err(anyhow::Error::new)?;
     if json {
         let report = serde_json::json!({
@@ -5883,7 +5862,7 @@ fn cmd_scan_todos(json: bool, create_inbox: bool) -> Result<()> {
                 inbox: true,
                 ..mutate::new_issue::NewArgs::default()
             };
-            match do_new(&root, args, &UncachedConfig) {
+            match do_new(&root, args) {
                 Ok(out) => {
                     if !json {
                         println!(
@@ -6692,7 +6671,7 @@ mod tests {
         let mut a = new_args("task", "Reserved");
         a.slug = Some("reserved-notes".into());
         a.description = Some("intro\n\n## Notes\n\nlegacy content".into());
-        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let n = do_new(tmp.path(), a).unwrap();
         // Write still happened.
         assert!(n.item_path.exists());
         // ...and a reserved-section warning was surfaced.
@@ -6711,7 +6690,7 @@ mod tests {
         let mut a = new_args("task", "Reserved");
         a.slug = Some("notes-after-rule".into());
         a.description = Some("intro\n\n---\n\n## Notes\n\nlegacy content".into());
-        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let n = do_new(tmp.path(), a).unwrap();
         assert_eq!(n.warnings.len(), 1, "warnings={:?}", n.warnings);
         assert!(n.warnings[0].contains("## Notes"));
     }
@@ -6722,7 +6701,7 @@ mod tests {
         let mut a = new_args("task", "Clean");
         a.slug = Some("clean-body".into());
         a.description = Some("intro\n\n## Comments\n\nfine".into());
-        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let n = do_new(tmp.path(), a).unwrap();
         assert!(n.warnings.is_empty(), "warnings={:?}", n.warnings);
     }
 
@@ -6731,14 +6710,13 @@ mod tests {
         let tmp = fresh_repo();
         let mut a = new_args("task", "Body target");
         a.slug = Some("body-target".into());
-        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let n = do_new(tmp.path(), a).unwrap();
         let outcome = mutate::update_body(
             tmp.path(),
             &n.slug,
             None,
             "fresh body\n\n## Notes\n\nlegacy".into(),
             false,
-            &UncachedConfig,
         )
         .unwrap();
         assert_eq!(outcome.warnings.len(), 1, "warnings={:?}", outcome.warnings);
@@ -6752,14 +6730,13 @@ mod tests {
         let tmp = fresh_repo();
         let mut a = new_args("task", "Body clean");
         a.slug = Some("body-clean".into());
-        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let n = do_new(tmp.path(), a).unwrap();
         let outcome = mutate::update_body(
             tmp.path(),
             &n.slug,
             None,
             "fresh body\n\n## Comments\n\nfine".into(),
             false,
-            &UncachedConfig,
         )
         .unwrap();
         assert!(
@@ -6776,7 +6753,7 @@ mod tests {
         a.slug = Some("my-test-slug".into());
         a.reporter = Some("rep".into());
         a.assignee = Some("ass".into());
-        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let n = do_new(tmp.path(), a).unwrap();
         do_update(
             tmp.path(),
             UpdateArgs {
@@ -6797,7 +6774,7 @@ mod tests {
         a.slug = Some("close-me".into());
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
-        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let n = do_new(tmp.path(), a).unwrap();
         let outcome = do_update(
             tmp.path(),
             UpdateArgs {
@@ -6821,7 +6798,7 @@ mod tests {
         let mut a = new_args("task", "T");
         a.slug = Some("task-x".into());
         a.epic = Some("api-v2".into());
-        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let n = do_new(tmp.path(), a).unwrap();
         do_update(
             tmp.path(),
             UpdateArgs {
@@ -6843,7 +6820,7 @@ mod tests {
         let tmp = fresh_repo();
         let mut a = new_args("task", "T");
         a.slug = Some("seq-x".into());
-        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let n = do_new(tmp.path(), a).unwrap();
 
         do_update(
             tmp.path(),
@@ -6893,7 +6870,7 @@ mod tests {
         let mut a = new_args("task", "T");
         a.slug = Some("task-y".into());
         a.epic = Some("api-v2".into());
-        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let n = do_new(tmp.path(), a).unwrap();
         do_update(
             tmp.path(),
             UpdateArgs {
@@ -6914,7 +6891,7 @@ mod tests {
         a.slug = Some("bug-slug".into());
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
-        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let n = do_new(tmp.path(), a).unwrap();
         let outcome = do_close(tmp.path(), &n.slug, None, None, None, vec![], None).unwrap();
         assert!(outcome.moved_to_closed);
         let content = read(&outcome.final_dir.join("item.md"));
@@ -6928,7 +6905,7 @@ mod tests {
         a.slug = Some("task-slug".into());
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
-        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let n = do_new(tmp.path(), a).unwrap();
         let outcome = do_close(tmp.path(), &n.slug, None, None, None, vec![], None).unwrap();
         let content = read(&outcome.final_dir.join("item.md"));
         assert!(content.contains("status: done"));
@@ -6941,7 +6918,7 @@ mod tests {
         a.slug = Some("once-only".into());
         a.reporter = Some("r".into());
         a.assignee = Some("a".into());
-        let n = do_new(tmp.path(), a, &UncachedConfig).unwrap();
+        let n = do_new(tmp.path(), a).unwrap();
         do_close(tmp.path(), &n.slug, None, None, None, vec![], None).unwrap();
         assert!(do_close(tmp.path(), &n.slug, None, None, None, vec![], None).is_err());
     }

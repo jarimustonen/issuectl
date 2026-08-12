@@ -244,8 +244,7 @@ pub fn load(root: &Path) -> Result<Arc<TransitionRules>> {
     Ok(Arc::new(load_uncached(root)?))
 }
 
-/// Direct, unconditional parse. The value carrier behind [`load`] and
-/// the [`ConfigSource`](crate::repo_config::ConfigSource) implementation.
+/// Direct, unconditional parse. The value carrier behind [`load`].
 pub(crate) fn load_uncached(root: &Path) -> Result<TransitionRules> {
     let path = rules_path(root);
     if !path.is_file() {

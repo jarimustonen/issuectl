@@ -51,7 +51,6 @@
 use std::path::Path;
 
 use crate::models::Issue;
-use crate::repo_config::ConfigSource;
 use crate::schema::{is_closing, Schema};
 use crate::transitions::TransitionRules;
 
@@ -299,24 +298,19 @@ pub(crate) fn plan_issue(issue: &Issue, schema: &Schema) -> Option<MigrateAction
 /// serialized against other writers; each issue's write is still
 /// individually atomic, so a mid-pass I/O error leaves earlier issues
 /// committed and a re-run resumes cleanly (the pass is idempotent).
-pub fn migrate(
-    root: &Path,
-    apply: bool,
-    config: &dyn ConfigSource,
-) -> Result<MigrateReport, IntakeError> {
+pub fn migrate(root: &Path, apply: bool) -> Result<MigrateReport, IntakeError> {
     // A single lock for the whole pass: for apply it serializes the batch;
     // for dry-run it gives a consistent snapshot (no writer slips in
     // between load and report).
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    let schema = config
-        .schema(root)
-        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let schema =
+        crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     // Empty rules ⇒ the repo's opt-in transition graph is bypassed for this
     // repair pass; the intrinsic invariants inside `update_issue_under_lock`
     // still apply. See the module docs.
     let empty_rules = TransitionRules::default();
 
-    let issues = crate::repo::load_issues_with_config(root, config);
+    let issues = crate::repo::load_issues(root);
 
     let mut actions: Vec<MigrateAction> = Vec::new();
     for issue in &issues {
@@ -385,7 +379,6 @@ fn apply_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo_config::UncachedConfig;
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
@@ -424,13 +417,13 @@ mod tests {
     }
 
     fn schema() -> std::sync::Arc<Schema> {
-        UncachedConfig.schema(&std::env::temp_dir()).unwrap()
+        crate::schema::load(&std::env::temp_dir()).unwrap()
     }
 
     /// Load the schema a repo actually declares (for tests that write a
     /// custom `.schema.yaml` — e.g. custom statuses / provenance enum).
     fn schema_at(root: &Path) -> std::sync::Arc<Schema> {
-        UncachedConfig.schema(root).unwrap()
+        crate::schema::load(root).unwrap()
     }
 
     // ── plan_issue: one test per §6 table row ────────────────────────────
@@ -584,7 +577,7 @@ mod tests {
             "dr-item",
             "slug: dr-item\ntype: bug\nstatus: open\nlabels: [needs-triage, via:telegram]\n",
         );
-        let report = migrate(tmp.path(), false, &UncachedConfig).unwrap();
+        let report = migrate(tmp.path(), false).unwrap();
         assert!(!report.applied);
         assert_eq!(report.migrated_count(), 1);
         // Nothing on disk changed.
@@ -601,7 +594,7 @@ mod tests {
             "ap-item",
             "slug: ap-item\ntype: bug\nstatus: open\nlabels: [needs-triage, via:telegram]\n",
         );
-        let r1 = migrate(tmp.path(), true, &UncachedConfig).unwrap();
+        let r1 = migrate(tmp.path(), true).unwrap();
         assert!(r1.applied);
         assert_eq!(r1.migrated_count(), 1);
         assert!(r1.actions[0].applied);
@@ -616,7 +609,7 @@ mod tests {
         );
 
         // Second run: nothing left to do.
-        let r2 = migrate(tmp.path(), true, &UncachedConfig).unwrap();
+        let r2 = migrate(tmp.path(), true).unwrap();
         assert!(r2.actions.is_empty(), "idempotent — no-op on re-run");
     }
 
@@ -631,7 +624,7 @@ mod tests {
             "graphed-item",
             "slug: graphed\ntype: bug\nstatus: open\nlabels: [needs-triage]\n",
         );
-        let r = migrate(tmp.path(), true, &UncachedConfig).unwrap();
+        let r = migrate(tmp.path(), true).unwrap();
         assert_eq!(r.migrated_count(), 1);
         assert_eq!(load(tmp.path(), "graphed-item").status, "untriaged");
     }
@@ -644,7 +637,7 @@ mod tests {
             "skip-me",
             "slug: skip-me\ntype: bug\nstatus: open\nlabels: [needs-triage, deferred]\n",
         );
-        let r = migrate(tmp.path(), true, &UncachedConfig).unwrap();
+        let r = migrate(tmp.path(), true).unwrap();
         assert_eq!(r.skipped_count(), 1);
         assert!(!r.actions[0].applied);
         // Untouched on disk.
@@ -662,7 +655,7 @@ mod tests {
             "wip-item",
             "type: bug\nstatus: in-progress\nassignee: bob\nlabels: [needs-triage]\n",
         );
-        let r = migrate(tmp.path(), true, &UncachedConfig).unwrap();
+        let r = migrate(tmp.path(), true).unwrap();
         assert_eq!(r.migrated_count(), 1);
         let after = load(tmp.path(), "wip-item");
         assert_eq!(after.status, "in-progress", "no regression");
@@ -751,7 +744,7 @@ mod tests {
             "bad-item",
             "type: bug\nstatus: open\nlabels: [via:telegram]\n",
         );
-        let r = migrate(tmp.path(), true, &UncachedConfig).unwrap();
+        let r = migrate(tmp.path(), true).unwrap();
         assert_eq!(r.failed_count(), 1, "the telegram write failed");
         assert_eq!(r.migrated_count(), 1, "the other item still migrated");
         // The good one is committed; the bad one is untouched (still open,

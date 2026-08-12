@@ -209,7 +209,7 @@ pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
             status: Patch::Unspecified,
             ..Default::default()
         };
-        mutate::update_issue(repo_root, &slug, req, &crate::repo_config::UncachedConfig)
+        mutate::update_issue(repo_root, &slug, req)
             .map_err(|e| anyhow::anyhow!("updating @{slug}: {e}"))?;
         report.applied.insert(slug, count);
     }

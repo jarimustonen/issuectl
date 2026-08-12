@@ -35,7 +35,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::mutate::new_issue::{do_new_locked, NewArgs, WriteOutcome};
 use crate::mutate::WriteLock;
-use crate::repo_config::ConfigSource;
 
 /// Directory holding recurrence definitions (one YAML per recurrence).
 pub const RECURRENCES_DIR: &str = ".issuectl/recurrences";
@@ -338,12 +337,7 @@ pub fn fires_between(
 ///
 /// `now` is injected so tests can pin the wall clock; production
 /// callers pass `Utc::now()`.
-pub fn run(
-    root: &Path,
-    config: &dyn ConfigSource,
-    now: DateTime<Utc>,
-    dry_run: bool,
-) -> Result<RunReport> {
+pub fn run(root: &Path, now: DateTime<Utc>, dry_run: bool) -> Result<RunReport> {
     // Hold the repo-wide flock around the manifest read/process/write
     // window. Without this, two parallel `schedule run` invocations
     // (e.g. system cron + a user-triggered run) would both read the
@@ -366,16 +360,7 @@ pub fn run(
     report.recurrences_evaluated = defs.len();
 
     for def in &defs {
-        if let Err(e) = run_one(
-            &lock,
-            root,
-            config,
-            def,
-            now,
-            dry_run,
-            &mut manifest,
-            &mut report,
-        ) {
+        if let Err(e) = run_one(&lock, root, def, now, dry_run, &mut manifest, &mut report) {
             // One bad definition shouldn't black-hole the whole
             // schedule. Record and continue.
             report.errors.push((def.name.clone(), format!("{e:#}")));
@@ -397,14 +382,13 @@ fn manifest_changed(a: &Manifest, b: &Manifest) -> bool {
 
 /// Wall-clock variant of [`run`] — convenience for the CLI so it
 /// doesn't have to depend on `chrono` directly.
-pub fn run_now(root: &Path, config: &dyn ConfigSource, dry_run: bool) -> Result<RunReport> {
-    run(root, config, Utc::now(), dry_run)
+pub fn run_now(root: &Path, dry_run: bool) -> Result<RunReport> {
+    run(root, Utc::now(), dry_run)
 }
 
 fn run_one(
     lock: &WriteLock,
     root: &Path,
-    config: &dyn ConfigSource,
     def: &RecurrenceDef,
     now: DateTime<Utc>,
     dry_run: bool,
@@ -469,7 +453,7 @@ fn run_one(
             continue;
         }
 
-        match materialize(lock, root, config, def, &occ_key) {
+        match materialize(lock, root, def, &occ_key) {
             Ok(outcome) => {
                 state.occurrences.push(ManifestOccurrence {
                     occurrence: occ_key.clone(),
@@ -510,7 +494,6 @@ fn run_one(
 fn materialize(
     lock: &WriteLock,
     root: &Path,
-    config: &dyn ConfigSource,
     def: &RecurrenceDef,
     occurrence_key: &str,
 ) -> Result<WriteOutcome> {
@@ -546,7 +529,7 @@ fn materialize(
     // either succeed silently and break the invariant, or deadlock,
     // depending on the platform). The outer `run()` already holds
     // it for the full read-process-write window.
-    do_new_locked(lock, root, args, config).map_err(Into::into)
+    do_new_locked(lock, root, args).map_err(Into::into)
 }
 
 fn parse_fire_time(s: &str) -> Result<DateTime<Utc>> {
@@ -558,7 +541,6 @@ fn parse_fire_time(s: &str) -> Result<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo_config::UncachedConfig;
     use chrono::TimeZone;
     use std::fs;
     use tempfile::TempDir;
@@ -630,7 +612,7 @@ mod tests {
             "title: Daily standup\nschedule: 0 0 * * *\n",
         );
         let now = Utc.with_ymd_and_hms(2026, 5, 25, 12, 0, 0).unwrap();
-        let report = run(tmp.path(), &UncachedConfig, now, false).unwrap();
+        let report = run(tmp.path(), now, false).unwrap();
         assert!(
             report.materialized.is_empty(),
             "first run should not materialize"
@@ -653,10 +635,10 @@ mod tests {
         // First run subscribes at 2026-05-25T00:00:00Z (just before
         // the first fire of the day to keep arithmetic simple).
         let t0 = Utc.with_ymd_and_hms(2026, 5, 25, 0, 0, 0).unwrap();
-        run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        run(tmp.path(), t0, false).unwrap();
         // Three days later → expect three fires (26th, 27th, 28th).
         let t1 = Utc.with_ymd_and_hms(2026, 5, 28, 12, 0, 0).unwrap();
-        let report = run(tmp.path(), &UncachedConfig, t1, false).unwrap();
+        let report = run(tmp.path(), t1, false).unwrap();
         assert_eq!(report.materialized.len(), 3);
         assert_eq!(report.materialized[0].occurrence, "2026-05-26T00:00:00Z");
         // Each materialized issue is a real file with the
@@ -678,10 +660,10 @@ mod tests {
         let tmp = fresh_repo();
         write_def(tmp.path(), "daily", "title: Daily\nschedule: 0 0 * * *\n");
         let t0 = Utc.with_ymd_and_hms(2026, 5, 25, 0, 0, 0).unwrap();
-        run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        run(tmp.path(), t0, false).unwrap();
         let t1 = Utc.with_ymd_and_hms(2026, 5, 27, 12, 0, 0).unwrap();
-        let first = run(tmp.path(), &UncachedConfig, t1, false).unwrap();
-        let again = run(tmp.path(), &UncachedConfig, t1, false).unwrap();
+        let first = run(tmp.path(), t1, false).unwrap();
+        let again = run(tmp.path(), t1, false).unwrap();
         assert_eq!(first.materialized.len(), 2);
         assert_eq!(again.materialized.len(), 0);
     }
@@ -694,7 +676,7 @@ mod tests {
         // Even the first-run subscribe step must be a no-op under
         // dry-run, so a subsequent real run still has cursor=None
         // and behaves like a true first run.
-        run(tmp.path(), &UncachedConfig, t0, true).unwrap();
+        run(tmp.path(), t0, true).unwrap();
         assert!(!manifest_path(tmp.path()).exists());
         let issues_dir = tmp.path().join("issues");
         let count_after_dry = fs::read_dir(&issues_dir).unwrap().count();
@@ -706,9 +688,9 @@ mod tests {
         let tmp = fresh_repo();
         write_def(tmp.path(), "daily", "title: D\nschedule: 0 0 * * *\n");
         let t0 = Utc.with_ymd_and_hms(2026, 5, 25, 0, 0, 0).unwrap();
-        run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        run(tmp.path(), t0, false).unwrap();
         let t1 = Utc.with_ymd_and_hms(2026, 5, 26, 12, 0, 0).unwrap();
-        run(tmp.path(), &UncachedConfig, t1, false).unwrap();
+        run(tmp.path(), t1, false).unwrap();
         // Reload manifest from disk — simulates process restart.
         let manifest = load_manifest(tmp.path()).unwrap();
         let state = manifest.recurrences.get("daily").unwrap();
@@ -722,10 +704,10 @@ mod tests {
         // Hourly cron: 60+ fires over many days will exceed the cap.
         write_def(tmp.path(), "hourly", "title: H\nschedule: 0 * * * *\n");
         let t0 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        run(tmp.path(), t0, false).unwrap();
         // ~5 months later — would be thousands of fires uncapped.
         let t1 = Utc.with_ymd_and_hms(2026, 5, 31, 0, 0, 0).unwrap();
-        let report = run(tmp.path(), &UncachedConfig, t1, false).unwrap();
+        let report = run(tmp.path(), t1, false).unwrap();
         assert_eq!(report.materialized.len(), MAX_CATCHUP_PER_RUN);
     }
 
@@ -754,7 +736,7 @@ mod tests {
         write_def(tmp.path(), "good", "title: G\nschedule: 0 0 * * *\n");
         write_def(tmp.path(), "bad", "title: B\nschedule: not-a-cron\n");
         let t0 = Utc.with_ymd_and_hms(2026, 5, 25, 0, 0, 0).unwrap();
-        let report = run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        let report = run(tmp.path(), t0, false).unwrap();
         assert_eq!(report.recurrences_evaluated, 2);
         assert_eq!(report.errors.len(), 1);
         assert_eq!(report.errors[0].0, "bad");
@@ -785,9 +767,9 @@ mod tests {
         let tmp = fresh_repo();
         write_def(tmp.path(), "hourly", "title: H\nschedule: 0 * * * *\n");
         let t0 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        run(tmp.path(), t0, false).unwrap();
         let t1 = Utc.with_ymd_and_hms(2026, 5, 31, 0, 0, 0).unwrap();
-        let report = run(tmp.path(), &UncachedConfig, t1, false).unwrap();
+        let report = run(tmp.path(), t1, false).unwrap();
         // Cap was hit because thousands of hours fit in the window.
         assert_eq!(report.capped, vec!["hourly".to_string()]);
     }
@@ -797,7 +779,7 @@ mod tests {
         let tmp = fresh_repo();
         write_def(tmp.path(), "daily", "title: D\nschedule: 0 0 * * *\n");
         let t0 = Utc.with_ymd_and_hms(2026, 5, 25, 12, 0, 0).unwrap();
-        let report = run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        let report = run(tmp.path(), t0, false).unwrap();
         assert_eq!(report.subscribed, vec!["daily".to_string()]);
         assert!(report.materialized.is_empty());
     }
@@ -810,11 +792,11 @@ mod tests {
         let tmp = fresh_repo();
         write_def(tmp.path(), "daily", "title: D\nschedule: 0 0 * * *\n");
         let t0 = Utc.with_ymd_and_hms(2026, 5, 25, 12, 0, 0).unwrap();
-        let report = run(tmp.path(), &UncachedConfig, t0, true).unwrap();
+        let report = run(tmp.path(), t0, true).unwrap();
         assert_eq!(report.subscribed, vec!["daily".to_string()]);
         assert!(!manifest_path(tmp.path()).exists());
         // A subsequent non-dry run still treats it as first-sight.
-        let report = run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        let report = run(tmp.path(), t0, false).unwrap();
         assert_eq!(report.subscribed, vec!["daily".to_string()]);
     }
 
@@ -826,7 +808,7 @@ mod tests {
         let tmp = fresh_repo();
         write_def(tmp.path(), "daily", "title: D\nschedule: 0 0 * * *\n");
         let t0 = Utc.with_ymd_and_hms(2026, 5, 25, 0, 0, 0).unwrap();
-        run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        run(tmp.path(), t0, false).unwrap();
         let mtime_before = fs::metadata(manifest_path(tmp.path()))
             .unwrap()
             .modified()
@@ -835,7 +817,7 @@ mod tests {
         // observable if the file were rewritten.
         std::thread::sleep(std::time::Duration::from_millis(50));
         // Now == cursor (no due fires) → no write.
-        run(tmp.path(), &UncachedConfig, t0, false).unwrap();
+        run(tmp.path(), t0, false).unwrap();
         let mtime_after = fs::metadata(manifest_path(tmp.path()))
             .unwrap()
             .modified()
@@ -859,7 +841,7 @@ mod tests {
         )
         .unwrap();
         let t0 = Utc.with_ymd_and_hms(2026, 5, 25, 0, 0, 0).unwrap();
-        assert!(run(tmp.path(), &UncachedConfig, t0, false).is_err());
+        assert!(run(tmp.path(), t0, false).is_err());
     }
 
     #[test]

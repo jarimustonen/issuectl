@@ -13,7 +13,6 @@ use serde::Serialize;
 
 use super::{MutateError, WriteLock};
 use crate::repo;
-use crate::repo_config::ConfigSource;
 
 /// Default `--older-than` window in days when the flag is omitted.
 pub const DEFAULT_ARCHIVE_DAYS: i64 = 90;
@@ -53,12 +52,10 @@ pub fn archive_closed(
     repo_root: &Path,
     older_than_days: i64,
     dry_run: bool,
-    config: &dyn ConfigSource,
 ) -> Result<ArchiveReport, MutateError> {
     let _lock = WriteLock::acquire(repo_root).map_err(MutateError::Io)?;
-    let schema = config
-        .schema(repo_root)
-        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let schema =
+        crate::schema::load(repo_root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let today = Local::now().date_naive();
     // One archive-tree walk shared across every per-slug layout resolve
     // below, keeping the batch O(N) rather than O(N·archive).
@@ -180,7 +177,6 @@ fn perform_move(mv: &ArchiveMove) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo_config::UncachedConfig;
     use std::fs;
     use tempfile::TempDir;
 
@@ -205,7 +201,7 @@ mod tests {
     fn archives_old_closed_issue() {
         let tmp = repo();
         seed(&tmp, "old-done-fox", "fixed", Some("2020-01-01"));
-        let report = archive_closed(tmp.path(), 90, false, &UncachedConfig).unwrap();
+        let report = archive_closed(tmp.path(), 90, false).unwrap();
         assert_eq!(report.archived.len(), 1);
         assert!(!tmp.path().join("issues/old-done-fox").exists());
         assert!(tmp
@@ -223,7 +219,7 @@ mod tests {
             .to_string();
         seed(&tmp, "fresh-done-owl", "fixed", Some(&recent));
         seed(&tmp, "active-open-elk", "open", None);
-        let report = archive_closed(tmp.path(), 90, false, &UncachedConfig).unwrap();
+        let report = archive_closed(tmp.path(), 90, false).unwrap();
         assert!(report.archived.is_empty());
         assert!(tmp.path().join("issues/fresh-done-owl").exists());
         assert!(tmp.path().join("issues/active-open-elk").exists());
@@ -233,7 +229,7 @@ mod tests {
     fn dry_run_moves_nothing() {
         let tmp = repo();
         seed(&tmp, "old-done-fox", "fixed", Some("2020-01-01"));
-        let report = archive_closed(tmp.path(), 90, true, &UncachedConfig).unwrap();
+        let report = archive_closed(tmp.path(), 90, true).unwrap();
         assert_eq!(report.archived.len(), 1);
         assert!(report.dry_run);
         assert!(tmp.path().join("issues/old-done-fox").exists());
@@ -253,7 +249,7 @@ mod tests {
             "---\nstatus: fixed\nclosed: 2020-01-01\n---\n# x\n",
         )
         .unwrap();
-        let report = archive_closed(tmp.path(), 90, false, &UncachedConfig).unwrap();
+        let report = archive_closed(tmp.path(), 90, false).unwrap();
         assert!(report.archived.is_empty());
         assert!(report.skipped.is_empty());
     }
@@ -262,7 +258,7 @@ mod tests {
     fn missing_date_is_skipped_with_reason() {
         let tmp = repo();
         seed(&tmp, "dateless-done-newt", "fixed", None);
-        let report = archive_closed(tmp.path(), 90, false, &UncachedConfig).unwrap();
+        let report = archive_closed(tmp.path(), 90, false).unwrap();
         assert!(report.archived.is_empty());
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].slug, "dateless-done-newt");

@@ -27,7 +27,6 @@ use std::path::{Path, PathBuf};
 
 use crate::canonical::canonical_hash;
 use crate::repo::folder_for_status;
-use crate::repo_config::ConfigSource;
 use crate::write;
 
 use super::new_issue::{do_new_locked, NewArgs};
@@ -223,11 +222,7 @@ pub struct FileOutcome {
 /// reception state (never `open`, so the transition matrix is not
 /// tripped), guards the field surface (OD-6), and is idempotent on
 /// `(provenance, source_ref)` (OD-10).
-pub fn file(
-    root: &Path,
-    req: FileRequest,
-    config: &dyn ConfigSource,
-) -> Result<FileOutcome, IntakeError> {
+pub fn file(root: &Path, req: FileRequest) -> Result<FileOutcome, IntakeError> {
     if req.issue_type == "epic" {
         return Err(MutateError::Validation(
             "intake file does not accept epics — an epic is planning scaffolding, not a report"
@@ -243,9 +238,8 @@ pub fn file(
     }
 
     let lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    let schema = config
-        .schema(root)
-        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let schema =
+        crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
 
     // Provenance value-set check (friendly message before schema
     // validation would raise a terser one). Only when the repo narrowed
@@ -266,7 +260,7 @@ pub fn file(
     // Idempotency: a retry with the same (provenance, source_ref) returns
     // the existing item rather than creating a second one.
     if let Some(source_ref) = req.source_ref.as_deref() {
-        let matches = matching_source_ref(root, config, &req.provenance, source_ref);
+        let matches = matching_source_ref(root, &req.provenance, source_ref);
         match matches.len() {
             0 => {}
             1 => {
@@ -332,7 +326,7 @@ pub fn file(
         inbox: false,
     };
 
-    let outcome = do_new_locked(&lock, root, new_args, config).map_err(MutateError::from)?;
+    let outcome = do_new_locked(&lock, root, new_args).map_err(MutateError::from)?;
     let parsed =
         crate::parser::parse_item_md_with_warnings(&outcome.item_path, &outcome.slug, "open");
     let mut issue = parsed.issue;
@@ -352,13 +346,8 @@ pub fn file(
 /// Slugs of existing issues carrying this exact `(provenance,
 /// source_ref)` pair. Both live in `Issue::extra` (not first-class
 /// fields).
-fn matching_source_ref(
-    root: &Path,
-    config: &dyn ConfigSource,
-    provenance: &str,
-    source_ref: &str,
-) -> Vec<String> {
-    crate::repo::load_issues_with_config(root, config)
+fn matching_source_ref(root: &Path, provenance: &str, source_ref: &str) -> Vec<String> {
+    crate::repo::load_issues(root)
         .into_iter()
         .filter(|i| {
             extra_str(i, F_PROVENANCE) == Some(provenance)
@@ -410,20 +399,14 @@ const LIFECYCLE_FIELDS: &[&str] = &[
 ];
 
 /// Execute a planned intake transition, acquiring the flock.
-fn apply(
-    root: &Path,
-    slug: &str,
-    plan: Plan,
-    config: &dyn ConfigSource,
-) -> Result<UpdateOutcome, IntakeError> {
+fn apply(root: &Path, slug: &str, plan: Plan) -> Result<UpdateOutcome, IntakeError> {
     if !crate::slug::is_valid(slug) {
         return Err(MutateError::Validation(format!("invalid slug shape: {slug:?}")).into());
     }
     let lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    let schema = config
-        .schema(root)
-        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
-    apply_locked(&lock, root, slug, plan, config, &schema)
+    let schema =
+        crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    apply_locked(&lock, root, slug, plan, &schema)
 }
 
 /// Body of [`apply`] with the flock already held. Split out so verbs that
@@ -435,7 +418,6 @@ fn apply_locked(
     root: &Path,
     slug: &str,
     plan: Plan,
-    config: &dyn ConfigSource,
     schema: &crate::schema::Schema,
 ) -> Result<UpdateOutcome, IntakeError> {
     // Read-only locate first so a precondition failure leaves no repo
@@ -505,7 +487,7 @@ fn apply_locked(
         }));
     }
     req.validate().map_err(IntakeError::from)?;
-    let rules = super::load_validated_rules(root, schema, config).map_err(IntakeError::from)?;
+    let rules = super::load_validated_rules(root, schema).map_err(IntakeError::from)?;
     super::update_issue_under_lock(root, slug, item_path, req, schema, &rules)
         .map_err(IntakeError::from)
 }
@@ -517,7 +499,6 @@ pub fn accept(
     slug: &str,
     assignee: Option<String>,
     priority: Option<String>,
-    config: &dyn ConfigSource,
 ) -> Result<UpdateOutcome, IntakeError> {
     apply(
         root,
@@ -530,7 +511,6 @@ pub fn accept(
             allowed_source: INTAKE_STATES,
             ..Default::default()
         },
-        config,
     )
 }
 
@@ -540,7 +520,6 @@ pub fn defer(
     slug: &str,
     reason: &str,
     until: Option<String>,
-    config: &dyn ConfigSource,
 ) -> Result<UpdateOutcome, IntakeError> {
     let mut set_fields = vec![(F_DISPOSITION_NOTE.to_string(), reason.trim().to_string())];
     if let Some(u) = until {
@@ -557,17 +536,11 @@ pub fn defer(
             allowed_source: &["untriaged", "needs-info", "open"],
             ..Default::default()
         },
-        config,
     )
 }
 
 /// `→ needs-info`, awaiting reporter input.
-pub fn need_info(
-    root: &Path,
-    slug: &str,
-    reason: &str,
-    config: &dyn ConfigSource,
-) -> Result<UpdateOutcome, IntakeError> {
+pub fn need_info(root: &Path, slug: &str, reason: &str) -> Result<UpdateOutcome, IntakeError> {
     apply(
         root,
         slug,
@@ -579,7 +552,6 @@ pub fn need_info(
             allowed_source: &["untriaged", "deferred", "open"],
             ..Default::default()
         },
-        config,
     )
 }
 
@@ -609,7 +581,6 @@ pub fn reject(
     slug: &str,
     kind: RejectKind,
     reason: &str,
-    config: &dyn ConfigSource,
 ) -> Result<UpdateOutcome, IntakeError> {
     apply(
         root,
@@ -642,7 +613,6 @@ pub fn reject(
             ],
             ..Default::default()
         },
-        config,
     )
 }
 
@@ -652,7 +622,6 @@ pub fn cannot_reproduce(
     root: &Path,
     slug: &str,
     reason: &str,
-    config: &dyn ConfigSource,
 ) -> Result<UpdateOutcome, IntakeError> {
     apply(
         root,
@@ -665,18 +634,12 @@ pub fn cannot_reproduce(
             allowed_source: &["untriaged", "deferred", "needs-info", "open"],
             ..Default::default()
         },
-        config,
     )
 }
 
 /// `→ duplicate` with a directed `duplicate_of` link. Rejects
 /// self-duplicates, missing targets, and cycles.
-pub fn duplicate(
-    root: &Path,
-    slug: &str,
-    of: &str,
-    config: &dyn ConfigSource,
-) -> Result<UpdateOutcome, IntakeError> {
+pub fn duplicate(root: &Path, slug: &str, of: &str) -> Result<UpdateOutcome, IntakeError> {
     if of == slug {
         return Err(IntakeError::DuplicateSelf(slug.to_string()));
     }
@@ -688,10 +651,9 @@ pub fn duplicate(
     // time-of-use gap where a concurrent writer could insert an edge that
     // makes this one cyclic.
     let lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
-    let schema = config
-        .schema(root)
-        .map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
-    let issues = crate::repo::load_issues_with_config(root, config);
+    let schema =
+        crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
+    let issues = crate::repo::load_issues(root);
     if !issues.iter().any(|i| i.slug == of) {
         return Err(IntakeError::DuplicateTargetMissing(of.to_string()));
     }
@@ -729,7 +691,6 @@ pub fn duplicate(
             allowed_source: &["untriaged", "deferred", "needs-info", "open"],
             ..Default::default()
         },
-        config,
         &schema,
     )
 }
@@ -740,7 +701,6 @@ pub fn obsolete(
     slug: &str,
     reason: &str,
     superseded_by: Option<String>,
-    config: &dyn ConfigSource,
 ) -> Result<UpdateOutcome, IntakeError> {
     let mut set_fields = vec![(F_DISPOSITION_NOTE.to_string(), reason.trim().to_string())];
     let mut note = format!("Obsolete: {}", reason.trim());
@@ -760,19 +720,13 @@ pub fn obsolete(
             allowed_source: &["untriaged", "deferred", "needs-info", "open"],
             ..Default::default()
         },
-        config,
     )
 }
 
 /// Reclassify `type` (OD-13). Valid only while the item is in an intake
 /// state; no status change. Rejects `epic` — an epic is planning
 /// scaffolding, not a triageable report (mirrors [`file`]).
-pub fn retype(
-    root: &Path,
-    slug: &str,
-    to: &str,
-    config: &dyn ConfigSource,
-) -> Result<UpdateOutcome, IntakeError> {
+pub fn retype(root: &Path, slug: &str, to: &str) -> Result<UpdateOutcome, IntakeError> {
     if to == "epic" {
         return Err(MutateError::Validation(
             "cannot retype an intake item to 'epic' — an epic is not a report".into(),
@@ -789,7 +743,6 @@ pub fn retype(
             allowed_source: INTAKE_STATES,
             ..Default::default()
         },
-        config,
     )
 }
 
@@ -803,7 +756,6 @@ pub fn reopen(
     slug: &str,
     to: Option<String>,
     reason: &str,
-    config: &dyn ConfigSource,
 ) -> Result<UpdateOutcome, IntakeError> {
     let target = to.unwrap_or_else(|| "untriaged".to_string());
     apply(
@@ -819,18 +771,12 @@ pub fn reopen(
             require_closing: true,
             ..Default::default()
         },
-        config,
     )
 }
 
 /// Reporter retracts their own untriaged report: `untriaged → wontfix`
 /// with `disposition_reason: withdrawn`.
-pub fn withdraw(
-    root: &Path,
-    slug: &str,
-    reason: &str,
-    config: &dyn ConfigSource,
-) -> Result<UpdateOutcome, IntakeError> {
+pub fn withdraw(root: &Path, slug: &str, reason: &str) -> Result<UpdateOutcome, IntakeError> {
     apply(
         root,
         slug,
@@ -845,7 +791,6 @@ pub fn withdraw(
             allowed_source: &["untriaged"],
             ..Default::default()
         },
-        config,
     )
 }
 
@@ -890,7 +835,6 @@ pub(crate) fn intrinsic_transition_violations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo_config::UncachedConfig;
     use std::fs;
     use tempfile::TempDir;
 
@@ -924,7 +868,6 @@ mod tests {
                 labels: vec![],
                 fields: vec![],
             },
-            &UncachedConfig,
         )
         .expect("file should succeed")
     }
@@ -970,9 +913,9 @@ mod tests {
             labels: vec![],
             fields: vec![],
         };
-        let first = file(tmp.path(), mk(), &UncachedConfig).unwrap();
+        let first = file(tmp.path(), mk()).unwrap();
         assert!(!first.deduplicated);
-        let second = file(tmp.path(), mk(), &UncachedConfig).unwrap();
+        let second = file(tmp.path(), mk()).unwrap();
         assert!(second.deduplicated, "retry must dedup");
         assert_eq!(first.slug, second.slug);
         // Exactly one issue on disk.
@@ -997,7 +940,6 @@ mod tests {
                 labels: vec![],
                 fields: vec![("status".into(), "fixed".into())],
             },
-            &UncachedConfig,
         )
         .unwrap_err();
         assert_eq!(err.code(), "protected-field");
@@ -1027,7 +969,6 @@ mod tests {
                 labels: vec![],
                 fields: vec![],
             },
-            &UncachedConfig,
         )
         .unwrap_err();
         match err {
@@ -1042,27 +983,13 @@ mod tests {
     fn accept_moves_to_open_and_refuses_closed() {
         let tmp = repo_with_rules();
         file_bug(tmp.path(), "A", "accept-me");
-        accept(
-            tmp.path(),
-            "accept-me",
-            Some("bob".into()),
-            None,
-            &UncachedConfig,
-        )
-        .unwrap();
+        accept(tmp.path(), "accept-me", Some("bob".into()), None).unwrap();
         assert_eq!(status_of(tmp.path(), "accept-me"), "open");
 
         // Now close it, then accept must refuse (cannot accept a closed item).
         file_bug(tmp.path(), "B", "closed-item");
-        reject(
-            tmp.path(),
-            "closed-item",
-            RejectKind::Wontfix,
-            "nope",
-            &UncachedConfig,
-        )
-        .unwrap();
-        let err = accept(tmp.path(), "closed-item", None, None, &UncachedConfig).unwrap_err();
+        reject(tmp.path(), "closed-item", RejectKind::Wontfix, "nope").unwrap();
+        let err = accept(tmp.path(), "closed-item", None, None).unwrap_err();
         assert_eq!(err.code(), "transition-illegal");
         assert_eq!(err.exit_code(), 2);
     }
@@ -1076,7 +1003,6 @@ mod tests {
             "do-later",
             "no capacity this quarter",
             Some("2026-12-01".into()),
-            &UncachedConfig,
         )
         .unwrap();
         assert_eq!(status_of(tmp.path(), "do-later"), "deferred");
@@ -1096,7 +1022,6 @@ mod tests {
             "works-as-intended",
             RejectKind::ByDesign,
             "intended behaviour",
-            &UncachedConfig,
         )
         .unwrap();
         let body = read_body(tmp.path(), "works-as-intended");
@@ -1123,11 +1048,9 @@ mod tests {
                 labels: vec![],
                 fields: vec![],
             },
-            &UncachedConfig,
         )
         .unwrap();
-        let err =
-            cannot_reproduce(tmp.path(), "shiny-feature", "n/a", &UncachedConfig).unwrap_err();
+        let err = cannot_reproduce(tmp.path(), "shiny-feature", "n/a").unwrap_err();
         assert_eq!(err.code(), "transition-illegal");
     }
 
@@ -1138,14 +1061,14 @@ mod tests {
         file_bug(tmp.path(), "B", "issue-b");
 
         // self
-        let e = duplicate(tmp.path(), "issue-a", "issue-a", &UncachedConfig).unwrap_err();
+        let e = duplicate(tmp.path(), "issue-a", "issue-a").unwrap_err();
         assert!(matches!(e, IntakeError::DuplicateSelf(_)));
         // missing target
-        let e = duplicate(tmp.path(), "issue-a", "ghost-slug", &UncachedConfig).unwrap_err();
+        let e = duplicate(tmp.path(), "issue-a", "ghost-slug").unwrap_err();
         assert!(matches!(e, IntakeError::DuplicateTargetMissing(_)));
         // cycle: a → b, then b → a must be rejected
-        duplicate(tmp.path(), "issue-a", "issue-b", &UncachedConfig).unwrap();
-        let e = duplicate(tmp.path(), "issue-b", "issue-a", &UncachedConfig).unwrap_err();
+        duplicate(tmp.path(), "issue-a", "issue-b").unwrap();
+        let e = duplicate(tmp.path(), "issue-b", "issue-a").unwrap_err();
         assert!(matches!(e, IntakeError::DuplicateCycle { .. }), "{e}");
     }
 
@@ -1153,22 +1076,8 @@ mod tests {
     fn reopen_from_closing_clears_disposition() {
         let tmp = repo_with_rules();
         file_bug(tmp.path(), "Regressed", "regressed-bug");
-        reject(
-            tmp.path(),
-            "regressed-bug",
-            RejectKind::Wontfix,
-            "later",
-            &UncachedConfig,
-        )
-        .unwrap();
-        reopen(
-            tmp.path(),
-            "regressed-bug",
-            None,
-            "reproduced on main",
-            &UncachedConfig,
-        )
-        .unwrap();
+        reject(tmp.path(), "regressed-bug", RejectKind::Wontfix, "later").unwrap();
+        reopen(tmp.path(), "regressed-bug", None, "reproduced on main").unwrap();
         assert_eq!(status_of(tmp.path(), "regressed-bug"), "untriaged");
         let body = read_body(tmp.path(), "regressed-bug");
         assert!(!body.contains("disposition_reason:"), "cleared; {body}");
@@ -1186,12 +1095,11 @@ mod tests {
             "parked-item",
             "later",
             Some("2026-12-01".into()),
-            &UncachedConfig,
         )
         .unwrap();
         assert!(read_body(tmp.path(), "parked-item").contains("deferred_until:"));
 
-        accept(tmp.path(), "parked-item", None, None, &UncachedConfig).unwrap();
+        accept(tmp.path(), "parked-item", None, None).unwrap();
         let body = read_body(tmp.path(), "parked-item");
         assert!(
             !body.contains("deferred_until:"),
@@ -1210,10 +1118,9 @@ mod tests {
             "reclass-item",
             "later",
             Some("2026-12-01".into()),
-            &UncachedConfig,
         )
         .unwrap();
-        retype(tmp.path(), "reclass-item", "feature", &UncachedConfig).unwrap();
+        retype(tmp.path(), "reclass-item", "feature").unwrap();
         let body = read_body(tmp.path(), "reclass-item");
         assert!(
             body.contains("deferred_until:"),
@@ -1240,7 +1147,6 @@ mod tests {
                 labels: vec![],
                 fields: vec![("source_ref".into(), "B".into())],
             },
-            &UncachedConfig,
         )
         .unwrap_err();
         assert_eq!(err.code(), "protected-field");
@@ -1250,7 +1156,7 @@ mod tests {
     fn retype_rejects_epic() {
         let tmp = fresh_repo();
         file_bug(tmp.path(), "NotAnEpic", "not-an-epic");
-        let err = retype(tmp.path(), "not-an-epic", "epic", &UncachedConfig).unwrap_err();
+        let err = retype(tmp.path(), "not-an-epic", "epic").unwrap_err();
         assert_eq!(err.code(), "validation");
     }
 
@@ -1259,8 +1165,8 @@ mod tests {
         let tmp = fresh_repo();
         file_bug(tmp.path(), "Oops", "mistaken-report");
         // Move out of untriaged, then withdraw must refuse.
-        accept(tmp.path(), "mistaken-report", None, None, &UncachedConfig).unwrap();
-        let err = withdraw(tmp.path(), "mistaken-report", "retract", &UncachedConfig).unwrap_err();
+        accept(tmp.path(), "mistaken-report", None, None).unwrap();
+        let err = withdraw(tmp.path(), "mistaken-report", "retract").unwrap_err();
         assert_eq!(err.code(), "transition-illegal");
     }
 
@@ -1268,7 +1174,7 @@ mod tests {
     fn retype_only_in_intake_state() {
         let tmp = fresh_repo();
         file_bug(tmp.path(), "Actually a feature", "misfiled-report");
-        retype(tmp.path(), "misfiled-report", "feature", &UncachedConfig).unwrap();
+        retype(tmp.path(), "misfiled-report", "feature").unwrap();
         assert_eq!(
             crate::repo::load_issues(tmp.path())
                 .into_iter()
@@ -1278,8 +1184,8 @@ mod tests {
             "feature"
         );
         // Accept it, then retype must refuse (not an intake state).
-        accept(tmp.path(), "misfiled-report", None, None, &UncachedConfig).unwrap();
-        let err = retype(tmp.path(), "misfiled-report", "task", &UncachedConfig).unwrap_err();
+        accept(tmp.path(), "misfiled-report", None, None).unwrap();
+        let err = retype(tmp.path(), "misfiled-report", "task").unwrap_err();
         assert_eq!(err.code(), "transition-illegal");
     }
 
@@ -1293,8 +1199,7 @@ mod tests {
             status: Patch::Set("in-progress".into()),
             ..Default::default()
         };
-        let err = super::super::update_issue(tmp.path(), "queue-jumper", req, &UncachedConfig)
-            .unwrap_err();
+        let err = super::super::update_issue(tmp.path(), "queue-jumper", req).unwrap_err();
         assert!(matches!(err, MutateError::TransitionViolation(_)), "{err}");
     }
 

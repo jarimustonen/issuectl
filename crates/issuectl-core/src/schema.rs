@@ -390,8 +390,7 @@ pub fn load(root: &Path) -> Result<Arc<Schema>> {
 }
 
 /// Direct, unconditional parse of `issues/.schema.yaml`. The value
-/// carrier behind [`load`] and the [`ConfigSource`](crate::repo_config::ConfigSource)
-/// implementation.
+/// carrier behind [`load`].
 pub(crate) fn load_uncached(root: &Path) -> Result<Schema> {
     let path = schema_path(root);
     if !path.is_file() {

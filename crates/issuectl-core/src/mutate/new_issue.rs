@@ -158,17 +158,13 @@ impl From<DoNewError> for MutateError {
     }
 }
 
-pub fn do_new(
-    root: &Path,
-    args: NewArgs,
-    config: &dyn crate::repo_config::ConfigSource,
-) -> Result<WriteOutcome> {
+pub fn do_new(root: &Path, args: NewArgs) -> Result<WriteOutcome> {
     // M1 contract: every issuectl-mediated writer holds the repo
     // `flock`. Without this acquire, concurrent `issuectl new` from
     // the terminal would race against server-side mutations and
     // bypass the protocol's serialization guarantee.
     let lock = WriteLock::acquire(root)?;
-    Ok(do_new_locked(&lock, root, args, config)?)
+    Ok(do_new_locked(&lock, root, args)?)
 }
 
 /// Body of `do_new` that assumes the caller holds the repo `WriteLock`.
@@ -180,7 +176,6 @@ pub(crate) fn do_new_locked(
     _lock: &WriteLock,
     root: &Path,
     args: NewArgs,
-    config: &dyn crate::repo_config::ConfigSource,
 ) -> std::result::Result<WriteOutcome, DoNewError> {
     schema::ensure_default_written(root).map_err(DoNewError::Io)?;
     if args.issue_type == "epic" {
@@ -242,9 +237,8 @@ pub(crate) fn do_new_locked(
     // string parsing that the previous version used (and that subtly
     // duplicated the fragile `find("\n---")` splitter logic).
     let frontmatter = write::build_new_frontmatter(&new_args);
-    let schema = config
-        .schema(root)
-        .map_err(|e| DoNewError::SchemaConfig(format!("{e:#}")))?;
+    let schema =
+        crate::schema::load(root).map_err(|e| DoNewError::SchemaConfig(format!("{e:#}")))?;
     {
         let violations = schema::validate(&schema, &frontmatter);
         if !violations.is_empty() {
@@ -517,7 +511,6 @@ fn claim_random_slug(root: &Path, issues_parent: &Path) -> Result<(String, PathB
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo_config::UncachedConfig;
     use crate::slug;
     use std::fs;
     use tempfile::TempDir;
@@ -562,7 +555,7 @@ mod tests {
         args.slug_random = true;
         args.reporter = Some("alice".into());
         args.assignee = Some("bob".into());
-        let out = do_new(tmp.path(), args, &UncachedConfig).unwrap();
+        let out = do_new(tmp.path(), args).unwrap();
         assert!(
             slug::is_valid(&out.slug),
             "{} should be valid slug",
@@ -584,7 +577,6 @@ mod tests {
         let out = do_new(
             tmp.path(),
             new_args("bug", "Login redirect loops on safari"),
-            &UncachedConfig,
         )
         .unwrap();
         assert_eq!(out.slug, "login-redirect-loops");
@@ -597,27 +589,12 @@ mod tests {
     #[test]
     fn new_derived_slug_collision_gets_numeric_suffix() {
         let tmp = fresh_repo();
-        let first = do_new(
-            tmp.path(),
-            new_args("bug", "Fix login bug"),
-            &UncachedConfig,
-        )
-        .unwrap();
+        let first = do_new(tmp.path(), new_args("bug", "Fix login bug")).unwrap();
         assert_eq!(first.slug, "fix-login-bug");
         // Same title again → deterministic base collides → `-2` suffix.
-        let second = do_new(
-            tmp.path(),
-            new_args("bug", "Fix login bug"),
-            &UncachedConfig,
-        )
-        .unwrap();
+        let second = do_new(tmp.path(), new_args("bug", "Fix login bug")).unwrap();
         assert_eq!(second.slug, "fix-login-bug-2");
-        let third = do_new(
-            tmp.path(),
-            new_args("bug", "Fix login bug"),
-            &UncachedConfig,
-        )
-        .unwrap();
+        let third = do_new(tmp.path(), new_args("bug", "Fix login bug")).unwrap();
         assert_eq!(third.slug, "fix-login-bug-3");
     }
 
@@ -626,12 +603,7 @@ mod tests {
         let tmp = fresh_repo();
         // A title that derives no valid slug (non-ASCII) must still create
         // an issue — via the random fallback.
-        let out = do_new(
-            tmp.path(),
-            new_args("bug", "Käyttäjän virhe"),
-            &UncachedConfig,
-        )
-        .unwrap();
+        let out = do_new(tmp.path(), new_args("bug", "Käyttäjän virhe")).unwrap();
         assert!(
             slug::is_valid(&out.slug),
             "{} should be a valid slug",
@@ -647,7 +619,7 @@ mod tests {
         let tmp = fresh_repo();
         let mut args = new_args("bug", "Login redirect loops");
         args.slug_random = true;
-        let out = do_new(tmp.path(), args, &UncachedConfig).unwrap();
+        let out = do_new(tmp.path(), args).unwrap();
         assert!(slug::is_valid(&out.slug));
         // Explicitly NOT the derived slug.
         assert_ne!(out.slug, "login-redirect-loops");
@@ -659,7 +631,7 @@ mod tests {
         let tmp = fresh_repo();
         let mut args = new_args("bug", "Some Long Title");
         args.slug = Some("custom-thing".into());
-        let out = do_new(tmp.path(), args, &UncachedConfig).unwrap();
+        let out = do_new(tmp.path(), args).unwrap();
         assert_eq!(out.slug, "custom-thing");
         assert!(out.item_path.to_string_lossy().contains("/custom-thing/"));
     }
@@ -669,7 +641,7 @@ mod tests {
         let tmp = fresh_repo();
         let mut args = new_args("bug", "Title");
         args.slug = Some("!!!".into());
-        assert!(do_new(tmp.path(), args, &UncachedConfig).is_err());
+        assert!(do_new(tmp.path(), args).is_err());
     }
 
     #[test]
@@ -686,7 +658,7 @@ mod tests {
         .unwrap();
         let mut args = new_args("bug", "Title");
         args.slug = Some("already-taken".into());
-        let err = do_new(tmp.path(), args, &UncachedConfig)
+        let err = do_new(tmp.path(), args)
             .err()
             .expect("explicit-slug collision must error");
         assert!(
@@ -706,7 +678,7 @@ mod tests {
         let mut args = new_args("bug", "Some Title");
         args.slug = Some("custom-thing".into());
         args.slug_random = true;
-        let out = do_new(tmp.path(), args, &UncachedConfig).unwrap();
+        let out = do_new(tmp.path(), args).unwrap();
         assert_eq!(out.slug, "custom-thing");
     }
 
@@ -715,7 +687,7 @@ mod tests {
         let tmp = fresh_repo();
         let mut args = new_args("epic", "API v2");
         args.reporter = Some("alice".into());
-        assert!(do_new(tmp.path(), args, &UncachedConfig).is_err());
+        assert!(do_new(tmp.path(), args).is_err());
     }
 
     #[test]
@@ -723,7 +695,7 @@ mod tests {
         let tmp = fresh_repo();
         let mut args = new_args("bug", "B");
         args.owner = Some("alice".into());
-        assert!(do_new(tmp.path(), args, &UncachedConfig).is_err());
+        assert!(do_new(tmp.path(), args).is_err());
     }
 
     #[test]
@@ -731,7 +703,7 @@ mod tests {
         let tmp = fresh_repo();
         let mut args = new_args("epic", "API v2 migration");
         args.owner = Some("cara".into());
-        let out = do_new(tmp.path(), args, &UncachedConfig).unwrap();
+        let out = do_new(tmp.path(), args).unwrap();
         let content = read(&out.item_path);
         assert!(content.contains("type: epic"));
         assert!(content.contains("owner: cara"));
@@ -742,7 +714,7 @@ mod tests {
         let tmp = fresh_repo();
         let mut args = new_args("bug", "B");
         args.related = vec!["@extremely-quiet-otter".into(), "amber-loud-fox".into()];
-        let out = do_new(tmp.path(), args, &UncachedConfig).unwrap();
+        let out = do_new(tmp.path(), args).unwrap();
         let content = read(&out.item_path);
         assert!(content.contains("@extremely-quiet-otter"));
         assert!(content.contains("@amber-loud-fox"));
@@ -753,7 +725,7 @@ mod tests {
         let tmp = fresh_repo();
         let mut args = new_args("bug", "B");
         args.related = vec!["#7".into()];
-        let out = do_new(tmp.path(), args, &UncachedConfig).unwrap();
+        let out = do_new(tmp.path(), args).unwrap();
         let content = read(&out.item_path);
         assert!(content.contains("'#7'") || content.contains("\"#7\""));
     }
@@ -769,7 +741,7 @@ mod tests {
             "version: 1\nfields:\n  team:\n    required: true\n",
         )
         .unwrap();
-        let res = do_new(tmp.path(), new_args("bug", "Will fail"), &UncachedConfig);
+        let res = do_new(tmp.path(), new_args("bug", "Will fail"));
         let err = res
             .err()
             .expect("schema-required field missing should fail");
@@ -790,7 +762,7 @@ mod tests {
         .unwrap();
         let mut args = new_args("bug", "With team");
         args.custom_fields = vec![("team".into(), "payments".into())];
-        let out = do_new(tmp.path(), args, &UncachedConfig).unwrap();
+        let out = do_new(tmp.path(), args).unwrap();
         let content = read(&out.item_path);
         assert!(content.contains("team: payments"));
     }
@@ -805,7 +777,7 @@ mod tests {
         .unwrap();
         let mut args = new_args("bug", "Bad team");
         args.custom_fields = vec![("team".into(), "marketing".into())];
-        let err = do_new(tmp.path(), args, &UncachedConfig).err().unwrap();
+        let err = do_new(tmp.path(), args).err().unwrap();
         let msg = err.to_string();
         assert!(
             msg.contains("schema") && msg.contains("team") && msg.contains("marketing"),
@@ -818,7 +790,7 @@ mod tests {
         let tmp = fresh_repo();
         let mut args = new_args("bug", "Dup");
         args.custom_fields = vec![("team".into(), "a".into()), ("team".into(), "b".into())];
-        let err = do_new(tmp.path(), args, &UncachedConfig).err().unwrap();
+        let err = do_new(tmp.path(), args).err().unwrap();
         let msg = err.to_string();
         assert!(
             msg.contains("team") && msg.contains("more than once"),
@@ -885,7 +857,7 @@ mod tests {
         let tmp = fresh_repo();
         assert!(!tmp.path().join("issues/.schema.yaml").exists());
         let args = new_args("bug", "First bug");
-        do_new(tmp.path(), args, &UncachedConfig).unwrap();
+        do_new(tmp.path(), args).unwrap();
         assert!(
             tmp.path().join("issues/.schema.yaml").is_file(),
             "schema file should be auto-written on first new"

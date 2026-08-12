@@ -69,7 +69,6 @@ pub mod refs;
 #[doc(hidden)]
 pub mod repo;
 #[doc(hidden)]
-pub mod repo_config;
 #[doc(hidden)]
 pub mod report;
 #[doc(hidden)]
