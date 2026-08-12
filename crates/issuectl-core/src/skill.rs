@@ -876,7 +876,8 @@ pub enum PiSkillState {
     /// running binary — the copy was hand-edited or corrupted after issuectl
     /// wrote it. `--force` restores it.
     Modified,
-    /// In the manifest but the `SKILL.md` is gone. `pi-prune` clears the row.
+    /// In the manifest but the `SKILL.md` is genuinely gone (a `NotFound` stat).
+    /// `pi-prune` clears the row.
     Missing,
     /// Manifest entry for a skill the running binary no longer ships (renamed
     /// or removed, e.g. `/triage-bugs`). `pi-prune` removes dir + row.
@@ -885,6 +886,12 @@ pub enum PiSkillState {
     /// another tool, or written by a pre-manifest issuectl. Reported for
     /// visibility; never touched by `pi-prune`.
     Unmanaged,
+    /// The `SKILL.md` could not be stat'd for a reason OTHER than absence
+    /// (permission denied, I/O error, ELOOP, a transient failure). Presence and
+    /// content are unknown, so the entry must NOT be treated as `Missing` — that
+    /// would let `pi-prune` drop the manifest row for a skill whose file may
+    /// still exist, losing provenance. Reported for visibility; never pruned.
+    Inaccessible,
 }
 
 impl PiSkillState {
@@ -897,6 +904,7 @@ impl PiSkillState {
             Self::Missing => "missing",
             Self::Orphan => "orphan",
             Self::Unmanaged => "unmanaged",
+            Self::Inaccessible => "inaccessible",
         }
     }
 }
@@ -928,7 +936,8 @@ pub struct PiStatusReport {
 }
 
 impl PiStatusReport {
-    /// Whether any entry is actionable (drift, orphan, or a missing copy).
+    /// Whether any entry is actionable (drift, orphan, a missing copy, or a
+    /// copy that could not be inspected).
     pub fn has_findings(&self) -> bool {
         self.skills.iter().any(|s| {
             matches!(
@@ -937,6 +946,7 @@ impl PiStatusReport {
                     | PiSkillState::Modified
                     | PiSkillState::Missing
                     | PiSkillState::Orphan
+                    | PiSkillState::Inaccessible
             )
         })
     }
@@ -1008,14 +1018,17 @@ fn classify_pi_corpus(pi_root: &Path, manifest: &PiManifest) -> Vec<PiSkillStatu
             continue;
         }
 
-        // Presence via `symlink_metadata` (does NOT follow symlinks): only a
-        // genuine `NotFound` counts as absent, so a present-but-unreadable file
-        // (permission, a symlink, invalid UTF-8) is never misreported as a
-        // `Missing` copy that prune would then clear. Content is read only for a
-        // plain regular file.
+        // Presence via `symlink_metadata` (does NOT follow symlinks). Only a
+        // genuine `NotFound` counts as absent; a stat that fails for ANY other
+        // reason (permission, I/O, ELOOP, a transient failure) leaves presence
+        // *unknown* — classifying it as `Missing` would let `pi_prune` drop the
+        // manifest row for a skill whose file may still exist, losing
+        // provenance. Such an entry is surfaced as `Inaccessible` and never
+        // pruned. Content is read only for a plain regular file.
         let meta = skill_md.symlink_metadata();
+        let inaccessible = matches!(&meta, Err(e) if e.kind() != std::io::ErrorKind::NotFound);
         let present = meta.is_ok();
-        let is_regular = meta.map(|m| m.is_file()).unwrap_or(false);
+        let is_regular = meta.as_ref().map(|m| m.is_file()).unwrap_or(false);
         let on_disk = if is_regular {
             std::fs::read_to_string(&skill_md).ok()
         } else {
@@ -1023,9 +1036,15 @@ fn classify_pi_corpus(pi_root: &Path, manifest: &PiManifest) -> Vec<PiSkillStatu
         };
         let on_disk_version = on_disk.as_deref().and_then(pinned_version);
 
-        let state = if recorded.is_some() && !present {
-            // Owned but the copy is truly gone (checked before orphan, so a
-            // retired skill whose file already vanished reads as Missing).
+        let state = if inaccessible {
+            // Stat failed with something other than `NotFound`: presence and
+            // content are unknown. Never fold this into `Missing` (which prune
+            // clears) — report it as `Inaccessible` and leave the entry alone.
+            PiSkillState::Inaccessible
+        } else if recorded.is_some() && !present {
+            // Owned but the copy is truly gone (a genuine `NotFound`; checked
+            // before orphan, so a retired skill whose file already vanished
+            // reads as Missing).
             PiSkillState::Missing
         } else if recorded.is_some() && managed_template.is_none() {
             // issuectl-owned but no longer a shipped skill → orphan.
@@ -2329,6 +2348,53 @@ mod tests {
         assert_eq!(outcome.removed.len(), 1);
         assert_eq!(outcome.removed[0].kind, PiPruneKind::Missing);
         assert!(!load_pi_manifest(pi.path()).skills.contains_key("issue"));
+    }
+
+    /// REGRESSION (`pi-corpus-metadata-error-misclass`): an owned entry whose
+    /// `SKILL.md` cannot be stat'd for a reason OTHER than `NotFound` must NOT
+    /// be misclassified as `Missing` and pruned — its provenance row must
+    /// survive. Here the manifest owns `issue`, but `<pi>/issue` is a regular
+    /// file rather than a directory, so `<pi>/issue/SKILL.md`'s stat fails with
+    /// `ENOTDIR` (a non-`NotFound` I/O error — the same class as a permission or
+    /// transient failure) while presence stays genuinely unknown. The entry must
+    /// classify as `Inaccessible` and `pi_prune(apply=true)` must leave the row
+    /// (and, being outside our control, the on-disk path) untouched.
+    #[test]
+    fn inaccessible_entry_is_not_pruned_as_missing() {
+        let pi = tempfile::tempdir().unwrap();
+        // `<pi>/issue` is a FILE, so any stat of `<pi>/issue/SKILL.md` errors
+        // with ENOTDIR rather than ENOENT — presence is unknowable.
+        std::fs::write(pi.path().join("issue"), "not a directory").unwrap();
+        let mut manifest = PiManifest::empty();
+        manifest.skills.insert(
+            "issue".into(),
+            PiManifestEntry {
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
+        );
+        save_pi_manifest(pi.path(), &manifest).unwrap();
+
+        // A non-`NotFound` stat error classifies as `Inaccessible`, never
+        // `Missing`, and is surfaced as an actionable finding.
+        let report = pi_status(pi.path()).unwrap();
+        assert_eq!(
+            row(&report, "issue").state,
+            PiSkillState::Inaccessible,
+            "a non-NotFound metadata error must not read as Missing"
+        );
+        assert!(report.has_findings());
+
+        // Prune must keep the row: dropping it would lose provenance for a skill
+        // whose file we could not even inspect.
+        let outcome = pi_prune(pi.path(), true).unwrap();
+        assert!(
+            outcome.removed.iter().all(|i| i.name != "issue"),
+            "an inaccessible entry must never be pruned"
+        );
+        assert!(
+            load_pi_manifest(pi.path()).skills.contains_key("issue"),
+            "the manifest row must survive a metadata-read error"
+        );
     }
 
     /// A re-install after an orphan prune records provenance truthfully from

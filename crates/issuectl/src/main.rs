@@ -5618,6 +5618,7 @@ fn cmd_skill_pi_status(json: bool) -> Result<()> {
             skill::PiSkillState::Unmanaged => "·",
             skill::PiSkillState::Stale | skill::PiSkillState::Modified => "⚠",
             skill::PiSkillState::Missing | skill::PiSkillState::Orphan => "✗",
+            skill::PiSkillState::Inaccessible => "?",
         };
         let detail = match s.state {
             skill::PiSkillState::Stale => {
@@ -5640,6 +5641,10 @@ fn cmd_skill_pi_status(json: bool) -> Result<()> {
             }
             skill::PiSkillState::Missing => {
                 " (copy gone; run `issuectl skill pi-prune --force` to clear the record)"
+                    .to_string()
+            }
+            skill::PiSkillState::Inaccessible => {
+                " (could not read this entry — permission or I/O error; left untouched, not pruned)"
                     .to_string()
             }
             skill::PiSkillState::Unmanaged => " (not written by issuectl)".to_string(),
