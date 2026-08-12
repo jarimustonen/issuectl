@@ -247,6 +247,21 @@ pub fn install_skill_summary(
     // stderr and skipped, and the repo-local install still reports success.
     if let Some(pi_root) = pi_root {
         if agents.contains(&Agent::Claude) {
+            // Serialize the whole pi block — mirror writes AND the manifest
+            // read-modify-write — against a concurrent install/prune from
+            // another repo sharing the same global corpus. Like every other pi
+            // failure here, a lock we cannot acquire is warned and the pi
+            // mirror skipped rather than failing an install whose repo-local
+            // targets are already on disk. Held until the end of this scope so
+            // `record_pi_provenance` runs under it (see `acquire_pi_lock`).
+            let _pi_lock = match acquire_pi_lock(pi_root) {
+                Ok(lock) => lock,
+                Err(e) => {
+                    eprintln!("  ! pi.dev skill mirror skipped (lock unavailable): {e:#}");
+                    return Ok(results);
+                }
+            };
+
             // Iterate the single authoritative managed-skill set so the mirror
             // write and the lifecycle layer can never disagree about which
             // skills issuectl ships (see `managed_pi_skills`). Track the names
@@ -499,6 +514,32 @@ const PI_MANIFEST_VERSION: u32 = 1;
 /// The tool name stamped into the manifest — a guard against reading a
 /// differently-owned file if the filename convention ever collides.
 const PI_MANIFEST_TOOL: &str = "issuectl";
+
+/// Acquire the cross-process advisory lock guarding the pi corpus at `pi_root`,
+/// so a `skill install` mirror-write + manifest read-modify-write from one repo
+/// serializes against a concurrent `skill install` / `pi-prune` from another
+/// (both resolve the same global `~/.pi/agent/skills` root, but run as
+/// independent processes with no other coordination). Without it, two installs
+/// can each load the manifest, add their own row, and race the atomic rename —
+/// the loser's row is lost even though the file itself is never torn.
+///
+/// Reuses the repo-wide [`crate::mutate::WriteLock`] flock helper rather than
+/// hand-rolling a second locking primitive: it creates `<pi_root>/.issuectl/`
+/// (a dotfile dir the corpus scanner already ignores — see
+/// [`is_valid_skill_name`]) and takes an exclusive `flock(2)` on `write.lock`
+/// there, released when the returned guard drops. `WriteLock::acquire`
+/// `create_dir_all`s that dir first, so this succeeds even when `pi_root` does
+/// not yet exist (the first install).
+///
+/// The lock is per open file description, so the guard must be held for the
+/// whole read-modify-write and never re-acquired while already held —
+/// [`record_pi_provenance`]/[`save_pi_manifest`] run *under* a held lock and so
+/// deliberately take no lock of their own (a nested acquire would deadlock on
+/// Linux, per the same convention `mutate/` follows).
+fn acquire_pi_lock(pi_root: &Path) -> Result<crate::mutate::WriteLock> {
+    crate::mutate::WriteLock::acquire(pi_root)
+        .with_context(|| format!("cannot acquire pi corpus lock at {}", pi_root.display()))
+}
 
 /// The out-of-band provenance manifest issuectl maintains at
 /// `<pi_root>/.issuectl-manifest.json`. It records which skill entries under
@@ -965,6 +1006,13 @@ fn orphan_is_safely_removable(dir: &Path, skill_md: &Path) -> bool {
 ///   files is reported in `skipped`, not deleted (see
 ///   [`orphan_is_safely_removable`]).
 pub fn pi_prune(pi_root: &Path, apply: bool) -> Result<PiPruneOutcome> {
+    // Hold the corpus lock across the whole load → classify → delete → save so a
+    // concurrent `skill install` (or a second prune) from another repo cannot
+    // interleave its manifest read-modify-write with ours and lose a row. Unlike
+    // the best-effort install path, prune is an explicit user command, so a lock
+    // we cannot acquire is a hard error rather than a silent skip.
+    let _pi_lock = acquire_pi_lock(pi_root)?;
+
     // Deletion gate: refuse to act on a manifest we cannot fully trust. An
     // absent manifest means nothing is owned, so nothing to prune.
     let mut manifest = match try_load_pi_manifest(pi_root)? {
@@ -1649,12 +1697,16 @@ mod tests {
 
         // Only three per-skill *dirs*, each holding exactly one SKILL.md. The
         // corpus root also carries the out-of-band provenance manifest (a file,
-        // not a mirrored skill), so filter to directories before comparing.
+        // not a mirrored skill) and the `.issuectl` advisory-lock dir — both
+        // dotfiles the corpus scanner ignores. Filter to genuine skill dirs
+        // exactly as production does ([`is_valid_skill_name`], which excludes
+        // dotfiles) before comparing.
         let mut names: Vec<String> = std::fs::read_dir(pi.path())
             .unwrap()
             .map(|e| e.unwrap())
             .filter(|e| e.file_type().unwrap().is_dir())
             .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| is_valid_skill_name(name))
             .collect();
         names.sort();
         assert_eq!(names, ["issue", "issue-intake", "issue-new"]);
@@ -2376,5 +2428,145 @@ mod tests {
             .collect();
         assert!(residue.is_empty(), "atomic write must not leave temp files");
         assert!(pi.path().join(PI_MANIFEST_FILE).is_file());
+    }
+
+    /// Concurrency regression for `pi-manifest-locking`: many processes sharing
+    /// the one global pi corpus each read-modify-write the manifest, and the
+    /// loser of an unlocked race silently drops the winner's row (the atomic
+    /// temp+rename prevents a *torn* file but not a *lost update*). This drives
+    /// the exact production primitives the install/prune paths hold their lock
+    /// across — `acquire_pi_lock` → strict load → insert → `save_pi_manifest` —
+    /// with every thread inserting its own distinct row, and asserts none are
+    /// lost. A `Barrier` releases all threads at once and a short mid-critical
+    /// sleep widens the window so the same test reliably FAILS if the lock is
+    /// removed (each racer would then clobber the others down to ~one row).
+    #[test]
+    fn concurrent_manifest_writers_do_not_lose_entries() {
+        use std::sync::{Arc, Barrier};
+
+        let pi = tempfile::tempdir().unwrap();
+        let pi_root = pi.path().to_path_buf();
+        const WRITERS: usize = 8;
+        let barrier = Arc::new(Barrier::new(WRITERS));
+
+        let handles: Vec<_> = (0..WRITERS)
+            .map(|i| {
+                let pi_root = pi_root.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let key = format!("concurrent-skill-{i}");
+                    barrier.wait(); // maximise contention: everyone starts together
+                                    // The same load → modify → save discipline `record_pi_provenance`
+                                    // and `pi_prune` run, but here each writer contributes a
+                                    // *distinct* row so a lost update is directly observable.
+                    let _lock = acquire_pi_lock(&pi_root).expect("acquire pi lock");
+                    let mut manifest = try_load_pi_manifest(&pi_root)
+                        .unwrap()
+                        .unwrap_or_else(PiManifest::empty);
+                    manifest.skills.insert(
+                        key,
+                        PiManifestEntry {
+                            version: format!("0.0.{i}"),
+                        },
+                    );
+                    // Widen the read-modify-write window so an unlocked run would
+                    // reliably interleave (and clobber). Under the lock this only
+                    // serialises the writers.
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    save_pi_manifest(&pi_root, &manifest).expect("save manifest");
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("writer thread panicked");
+        }
+
+        // Every writer's row must have survived the concurrent updates.
+        let manifest = try_load_pi_manifest(&pi_root)
+            .expect("final manifest loads")
+            .expect("manifest present after writes");
+        assert_eq!(
+            manifest.skills.len(),
+            WRITERS,
+            "every concurrent writer's row must survive; got {:?}",
+            manifest.skills.keys().collect::<Vec<_>>()
+        );
+        for i in 0..WRITERS {
+            assert!(
+                manifest
+                    .skills
+                    .contains_key(&format!("concurrent-skill-{i}")),
+                "row for writer {i} was lost to a racing writer"
+            );
+        }
+    }
+
+    /// End-to-end companion to `concurrent_manifest_writers_do_not_lose_entries`,
+    /// exercising the real lock *sites*: a `skill install` (mirror + provenance
+    /// RMW) from one repo running concurrently with a `pi_prune` on the same
+    /// corpus. The lock must serialise them so the run always ends with a
+    /// well-formed manifest that still owns every shipped skill — never a torn
+    /// file, a panic, or a managed row dropped by an interleaved prune. Each
+    /// repo gets its own tempdir; the pi corpus is shared (as it is in reality).
+    #[test]
+    fn concurrent_install_and_prune_keep_manifest_consistent() {
+        let pi = tempfile::tempdir().unwrap();
+        let pi_root = pi.path().to_path_buf();
+
+        // Seed the corpus so there is a real manifest for prune to load, plus a
+        // stale orphan row (a skill this binary no longer ships) whose dir is
+        // gone — a `Missing` entry prune will try to clear while install runs.
+        let repo0 = tempfile::tempdir().unwrap();
+        install_skill(repo0.path(), &[Agent::Claude], false, Some(&pi_root)).unwrap();
+        {
+            let mut m = load_pi_manifest(&pi_root);
+            m.skills.insert(
+                "retired-skill".to_string(),
+                PiManifestEntry {
+                    version: "0.0.1".to_string(),
+                },
+            );
+            save_pi_manifest(&pi_root, &m).unwrap();
+        }
+
+        let installer = {
+            let pi_root = pi_root.clone();
+            std::thread::spawn(move || {
+                let repo = tempfile::tempdir().unwrap();
+                install_skill_summary(repo.path(), &[Agent::Claude], true, Some(&pi_root)).unwrap();
+            })
+        };
+        let pruner = {
+            let pi_root = pi_root.clone();
+            std::thread::spawn(move || {
+                pi_prune(&pi_root, true).unwrap();
+            })
+        };
+        installer.join().expect("installer thread panicked");
+        pruner.join().expect("pruner thread panicked");
+
+        // The manifest must still be trustworthy (strict load succeeds) and must
+        // still own every shipped skill — the interleaved prune must not have
+        // dropped a row the concurrent install just (re)wrote.
+        let manifest = try_load_pi_manifest(&pi_root)
+            .expect("manifest stays trusted under concurrency")
+            .expect("manifest present");
+        for (name, _) in managed_pi_skills() {
+            assert!(
+                manifest.skills.contains_key(name),
+                "shipped skill `{name}` lost from manifest under concurrent install+prune"
+            );
+        }
+        // No temp residue from a half-finished atomic write.
+        let residue: Vec<_> = std::fs::read_dir(&pi_root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "no temp residue after concurrent writes"
+        );
     }
 }
