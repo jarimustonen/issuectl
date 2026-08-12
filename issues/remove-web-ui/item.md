@@ -1,10 +1,9 @@
 ---
 created: 2026-08-10
-updated: 2026-08-10
+updated: 2026-08-12
 type: chore
 status: open
 priority: normal
-labels: [deferred]
 ---
 
 # Remove browser/web UI from issuectl
