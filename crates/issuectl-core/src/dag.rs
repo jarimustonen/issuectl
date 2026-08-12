@@ -299,7 +299,9 @@ pub struct DagView {
     pub reservations_applied: bool,
     /// Lanes, ordered by lane name.
     pub lanes: Vec<DagLane>,
-    /// Issues without a lane, each independent.
+    /// Issues without a lane, each independent. Terminal (closing-status)
+    /// issues are excluded — this is a scheduling view, and a closed issue
+    /// can never be scheduled.
     pub unscheduled: Vec<DagIssue>,
 }
 
@@ -337,11 +339,27 @@ pub fn compute(issues: &[Issue], schema: &Schema, reservations: Option<&Reservat
     // serialized. The sentinel differs from an absent lane only in what
     // the row echoes (`lane: "unlaned"` vs `null`), so a caller can tell
     // "confirmed parallel-safe" from "unclassified".
+    //
+    // Terminal (closing-status) issues are excluded from the unscheduled
+    // bucket: `dag` is a scheduling view, and a done/wontfix/obsolete issue
+    // can never be scheduled — dumping it here is noise that has misled
+    // readers into treating shipped-and-closed work as open backlog. The
+    // closing classification is the schema-aware `done` set (so a project's
+    // `status_classes` override is honoured), computed above over the full
+    // issue set — closing issues stay in that set for blocker resolution,
+    // they are just not surfaced as schedulable rows. Lane members are left
+    // untouched: a done member is contextualised by its lane's head-of-line
+    // (which is always the first not-done, runnable issue) rather than
+    // presented as loose, ready-looking work.
     let mut by_lane: BTreeMap<&str, Vec<&Issue>> = BTreeMap::new();
     let mut unscheduled: Vec<&Issue> = Vec::new();
     for i in issues {
         match i.lane.as_deref() {
-            Some(UNLANED) | None => unscheduled.push(i),
+            Some(UNLANED) | None => {
+                if !done.contains(i.slug.as_str()) {
+                    unscheduled.push(i);
+                }
+            }
             Some(lane) => by_lane.entry(lane).or_default().push(i),
         }
     }
@@ -938,6 +956,65 @@ mod tests {
             .map(|i| i.slug.as_str())
             .collect();
         assert_eq!(order, vec!["a-first", "z-last"]);
+    }
+
+    // ── dag-lists-closed-issues (bug) ───────────────────────────────────
+
+    #[test]
+    fn closed_issue_is_excluded_from_unscheduled() {
+        // Regression: `dag` is a scheduling view, but terminal-status issues
+        // (done/wontfix/…) were dumped into the unscheduled bucket alongside
+        // genuinely open work — misleading a reader into treating shipped,
+        // closed work as open backlog. A closing-status unlaned issue must
+        // not surface as unscheduled; the open one still does.
+        let issues = vec![
+            mk("a-shipped", "done", "normal"),
+            mk("b-wontfix", "wontfix", "normal"),
+            mk("c-open", "open", "normal"),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let slugs: Vec<&str> = v.unscheduled.iter().map(|i| i.slug.as_str()).collect();
+        assert_eq!(
+            slugs,
+            vec!["c-open"],
+            "only the non-terminal issue is scheduled/unscheduled"
+        );
+    }
+
+    #[test]
+    fn closed_unlaned_sentinel_issue_is_excluded_from_unscheduled() {
+        // The exclusion is by closing status, not by absent lane: a closed
+        // issue carrying the `unlaned` sentinel is likewise dropped from the
+        // unscheduled bucket.
+        let issues = vec![
+            with_lane(mk("a-done", "done", "normal"), UNLANED),
+            with_lane(mk("b-open", "open", "normal"), UNLANED),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let slugs: Vec<&str> = v.unscheduled.iter().map(|i| i.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["b-open"]);
+    }
+
+    #[test]
+    fn closed_unscheduled_issue_still_satisfies_a_blocker() {
+        // Excluding closed issues from the unscheduled *display* must not
+        // drop them from the `done` set used for blocker resolution: a lane
+        // issue blocked by a closed unscheduled issue is still runnable.
+        let issues = vec![
+            mk("dep-done", "done", "normal"), // unscheduled + closed → hidden
+            with_lane(
+                with_blocked_by(mk("a-head", "open", "normal"), &["dep-done"]),
+                "schema",
+            ),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        assert!(
+            v.unscheduled.is_empty(),
+            "the closed blocker is not shown as unscheduled"
+        );
+        let a = &lane(&v, "schema").issues[0];
+        assert!(a.blockers_open.is_empty(), "closed dep still counts as done");
+        assert!(a.spawnable, "head is runnable — its blocker is satisfied");
     }
 
     // ── dag-inprogress-spawnable (bug) ──────────────────────────────────

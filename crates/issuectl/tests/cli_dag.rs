@@ -132,6 +132,24 @@ fn dag_json_shape_and_head_of_line() {
 }
 
 #[test]
+fn dag_excludes_closed_issue_from_unscheduled() {
+    // `dag` is a scheduling view: a closed (terminal-status) issue can never
+    // be scheduled, so it must not surface in the unscheduled bucket. Only
+    // the still-open lane-less issue is listed.
+    let tmp = fresh_repo();
+    let r = tmp.path();
+    new_issue(r, "open-one");
+    new_issue(r, "shipped-one");
+    let out = run(r, &["--json", "close", "shipped-one", "--status", "done"]);
+    assert_eq!(out.status.code(), Some(0), "close: {out:?}");
+
+    let v = json(&run(r, &["--json", "dag"]));
+    let uns = v["unscheduled"].as_array().expect("unscheduled array");
+    let slugs: Vec<&str> = uns.iter().map(|i| i["slug"].as_str().unwrap()).collect();
+    assert_eq!(slugs, vec!["open-one"], "closed issue must be excluded");
+}
+
+#[test]
 fn dag_reservations_inline_json_marks_reserved() {
     let tmp = scheduled_repo();
     let v = json(&run(
