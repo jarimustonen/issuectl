@@ -18,9 +18,13 @@ EI vielä julkaistu.** Käyttäjä käynnisti ensin 3 DAG-kaistaa rinnan; `@warn
 `@codex-prompt-variants` (LANE B) landasivat. Handoffin jälkeen nousi **kiireellinen `@pidev-dual-home-skills`**
 (pi.dev-migraation WS4) — spawnattiin issuectl-worktree, **landasi** (dual-home `~/.pi/agent/skills/`iin).
 Kaikki kolme: green gate vihreä (fmt clean, 1081 testiä, ei uusia clippy-varoituksia), `/llm-review` ajettu.
-`main == origin`, työpuu puhdas. **Release PIDETTIIN** (ei cutattu): featuret low/high-prio + CHANGELOG
-`[Unreleased]` **tyhjä** + release-polku yhä rikki (ks. release-oppi). Batchataan → seuraava rupeama cuttaa
-0.9.0:n (3 featurea). ⚠️ Huom: `@pidev-dual-home-skills` filasi follow-upin `@pidev-pi-skill-lifecycle`.
+`main == origin`, työpuu puhdas paikallisesti. **⚠️ MUTTA main CI on PUNAINEN:** viimeisen landauksen
+(`75670fa`) jälkeen CI (run 31509473175) punainen yhdestä flaky-testistä `put_body_rate_limit_fires_with_retry_after`
+(1080 pass / 1 fail; odotti 429, sai 200 — ajoitusflake server/mod.rs:ssä). **Paikallinen `cargo test` menee
+läpi** (1081) koska flake on aikariippuvainen → jäi kiinni vain CI:ssä. Filattu `@rate-limit-test-flaky`
+(high, ci), DAG head-of-line. **Release PIDETTIIN** ja on nyt **tuplagate**: CHANGELOG `[Unreleased]` **tyhjä**
+JA CI punainen (+ release-polku yhä rikki, ks. release-oppi). Ennen 0.9.0-cutia: korjaa flake → vihreä CI →
+täytä CHANGELOG. ⚠️ Huom: `@pidev-dual-home-skills` filasi follow-upin `@pidev-pi-skill-lifecycle`.
 
 **⚠️ RELEASE-OPPI (yhä voimassa): ossctl `release cut` EI julkaise oikeasti → 0.8.1 tehtiin `cargo publish`illa.**
 Real cut ei uploadannut crates.io:hon (raportoi 300s "index visibility" -timeoutin cratelle jota se ei
@@ -35,7 +39,7 @@ julkaisee PUUN version — se EI bumppaa; siksi bump + CHANGELOG-finalisointi + 
 ENNEN cutia. (Sekundäärifriktio: stale-lock esti `release abandon`in → ossctl
 `@release-abandon-break-stale-lock`, filattu.)
 
-**Mitä tässä rupeamassa tehtiin (2 featurea, landattu `main`iin, EI releasea):**
+**Mitä tässä rupeamassa tehtiin (3 featurea landattu `main`iin, EI releasea — `pidev-dual-home-skills` ks. Tila + Seuraava askel):**
 - **`@warn-reserved-notes-section`** (low, feature, `done`) — `issuectl new` ja `body set` varoittavat nyt
   authoring-aikaan kun issue-body käyttää varattua `## Notes`-otsikkoa (jonka doctor migratoi `## Comments`iin).
   Ei-fataali (ei blokkaa kirjoitusta), varoitus sekä human- (`emit_warnings_to_stderr`) että `--json`
@@ -81,7 +85,12 @@ poisto ajetaan `@remove-web-ui`:n kautta **vasta kun seuraaja-ohjelman luonnos o
 (gate käsin, ks. Tila-blokki). Fokus CLI:ssä.
 
 **Seuraava askel:**
-- **RELEASE PENDING (3 landattua featurea odottaa):** kun release cutataan, ensin **täytä CHANGELOG
+- **🔴 HEAD-OF-LINE — `@rate-limit-test-flaky`** (high, ci-bug): **main CI on PUNAINEN.**
+  `put_body_rate_limit_fires_with_retry_after` (server/mod.rs) on ajoitusflake — odotti 429, sai 200.
+  Korjaa deterministiseksi (mock-clock / kiinteä token-budjetti / yksiselitteinen burst) TAI, koska koko
+  server poistuu `@remove-web-ui`:n mukana, harkitse testin poistoa sen yhteydessä. **Vihreä CI on
+  0.9.0-releasen edellytys.** Paikallinen `cargo test` ei paljasta tätä (aikariippuvainen) — verifioi CI:stä.
+- **RELEASE PENDING (3 landattua featurea odottaa; tuplagate: punainen CI + tyhjä CHANGELOG):** kun release cutataan, ensin **täytä CHANGELOG
   `[Unreleased]`** kaikilla kolmella (`@warn-reserved-notes-section` + `@codex-prompt-variants` +
   `@pidev-dual-home-skills`; workerit eivät lisänneet merkintöjä — `[Unreleased]` on tyhjä), sitten
   version-bump. Kaikki additiivisia → **minor-bump 0.8.1 → 0.9.0** (muista **caret-gotcha**: bumppaa myös
@@ -102,12 +111,13 @@ poisto ajetaan `@remove-web-ui`:n kautta **vasta kun seuraaja-ohjelman luonnos o
   tekee re-pointin. Tämä ratkaisee myös release-polun.
 - **Deferred:** portitettu `@remove-web-ui` (odottaa seuraaja-luonnosta), CLI-only `@issue-graph-view` +
   `@epic-tree-view`, `@events-jsonl-log` (build-only-if). `@focus-areas` suljettu `wontfix` (ADR 0001
-  tallessa). Uusi rupeama: ei selkeästi koodattavaa jonossa (ossctl-cut on upstream-blocked) → nosta
-  deferredistä tai uudesta intakesta, tai cutataan pending-release.
+  tallessa). Uusi rupeama: **koodattavaa on** — head-of-line `@rate-limit-test-flaky` (high, punainen CI),
+  sitten `@pidev-pi-skill-lifecycle` (normal) + 2 warn-notes-follow-upia (low). ossctl-cut pysyy
+  upstream-blocked. Järjestys: korjaa CI vihreäksi → cuttaa 0.9.0 → muut jonosta.
 
 ---
 
-## Execution DAG (2026-08-11)
+## Execution DAG (2026-08-12)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge each round (drop landed, add active, keep existing order).
@@ -121,7 +131,7 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: pidev-pi-skill-lifecycle   ← ylin selkeästi koodattava (normal). ossctl-cut on high MUTTA upstream-blocked (ei koodattavaa täällä)
+GLOBAL HEAD-OF-LINE: rate-limit-test-flaky   ← high; main CI PUNAINEN + BLOKKAA 0.9.0-releasen. Korjaa (tai poista testi remove-web-ui:n mukana) ensin.
 LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections
     doctor-fix-merge-notes-comments  low · feature; doctor --fix auto-mergeää ## Notes → ## Comments myös kun molemmat olemassa (nyt "manual merge required"). Touches doctor/ + body_sections.
     note-missing-as-generic-error  low · bug; `issuectl note` ilman --as printtaa geneerisen helpin clapin missing-arg-viestin sijaan. Touches main.rs clap + note-handler.
@@ -129,15 +139,19 @@ LANE B — skill install + templates/ + skill.rs (skill distribution)
     pidev-pi-skill-lifecycle  normal · feature; pi-korpuksen (~/.pi/agent/skills/) lifecycle: version-drift-näkyvyys, prune (orphanit esim. /triage-bugs), doctor-verify, uninstall-gap. Follow-up dual-homelle. collision: doctor/ (LANE A). orchestratectl-repossa identtinen sisar-issue.
 LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
     ossctl-cut-no-publish  high · bug; ossctl release cut ei julkaise oikeasti → manuaalinen cargo publish. BLOCKED upstream-ossctl:llä; kun korjattu, poista AGENTS-caveat + re-point releaset ossctliin.
+UNLANED — confirmed no shared hot files, run anytime:
+    rate-limit-test-flaky  high · bug (ci); `put_body_rate_limit_fires_with_retry_after` flaky (odotti 429, sai 200) — ajoitusherkkä server/mod.rs:ssä. main CI PUNAINEN (run 31509473175 @75670fa). Fix: deterministinen limiter-testi (mock-clock / kiinteä token-budjetti). ⚠️ latentti collision vain deferred @remove-web-ui:n kanssa (koko server poistuu). Confined to crates/issuectl-core/src/server/mod.rs.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: käyttäjä ajoi kaikki 3 kaistaa rinnan. **`warn-reserved-notes-section`** (LANE A) +
-**`codex-prompt-variants`** (LANE B) landasivat puhtaasti (green + `/llm-review`) → **terminal `done` →
-pudotettu DAG:sta**. **Release pidettiin** (low-prio + tyhjä CHANGELOG `[Unreleased]` + rikki release-polku).
-`ossctl-cut-no-publish` (LANE C) pysyy — upstream-blocked, ei koodattavaa täällä ennen ossctlin korjausta.
-Jäljellä vain yksi aktiivinen node, sekin blokattu → DAG käytännössä tyhjä; seuraava rupeama nostaa
-deferredistä / intakesta tai cutataan pending-release.
+Kaari-lyhyesti: **3 featurea landasi** — `warn-reserved-notes-section` (LANE A) + `codex-prompt-variants`
+(LANE B) rinnakkain, sitten kiireellinen `pidev-dual-home-skills` (WS4) → kaikki `done`, pudotettu DAG:sta.
+Landaukset paljastivat/toivat 4 follow-upia jotka ovat nyt DAG:ssa: `pidev-pi-skill-lifecycle` (B),
+`doctor-fix-merge-notes-comments` + `note-missing-as-generic-error` (A), ja **`rate-limit-test-flaky`
+(UNLANED, high) — main CI meni PUNAISEKSI viimeisen landauksen (`75670fa`) jälkeen flaky rate-limit-testistä**.
+`ossctl-cut-no-publish` (LANE C) pysyy upstream-blocked. **Release pidettiin** ja on nyt tuplagate:
+tyhjä CHANGELOG **JA** punainen CI. Seuraava rupeama: korjaa rate-limit-flake (head-of-line) → sitten
+0.9.0-cut (3 featurea), tai nosta muuta jonosta.
 
 ---
 
