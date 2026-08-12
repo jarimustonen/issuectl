@@ -111,19 +111,24 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: flock-write-test-coverage   ← LANE A head (pidev + collapse landed). LANE A (mutate/main.rs) ‖ LANE B (skill.rs/pi) run disjoint. ossctl-cut high but upstream-blocked.
+GLOBAL HEAD-OF-LINE: pi-corpus-symlink-traversal   ← HIGH bug in freshly-shipped pi feature (path escape). LANE B (pi-corpus) ‖ LANE A (mutate/main.rs) run disjoint. ossctl-cut high but upstream-blocked.
 LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections  (RUUHKAINEN — sarjata)
-    flock-write-test-coverage  normal · task; palauta write-under-flock-testikattavuus (server-testit antoivat sen ennen). Touches mutate/ tests.
     configsource-load-return-value  normal · improvement; collapse-seam-review-spinoff — return schema/transitions load BY VALUE now that the cache is gone. Touches mutate/ + config load.
     load-once-thread-schema  normal · improvement; collapse-seam-review-spinoff — thread loaded schema/rules through mutate helpers to stop redundant re-parses. Touches mutate/ + schema.
-    new-and-update-blocked-by  normal · feature (RE-SCOPED 2026-08-12 → only `new --blocked-by` at creation; `update --add-blocked-by` half already done via `depend add/remove`, 6e95b07). Touches main.rs clap + mutate/.
     dag-lists-closed-issues  normal · bug; issuectl dag listaa suljetut/terminaali-issuet unscheduledissa → filtteröi ei-terminaaleihin. Touches crate::dag (+ ehkä cmd_dag).
     epic-tree-view  normal · feature; `issuectl epic tree <slug>` — epic+lapset puuna. Uusi main.rs-subcommand + moduuli. Kevyt.
     action-verb-json-echo-mutation  normal · improvement; update/label/close --json-tulos ei echoa mutatoitua kenttää (.priority/.labels/.status = null). Echo resulting value. Touches cmd_* action-verb handlerit main.rs:ssä + result-objektit.
-LANE B — skill install + templates/ + skill.rs + pi-corpus lifecycle (skill distribution)
-    pi-manifest-locking  normal · improvement; pidev-lifecycle-review-spinoff — lock the pi-corpus provenance manifest for concurrent writers. Touches skill.rs/pi lifecycle.
+    new-and-update-blocked-by  normal · feature (RE-SCOPED 2026-08-12 → only `new --blocked-by` at creation; `update --add-blocked-by` half already done via `depend add/remove`, 6e95b07). Touches main.rs clap + mutate/.
+LANE B — skill install + templates/ + skill.rs + pi-corpus lifecycle (skill distribution)  (RUUHKAINEN — pi-review-cascade, sarjata; all touch pi-corpus/skill.rs)
+    pi-corpus-symlink-traversal  high · bug; pi-manifest-lock-review-spinoff — prune/install follow directory symlinks → delete/overwrite can escape the corpus. Path-escape in shipped code.
+    pi-corpus-metadata-error-misclass  high · bug; pi-manifest-lock-review-spinoff — metadata errors misclassified as Missing → pi_prune drops the manifest row (data loss).
     pi-prune-digest-gate  normal · improvement; pidev-lifecycle-review-spinoff — gate pi-prune on a content digest before removing. Touches skill.rs/pi prune.
-    pi-status-check-exit  low · improvement; pidev-lifecycle-review-spinoff — pi-status exit-code semantics for drift/orphans. Touches skill.rs/pi status.
+    pi-manifest-fsync-durability  normal · improvement; pi-lock-review-spinoff — save_pi_manifest lacks fsync durability.
+    pi-mirror-atomic-writes  normal · improvement; pi-lock-review-spinoff — mirror SKILL.md writes are non-atomic (torn file on crash).
+    pi-status-check-exit  low · improvement; pidev-lifecycle-review-spinoff — pi-status exit-code semantics for drift/orphans.
+    pi-mirror-hint-accuracy  low · bug; pi-lock-review-spinoff — install prints "skills mirrored" hint even when pi block skipped.
+    pi-status-shared-lock  low · improvement; pi-lock-review-spinoff — pi_status reads lock-free → can report a torn snapshot.
+    pi-corpus-cross-tool-lock  low · improvement; pi-lock-review-spinoff — issuectl and orchestratectl hold separate locks; no cross-tool serialization on shared skill dirs.
 LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
     ossctl-cut-no-publish  high · bug; ossctl release cut ei julkaise oikeasti → manuaalinen cargo publish. BLOCKED upstream-ossctl:llä; kun korjattu, poista AGENTS-caveat + re-point releaset ossctliin.
 ```
