@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-12
+
+### Added
+- **Authoring-time warning for the reserved `## Notes` section.** `issuectl
+  new` and `issuectl body set` now warn (non-fatally, in both human and
+  `--json` `warnings` output) when the supplied issue body contains the
+  reserved legacy heading `## Notes` (which `doctor` migrates to
+  `## Comments`), so the collision surfaces immediately instead of only at
+  commit time via the pre-commit `doctor` hook. The write is never blocked.
+  (issue: `@warn-reserved-notes-section`)
+- **Codex-prompt variants of `/issue-new` and `/issue-intake`.** Both intake
+  skills now install in both formats like `/issue`: a Claude skill under
+  `.claude/skills/<name>/SKILL.md` and a Codex prompt under
+  `.codex/prompts/<name>.md` (frontmatter stripped, body identical).
+  `--agent all` installs both; the dogfood sync test now enforces all six
+  copies. (issue: `@codex-prompt-variants`)
+- **Dual-home skills into pi.dev's global corpus.** `issuectl skill install`
+  and `issuectl init` now also write each Claude `SKILL.md` to
+  `~/.pi/agent/skills/<name>/SKILL.md` (home-global, resolved via
+  `skill::pi_skills_root`) so the skills are discoverable under the pi.dev
+  harness (`/skill:<name>`). Only `SKILL.md` is mirrored (vendored filter);
+  the repo-local Claude/Codex targets are unchanged, and the pi mirror is
+  non-fatal (a failed home write never breaks the repo-local install).
+  (issue: `@pidev-dual-home-skills`)
+- **`doctor --fix` auto-merges `## Notes` into `## Comments`.** When an issue
+  body contains both sections, `doctor --fix` now merges `## Notes`' entries
+  into `## Comments` (document order preserved, `## Notes` dropped) instead of
+  demanding a manual merge. Ambiguous shapes (multiple `## Notes`, or
+  `## Notes` + multiple `## Comments`) still surface as manual-merge conflicts.
+  (issue: `@doctor-fix-merge-notes-comments`)
+
+### Fixed
+- **Deterministic rate-limit test.** The token-bucket limiter's clock is now
+  injectable (`SystemClock` in production, a frozen clock in tests), fixing a
+  CI flake where `put_body_rate_limit_fires_with_retry_after` could see a
+  burst request still return `200` instead of `429` under load. Production
+  behaviour is unchanged. (issue: `@rate-limit-test-flaky`)
+
 ## [0.8.1] - 2026-08-10
 
 ### Added
