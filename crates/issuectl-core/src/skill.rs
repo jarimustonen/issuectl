@@ -457,10 +457,19 @@ fn install_pi_mirror(
 /// symlink is seen as a symlink rather than as its (external) target.
 ///
 /// A not-yet-existing entry is fine — the install creates a real directory and
-/// a real file. A pre-existing regular file where the entry dir belongs is
-/// refused (it can't hold a `SKILL.md`); the caller warns and skips, exactly as
-/// the old `create_dir_all` failure did.
+/// a real file. A pre-existing regular file where the entry dir belongs, or a
+/// non-regular `SKILL.md` (symlink, FIFO, device, dir), is refused; the caller
+/// warns and skips, exactly as the old `create_dir_all` failure did. Every
+/// branch fails CLOSED: a stat error we cannot attribute to `NotFound`
+/// propagates rather than being read as "safe".
 fn ensure_pi_mirror_target_within_corpus(pi_root: &Path, name: &str) -> Result<()> {
+    // Defense in depth at the filesystem boundary: reject a key that is not a
+    // single safe path component before any join, even though every current
+    // caller passes a hard-coded `managed_pi_skills()` name. Without this the
+    // helper's own containment contract would rest entirely on its callers.
+    if !is_valid_skill_name(name) {
+        anyhow::bail!("invalid pi.dev skill name {name:?}; refusing to write it");
+    }
     let dir = pi_root.join(name);
     match dir.symlink_metadata() {
         Ok(m) if m.file_type().is_symlink() => anyhow::bail!(
@@ -475,13 +484,20 @@ fn ensure_pi_mirror_target_within_corpus(pi_root: &Path, name: &str) -> Result<(
         Err(e) => return Err(e).with_context(|| format!("cannot stat {}", dir.display())),
     }
     let skill_md = dir.join("SKILL.md");
-    if let Ok(m) = skill_md.symlink_metadata() {
-        if m.file_type().is_symlink() {
-            anyhow::bail!(
-                "{} is a symlink out of the corpus; refusing to overwrite through it",
-                skill_md.display()
-            );
+    match skill_md.symlink_metadata() {
+        Ok(m) if m.file_type().is_symlink() => anyhow::bail!(
+            "{} is a symlink out of the corpus; refusing to overwrite through it",
+            skill_md.display()
+        ),
+        // A pre-existing `SKILL.md` must be a plain regular file. A FIFO would
+        // block `std::fs::write` forever; a device/socket would receive the
+        // rendered body. `--force` overwrites only a genuine regular file.
+        Ok(m) if !m.is_file() => {
+            anyhow::bail!("{} exists but is not a regular file", skill_md.display())
         }
+        Ok(_) => {}                                              // real regular file
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // will be created
+        Err(e) => return Err(e).with_context(|| format!("cannot stat {}", skill_md.display())),
     }
     Ok(())
 }
@@ -552,6 +568,25 @@ fn install_rendered_file(
 // recorded version differs from the running binary) and *reversible* (re-run
 // `skill install --force`, or `skill pi-prune` for orphans), rather than by
 // guarding the write.
+//
+// SYMLINK CONTAINMENT / THREAT MODEL (see the `pi-corpus-symlink-traversal`
+// issue). Every path that walks, deletes, or overwrites under `pi_root` refuses
+// to follow a directory/`SKILL.md` symlink out of the corpus: the walk gate in
+// [`classify_pi_corpus`] (symlinked entry → `Unmanaged`, never read through),
+// the delete gate [`orphan_is_safely_removable`], and the write gate
+// [`ensure_pi_mirror_target_within_corpus`], all via `symlink_metadata` (which
+// never follows the final component). `save_pi_manifest` creates its temp file
+// with `O_EXCL` so a pre-planted symlink at the temp name is refused too. These
+// gates are `symlink_metadata`-then-act (check-then-use): they fully close the
+// documented threat — a symlink planted BEFORE issuectl runs (a user footgun or
+// a sibling tool's leftover), plus the cross-process advisory flock that
+// serializes cooperating issuectl/orchestratectl processes. They do NOT close a
+// TOCTOU race against a *hostile* process that swaps a real dir for a symlink in
+// the window between the check and the destructive syscall, nor a `--force`
+// overwrite through a hard link; a same-UID adversary racing us on the corpus
+// is out of scope here. Fully closing that needs descriptor-relative no-follow
+// ops (`openat2 RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS`, `unlinkat`, atomic
+// `renameat`) — tracked in `pi-corpus-fd-relative-hardening`.
 
 /// The provenance-manifest filename at the root of the pi corpus. Namespaced
 /// by tool so the sibling `orchestratectl` corpus writer keeps its own manifest
@@ -756,8 +791,25 @@ fn save_pi_manifest(pi_root: &Path, manifest: &PiManifest) -> Result<()> {
         std::process::id(),
         TMP_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&tmp, format!("{body}\n"))
-        .with_context(|| format!("cannot write {}", tmp.display()))?;
+    // The temp name is predictable (`<pid>.<seq>`), so a hostile process could
+    // pre-create it as a symlink to a file OUTSIDE the corpus; a plain
+    // `std::fs::write` would then follow the link and truncate that target with
+    // manifest JSON — another way to escape `pi_root`. Create the temp file
+    // exclusively via `create_new` (`O_CREAT|O_EXCL`): POSIX guarantees the open
+    // fails with `EEXIST` when the final component already exists *including a
+    // symlink*, regardless of its target, so a pre-created (or racing) symlink
+    // at this exact name is refused rather than followed. No new dependency
+    // needed — this is std-only.
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .with_context(|| format!("cannot exclusively create {}", tmp.display()))?;
+        f.write_all(format!("{body}\n").as_bytes())
+            .with_context(|| format!("cannot write {}", tmp.display()))?;
+    }
     std::fs::rename(&tmp, &path).with_context(|| {
         // Best-effort cleanup of the temp file on a failed rename.
         let _ = std::fs::remove_file(&tmp);
@@ -928,7 +980,33 @@ fn classify_pi_corpus(pi_root: &Path, manifest: &PiManifest) -> Vec<PiSkillStatu
     for name in names {
         let recorded = manifest.skills.get(&name);
         let managed_template = managed.get(name.as_str()).copied();
-        let skill_md = pi_root.join(&name).join("SKILL.md");
+        let dir = pi_root.join(&name);
+        let skill_md = dir.join("SKILL.md");
+
+        // Containment gate on the WALK path (mirrors the prune/install gates):
+        // never resolve `skill_md` THROUGH a symlinked `<pi_root>/<name>`.
+        // `symlink_metadata(skill_md)` does not follow the final component but
+        // *does* follow an intermediate directory symlink, so a
+        // `<pi_root>/x -> /external/dir` would make status read
+        // `/external/dir/SKILL.md` — an out-of-corpus read (info disclosure) and
+        // a misclassification. A symlinked entry dir is reported `Unmanaged`
+        // (visible, but never read through and never prune-eligible — prune only
+        // ever acts on `Orphan`/`Missing`), so classification and prune agree
+        // that a symlinked entry is off-limits without following it.
+        if dir
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            skills.push(PiSkillStatus {
+                name,
+                state: PiSkillState::Unmanaged,
+                recorded_version: recorded.map(|e| e.version.clone()),
+                on_disk_version: None,
+                path: skill_md.to_string_lossy().into_owned(),
+            });
+            continue;
+        }
 
         // Presence via `symlink_metadata` (does NOT follow symlinks): only a
         // genuine `NotFound` counts as absent, so a present-but-unreadable file
@@ -1061,12 +1139,22 @@ fn orphan_is_safely_removable(dir: &Path, skill_md: &Path) -> bool {
     match skill_md.symlink_metadata() {
         Ok(m) if !m.is_file() => return false, // symlink or dir at SKILL.md → refuse
         Ok(_) => {}
-        Err(_) => {} // no SKILL.md — the (stray) dir/row is still safe to drop
+        // Fail CLOSED on a stat error we can't attribute to absence: only a
+        // genuine `NotFound` means "no SKILL.md, the stray dir/row is safe to
+        // drop". EACCES/EIO/ELOOP etc. leave the type unknown, so refuse rather
+        // than delete a file we could not inspect.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return false,
     }
     match std::fs::read_dir(dir) {
+        // A sibling-file check gates the delete, so it must fail CLOSED: an
+        // unreadable entry (`Err`) is NOT proof the dir holds only `SKILL.md`.
+        // `flatten()` would silently drop such an `Err` and could let prune tear
+        // `SKILL.md` out of a dir that actually has siblings — treat any `Err`
+        // entry as "not only SKILL.md" and refuse.
         Ok(entries) => entries
-            .flatten()
-            .all(|e| e.file_name().to_str() == Some("SKILL.md")),
+            .map(|e| e.map(|e| e.file_name()))
+            .all(|e| matches!(e, Ok(n) if n.to_str() == Some("SKILL.md"))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => true, // no dir at all
         Err(_) => false, // can't inspect the dir → refuse to delete blindly
     }
@@ -1133,15 +1221,34 @@ pub fn pi_prune(pi_root: &Path, apply: bool) -> Result<PiPruneOutcome> {
                     continue;
                 }
                 if apply {
-                    // Remove the file (ignoring an already-absent one); on a hard
-                    // removal error leave the row so the manifest keeps
-                    // reflecting reality, and report it as skipped.
-                    if skill_md.exists() && std::fs::remove_file(&skill_md).is_err() {
-                        skipped.push(item);
-                        continue;
+                    // Remove the file. A genuine `NotFound` is fine (already
+                    // gone); any OTHER error is a hard failure — leave the row so
+                    // the manifest keeps reflecting reality, and report it as
+                    // skipped. (No preceding `exists()` probe: that both follows
+                    // symlinks and races the unlink; matching the `remove_file`
+                    // result directly is the fail-closed form.)
+                    match std::fs::remove_file(&skill_md) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => {
+                            skipped.push(item);
+                            continue;
+                        }
                     }
-                    // Drop the dir only if empty — never recursively.
-                    let _ = std::fs::remove_dir(&dir);
+                    // Drop the dir only if now empty — never recursively. Do NOT
+                    // clear the row (or report the entry removed) if this hard-
+                    // fails: a non-empty/permission/raced dir means the on-disk
+                    // state does not match "fully pruned", so keep the row (the
+                    // now-fileless dir reclassifies as `Missing` next pass and is
+                    // cleared then). `NotFound` is fine — nothing left to drop.
+                    match std::fs::remove_dir(&dir) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => {
+                            skipped.push(item);
+                            continue;
+                        }
+                    }
                     manifest.skills.remove(&entry.name);
                     dirty = true;
                 }
@@ -2369,13 +2476,14 @@ mod tests {
         );
     }
 
-    /// Path-traversal (symlink) regression: an issuectl-owned orphan entry whose
+    /// Path-traversal (symlink) regression: an issuectl-owned entry whose
     /// `<pi_root>/<name>` directory has been REPLACED by a symlink pointing at a
     /// directory OUTSIDE the corpus must never be followed by prune —
-    /// `is_valid_skill_name` vets only the key, not the on-disk shape. Prune
-    /// must skip it (report it under `skipped`) and leave the external file
-    /// untouched, rather than `remove_file`-ing through the link. Hermetic: two
-    /// tempdirs, never the real `~/.pi/`.
+    /// `is_valid_skill_name` vets only the key, not the on-disk shape. The walk
+    /// gate in `classify_pi_corpus` reports a symlinked entry dir as `Unmanaged`
+    /// (never read through, never prune-eligible), so it is neither removed nor
+    /// even reached the deletion gate, and the external file is untouched.
+    /// Hermetic: two tempdirs, never the real `~/.pi/`.
     #[cfg(unix)]
     #[test]
     fn pi_prune_refuses_to_follow_directory_symlink_out_of_corpus() {
@@ -2401,7 +2509,23 @@ mod tests {
         );
         save_pi_manifest(pi.path(), &manifest).unwrap();
 
-        // Apply-prune must NOT follow the symlink and delete the external file.
+        // Status must classify the symlinked entry as Unmanaged WITHOUT reading
+        // through the link (no leaked out-of-corpus version), and never as a
+        // prune-eligible Orphan/Missing.
+        let report = pi_status(pi.path()).unwrap();
+        let tb = row(&report, "triage-bugs");
+        assert_eq!(
+            tb.state,
+            PiSkillState::Unmanaged,
+            "a symlinked entry dir must classify Unmanaged, not Orphan/Missing"
+        );
+        assert!(
+            tb.on_disk_version.is_none(),
+            "status must not read through the symlink and leak the external file's version"
+        );
+
+        // Apply-prune must NOT follow the symlink and delete the external file,
+        // and must neither remove nor touch the entry.
         let outcome = pi_prune(pi.path(), true).unwrap();
         assert!(
             victim.exists(),
@@ -2411,12 +2535,18 @@ mod tests {
             outcome.removed.iter().all(|i| i.name != "triage-bugs"),
             "a symlinked entry dir must never be reported removed"
         );
-        assert!(
-            outcome.skipped.iter().any(|i| i.name == "triage-bugs"),
-            "a symlinked entry dir must be reported skipped for the user to resolve"
-        );
         // The symlink itself is left in place (prune never touches it).
         assert!(pi.path().join("triage-bugs").symlink_metadata().is_ok());
+
+        // Defense in depth: the deletion gate ALSO refuses a symlinked entry dir
+        // directly, independent of the classify-side Unmanaged verdict.
+        assert!(
+            !orphan_is_safely_removable(
+                &pi.path().join("triage-bugs"),
+                &pi.path().join("triage-bugs").join("SKILL.md"),
+            ),
+            "orphan_is_safely_removable must refuse a symlinked entry dir"
+        );
     }
 
     /// Companion to the dir-symlink case: a REAL orphan entry dir whose
@@ -2506,6 +2636,32 @@ mod tests {
             "Host *\n  secret\n",
             "install --force must not overwrite a symlinked SKILL.md's external target"
         );
+    }
+
+    /// The install write gate rejects a pre-existing non-regular `SKILL.md`
+    /// (here: a directory) rather than blindly writing over it. The mirror is
+    /// skipped (non-fatal — absent from the summary), and the repo-local Claude
+    /// install still succeeds. Guards against the fail-open form where a
+    /// non-`NotFound` stat outcome was treated as "safe to write".
+    #[test]
+    fn install_refuses_nonregular_skill_md() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        // A directory where the `issue` mirror's `SKILL.md` file belongs.
+        std::fs::create_dir_all(pi.path().join("issue/SKILL.md")).unwrap();
+
+        let results =
+            install_skill_summary(repo.path(), &[Agent::Claude], true, Some(pi.path())).unwrap();
+        assert!(
+            !results
+                .iter()
+                .any(|r| r.path == pi.path().join("issue/SKILL.md")),
+            "a non-regular SKILL.md must be skipped, not written"
+        );
+        // The directory is left untouched, and the writable mirrors still land.
+        assert!(pi.path().join("issue/SKILL.md").is_dir());
+        assert!(pi.path().join("issue-new/SKILL.md").is_file());
+        assert!(repo.path().join(".claude/skills/issue/SKILL.md").exists());
     }
 
     /// The deletion gate refuses to act on a corrupt manifest rather than
