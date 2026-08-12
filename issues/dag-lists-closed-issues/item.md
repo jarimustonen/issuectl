@@ -2,9 +2,10 @@
 created: 2026-08-12
 updated: 2026-08-12
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 labels: [observability]
+closed: 2026-08-12
 ---
 
 # issuectl dag lists closed/terminal issues in its unscheduled output
@@ -37,3 +38,9 @@ Filter the input set to non-terminal statuses in the dag computation (`crate::da
 
 ## Note
 Confirmed on the version at commit ~2031294 (0.8.1 tree).
+
+## Resolution
+
+### 2026-08-12T16:55:56Z · @issuectl
+
+Filtered closing-status (terminal) issues out of the dag scheduling view — both the unscheduled bucket and named lanes. done/graph/all_slugs are still built over the full issue set so a done dependency still reads as satisfied. Excluding closed lane members also fixed a latent reordering bug: a closed lane member's blocked_by edge + priority could demote a higher-priority runnable member out of head-of-line. Schema-aware via StatusClass::Closing (honours status_classes overrides). Reviewed by 4-model llm-review; 2 spin-offs filed (dag-inprogress-schema-aware, dag-reservations-run-id-object-shape).
