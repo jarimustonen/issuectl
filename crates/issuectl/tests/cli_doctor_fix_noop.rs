@@ -5,7 +5,7 @@
 //! Fixture mirrors `/tmp/doctor-repro3/` from the bug report:
 //!   - `.schema.yaml` with the built-in alias table
 //!   - one legacy `status: closed` issue (alias coerces to `done`)
-//!   - one issue with both `## Notes` and `## Comments` (manual merge)
+//!   - one issue with multiple `## Notes` (ambiguous → manual merge)
 //!   - one drifted `.issuectl/AGENTS.md` managed block
 
 use std::process::{Command, Output};
@@ -55,11 +55,14 @@ fn build_repro_fixture() -> TempDir {
     )
     .unwrap();
 
+    // Multiple `## Notes` is the shape that still needs a human merge —
+    // the unambiguous one-`## Notes` + one-`## Comments` case now
+    // auto-merges (issue @doctor-fix-merge-notes-comments).
     let conflict = root.join("issues/notes-conflict-bug");
     std::fs::create_dir_all(&conflict).unwrap();
     std::fs::write(
         conflict.join("item.md"),
-        "---\ncreated: 2026-01-01\nupdated: 2026-01-01\ntype: bug\nstatus: open\npriority: normal\n---\n\n# notes conflict bug\n\n## Notes\nold\n\n## Comments\nnew\n",
+        "---\ncreated: 2026-01-01\nupdated: 2026-01-01\ntype: bug\nstatus: open\npriority: normal\n---\n\n# notes conflict bug\n\n## Notes\nold\n\n## Notes\nnewer\n",
     )
     .unwrap();
 
@@ -207,7 +210,7 @@ fn doctor_fix_handles_legacy_folder_notes_conflict() {
     std::fs::create_dir_all(root.join("issues/open/foo-bar")).unwrap();
     std::fs::write(
         root.join("issues/open/foo-bar/item.md"),
-        "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2026-01-01\n---\n# T\n\n## Notes\nold\n\n## Comments\nnew\n",
+        "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2026-01-01\n---\n# T\n\n## Notes\nold\n\n## Notes\nnewer\n",
     )
     .unwrap();
     std::fs::create_dir_all(root.join("issues/closed/3-old")).unwrap();

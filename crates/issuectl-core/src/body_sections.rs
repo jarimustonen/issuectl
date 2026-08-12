@@ -806,6 +806,114 @@ pub fn reserved_section_warnings(body: &str) -> Vec<String> {
         .collect()
 }
 
+/// Merge the body of the H2 section named `from` into the H2 section
+/// named `into`, then drop the now-empty `from` section entirely. This
+/// is the structural half of the `## Notes` → `## Comments` migration
+/// for the case where BOTH headings already exist (see
+/// [`LEGACY_SECTION_ALIASES`]): `doctor --fix` folds the legacy alias's
+/// entries into the canonical section instead of demanding a manual
+/// merge.
+///
+/// Entry order is preserved in **document order**: when `from` appears
+/// before `into` its content is prepended to `into`'s content;
+/// otherwise it is appended. Every other section — including any
+/// section sitting between the two — is preserved in place, with only
+/// its border blank lines normalised. Detection is fence-aware, so a
+/// `## …` line inside a code fence is content, not a heading.
+///
+/// Precondition (caller-enforced via `classify_notes`): exactly one
+/// `from` heading and one `into` heading. If either is absent the body
+/// is returned unchanged.
+pub fn merge_h2_section(body: &str, from: &str, into: &str) -> String {
+    let lines: Vec<&str> = body.split('\n').collect();
+    let h2_indices = scan_outside_fences(&lines, |_, l| is_any_h2(l));
+
+    let name_at = |idx: usize| lines[idx].strip_prefix("## ").map(|r| r.trim_end());
+    let from_idx = h2_indices
+        .iter()
+        .copied()
+        .find(|&i| name_at(i) == Some(from));
+    let into_idx = h2_indices
+        .iter()
+        .copied()
+        .find(|&i| name_at(i) == Some(into));
+    let (Some(from_idx), Some(into_idx)) = (from_idx, into_idx) else {
+        return body.to_string();
+    };
+
+    // Section span = heading+1 .. next H2 heading (or EOF).
+    let span_end = |start: usize| {
+        h2_indices
+            .iter()
+            .copied()
+            .find(|&i| i > start)
+            .unwrap_or(lines.len())
+    };
+    let from_body = trim_blank_borders(&lines[from_idx + 1..span_end(from_idx)]);
+    let into_body = trim_blank_borders(&lines[into_idx + 1..span_end(into_idx)]);
+    let merged_body = if from_idx < into_idx {
+        join_section_bodies(&from_body, &into_body)
+    } else {
+        join_section_bodies(&into_body, &from_body)
+    };
+
+    // Rebuild: preamble verbatim, then each section in document order —
+    // dropping `from`, replacing `into`'s body with the merged content,
+    // and preserving every other section (border blanks normalised).
+    let first_h2 = h2_indices.first().copied().unwrap_or(lines.len());
+    let preamble = trim_trailing_blank(&lines[..first_h2]);
+
+    let mut sections: Vec<String> = Vec::new();
+    for (pos, &idx) in h2_indices.iter().enumerate() {
+        if idx == from_idx {
+            continue;
+        }
+        let sec_body = if idx == into_idx {
+            merged_body.clone()
+        } else {
+            let end = h2_indices.get(pos + 1).copied().unwrap_or(lines.len());
+            trim_blank_borders(&lines[idx + 1..end])
+        };
+        let mut sec = lines[idx].to_string();
+        if !sec_body.is_empty() {
+            sec.push_str("\n\n");
+            sec.push_str(&sec_body);
+        }
+        sections.push(sec);
+    }
+
+    let mut parts: Vec<String> = Vec::with_capacity(sections.len() + 1);
+    if !preamble.is_empty() {
+        parts.push(preamble);
+    }
+    parts.extend(sections);
+    let mut out = parts.join("\n\n");
+    out.push('\n');
+    out
+}
+
+/// Concatenate two already-border-trimmed section bodies with exactly
+/// one blank line of separation, dropping empty operands so the result
+/// never has leading/trailing/double blanks.
+fn join_section_bodies(a: &str, b: &str) -> String {
+    match (a.is_empty(), b.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => a.to_string(),
+        (true, false) => b.to_string(),
+        (false, false) => format!("{a}\n\n{b}"),
+    }
+}
+
+/// Like [`trim_blank_borders`] but preserves leading blank lines —
+/// used for the preamble (everything before the first H2), where only
+/// the trailing section-separator blanks should be dropped.
+fn trim_trailing_blank(lines: &[&str]) -> String {
+    match lines.iter().rposition(|l| !l.trim().is_empty()) {
+        Some(b) => lines[..=b].join("\n"),
+        None => String::new(),
+    }
+}
+
 #[allow(dead_code)]
 fn parse_block_heading(line: &str) -> Option<(String, String)> {
     let rest = line.strip_prefix("### ")?.trim_end();
@@ -830,6 +938,51 @@ fn trim_blank_borders(lines: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_h2_folds_source_into_target_document_order() {
+        // Source (`Notes`) precedes target (`Comments`): its entry lands
+        // first, `Notes` is dropped, a real block round-trips intact.
+        let body = "# T\n\n## Notes\n\n### 2026-01-01T00:00:00Z · @a\n\nold\n\n\
+                    ## Comments\n\n### 2026-02-01T00:00:00Z · @b\n\nnew\n";
+        let out = merge_h2_section(body, "Notes", COMMENTS);
+        assert!(!out.contains("## Notes"), "Notes dropped: {out}");
+        assert_eq!(out.matches("## Comments").count(), 1);
+        let old = out.find("old").unwrap();
+        let new = out.find("new").unwrap();
+        assert!(old < new, "document order preserved: {out}");
+    }
+
+    #[test]
+    fn merge_h2_appends_when_source_follows_target() {
+        let body = "## Comments\n\ny\n\n## Notes\n\nx\n";
+        assert_eq!(
+            merge_h2_section(body, "Notes", COMMENTS),
+            "## Comments\n\ny\n\nx\n"
+        );
+    }
+
+    #[test]
+    fn merge_h2_is_noop_when_source_absent() {
+        let body = "## Comments\n\nonly comments\n";
+        assert_eq!(merge_h2_section(body, "Notes", COMMENTS), body);
+    }
+
+    #[test]
+    fn merge_h2_is_fence_aware() {
+        // A fenced `## Notes` is content, not a heading — with no real
+        // `## Notes` present the body is returned unchanged.
+        let body = "## Comments\n\n```\n## Notes\n```\n";
+        assert_eq!(merge_h2_section(body, "Notes", COMMENTS), body);
+    }
+
+    #[test]
+    fn merge_h2_result_is_idempotent() {
+        let body = "## Notes\n\nx\n\n## Comments\n\ny\n";
+        let once = merge_h2_section(body, "Notes", COMMENTS);
+        let twice = merge_h2_section(&once, "Notes", COMMENTS);
+        assert_eq!(once, twice, "merging an already-merged body is a no-op");
+    }
 
     #[test]
     fn append_creates_section_when_missing() {

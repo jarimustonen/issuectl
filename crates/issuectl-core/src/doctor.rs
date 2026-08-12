@@ -302,9 +302,11 @@ struct DoctorFindings {
     /// `## Notes` → `## Comments`. Populated in `scan()`; consumed
     /// (and emptied) by `rename_notes_to_comments()` during `--fix`.
     notes_to_rename: Vec<String>,
-    /// Slugs whose body has both `## Notes` and `## Comments`, or
-    /// multiple `## Notes` headings — merging needs human
-    /// judgement, so doctor flags them and skips.
+    /// Slugs with an ambiguous legacy-section shape — multiple
+    /// `## Notes`, or a `## Notes` alongside multiple `## Comments` —
+    /// where the merge target is unclear, so doctor flags them for
+    /// manual merge and skips. (The unambiguous both-exist case — one
+    /// of each — is auto-merged and lives in `notes_to_rename`.)
     notes_conflicts: Vec<String>,
     /// Broken cross-references: `(slug, kind, target)` where `kind` is
     /// "epic" / "related" / "blocked_by" and `target` is the unresolved
@@ -427,13 +429,13 @@ struct DoctorActions {
     legacy_dirs: Vec<LegacyMigration>,
     flat_layout_plan: Option<MigrateLayoutPlan>,
     notes_to_rename: Vec<String>,
-    /// Slugs with BOTH `## Notes` and `## Comments` already in their
-    /// body. The rename cannot be applied (manual merge required) but
-    /// the apply pipeline records them in `outcome.notes_conflicts_at_apply`
-    /// so the human/JSON output still surfaces the manual-merge need.
-    /// Carried as actions (not implicit from findings) so the
-    /// post-flat-layout rescan can repopulate this alongside
-    /// `notes_to_rename`. See issue: @doctor-fix-noop.
+    /// Slugs with an ambiguous legacy-section shape (multiple
+    /// `## Notes`, or a `## Notes` alongside multiple `## Comments`)
+    /// that cannot be auto-merged. The apply pipeline records them in
+    /// `outcome.notes_conflicts_at_apply` so the human/JSON output
+    /// surfaces the manual-merge need. Carried as actions (not implicit
+    /// from findings) so the post-flat-layout rescan can repopulate
+    /// this alongside `notes_to_rename`. See issue: @doctor-fix-noop.
     notes_conflicts: Vec<String>,
     orphan_tempfiles: Vec<PathBuf>,
     closed_with_active_status: Vec<(String, String, PathBuf)>,
@@ -1962,7 +1964,12 @@ fn populate_notes_migration(scan: &ScanResult, report: &mut DoctorFindings) {
         };
         match classify_notes(text) {
             NotesScan::NoOp => {}
-            NotesScan::SafeRename => report.notes_to_rename.push(s.dir_name.clone()),
+            // Both SafeRename and Merge are forward-fixable by
+            // `migrate_notes_heading`; the apply pass re-classifies and
+            // routes each to a rename or a merge.
+            NotesScan::SafeRename | NotesScan::Merge => {
+                report.notes_to_rename.push(s.dir_name.clone())
+            }
             NotesScan::Conflict => report.notes_conflicts.push(s.dir_name.clone()),
         }
     }
@@ -2682,10 +2689,15 @@ enum NotesScan {
     /// File has exactly one `## Notes` and no `## Comments`. Safe to
     /// rewrite to `## Comments`.
     SafeRename,
-    /// File has both `## Notes` and `## Comments`, OR more than one
-    /// `## Notes`. Renaming silently would produce duplicate
-    /// `## Comments` sections (round-2 finding G5/O5), so we skip
-    /// and surface the slug for manual merge.
+    /// File has exactly one `## Notes` AND exactly one `## Comments`.
+    /// The two are auto-merged: `## Notes`' entries fold into
+    /// `## Comments` (document order preserved) and `## Notes` is
+    /// dropped (issue @doctor-fix-merge-notes-comments).
+    Merge,
+    /// File has more than one `## Notes` (with or without
+    /// `## Comments`), OR one `## Notes` alongside multiple
+    /// `## Comments`. The merge target is ambiguous (round-2 finding
+    /// G5/O5), so we skip and surface the slug for manual merge.
     Conflict,
 }
 
@@ -2700,6 +2712,8 @@ fn classify_notes(text: &str) -> NotesScan {
         NotesScan::NoOp
     } else if notes == 1 && comments == 0 {
         NotesScan::SafeRename
+    } else if notes == 1 && comments == 1 {
+        NotesScan::Merge
     } else {
         NotesScan::Conflict
     }
@@ -2725,17 +2739,25 @@ fn body_sections_scan(lines: &[&str], name: &str) -> usize {
     count
 }
 
-/// Pure function: rewrite `## Notes` → `## Comments` when there's no
-/// pre-existing `## Comments`. Fence-aware so a `## Notes` line
+/// Pure function: migrate `## Notes` toward `## Comments`. When only
+/// `## Notes` exists it's renamed; when both exist (exactly one of
+/// each) `## Notes`' entries are folded into `## Comments` in document
+/// order and `## Notes` is dropped. Fence-aware so a `## Notes` line
 /// inside a code block is preserved verbatim. Returns
-/// `(new_text, conflict)` — `conflict=true` when both headings
-/// exist or there are multiple `## Notes` headings (caller should
-/// skip and surface to the user).
+/// `(new_text, conflict)` — `conflict=true` only for the genuinely
+/// ambiguous shapes (multiple `## Notes`, or a `## Notes` alongside
+/// multiple `## Comments`) which the caller skips and surfaces.
 fn migrate_notes_heading(text: &str) -> (String, bool) {
     use crate::body_sections::{closes_fence, opening_fence, Fence};
     match classify_notes(text) {
         NotesScan::NoOp => return (text.to_string(), false),
         NotesScan::Conflict => return (text.to_string(), true),
+        NotesScan::Merge => {
+            return (
+                crate::body_sections::merge_h2_section(text, "Notes", "Comments"),
+                false,
+            )
+        }
         NotesScan::SafeRename => {}
     }
     let lines: Vec<&str> = text.split('\n').collect();
@@ -4168,11 +4190,37 @@ mod tests {
     }
 
     #[test]
-    fn migrate_notes_heading_flags_conflict_when_both_exist() {
+    fn migrate_notes_heading_merges_when_both_exist() {
+        // Issue @doctor-fix-merge-notes-comments: one `## Notes` and one
+        // `## Comments` auto-merge (no manual conflict). `## Notes`
+        // preceded `## Comments`, so its entry lands first (document
+        // order preserved) and `## Notes` is dropped.
         let body = "## Notes\n\nx\n\n## Comments\n\ny\n";
         let (out, conflict) = migrate_notes_heading(body);
-        assert!(conflict);
-        assert_eq!(out, body, "no rewrite when conflict");
+        assert!(!conflict, "both-exist is auto-merged, not a conflict");
+        assert_eq!(out, "## Comments\n\nx\n\ny\n");
+        assert!(!out.contains("## Notes"), "## Notes must be dropped");
+    }
+
+    #[test]
+    fn migrate_notes_heading_merge_preserves_document_order_notes_after() {
+        // When `## Comments` precedes `## Notes`, the Comments entries
+        // stay first and the Notes entries are appended — document
+        // order is preserved regardless of which section came first.
+        let body = "## Comments\n\ny\n\n## Notes\n\nx\n";
+        let (out, conflict) = migrate_notes_heading(body);
+        assert!(!conflict);
+        assert_eq!(out, "## Comments\n\ny\n\nx\n");
+    }
+
+    #[test]
+    fn migrate_notes_heading_merge_preserves_intervening_section() {
+        // A section between `## Notes` and `## Comments` is preserved in
+        // place; only `## Notes` is folded away.
+        let body = "## Notes\n\nx\n\n## Decisions\n\nd\n\n## Comments\n\ny\n";
+        let (out, conflict) = migrate_notes_heading(body);
+        assert!(!conflict);
+        assert_eq!(out, "## Decisions\n\nd\n\n## Comments\n\nx\n\ny\n");
     }
 
     #[test]
@@ -4198,16 +4246,31 @@ mod tests {
             "---\nstatus: open\n---\n\n## Notes\n\nold\n",
         )
         .unwrap();
-        let conflict = tmp.path().join("issues/has-both");
-        fs::create_dir_all(&conflict).unwrap();
+        // One `## Notes` + one `## Comments` is now an auto-merge, so it
+        // joins `notes_to_rename`, not `notes_conflicts`.
+        let merge = tmp.path().join("issues/has-both");
+        fs::create_dir_all(&merge).unwrap();
         fs::write(
-            conflict.join("item.md"),
+            merge.join("item.md"),
             "---\nstatus: open\n---\n\n## Notes\n\nx\n\n## Comments\n\ny\n",
         )
         .unwrap();
+        // Multiple `## Notes` stays an ambiguous conflict.
+        let conflict = tmp.path().join("issues/two-notes");
+        fs::create_dir_all(&conflict).unwrap();
+        fs::write(
+            conflict.join("item.md"),
+            "---\nstatus: open\n---\n\n## Notes\n\na\n\n## Decisions\n\nd\n\n## Notes\n\nb\n",
+        )
+        .unwrap();
         let r = scan(tmp.path()).unwrap();
-        assert_eq!(r.notes_to_rename, vec!["safe-rename".to_string()]);
-        assert_eq!(r.notes_conflicts, vec!["has-both".to_string()]);
+        let mut to_rename = r.notes_to_rename.clone();
+        to_rename.sort();
+        assert_eq!(
+            to_rename,
+            vec!["has-both".to_string(), "safe-rename".to_string()]
+        );
+        assert_eq!(r.notes_conflicts, vec!["two-notes".to_string()]);
     }
 
     #[test]
@@ -4241,6 +4304,56 @@ mod tests {
         assert!(!after.contains("## Notes"));
         assert!(after.contains("old note"));
         assert_eq!(outcome.notes_renamed, vec!["legacy-notes-here".to_string()]);
+    }
+
+    #[test]
+    fn doctor_fix_merges_notes_into_comments_when_both_exist() {
+        // Issue @doctor-fix-merge-notes-comments: a body with BOTH
+        // `## Notes` and `## Comments` is auto-merged by `--fix`
+        // (document order preserved, `## Notes` dropped) — it no longer
+        // surfaces as a manual-merge conflict, so nothing lands in
+        // `notes_conflicts_at_apply` and the apply completes cleanly.
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/has-both");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n# T\n\n## Notes\n\nfirst\n\n## Comments\n\nsecond\n",
+        )
+        .unwrap();
+        let mut r = scan(tmp.path()).unwrap();
+        assert!(
+            r.notes_conflicts.is_empty(),
+            "both-exist must not be a scan conflict, got {:?}",
+            r.notes_conflicts
+        );
+        let actions = DoctorActions::from_findings(&mut r);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        let after = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert!(
+            !after.contains("## Notes"),
+            "## Notes must be dropped: {after}"
+        );
+        assert_eq!(after.matches("## Comments").count(), 1, "single Comments");
+        // Document order preserved: the Notes entry precedes the
+        // existing Comments entry.
+        let first = after.find("first").expect("Notes entry retained");
+        let second = after.find("second").expect("Comments entry retained");
+        assert!(first < second, "Notes entry must come first: {after}");
+        assert_eq!(outcome.notes_renamed, vec!["has-both".to_string()]);
+        assert!(
+            outcome.notes_conflicts_at_apply.is_empty(),
+            "no manual-merge leftovers: {:?}",
+            outcome.notes_conflicts_at_apply
+        );
+        // A second doctor run is a clean no-op (idempotent merge).
+        let r2 = scan(tmp.path()).unwrap();
+        assert!(r2.notes_to_rename.is_empty() && r2.notes_conflicts.is_empty());
     }
 
     #[test]
@@ -5536,9 +5649,11 @@ mod tests {
         let tmp = fresh_repo();
         let foo = tmp.path().join("issues/open/foo-bar");
         fs::create_dir_all(&foo).unwrap();
+        // Multiple `## Notes` — an ambiguous shape that stays a manual
+        // conflict (the unambiguous both-exist case now auto-merges).
         fs::write(
             foo.join("item.md"),
-            "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2026-01-01\n---\n# T\n\n## Notes\n\nfirst\n\n## Comments\n\nsecond\n",
+            "---\ntype: bug\nstatus: open\npriority: normal\ncreated: 2026-01-01\n---\n# T\n\n## Notes\n\nfirst\n\n## Notes\n\nsecond\n",
         )
         .unwrap();
         let old = tmp.path().join("issues/closed/3-old");
@@ -6799,12 +6914,14 @@ mod tests {
             .iter()
             .any(|s| s == "legacy-notes-here"));
 
-        // Concurrent edit: a user appends a `## Comments` section
-        // before apply runs. `migrate_notes_heading` will now
-        // classify this as Conflict at apply time.
+        // Concurrent edit: a user appends a SECOND `## Notes` section
+        // before apply runs — an ambiguous shape. `migrate_notes_heading`
+        // will now classify this as Conflict at apply time. (Adding a
+        // single `## Comments` would instead auto-merge; multiple
+        // `## Notes` is the shape that still needs a human.)
         fs::write(
             &item,
-            "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n## Notes\n\nold\n\n## Comments\n\nnew\n",
+            "---\ntype: bug\nstatus: open\npriority: normal\n---\n\n## Notes\n\nold\n\n## Notes\n\nnewer\n",
         )
         .unwrap();
 
