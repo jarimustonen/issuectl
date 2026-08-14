@@ -145,3 +145,7 @@ Execution DAG:n (drop landed, add active, keep order) rupeaman lopussa, ja commi
 omana committinaan (`git add TODO.md issues/ && git commit`) ennen `/wrap-up`:ia — näin
 tuore agentti voi jatkaa `jatketaan @TODO.md`:sta. Pidä `main` puhtaana rinnakkaisten
 worktreiden takia (ks. globaali CLAUDE.md).
+
+## Piialiisan bugiraportit
+
+- [ ] 🐛 Piialiisan bugiraportti: issuectl new: accept --lane (set scheduling lane at creation) — jari via Telegram ([`intake-feature-issuectl-035722451473`](issues/intake-feature-issuectl-035722451473/item.md))
