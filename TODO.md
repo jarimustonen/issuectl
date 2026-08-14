@@ -47,7 +47,7 @@ ohjelmistossa `/llm-review` taipuu tuottamaan tarpeettomia "keksitään keksimä
 -suosituksia (14/19 spin-offia → drop). Älä ota review-cascaden spin-offeja annettuina — punnitse jokainen
 todellista arvoa vasten ennen kuin nostat sen DAG:iin.
 
-**Seuraava askel:** työstä 8-issuen DAG (alla; sisältää sisar-agentin 2026-08-14 filaaman `@update-set-body-flag`in). **Tämä kierros toimii myös tavallisten worktree-promptien
+**Seuraava askel:** työstä 9-issuen DAG (alla; sisältää sisar-agentin 2026-08-14 filaaman `@update-set-body-flag`in). **Tämä kierros toimii myös tavallisten worktree-promptien
 testinä** (@jari: "testataan tavallisia worktree prompteja"). **GLOBAL HEAD-OF-LINE: `@flock-write-lock`**
 — flaky testi joka **PITÄÄ olla vihreä ennen seuraavaa releasea**; se + muu julkaisematon mainin työ menee
 seuraavaan minoriin (0.11.0). Kun DAG tyhjenee → ei enää tehtävää.
@@ -94,6 +94,7 @@ LANE A — main.rs (cmd_* + clap) + mutate/ + schema + crate::dag  (sarjata; jak
     configsource-load-return-value  normal · improvement; the ONE kept readability win — return schema/transitions load BY VALUE now the cache is gone (finishes collapse-configsource-seam). Touches mutate/ + config load.
     action-verb-json-echo-mutation  normal · improvement; update/label/close --json result doesn't echo the mutated field (.priority/.labels/.status = null). Echo resulting value. Touches cmd_* action-verb handlers main.rs + result objects.
     update-set-body-flag  normal · feature; `issuectl update` lacks a body-set flag that `new` has — add `--body-file`/`--description` (+ stdin `-`) to set/replace an existing body, matching new's exact flag names. Filed by a sibling agent 2026-08-14. Touches main.rs update clap + mutate/ body write.
+    as-flag-strip-at-sign  normal · improvement; `--as "@jari"` hard-fails ("author cannot contain '@'") though attributions display as @jari — strip a single leading '@' on note/close --as instead of rejecting. Wrap-up papercut (hit twice this session). Touches issuectl-core author-validation (mutate/ author path).
 LANE B — skill.rs + pi-corpus lifecycle
     pi-mirror-hint-accuracy  low · bug; install prints "skills mirrored" hint even when the pi block was skipped. Only kept pi-corpus item. Touches skill.rs/pi install.
 LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
@@ -105,7 +106,7 @@ Kaari-lyhyesti: sessio kahdessa vaiheessa. **(1) Rupeama:** 8 yksikköä landasi
 + 2 HIGH pi-bugia, ConfigSource-romautus, flock-testit, dag-lists-korjaus, epic-tree) — kaikki `/llm-review`
 läpi, ei releasea. **(2) PO-triage:** review-cascaden ~19 spin-offista **14 → wontfix, 6 → keep, 1 uusi**
 (`dag-inprogress-is-spawnable`). 15 issueä terminaaliksi → pudotettu DAG:sta (8 shipattua + 14 wontfix −
-päällekkäisyydet). DAG on nyt 8 aktiivia: LANE A ruuhkainen (6, sarjata; ml. sisar-agentin `update-set-body-flag`), LANE B 1, LANE C 1 (blocked).
+päällekkäisyydet). DAG on nyt 9 aktiivia: LANE A ruuhkainen (7, sarjata; ml. sisar-agentin `update-set-body-flag`), LANE B 1, LANE C 1 (blocked).
 Head = `flock-write-lock` (release-gate). Seuraava kierros testaa myös tavallisia worktree-prompteja.
 
 ---
