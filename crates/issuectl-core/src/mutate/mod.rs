@@ -177,6 +177,18 @@ pub struct UpdateIssueRequest {
     /// scanning the body 50k times in one request.
     #[serde(default)]
     pub body_ops: Vec<BodyOp>,
+    /// Replace the entire markdown body under the same flock as the
+    /// frontmatter PATCHes above. `None` leaves the body untouched;
+    /// `Some(body)` swaps it wholesale (the plain markdown a client
+    /// sends, sans the leading `---`/frontmatter). The replacement
+    /// applies *before* `body_ops` and the reopen-notes append, so those
+    /// layer on top of the new body, and before the type-change
+    /// required-section check, so that check validates the final body.
+    /// A reserved-legacy section heading (`## Notes`) surfaces the same
+    /// non-fatal warning `update_body` / `body set` raise. Drives
+    /// `issuectl update --description`/`--body`/`--body-file`.
+    #[serde(default)]
+    pub set_body: Option<String>,
     /// CLI-only: compute the post-mutation bytes and return them via
     /// `UpdateOutcome::pending_serialized` instead of writing or
     /// publishing. The flock is still acquired so the read+plan is
@@ -477,6 +489,7 @@ impl UpdateIssueRequest {
             && self.add_commits.is_empty()
             && self.custom_fields.is_empty()
             && self.body_ops.is_empty()
+            && self.set_body.is_none()
     }
 
     /// Reject empty-string Sets, type-set vs enum mismatches, and
@@ -522,6 +535,19 @@ impl UpdateIssueRequest {
         if let Patch::Set(author) = &self.closed_by {
             crate::body_sections::validate_author(author)
                 .map_err(|e| MutateError::Validation(format!("closed_by: {e}")))?;
+        }
+
+        // A body replacement must carry content: an empty (or whitespace-
+        // only) `set_body` would blank the document. The CLI already
+        // guards this (`parse_non_empty` / `read_body_file_arg`), so this
+        // catches a raw JSON/YAML PATCH — parity with the non-empty
+        // contract of `new --description`/`--body-file`.
+        if let Some(body) = &self.set_body {
+            if body.trim().is_empty() {
+                return Err(MutateError::Validation(
+                    "set_body cannot be empty (a body replacement must carry content)".into(),
+                ));
+            }
         }
 
         // No built-in `all_statuses()` membership check here, mirroring
@@ -1072,6 +1098,24 @@ fn update_issue_under_lock(
     let mut moved_to_closed = false;
     let mut moved_to_open = false;
 
+    // Whole-body replacement (`set_body`). Applied first — before the
+    // reopen-notes append, the `body_ops` loop, and the type-change
+    // required-section check below — so each of those operates on and
+    // validates the *replacement* body, not the stale one. Mirrors
+    // `update_body`: preserve one leading newline so the on-disk layout
+    // stays `---\n<fm>\n---\n\n<body>`, and surface the same non-fatal
+    // reserved-legacy-heading warning (merged into the returned
+    // `warnings` alongside the DoD advisories below).
+    let mut body_warnings: Vec<String> = Vec::new();
+    if let Some(body) = &req.set_body {
+        body_warnings = crate::body_sections::reserved_section_warnings(body);
+        item.body = if body.starts_with('\n') {
+            body.clone()
+        } else {
+            format!("\n{body}")
+        };
+    }
+
     // Frontmatter keys this mutation actually writes. Threaded into
     // `hard_schema_failure` so a `RequiredWhen` produced by this very
     // write (e.g. clearing `closed:` on a closing-status issue) is
@@ -1401,6 +1445,10 @@ fn update_issue_under_lock(
     if !rule_violations.is_empty() {
         return Err(MutateError::TransitionViolation(rule_violations.join("; ")));
     }
+    // Fold the body-replacement advisories in with the DoD warnings so
+    // every return path below surfaces both to the caller in one list.
+    let mut dod_warnings = dod_warnings;
+    dod_warnings.append(&mut body_warnings);
 
     // Post-mutation closing classification drives both the dry-run dir
     // prediction and the real unarchive decision below — an archived
@@ -4487,6 +4535,80 @@ mod tests {
         assert_ne!(out.version, v0);
         let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
         assert!(on_disk.contains("new body"));
+    }
+
+    #[test]
+    fn update_issue_set_body_replaces_body_and_advances_version() {
+        let tmp = fresh_repo();
+        let v0 = seed_issue(tmp.path(), "open", "set-body-replace-x", "open");
+        let req = UpdateIssueRequest {
+            set_body: Some("# Title\n\nBRAND-NEW-BODY".into()),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "set-body-replace-x", req).unwrap();
+        assert_ne!(out.version, v0, "body replace must advance the version");
+        let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("BRAND-NEW-BODY"), "{on_disk}");
+        // The seeded body was just `# Title`; the replacement keeps the
+        // heading but the whole body is swapped, and frontmatter is intact.
+        assert!(
+            on_disk.contains("status: open"),
+            "frontmatter lost: {on_disk}"
+        );
+    }
+
+    #[test]
+    fn update_issue_set_body_composes_with_frontmatter_patch_atomically() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "set-body-combo-x", "open");
+        let req = UpdateIssueRequest {
+            set_body: Some("# Title\n\nCOMBINED-BODY".into()),
+            priority: Patch::Set("high".into()),
+            ..Default::default()
+        };
+        update_issue(tmp.path(), "set-body-combo-x", req).unwrap();
+        let on_disk =
+            fs::read_to_string(tmp.path().join("issues/set-body-combo-x/item.md")).unwrap();
+        assert!(
+            on_disk.contains("COMBINED-BODY") && on_disk.contains("priority: high"),
+            "body and frontmatter must both land in one write: {on_disk}"
+        );
+    }
+
+    #[test]
+    fn update_issue_set_body_reserved_section_warns_without_blocking() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "set-body-warn-x", "open");
+        let req = UpdateIssueRequest {
+            set_body: Some("# Title\n\n## Notes\nlegacy heading".into()),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "set-body-warn-x", req).unwrap();
+        assert!(
+            out.warnings.iter().any(|w| w.contains("## Notes")),
+            "expected reserved-section warning, got {:?}",
+            out.warnings
+        );
+        // Non-fatal: the write still lands.
+        let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("legacy heading"), "{on_disk}");
+    }
+
+    #[test]
+    fn update_issue_set_body_rejects_empty() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "set-body-empty-x", "open");
+        let req = UpdateIssueRequest {
+            set_body: Some("   \n".into()),
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "set-body-empty-x", req).unwrap_err();
+        match err {
+            MutateError::Validation(msg) => {
+                assert!(msg.contains("set_body cannot be empty"), "got: {msg}")
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
     }
 
     #[test]

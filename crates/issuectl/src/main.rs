@@ -613,6 +613,22 @@ enum Command {
         #[arg(long = "clear-field", value_parser = parse_custom_field_key)]
         clear_fields: Vec<String>,
 
+        /// Replace the issue body with this free text. `--body` is accepted
+        /// as an alias. Mirrors `new`'s `--description`/`--body`; the whole
+        /// existing body is replaced (frontmatter is untouched). Mutually
+        /// exclusive with `--body-file`.
+        #[arg(long, visible_alias = "body", value_parser = parse_non_empty)]
+        description: Option<String>,
+
+        /// Replace the issue body with the contents of a file. Pass `-` to
+        /// read stdin (use `./-` for a file literally named `-`). Mirrors
+        /// `new`'s `--body-file`; mutually exclusive with
+        /// `--description`/`--body`. A body using a reserved legacy section
+        /// heading (`## Notes` — use `## Comments`) is accepted but warns;
+        /// `issuectl doctor --fix` migrates it later.
+        #[arg(long = "body-file", conflicts_with = "description")]
+        body_file: Option<PathBuf>,
+
         /// Optimistic-concurrency token from a prior `show`/`list --json`.
         /// Optional in both modes (opt-in compare-and-swap): pass it only
         /// when you want the write to fail on a version mismatch; it is
@@ -2222,34 +2238,49 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             add_commits,
             custom_fields,
             clear_fields,
+            description,
+            body_file,
             expected_version,
-        } => cmd_update(
-            json_output,
-            UpdateArgs {
-                slug,
-                status,
-                issue_type,
-                assignee,
-                owner,
-                priority,
-                epic,
-                no_epic,
-                lane,
-                no_lane,
-                lane_seq,
-                no_lane_seq,
-                add_collision,
-                remove_collision,
-                add_labels,
-                remove_labels,
-                add_related,
-                remove_related,
-                add_commits,
-                custom_fields,
-                clear_fields,
-                expected_version,
-            },
-        ),
+        } => {
+            // `--body-file` conflicts with `--description`/`--body` at the
+            // clap layer, so at most one is set. Resolve the file (or stdin
+            // for `-`) here — before `cmd_update` — so all body I/O + the
+            // input cap stay in the CLI layer and the resolved markdown
+            // flows through the same flock/schema write path as an inline
+            // `--description`. Mirrors the `new` command's body handling.
+            let set_body = match body_file {
+                Some(path) => Some(read_body_file_arg(&path)?),
+                None => description,
+            };
+            cmd_update(
+                json_output,
+                UpdateArgs {
+                    slug,
+                    status,
+                    issue_type,
+                    assignee,
+                    owner,
+                    priority,
+                    epic,
+                    no_epic,
+                    lane,
+                    no_lane,
+                    lane_seq,
+                    no_lane_seq,
+                    add_collision,
+                    remove_collision,
+                    add_labels,
+                    remove_labels,
+                    add_related,
+                    remove_related,
+                    add_commits,
+                    custom_fields,
+                    clear_fields,
+                    set_body,
+                    expected_version,
+                },
+            )
+        }
         Command::Close {
             slug,
             status,
@@ -4433,6 +4464,11 @@ pub(crate) struct UpdateArgs {
     pub add_commits: Vec<String>,
     pub custom_fields: Vec<(String, String)>,
     pub clear_fields: Vec<String>,
+    /// Replacement issue body (resolved from `--description`/`--body` or
+    /// `--body-file`). `None` leaves the body untouched; `Some` replaces
+    /// the whole existing body under the same flock as the frontmatter
+    /// PATCH (see `mutate::UpdateIssueRequest::set_body`).
+    pub set_body: Option<String>,
     pub expected_version: Option<String>,
 }
 
@@ -4456,6 +4492,10 @@ pub(crate) struct UpdateOutcome {
     // keeps the human/JSON confirmation in step with the stored token
     // (`--as "@jari"` and `--as jari` both echo `jari`).
     pub closed_by: Option<String>,
+    /// Non-fatal advisories from the write (e.g. a replacement body that
+    /// carries a reserved-legacy section heading via `--body-file`).
+    /// Empty for pure-frontmatter updates.
+    pub warnings: Vec<String>,
 }
 
 /// Merge the post-mutation core fields (`status`/`priority`/`labels`) into
@@ -4487,6 +4527,7 @@ fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
             "version": out.version,
         });
         echo_mutated_fields(&mut report, &out.status, &out.priority, &out.labels);
+        report["warnings"] = serde_json::json!(out.warnings);
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
@@ -4500,6 +4541,7 @@ fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
     } else {
         println!("Updated {slug}");
     }
+    emit_warnings_to_stderr(&out.warnings);
     Ok(())
 }
 
@@ -4507,6 +4549,7 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
     use mutate::Patch;
     let mut req = mutate::UpdateIssueRequest {
         expected_version: args.expected_version,
+        set_body: args.set_body,
         ..Default::default()
     };
     if let Some(s) = args.status {
@@ -4591,6 +4634,7 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
         priority: outcome.issue.priority,
         labels: outcome.issue.labels,
         closed_by: outcome.issue.closed_by,
+        warnings: outcome.warnings,
     })
 }
 
@@ -4689,6 +4733,7 @@ pub(crate) fn do_close(
         priority: outcome.issue.priority,
         labels: outcome.issue.labels,
         closed_by: outcome.issue.closed_by,
+        warnings: outcome.warnings,
     })
 }
 
