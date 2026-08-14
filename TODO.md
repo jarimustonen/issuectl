@@ -13,91 +13,66 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-12, iso rupeama — KAKSI releasea):** **0.10.0 LIVE ja varmistettu.** Tag `v0.10.0`
-originissa, molemmat cratet crates.io:ssa (`cargo publish`-fallback, ossctl yhä rikki), **`release.yml`
-completed/success sekä 0.9.0:lle että 0.10.0:lle** (binäärit + shell-installer + Homebrew). `main == origin`,
-työpuu puhdas, `v0.10.0` == `Cargo.toml`. **8 issueä suljettu/shipattu, kaksi releasea:**
-- **0.9.0** = 4 featurea + 1 fix: `@warn-reserved-notes-section`, `@codex-prompt-variants`,
-  `@pidev-dual-home-skills` (pi.dev WS4 dual-home), `@doctor-fix-merge-notes-comments`, ja fix
-  `@rate-limit-test-flaky` (deterministinen limiter-testi injektoitavalla kellolla). `@note-missing-as-generic-error`
-  suljettiin `fixed` (ei toistunut HEADilla → vain regressiotestit). `@events-jsonl-log` → `wontfix`.
-- **0.10.0** = **BREAKING: `@remove-web-ui`** — koko selain/web-UI poistettu (`issuectl serve`, server/HTTP-layer,
-  `/api`, kanban-frontend, SSE/watcher, user-boards, RepoConfigCache, `issuectl docs`). issuectl on nyt
-  **puhdas AI-first CLI**. 12 web-only-deppiä pruunattu; 4-mallin `/llm-review` ei löytänyt korrektiusbugia.
-  Review filasi 3 follow-upia (ks. Seuraava askel).
+**Tila (2026-08-14):** `main` **vihreä** (1219 testiä, 0 fail, 0 clippy-erroria), työpuu puhdas,
+`main == origin`. **Live-release yhä `v0.10.0`**, mutta mainissa on **julkaisematonta työtä**
+(8 yksikköä tämän session ekasta puoliskosta). `Cargo.toml == 0.10.0` (ei bumpattu). Ei release-gejä auki.
 
-Rupeaman kaari: käyttäjä ajoi ensin 3 kaistaa rinnan (warn-notes + codex-variants landasivat), sitten
-kiireellinen pidev-dual-home (WS4) landasi. CI meni hetkeksi punaiseksi flaky rate-limit-testistä →
-korjattiin (injektoitava kello) → vihreä. Cutattiin **0.9.0** (3+1 featurea + fix). Sitten käyttäjä antoi
-go:n web-UI:n poistolle → `@remove-web-ui` landasi → cutattiin **0.10.0** (breaking). Molemmat manuaalisella
-`cargo publish`illa (ossctl-cut yhä rikki). **Ei release-gejä auki** — molemmat cutattu ja varmistettu.
+**Tämä sessio, 2 vaihetta:**
 
-**⚠️ RELEASE-OPPI (yhä voimassa): ossctl `release cut` EI julkaise oikeasti → 0.8.1 tehtiin `cargo publish`illa.**
-Real cut ei uploadannut crates.io:hon (raportoi 300s "index visibility" -timeoutin cratelle jota se ei
-koskaan uploadannut; crate 404:ssä 9 min, ei receiptejä). Juurisyy todennäk. ossctl:n publish-adapterin
-bug (dry-run/no-op oikeassa cutissa), jäi kiinni koska `@wire-oss-release-as-release-path` verifioi vain
-`release plan`-dry-runilla. Bug filattu upstream-ossctl-reppuun **`release-cut-publish-noop`** (high) +
-downstream-tracker tässä **`@ossctl-cut-no-publish`** (high, DAG LANE C). AGENTS.md kuvaa `ossctl release
-cut`:n polkuna (workaround-stepit poistettu — korjataan, ei kierretä). **⚠️ Kunnes ossctl korjattu:
-seuraava release vaatii taas manuaalisen `cargo publish -p issuectl-core` → `-p issuectl` → tag → push
--fallbackin** (samat stepit kuin 0.8.1:ssä). **Toinen opetus (AGENTS.md:ssä):** `ossctl release cut`
-julkaisee PUUN version — se EI bumppaa; siksi bump + CHANGELOG-finalisointi + `release:`-commit tehdään
-ENNEN cutia. (Sekundäärifriktio: stale-lock esti `release abandon`in → ossctl
-`@release-abandon-break-stale-lock`, filattu.)
+**1) Rupeama — 8 yksikköä landasi mainiin (4 aaltoa, ei releasea):**
+`@pidev-pi-skill-lifecycle` (pi-korpuksen lifecycle: provenance-manifesti, `pi-status` drift, `pi-prune`),
+`@collapse-configsource-seam` (ConfigSource-seamin romautus), `@flock-write-test-coverage`
+(write-under-flock-testikattavuus takaisin), `@pi-manifest-locking` (manifestin lukitus),
+**2 HIGH pi-korpus-bugia:** `@pi-corpus-symlink-traversal` (polkupako-esto) +
+`@pi-corpus-metadata-error-misclass` (pi_prune ei enää pudota manifestiriviä metadata-virheestä =
+tietohäviö-korjaus), `@dag-lists-closed-issues` (dag ei enää listaa suljettuja unscheduledissa),
+`@epic-tree-view` (`issuectl epic tree <slug>`). Kaikki `/llm-review`+`/assess-findings` läpi.
 
-**Shipatun sisällön täydet muutokset:** CHANGELOG `[0.9.0]` (2026-08-12) + `[0.10.0]` (2026-08-12,
-breaking web-removal). Ei toisteta tässä.
+**2) PO-triage (iso karsinta):** review-cascade tuotti ~19 spin-offia; PO-kokpit (glasspad) käytiin
+läpi @jarin kanssa. **Suljettiin 14 `wontfix`** (defensiivistä/havainnointi/putkitusta epärealistisia
+uhkia vastaan — "ei fiksailla epätodennäköisiä ihmeellisyyksiä tämän maturiteetin ohjelmistossa").
+**Pidettiin 6.** **Filattiin 1 uusi:** `@dag-inprogress-is-spawnable`.
 
-**⚠️ Minor-bump-gotcha (UUSI, muista seuraavassa minor-releasessa):** 0.8.0-cut paljasti että
-`crates/issuectl/Cargo.toml`:n sisäinen dep `issuectl-core = { path = "…", version = "0.7.0" }`
-on caret-vaatimus (`^0.7.0` = `<0.8.0`) → **rikkoi buildin** kun workspace-versio nousi 0.8.0:aan.
-Korjaus: bumppaa tuo `version =` vastaamaan uutta minoria (0.7.0 → 0.8.0) samassa release-commitissa.
-Patch-bumpeissa (0.8.0 → 0.8.1) ei tarvita; vain minor/major-rajan ylitys vaatii tämän.
+**⚠️ ISO LINJAUS — in-progress ≠ "nyt työn alla" (`@dag-inprogress-is-spawnable`):** `issuectl dag`
+EI saa sulkea in-progressia pois `spawnable`sta. in-progress = *aloitettu, ei valmis*; dag:ia kysytään
+vain kun mikään ei ole käynnissä → in-progress-issuet ovat **resumoitavia ehdokkaita jotka on nostettava
+(aggressiivisesti)**, ei suljettava. Päällekkäisyyden esto = KUTSUJAN varausvastuu, ei dag:in. Korjaus:
+poista `!underway`-poissulku + `IN_PROGRESS`-vakio (dag.rs:80/466/470), päivitä docstring (dag.rs:44-50).
+**Sisar-issue orchestratectl-repossa:** `stint-head-of-line-in-progress-eligible` — stint/orchestrate
+head-of-line -konventio pitää linjata samaan (se sanoo nyt "eligible iff … not already in-progress").
 
-**⚠️ Autonomy (VAHVISTETTU tässä rupeamassa):** `AGENTS.md`:n operating-faktoissa deployt/releaset
-ovat **TÄYSIN autonomisia — ei go/no-go, ei output-reviewia** (käyttäjän eksplisiittinen ohje 2026-08-10:
-"deployt ja releaset saa tehdä automaattisesti"). 0.8.1 cutattiin sen nojalla.
+**⚠️ SPIN-OFF-LAADUN TARKKAILU (UUSI, @jarin ohje):** seuraavilla korjauskierroksilla **tarkkaillaan
+tarjottujen spin-offien laatua kriittisesti.** Havainto tästä sessiosta: tämän maturiteettitason
+ohjelmistossa `/llm-review` taipuu tuottamaan tarpeettomia "keksitään keksimällä jotakin hiottavaa"
+-suosituksia (14/19 spin-offia → drop). Älä ota review-cascaden spin-offeja annettuina — punnitse jokainen
+todellista arvoa vasten ennen kuin nostat sen DAG:iin.
 
-**Aiemmat releaset (pointeri, ei toistoa):** 0.8.0 = `@dag-scheduling-view` (lane/collision-kentät +
-`issuectl dag`-view) + `@default-slug-from-title` (otsikkojohdettu default-slug). Täydet muutokset
-CHANGELOG `[0.8.0]`/`[0.8.1]`:ssä; ei toisteta tässä.
+**Seuraava askel:** työstä 7-issuen DAG (alla). **Tämä kierros toimii myös tavallisten worktree-promptien
+testinä** (@jari: "testataan tavallisia worktree prompteja"). **GLOBAL HEAD-OF-LINE: `@flock-write-lock`**
+— flaky testi joka **PITÄÄ olla vihreä ennen seuraavaa releasea**; se + muu julkaisematon mainin työ menee
+seuraavaan minoriin (0.11.0). Kun DAG tyhjenee → ei enää tehtävää.
 
-**Dogfood:** Käyttäjä dogfoodaa issuectl:ää omissa projekteissaan. Asennus: `cargo install
-issuectl` (crates.io), `brew upgrade jarimustonen/issuectl/issuectl`, tai `cargo install
---path crates/issuectl`. 0.7.1:stä skillit `/issue`, `/issue-new`, `/issue-intake` tulevat
-kaikki `issuectl skill install`ista; bugit/feature-pyynnöt sisään `issuectl intake file`lla,
-`/issue-intake` (tai `/stint-start`) nostaa jonon seuraavan kerran.
+**⚠️ RELEASE-OPPI (yhä voimassa):** ossctl `release cut` EI julkaise oikeasti (`@ossctl-cut-no-publish`,
+upstream-blocked) → seuraava release vaatii manuaalisen `cargo publish -p issuectl-core` → `-p issuectl`
+→ tag → push -fallbackin. `ossctl release cut` julkaisee PUUN version, EI bumppaa → bump +
+CHANGELOG-finalisointi + `release:`-commit ENNEN cutia.
 
-**OSS-init (ennallaan):** `OSS-RELEASE.md` **approved** (`mvp`). cargo-dist pysyy
-release-engineinä — `/oss-release-cut` EI regeneroi `release.yml`:ää.
+**⚠️ Minor-bump-gotcha:** `crates/issuectl/Cargo.toml`:n sisäinen `issuectl-core = { …, version = "X" }`
+on caret-vaatimus → bumppaa se vastaamaan uutta minoria samassa release-commitissa (0.10.0 → 0.11.0).
+Vain minor/major-raja vaatii tämän, ei patch.
 
-**Iso linjaus (TOTEUTETTU 2026-08-12):** **web/selain-UI POISTETTU** — `@remove-web-ui` landasi ja
-julkaistiin 0.10.0:ssa (breaking). issuectl on nyt puhdas AI-first CLI (ei `serve`ä, ei `/api`ta, ei
-kanbania). Gate purettiin käyttäjän go:lla. Poiston `/llm-review` filasi 3 siivous-follow-upia:
-`@collapse-configsource-seam`, `@flock-write-test-coverage`, `@new-and-update-blocked-by` (kaikki DAG:ssa).
+**⚠️ Autonomy:** deployt/releaset TÄYSIN autonomisia (ei go/no-go, ei output-reviewia) — @jarin ohje 2026-08-10.
 
-**Seuraava askel:** **Ei releasea auki** (0.9.0 + 0.10.0 molemmat cutattu ja varmistettu). Aktiivinen jono
-on 6 ei-deferred-issueä — kaikki `normal` paitsi upstream-blocked ossctl. **GLOBAL HEAD-OF-LINE:
-`@pidev-pi-skill-lifecycle`** (LANE B, parallel-safe, oli käyttäjän "5 asap"-setissä). LANE A on ruuhkainen
-(5 issueä, jakavat main.rs/mutate/-hotfileja → sarjataan):
-- **`@pidev-pi-skill-lifecycle`** (normal, LANE B) — pi-korpuksen (~/.pi/agent/skills/) lifecycle:
-  version-drift-näkyvyys, prune (orphanit esim. /triage-bugs), doctor-verify, uninstall-gap. collision: doctor/.
-- **remove-web-ui-siivous-follow-upit (LANE A, 0.10.0-jälkipyykki):** `@collapse-configsource-seam`
-  (improvement — nyt kun server poissa, single-impl ConfigSource-seam voi romahtaa), `@flock-write-test-coverage`
-  (task — palauta write-under-flock-testikattavuus jonka server-testit ennen antoivat), `@new-and-update-blocked-by`
-  (feature — `new --blocked-by` + `update --add-blocked-by`).
-- **`@dag-lists-closed-issues`** (bug, LANE A) — `issuectl dag` listaa suljetut/terminaali-issuet
-  "unscheduled"-osiossa; filtteröi ei-terminaaleihin. (Tämä hämäsi toista agenttia luulemaan shipattuja
-  bugeja avoimiksi.)
-- **`@epic-tree-view`** (feature, LANE A — un-deferattu tässä rupeamassa) — `issuectl epic tree <slug>`.
-  Kevyt CLI-lisäys.
-- **`@ossctl-cut-no-publish`** (high, bug) — yhä upstream-blocked; ei koodattavaa täällä ennen ossctlin
-  korjausta. **Avoin C-päätös:** (1) jätä odottamaan, vai (2) verifiointi-worktree joka tarkistaa onko
-  ossctl korjattu ja re-pointaa. Kunnes korjattu, seuraavakin release tarvitsee manuaalisen `cargo publish`in.
+**Dogfood:** `cargo install issuectl` / `brew upgrade jarimustonen/issuectl/issuectl` / `cargo install
+--path crates/issuectl`. Skillit `/issue`, `/issue-new`, `/issue-intake` tulevat `issuectl skill install`ista;
+bugit/feature-pyynnöt sisään `issuectl intake file`lla, `/issue-intake` (tai `/stint-start`) nostaa jonon.
+
+**OSS-init:** `OSS-RELEASE.md` approved (`mvp`). cargo-dist release-engine — `/oss-release-cut` EI
+regeneroi `release.yml`:ää.
 
 ---
 
-## Execution DAG (2026-08-12)
+## Execution DAG (2026-08-14)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge each round (drop landed, add active, keep existing order).
@@ -111,41 +86,26 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: flock-write-lock   ← both HIGH pi bugs fixed this round. Remaining = flaky test (fix before next release) + improvement backlog. LANE A ‖ LANE B disjoint. ossctl-cut high but upstream-blocked.
-LANE A — main.rs (cmd_* + clap) + mutate/ + parser/body_sections  (RUUHKAINEN — sarjata)
-    flock-write-lock  normal · bug; flaky test — write_lock_released_after_failed_mutation intermittently fails under the full parallel suite (introduced Wave 2 by flock-write-test-coverage). Make deterministic. MUST be green before next release. Touches mutate/ tests.
-    configsource-load-return-value  normal · improvement; collapse-seam-review-spinoff — return schema/transitions load BY VALUE now that the cache is gone. Touches mutate/ + config load.
-    load-once-thread-schema  normal · improvement; collapse-seam-review-spinoff — thread loaded schema/rules through mutate helpers to stop redundant re-parses. Touches mutate/ + schema.
-    dag-inprogress-schema-aware  normal · improvement; dag-review-spinoff — schema-aware in-progress/underway classification. Touches crate::dag.
-    dag-reservations-run-id-object-shape  normal · improvement; dag-review-spinoff — dag reservations accept run_id object shape, not only array-of-holds. Touches crate::dag.
-    epic-tree-human-render-control-chars  normal · improvement; epic-tree-review-spinoff — sanitize control chars in human tree/list output. Touches epic tree render.
-    epic-tree-view-filters  normal · improvement; epic-tree-review-spinoff — optional --depth/--status/--limit filters for epic tree. Touches main.rs clap + epic tree.
-    action-verb-json-echo-mutation  normal · improvement; update/label/close --json-tulos ei echoa mutatoitua kenttää (.priority/.labels/.status = null). Echo resulting value. Touches cmd_* action-verb handlerit main.rs:ssä + result-objektit.
-    new-and-update-blocked-by  normal · feature (RE-SCOPED 2026-08-12 → only `new --blocked-by` at creation; `update --add-blocked-by` half already done via `depend add/remove`, 6e95b07). Touches main.rs clap + mutate/.
-LANE B — skill install + templates/ + skill.rs + pi-corpus lifecycle (skill distribution)  (RUUHKAINEN — pi-review-cascade, sarjata; all touch pi-corpus/skill.rs)
-    pi-corpus-fd-relative-hardening  normal · improvement; pi-symlink-review-spinoff — harden mutating paths with descriptor-relative no-follow ops (close TOCTOU + hard-link overwrite). Deepens the symlink fix.
-    pi-prune-digest-gate  normal · improvement; pidev-lifecycle-review-spinoff — gate pi-prune on a content digest before removing. Touches skill.rs/pi prune.
-    pi-manifest-fsync-durability  normal · improvement; pi-lock-review-spinoff — save_pi_manifest lacks fsync durability.
-    pi-mirror-atomic-writes  normal · improvement; pi-lock-review-spinoff — mirror SKILL.md writes are non-atomic (torn file on crash).
-    pi-status-check-exit  low · improvement; pidev-lifecycle-review-spinoff — pi-status exit-code semantics for drift/orphans.
-    pi-mirror-hint-accuracy  low · bug; pi-lock-review-spinoff — install prints "skills mirrored" hint even when pi block skipped.
-    pi-status-shared-lock  low · improvement; pi-lock-review-spinoff — pi_status reads lock-free → can report a torn snapshot.
-    pi-owned-symlink-unmanaged-hidden  low · improvement; pi-metadata-review-spinoff — manifest-owned entry replaced by a symlink hides from has_findings (Unmanaged).
-    pi-prune-report-inaccessible  low · improvement; pi-metadata-review-spinoff — pi_prune should report owned Inaccessible entries instead of a silent no-op.
-    pi-corpus-cross-tool-lock  low · improvement; pi-lock-review-spinoff — issuectl and orchestratectl hold separate locks; no cross-tool serialization on shared skill dirs.
+GLOBAL HEAD-OF-LINE: flock-write-lock   ← flaky test, MUST be green before next release (0.11.0). LANE A ‖ LANE B disjoint. ossctl-cut high but upstream-blocked.
+LANE A — main.rs (cmd_* + clap) + mutate/ + schema + crate::dag  (sarjata; jakavat hot-fileja)
+    flock-write-lock  normal · bug; flaky test — write_lock_released_after_failed_mutation intermittently fails under the full parallel suite (introduced by flock-write-test-coverage). Make deterministic. MUST be green before next release. Touches mutate/ tests.
+    dag-inprogress-is-spawnable  normal · bug; ISO LINJAUS — dag must NOT exclude in-progress from spawnable (in-progress = started-not-done, resumable; caller owns double-work prevention). Remove !underway + IN_PROGRESS const (dag.rs:80/466/470), update docstring (dag.rs:44-50), test in-progress head is spawnable. Touches crate::dag. Sibling: orchestratectl `stint-head-of-line-in-progress-eligible`.
+    dag-reservations-run-id-object-shape  normal · improvement; dag reservations accept run_id object shape, not only array-of-holds. One-line + test. Touches crate::dag.
+    configsource-load-return-value  normal · improvement; the ONE kept readability win — return schema/transitions load BY VALUE now the cache is gone (finishes collapse-configsource-seam). Touches mutate/ + config load.
+    action-verb-json-echo-mutation  normal · improvement; update/label/close --json result doesn't echo the mutated field (.priority/.labels/.status = null). Echo resulting value. Touches cmd_* action-verb handlers main.rs + result objects.
+LANE B — skill.rs + pi-corpus lifecycle
+    pi-mirror-hint-accuracy  low · bug; install prints "skills mirrored" hint even when the pi block was skipped. Only kept pi-corpus item. Touches skill.rs/pi install.
 LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
-    ossctl-cut-no-publish  high · bug; ossctl release cut ei julkaise oikeasti → manuaalinen cargo publish. BLOCKED upstream-ossctl:llä; kun korjattu, poista AGENTS-caveat + re-point releaset ossctliin.
+    ossctl-cut-no-publish  high · bug; ossctl release cut doesn't actually publish → manual cargo publish. BLOCKED upstream-ossctl; when fixed, remove AGENTS caveat + re-point releases to ossctl.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: iso rupeama, **2 releasea**. Wave 1 (warn-notes + codex-variants) + kiireellinen pidev-dual-home
-landasivat → flaky CI korjattiin → **0.9.0 cut**. Sitten `remove-web-ui` (breaking) landasi → **0.10.0 cut**.
-8 issueä terminaaliksi → pudotettu DAG:sta (`warn-reserved-notes-section`, `codex-prompt-variants`,
-`pidev-dual-home-skills`, `doctor-fix-merge-notes-comments`, `note-missing-as-generic-error`,
-`rate-limit-test-flaky`, `events-jsonl-log`, `remove-web-ui`). Tilalle 5 uutta aktiivia: 3 remove-web-ui-
-siivous-follow-upia (`collapse-configsource-seam`, `flock-write-test-coverage`, `new-and-update-blocked-by`)
-+ `dag-lists-closed-issues` (bug) + `epic-tree-view` (un-deferattu). LANE A on ruuhkainen (5) → sarjata;
-`pidev-pi-skill-lifecycle` (LANE B) ajaa rinnalla. `ossctl-cut-no-publish` (LANE C) yhä upstream-blocked.
+Kaari-lyhyesti: sessio kahdessa vaiheessa. **(1) Rupeama:** 8 yksikköä landasi mainiin (pi-korpuksen lifecycle
++ 2 HIGH pi-bugia, ConfigSource-romautus, flock-testit, dag-lists-korjaus, epic-tree) — kaikki `/llm-review`
+läpi, ei releasea. **(2) PO-triage:** review-cascaden ~19 spin-offista **14 → wontfix, 6 → keep, 1 uusi**
+(`dag-inprogress-is-spawnable`). 15 issueä terminaaliksi → pudotettu DAG:sta (8 shipattua + 14 wontfix −
+päällekkäisyydet). DAG on nyt 7 aktiivia: LANE A ruuhkainen (5, sarjata), LANE B 1, LANE C 1 (blocked).
+Head = `flock-write-lock` (release-gate). Seuraava kierros testaa myös tavallisia worktree-prompteja.
 
 ---
 
@@ -160,18 +120,19 @@ kanban/web-enhancement-issuet (13 kpl) oli jo suljettu `obsolete` (2026-08-10).
 **CLI-only visualisointi (deferred):**
 `@issue-graph-view` (ent. massively-periodic-surprise) — `issuectl graph` -moottori + lensit
 (deps / worktree-planning / epic-rollup); lens 2 osin jo `issuectl dag`:ssä. **EI kevyt** (koko graph-
-moottori + mermaid/dot/svg); arvioitu tässä rupeamassa → pidetään deferred, jos tarve konkretisoituu tee
-vain lens 1 (dep→mermaid). (`@epic-tree-view` un-deferattiin — nyt DAG:ssa, ei enää tässä.)
-
-_(`@events-jsonl-log` suljettu `wontfix` 2026-08-12 — ei tullut tarpeen.)_
+moottori + mermaid/dot/svg); jos tarve konkretisoituu tee vain lens 1 (dep→mermaid).
+(`@epic-tree-view` shipattiin tässä sessiossa — ei enää tässä eikä DAG:ssa.)
 
 **Strateginen:** `@focus-areas` **suljettu `wontfix` (2026-08-10)** — ei nyt tarvetta. Ylätason
 päätös (ADR 0001: `areas: []` skeemakenttä) on tallessa; reopen + kirjoita implementaatio-ADR jos
 tarve palaa.
 
-_(`@wire-oss-release-as-release-path` on suljettu `done` — mutta paljasti `@ossctl-cut-no-publish`in:
-ossctl release cut ei julkaise oikeasti → releaset manuaalisesti, ks. Tila-blokki. Se bug on DAG:n
-LANE C:ssä, ei tässä.)_
+_(Review-cascaden 14 wontfix-spin-offia 2026-08-14: pi-korpuksen defensiiviset kovennukset
+(`fd-relative-hardening`, `manifest-fsync-durability`, `mirror-atomic-writes`, `cross-tool-lock`,
+`prune-digest-gate`, `owned-symlink-unmanaged-hidden`, `prune-report-inaccessible`, `status-check-exit`,
+`status-shared-lock`), `dag-inprogress-schema-aware` (korvattu `dag-inprogress-is-spawnable`:lla),
+`epic-tree-human-render-control-chars`, `epic-tree-view-filters`, `load-once-thread-schema`,
+`new-and-update-blocked-by`. Perustelut issueiden `wontfix`-kommenteissa.)_
 
 ---
 
