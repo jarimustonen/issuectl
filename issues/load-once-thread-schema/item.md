@@ -1,9 +1,11 @@
 ---
 created: 2026-08-12
-updated: 2026-08-12
+updated: 2026-08-14
 type: improvement
-status: open
+status: wontfix
 priority: normal
+closed: 2026-08-14
+closed_by: jari
 ---
 
 # Thread loaded schema/rules through mutate helpers to stop redundant re-parses
@@ -38,3 +40,9 @@ kutsupaikkoineen ja testeineen — pidettävä erillään
 `collapse-configsource-seam`:in käyttäytymistä-säilyttävästä diffistä. Riippuu
 osittain siitä palautetaanko `load` arvona
 ([[configsource-load-return-value]]).
+
+## Resolution
+
+### 2026-08-14T03:41:55Z · @jari
+
+Wontfix: threads schema through many helper signatures to stop redundant re-parses — a perf/plumbing change, not a readability win (adds coupling). Cost is negligible; the code already calls it acceptable.

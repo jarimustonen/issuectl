@@ -1,11 +1,13 @@
 ---
 created: 2026-08-12
-updated: 2026-08-12
+updated: 2026-08-14
 type: improvement
-status: open
+status: wontfix
 priority: normal
 epic: hugely-exciting-spiders
 labels: [v0.6.0-candidate]
+closed: 2026-08-14
+closed_by: jari
 ---
 
 # Optional --depth/--status/--limit filters for epic tree
@@ -33,3 +35,9 @@ large epic with many children, standard tree-view knobs would help:
   palauttaa nyt koko puun, joten suodatuksella ei ole saumaa vielä.
 
 Not required for v1 of the read-only view; file as a follow-up enhancement.
+
+## Resolution
+
+### 2026-08-14T03:41:55Z · @jari
+
+Wontfix: YAGNI — depth/status/limit filters only matter once a large epic exists; none does. File anew if that changes.

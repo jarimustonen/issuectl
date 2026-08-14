@@ -1,10 +1,12 @@
 ---
 created: 2026-08-12
-updated: 2026-08-12
+updated: 2026-08-14
 type: improvement
-status: open
+status: wontfix
 priority: normal
 related: ['@pi-corpus-symlink-traversal']
+closed: 2026-08-14
+closed_by: jari
 ---
 
 # pi-corpus: harden mutating paths with descriptor-relative no-follow ops (close TOCTOU + hard-link overwrite)
@@ -54,3 +56,8 @@ pi.dev-corpus-lifecycle section header in `crates/issuectl-core/src/skill.rs`.
 Not a blocker for the shipped fix; scope this as its own change because it adds a
 dependency and rewrites the write/delete primitives.
 
+## Resolution
+
+### 2026-08-14T03:41:55Z · @jari
+
+Wontfix: closes only residual attacks requiring a hostile SAME-USER process racing issuectl in a timing window; needs a new low-level dependency (rustix/cap-std). Threat unrealistic for this tool; heaviest item in the cascade. Not worth it at this maturity.

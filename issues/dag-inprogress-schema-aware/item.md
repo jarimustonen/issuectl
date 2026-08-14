@@ -1,9 +1,11 @@
 ---
 created: 2026-08-12
-updated: 2026-08-12
+updated: 2026-08-14
 type: improvement
-status: open
+status: wontfix
 priority: normal
+closed: 2026-08-14
+closed_by: jari
 ---
 
 # dag: schema-aware in-progress/underway classification
@@ -19,3 +21,9 @@ Introduce a schema-aware "underway/in-progress" notion parallel to `StatusClass:
 
 ## Scope note
 Its own design — extends the schema status-class taxonomy and ripples to every `StatusClass` consumer, so it needs a dedicated issue rather than riding along with the closing-status filter.
+
+## Resolution
+
+### 2026-08-14T03:41:55Z · @jari
+
+Wontfix: in-progress is a canonical, non-renameable status — the hardcoded literal is intentional, not a bug. Superseded by dag-inprogress-is-spawnable, which removes the underway exclusion entirely (dag must surface in-progress aggressively; double-work prevention is the caller's reservation responsibility).

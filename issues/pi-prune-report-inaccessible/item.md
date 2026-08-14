@@ -1,10 +1,12 @@
 ---
 created: 2026-08-12
-updated: 2026-08-12
+updated: 2026-08-14
 type: improvement
-status: open
+status: wontfix
 priority: low
 related: ['@pi-corpus-metadata-error-misclass']
+closed: 2026-08-14
+closed_by: jari
 ---
 
 # pi_prune should report owned Inaccessible entries instead of a silent no-op
@@ -18,3 +20,9 @@ Spin-off from /llm-review of pi-corpus-metadata-error-misclass (DeepSeek).
 After the metadata-error fix, an issuectl-OWNED entry whose SKILL.md can't be stat'd/read (permission, I/O) classifies `Inaccessible` and `pi_prune` correctly leaves it alone (falls through `_ => {}`). But the returned `PiPruneOutcome` then has `removed` empty, `skipped` empty, `applied=false` — operationally indistinguishable from a clean corpus. A user who just ran `skill pi-prune --force` gets no signal that there was an owned entry it could not act on. `pi-status` shows it, but prune is the command they ran.
 
 Fix: report owned `Inaccessible` entries in `PiPruneOutcome.skipped` (or add a distinct `PiPruneKind::Blocked`) so scripts/users can tell 'nothing to do' from 'blocked on a permission/I/O problem'. Add a test asserting an owned inaccessible entry appears in `skipped`. Pure observability — no change to what prune deletes.
+
+## Resolution
+
+### 2026-08-14T03:41:55Z · @jari
+
+Wontfix: pure observability nicety (report owned Inaccessible entries in prune output). Low value.

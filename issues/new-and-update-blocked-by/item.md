@@ -1,10 +1,12 @@
 ---
 created: 2026-08-12
-updated: 2026-08-12
+updated: 2026-08-14
 type: feature
-status: open
+status: wontfix
 priority: normal
 labels: [cli]
+closed: 2026-08-14
+closed_by: jari
 ---
 
 # Set blocked_by at creation (new --blocked-by) + light update --add-blocked-by
@@ -29,3 +31,9 @@ Both should validate the target resolves to a real issue and reject self/cycle d
 ### 2026-08-12T15:09:48Z · @jari
 
 RE-SCOPE (2026-08-12): the 'update --add-blocked-by' half is effectively DONE — commit 6e95b07 landed a 'depend add/remove <slug> --blocked-by' subcommand giving the same lightweight dep-set-without-apply-patch convenience. Remaining scope = ONLY 'new --blocked-by' at CREATION (file an issue with its deps in one pass; depend-add requires the issue to already exist). Consider closing if the creation-time sliver isn't worth it.
+
+## Resolution
+
+### 2026-08-14T03:41:55Z · @jari
+
+Wontfix: the 'update --add-blocked-by' need is already met by the landed 'depend add/remove'; the remaining creation-time 'new --blocked-by' sliver is marginal.
