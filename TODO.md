@@ -86,18 +86,9 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: flock-write-lock   ← flaky test, MUST be green before next release (0.11.0). LANE A ‖ LANE B disjoint. ossctl-cut high but upstream-blocked.
-LANE A — main.rs (cmd_* + clap) + mutate/ + schema + crate::dag  (sarjata; jakavat hot-fileja)
-    flock-write-lock  normal · bug; flaky test — write_lock_released_after_failed_mutation intermittently fails under the full parallel suite (introduced by flock-write-test-coverage). Make deterministic. MUST be green before next release. Touches mutate/ tests.
-    dag-inprogress-is-spawnable  normal · bug; ISO LINJAUS — dag must NOT exclude in-progress from spawnable (in-progress = started-not-done, resumable; caller owns double-work prevention). Remove !underway + IN_PROGRESS const (dag.rs:80/466/470), update docstring (dag.rs:44-50), test in-progress head is spawnable. Touches crate::dag. Sibling: orchestratectl `stint-head-of-line-in-progress-eligible`.
-    dag-reservations-run-id-object-shape  normal · improvement; dag reservations accept run_id object shape, not only array-of-holds. One-line + test. Touches crate::dag.
-    configsource-load-return-value  normal · improvement; the ONE kept readability win — return schema/transitions load BY VALUE now the cache is gone (finishes collapse-configsource-seam). Touches mutate/ + config load.
-    action-verb-json-echo-mutation  normal · improvement; update/label/close --json result doesn't echo the mutated field (.priority/.labels/.status = null). Echo resulting value. Touches cmd_* action-verb handlers main.rs + result objects.
-    update-set-body-flag  normal · feature; `issuectl update` lacks a body-set flag that `new` has — add `--body-file`/`--description` (+ stdin `-`) to set/replace an existing body, matching new's exact flag names. Filed by a sibling agent 2026-08-14. Touches main.rs update clap + mutate/ body write.
-    as-flag-strip-at-sign  normal · improvement; `--as "@jari"` hard-fails ("author cannot contain '@'") though attributions display as @jari — strip a single leading '@' on note/close --as instead of rejecting. Wrap-up papercut (hit twice this session). Touches issuectl-core author-validation (mutate/ author path).
-LANE B — skill.rs + pi-corpus lifecycle
-    pi-mirror-hint-accuracy  low · bug; install prints "skills mirrored" hint even when the pi block was skipped. Only kept pi-corpus item. Touches skill.rs/pi install.
-LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl)
+GLOBAL HEAD-OF-LINE: changelog-trailers-never   ← blocks a quality 0.11.0 release; design-first (pick trailer-injection approach). ossctl-cut-no-publish still upstream-blocked. LANE A/B drained this round (7 units landed).
+LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl + git_trailers.rs / commit-hook)
+    changelog-trailers-never  high · bug; nothing injects Fixes-Issue/Refs-Issue trailers → trailer-driven `issuectl changelog` compiles near-empty (1/63 commits since v0.10.0) → 0.11.0 release notes would be misleading. DESIGN-FIRST: prefer stamping the trailer at close/merge (option 1 — orchestratectl run merge and/or `issuectl close --commit`). Touches issuectl close (mutate/cmd_close) and/or git_trailers.rs + orchestratectl run merge. Until fixed, a release needs a HAND-CURATED CHANGELOG [Unreleased].
     ossctl-cut-no-publish  high · bug; ossctl release cut doesn't actually publish → manual cargo publish. BLOCKED upstream-ossctl; when fixed, remove AGENTS caveat + re-point releases to ossctl.
 ```
 <!-- execution-dag:end -->
