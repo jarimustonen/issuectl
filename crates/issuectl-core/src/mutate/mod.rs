@@ -970,7 +970,7 @@ pub fn update_issue(
 fn load_validated_rules(
     root: &Path,
     schema: &crate::schema::Schema,
-) -> Result<std::sync::Arc<crate::transitions::TransitionRules>, MutateError> {
+) -> Result<crate::transitions::TransitionRules, MutateError> {
     let rules = crate::transitions::load(root)
         .map_err(|e| MutateError::TransitionConfig(format!("{e:#}")))?;
     let universe = crate::schema::status_universe(schema);

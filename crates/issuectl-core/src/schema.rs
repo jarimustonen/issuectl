@@ -26,7 +26,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -383,15 +382,9 @@ pub fn default_schema() -> Schema {
 /// constrain `labels.enum` without losing the rest of the defaults.
 /// Returns the default schema unchanged when the file is missing.
 ///
-/// Always re-parses. Returns `Arc<Schema>` so the result is
-/// interchangeable across downstream consumers.
-pub fn load(root: &Path) -> Result<Arc<Schema>> {
-    Ok(Arc::new(load_uncached(root)?))
-}
-
-/// Direct, unconditional parse of `issues/.schema.yaml`. The value
-/// carrier behind [`load`].
-pub(crate) fn load_uncached(root: &Path) -> Result<Schema> {
+/// Always re-parses and returns the schema by value — callers use it
+/// linearly, so there is no shared-ownership indirection to preserve.
+pub fn load(root: &Path) -> Result<Schema> {
     let path = schema_path(root);
     if !path.is_file() {
         return Ok(default_schema());
@@ -998,17 +991,27 @@ mod tests {
     // `load` re-parses on every call — it does NOT memoize. This is the
     // invariant that made collapsing the `ConfigSource`/`UncachedConfig`
     // seam behavior-preserving (the sole impl was always this fresh
-    // re-parse). Guarding it here keeps a future caching change from
-    // silently altering that contract; the assertion moved here when
-    // `repo_config.rs` was deleted.
+    // re-parse). Now that `load` returns by value there is no cached
+    // handle to compare, so the guard changes the file between two calls
+    // and asserts the second load reflects the edit — a memoizing loader
+    // would return the stale first parse and fail here.
     #[test]
     fn load_re_parses_on_every_call() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         fs::create_dir_all(root.join("issues")).unwrap();
+        let path = schema_path(root);
+
+        fs::write(&path, "version: 1\nfields:\n  team:\n    required: true\n").unwrap();
         let a = load(root).unwrap();
+        assert!(a.fields.contains_key("team"));
+
+        fs::write(&path, "version: 1\nfields:\n  squad:\n    required: true\n").unwrap();
         let b = load(root).unwrap();
-        assert!(!Arc::ptr_eq(&a, &b));
+        assert!(
+            b.fields.contains_key("squad") && !b.fields.contains_key("team"),
+            "second load must reflect the edited file, not a cached parse"
+        );
     }
 
     /// `DEFAULT_SCHEMA_YAML` embeds the priority enum as a hand-written

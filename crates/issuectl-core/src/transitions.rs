@@ -43,7 +43,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -240,12 +239,10 @@ pub fn write_default(root: &Path, force: bool) -> Result<bool> {
 /// `version` is mandatory in the YAML (no `#[serde(default)]`) so a
 /// future v2 cannot silently rebind today's untagged files. Likewise,
 /// each loaded rule is validated for empty/duplicated values.
-pub fn load(root: &Path) -> Result<Arc<TransitionRules>> {
-    Ok(Arc::new(load_uncached(root)?))
-}
-
-/// Direct, unconditional parse. The value carrier behind [`load`].
-pub(crate) fn load_uncached(root: &Path) -> Result<TransitionRules> {
+///
+/// Returns the rules by value — callers use them linearly, so there is
+/// no shared-ownership indirection to preserve.
+pub fn load(root: &Path) -> Result<TransitionRules> {
     let path = rules_path(root);
     if !path.is_file() {
         return Ok(TransitionRules::default());
@@ -505,16 +502,36 @@ mod tests {
 
     // `load` re-parses on every call — it does NOT memoize. This is the
     // invariant that made collapsing the `ConfigSource`/`UncachedConfig`
-    // seam behavior-preserving; the assertion moved here when
-    // `repo_config.rs` was deleted. See the twin test in `schema.rs`.
+    // seam behavior-preserving. Now that `load` returns by value there is
+    // no cached handle to compare, so the guard changes the file between
+    // two calls and asserts the second load reflects the edit — a
+    // memoizing loader would return the stale first parse and fail here.
+    // See the twin test in `schema.rs`.
     #[test]
     fn load_re_parses_on_every_call() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        fs::create_dir_all(root.join("issues")).unwrap();
+        fs::create_dir_all(root.join(".issuectl")).unwrap();
+        let path = rules_path(root);
+
+        fs::write(
+            &path,
+            "version: 1\nstatus_rules:\n  done:\n    requires_assignee: true\n",
+        )
+        .unwrap();
         let a = load(root).unwrap();
+        assert!(a.status_rules.contains_key("done"));
+
+        fs::write(
+            &path,
+            "version: 1\nstatus_rules:\n  fixed:\n    requires_commits: true\n",
+        )
+        .unwrap();
         let b = load(root).unwrap();
-        assert!(!Arc::ptr_eq(&a, &b));
+        assert!(
+            b.status_rules.contains_key("fixed") && !b.status_rules.contains_key("done"),
+            "second load must reflect the edited file, not a cached parse"
+        );
     }
 
     fn make_issue(status: &str, issue_type: &str, body: &str) -> Issue {

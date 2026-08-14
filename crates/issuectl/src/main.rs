@@ -6072,7 +6072,7 @@ fn cmd_complete_values(kind: CompleteKind) -> Result<()> {
             // Surface every status the schema knows about (built-in defaults
             // when no project schema is declared).
             let schema = issuectl_core::schema::load(&root)
-                .unwrap_or_else(|_| std::sync::Arc::new(issuectl_core::schema::default_schema()));
+                .unwrap_or_else(|_| issuectl_core::schema::default_schema());
             for s in issuectl_core::schema::status_universe(&schema) {
                 println!("{s}");
             }
@@ -6125,7 +6125,7 @@ fn cmd_scan_todos(json: bool, create_inbox: bool) -> Result<()> {
     let issues = repo::load_issues(&root);
     // Build slug -> closing-or-not map.
     let schema = issuectl_core::schema::load(&root)
-        .unwrap_or_else(|_| std::sync::Arc::new(issuectl_core::schema::default_schema()));
+        .unwrap_or_else(|_| issuectl_core::schema::default_schema());
     let mut known: std::collections::BTreeMap<String, bool> = Default::default();
     for i in &issues {
         let closing = issuectl_core::schema::is_closing(&schema, &i.status);

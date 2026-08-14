@@ -1080,12 +1080,7 @@ fn scan(repo_root: &Path) -> Result<DoctorFindings> {
         }
     };
     if rules.is_some() || schema_value.is_some() {
-        populate_transition_warnings(
-            &scan,
-            rules.as_deref(),
-            schema_value.as_deref(),
-            &mut report,
-        );
+        populate_transition_warnings(&scan, rules.as_ref(), schema_value.as_ref(), &mut report);
         // M2: stable, deterministic ordering for CLI text + JSON +
         // tests. `read_dir` traversal order is platform-dependent.
         report.transition_warnings.sort();
@@ -1146,7 +1141,7 @@ fn scan(repo_root: &Path) -> Result<DoctorFindings> {
     // before running `--fix`.
     populate_notes_migration(&scan, &mut report);
 
-    populate_extended_validation(&scan, schema_value.as_deref(), &mut report);
+    populate_extended_validation(&scan, schema_value.as_ref(), &mut report);
 
     populate_attachment_health(&scan, repo_root, &mut report);
 

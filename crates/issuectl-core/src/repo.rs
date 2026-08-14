@@ -58,7 +58,7 @@ pub enum LoadWarningCode {
 fn load_schema_or_warn(
     repo_root: &Path,
     warnings: Option<&mut Vec<LoadWarning>>,
-) -> std::sync::Arc<crate::schema::Schema> {
+) -> crate::schema::Schema {
     match crate::schema::load(repo_root) {
         Ok(s) => s,
         Err(e) => {
@@ -75,7 +75,7 @@ fn load_schema_or_warn(
             } else {
                 eprintln!("Warning: {msg}");
             }
-            std::sync::Arc::new(crate::schema::default_schema())
+            crate::schema::default_schema()
         }
     }
 }

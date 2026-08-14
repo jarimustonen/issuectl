@@ -416,13 +416,13 @@ mod tests {
             .unwrap()
     }
 
-    fn schema() -> std::sync::Arc<Schema> {
+    fn schema() -> Schema {
         crate::schema::load(&std::env::temp_dir()).unwrap()
     }
 
     /// Load the schema a repo actually declares (for tests that write a
     /// custom `.schema.yaml` — e.g. custom statuses / provenance enum).
-    fn schema_at(root: &Path) -> std::sync::Arc<Schema> {
+    fn schema_at(root: &Path) -> Schema {
         crate::schema::load(root).unwrap()
     }
 
