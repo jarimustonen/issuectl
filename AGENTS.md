@@ -163,7 +163,11 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
   across every command so consumers parse them uniformly:
   - **Success (exit 0)** → one JSON value on **stdout**: the resource
     (`show`), an array of resources (`ls`/`search`), or a result object
-    (action verbs).
+    (action verbs). A mutating action verb's result object **echoes the
+    resulting (post-mutation) value of the core mutable fields** —
+    `status`, `priority`, `labels` (from the updated issue the mutate
+    call returns under its flock, never a second read) — so a caller can
+    confirm the write from that one result without a follow-up `show`.
   - **Error (exit ≠ 0, nothing produced)** → one object on **stderr**:
     `{"error":{"code":"<kebab>","message":"…"}}`, with optional extra
     keys inside `error` (e.g. `matches`), and **empty stdout**. The

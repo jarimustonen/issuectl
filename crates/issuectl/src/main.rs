@@ -4441,6 +4441,15 @@ pub(crate) struct UpdateOutcome {
     pub moved_to_closed: bool,
     pub moved_to_open: bool,
     pub version: String,
+    // Post-mutation values of the fields the action verbs echo in their
+    // `--json` result so a caller can confirm the write without a second
+    // `show` round-trip (see issue action-verb-json-echo-mutation). Read
+    // straight off the updated `Issue` the mutate call returns under its
+    // flock — never re-read from disk, which would race a concurrent
+    // writer.
+    pub status: String,
+    pub priority: String,
+    pub labels: Option<Vec<String>>,
 }
 
 fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
@@ -4448,12 +4457,17 @@ fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
     let slug = args.slug.clone();
     let out = do_update(&root, args)?;
     if json {
+        // Echo the post-mutation core fields so a caller can confirm the
+        // write from this result alone (issue action-verb-json-echo-mutation).
         let report = serde_json::json!({
             "slug": slug,
             "dir": out.final_dir.to_string_lossy(),
             "moved_to_closed": out.moved_to_closed,
             "moved_to_open": out.moved_to_open,
             "version": out.version,
+            "status": out.status,
+            "priority": out.priority,
+            "labels": out.labels,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -4555,6 +4569,9 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
         moved_to_closed: outcome.moved_to_closed,
         moved_to_open: outcome.moved_to_open,
         version: outcome.version,
+        status: outcome.issue.status,
+        priority: outcome.issue.priority,
+        labels: outcome.issue.labels,
     })
 }
 
@@ -4580,11 +4597,14 @@ fn cmd_close(
         expected_version,
     )?;
     if json {
+        // Echo the resulting `status` so a caller can confirm which closing
+        // status landed (issue action-verb-json-echo-mutation).
         let mut report = serde_json::json!({
             "slug": slug,
             "dir": out.final_dir.to_string_lossy(),
             "moved_to_closed": out.moved_to_closed,
             "version": out.version,
+            "status": out.status,
         });
         if let Some(by) = closed_by {
             report["closed_by"] = serde_json::Value::String(by);
@@ -4641,6 +4661,9 @@ pub(crate) fn do_close(
         moved_to_closed: outcome.moved_to_closed,
         moved_to_open: outcome.moved_to_open,
         version: outcome.version,
+        status: outcome.issue.status,
+        priority: outcome.issue.priority,
+        labels: outcome.issue.labels,
     })
 }
 
@@ -5598,12 +5621,18 @@ fn finish_mutation(
         return Ok(());
     }
     if json {
+        // Echo the post-mutation core fields so callers of the shared
+        // mutation verbs (`label`, `set`, `check`, …) can confirm the write
+        // from this result alone (issue action-verb-json-echo-mutation).
         let report = serde_json::json!({
             "slug": slug,
             "dir": outcome.issue_dir.to_string_lossy(),
             "version": outcome.version,
             "moved_to_closed": outcome.moved_to_closed,
             "moved_to_open": outcome.moved_to_open,
+            "status": outcome.issue.status,
+            "priority": outcome.issue.priority,
+            "labels": outcome.issue.labels,
             "warnings": outcome.warnings,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
