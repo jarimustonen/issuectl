@@ -332,8 +332,16 @@ pub fn install_skill(
             "  Use /issue-new to file an intake report and /issue-intake to process the queue."
         );
     }
-    // The pi mirror only fires for a Claude install with a resolved home.
-    if pi_root.is_some() && agents.contains(&Agent::Claude) {
+    // The pi mirror only fires for a Claude install with a resolved home — but
+    // gate the hint on the block having actually produced a mirror result, not
+    // just on the preconditions. The pi block can be skipped after those hold
+    // (lock unavailable → early return; every mirror write warned-and-skipped),
+    // leaving no pi entry in `results`; printing the hint then would claim a
+    // mirror that never happened. A pi result carries the unique
+    // [`PI_SKILL_LABEL`], so its presence means at least one skill was mirrored
+    // (created, overwritten, or already present).
+    let pi_mirrored = results.iter().any(|r| r.label == PI_SKILL_LABEL);
+    if pi_mirrored {
         println!(
             "  The same skills are mirrored into ~/.pi/agent/skills for pi.dev (/skill:issue)."
         );
@@ -1915,6 +1923,54 @@ mod tests {
                 "{name} pi mirror must be byte-identical to the Claude SKILL.md"
             );
         }
+    }
+
+    /// The "skills mirrored" hint keys off a pi-labelled result being present
+    /// in the summary — not merely off the `pi_root.is_some() && claude`
+    /// preconditions. A normal Claude+pi install therefore yields at least one
+    /// [`PI_SKILL_LABEL`] result (the hint's ON signal).
+    #[test]
+    fn install_summary_carries_pi_label_when_mirror_runs() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        let results =
+            install_skill_summary(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
+        assert!(
+            results.iter().any(|r| r.label == PI_SKILL_LABEL),
+            "a real pi mirror must leave a pi-labelled result (the hint's signal)"
+        );
+    }
+
+    /// Regression for `pi-mirror-hint-accuracy`: when the whole pi block is
+    /// skipped after the preconditions hold — here every mirror write is
+    /// refused because each entry dir is a symlink out of the corpus — the
+    /// summary carries NO pi-labelled result, so the caller must NOT print the
+    /// "skills mirrored" hint. The repo-local Claude install still succeeds.
+    #[cfg(unix)]
+    #[test]
+    fn install_summary_omits_pi_label_when_block_skipped() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        // Block every managed pi mirror: point each entry dir at an external
+        // target so `ensure_pi_mirror_target_within_corpus` refuses the write
+        // and the caller warns-and-skips it, leaving no pi result.
+        for (name, _) in managed_pi_skills() {
+            let external = outside.path().join(name);
+            std::fs::create_dir_all(&external).unwrap();
+            std::os::unix::fs::symlink(&external, pi.path().join(name)).unwrap();
+        }
+
+        let results =
+            install_skill_summary(repo.path(), &[Agent::Claude], true, Some(pi.path())).unwrap();
+        assert!(
+            !results.iter().any(|r| r.label == PI_SKILL_LABEL),
+            "a fully skipped pi block must leave no pi-labelled result (hint stays off)"
+        );
+        assert!(
+            repo.path().join(".claude/skills/issue/SKILL.md").exists(),
+            "the repo-local Claude install must still succeed"
+        );
     }
 
     /// Vendored filter: ONLY `SKILL.md` is mirrored. The Codex prompts and the
