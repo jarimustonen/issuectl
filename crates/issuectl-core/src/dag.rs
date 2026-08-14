@@ -92,14 +92,13 @@ pub struct Reservations {
     held_collisions: BTreeSet<String>,
 }
 
-/// Top-level object keys accepted by [`Reservations::from_json`].
-///
-/// Mirrors [`RESERVATION_HOLD_KEYS`]: a bare single-hold object such as
-/// `{"run_id": "r1", "lane": "x"}` is accepted as a one-element array, so a
-/// tracking `run_id` is honoured (and ignored) consistently across both shapes.
-const RESERVATION_OBJECT_KEYS: &[&str] = &["run_id", "lanes", "lane", "collision"];
-/// Keys accepted inside a hold object of the array shape.
-const RESERVATION_HOLD_KEYS: &[&str] = &["run_id", "lanes", "lane", "collision"];
+/// Keys accepted in a reservation hold object, used for BOTH shapes: the
+/// top-level object (a bare single hold) and each element of the
+/// array-of-holds. `run_id` is accepted as an opaque tracking hint — it is
+/// not type-checked or retained; the remaining keys carry the lane and
+/// collision tokens. A single constant so the two shapes cannot drift apart
+/// (an earlier split let the object shape reject `run_id` the array accepted).
+const RESERVATION_KEYS: &[&str] = &["run_id", "lanes", "lane", "collision"];
 
 impl Reservations {
     /// Build from an explicit set of held lane names (collision set empty).
@@ -126,10 +125,13 @@ impl Reservations {
     /// Parse the caller-supplied reservations JSON. Two shapes are
     /// accepted:
     ///
-    /// - an object `{"run_id"?, "lanes": [..], "collision": [..]}` (every key
-    ///   optional; a scalar `lane: "x"` is also accepted) — a bare single hold
+    /// - an object `{"run_id"?, "lanes"?, "lane"?, "collision"?}` (every key
+    ///   optional; `lane` accepts a scalar or an array) — a bare single hold
     ///   behaves like a one-element array, or
-    /// - an array of hold objects `[{"run_id"?, "lane"?, "collision"?:[..]}, ..]`.
+    /// - an array of hold objects `[{"run_id"?, "lanes"?, "lane"?, "collision"?:[..]}, ..]`.
+    ///
+    /// Both shapes accept the same keys (see [`RESERVATION_KEYS`]); `run_id`
+    /// is an opaque tracking hint, accepted but not type-checked or retained.
     ///
     /// Strict per the AI-first contract: an unrecognised top-level shape,
     /// an **unknown key** (a typo like `collisions` that would silently
@@ -141,7 +143,7 @@ impl Reservations {
         let mut collisions = BTreeSet::new();
         match v {
             serde_json::Value::Object(map) => {
-                reject_unknown_keys(map, RESERVATION_OBJECT_KEYS, "reservations")?;
+                reject_unknown_keys(map, RESERVATION_KEYS, "reservations")?;
                 collect_token_array(map.get("lanes"), "lanes", &mut lanes)?;
                 if let Some(lane) = map.get("lane") {
                     collect_scalar_or_array(lane, "lane", &mut lanes)?;
@@ -154,7 +156,7 @@ impl Reservations {
                         format!("reservations[{i}] must be an object, got {hold}")
                     })?;
                     let ctx = format!("reservations[{i}]");
-                    reject_unknown_keys(obj, RESERVATION_HOLD_KEYS, &ctx)?;
+                    reject_unknown_keys(obj, RESERVATION_KEYS, &ctx)?;
                     collect_token_array(obj.get("lanes"), "lanes", &mut lanes)?;
                     if let Some(lane) = obj.get("lane") {
                         collect_scalar_or_array(lane, "lane", &mut lanes)?;
@@ -953,6 +955,11 @@ mod tests {
         assert!(r.reserves(Some("schema"), &[]));
         assert!(r.reserves(None, &["a.rs".to_string()]));
         assert!(!r.reserves(Some("other"), &["b.rs".to_string()]));
+
+        // `run_id` is an opaque tracking hint — never collected as a lane or
+        // collision token, so it must not reserve anything.
+        assert!(!r.reserves(Some("r1"), &[]));
+        assert!(!r.reserves(None, &["r1".to_string()]));
 
         // The object and array shapes agree for the same single hold.
         let arr = serde_json::json!([{"run_id": "r1", "lane": "schema", "collision": ["a.rs"]}]);
