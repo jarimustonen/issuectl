@@ -93,7 +93,11 @@ pub struct Reservations {
 }
 
 /// Top-level object keys accepted by [`Reservations::from_json`].
-const RESERVATION_OBJECT_KEYS: &[&str] = &["lanes", "lane", "collision"];
+///
+/// Mirrors [`RESERVATION_HOLD_KEYS`]: a bare single-hold object such as
+/// `{"run_id": "r1", "lane": "x"}` is accepted as a one-element array, so a
+/// tracking `run_id` is honoured (and ignored) consistently across both shapes.
+const RESERVATION_OBJECT_KEYS: &[&str] = &["run_id", "lanes", "lane", "collision"];
 /// Keys accepted inside a hold object of the array shape.
 const RESERVATION_HOLD_KEYS: &[&str] = &["run_id", "lanes", "lane", "collision"];
 
@@ -122,8 +126,9 @@ impl Reservations {
     /// Parse the caller-supplied reservations JSON. Two shapes are
     /// accepted:
     ///
-    /// - an object `{"lanes": [..], "collision": [..]}` (either key
-    ///   optional; a scalar `lane: "x"` is also accepted), or
+    /// - an object `{"run_id"?, "lanes": [..], "collision": [..]}` (every key
+    ///   optional; a scalar `lane: "x"` is also accepted) — a bare single hold
+    ///   behaves like a one-element array, or
     /// - an array of hold objects `[{"run_id"?, "lane"?, "collision"?:[..]}, ..]`.
     ///
     /// Strict per the AI-first contract: an unrecognised top-level shape,
@@ -937,6 +942,23 @@ mod tests {
         assert!(r.reserves(Some("main-rs"), &[]));
         assert!(r.reserves(Some("schema"), &[]));
         assert!(r.reserves(None, &["x.rs".to_string()]));
+    }
+
+    #[test]
+    fn reservations_from_json_accepts_single_hold_object() {
+        // A bare single-hold object carrying a tracking `run_id` behaves like a
+        // one-element array — no wrapping `[..]` required to satisfy the parser.
+        let obj = serde_json::json!({"run_id": "r1", "lane": "schema", "collision": ["a.rs"]});
+        let r = Reservations::from_json(&obj).unwrap();
+        assert!(r.reserves(Some("schema"), &[]));
+        assert!(r.reserves(None, &["a.rs".to_string()]));
+        assert!(!r.reserves(Some("other"), &["b.rs".to_string()]));
+
+        // The object and array shapes agree for the same single hold.
+        let arr = serde_json::json!([{"run_id": "r1", "lane": "schema", "collision": ["a.rs"]}]);
+        let via_arr = Reservations::from_json(&arr).unwrap();
+        assert_eq!(r.held_lanes, via_arr.held_lanes);
+        assert_eq!(r.held_collisions, via_arr.held_collisions);
     }
 
     #[test]
