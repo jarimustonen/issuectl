@@ -5228,6 +5228,65 @@ mod tests {
     }
 
     #[test]
+    fn close_with_at_prefixed_closer_strips_sigil_across_both_write_sites() {
+        // `close --as "@jari" --comment "..."` normalizes the single
+        // leading `@` at the shared author seam, so the SAME stored token
+        // `jari` lands in both write sites the closer feeds: the
+        // `closed_by:` frontmatter slot and the `## Resolution` block
+        // author. Guards against a refactor normalizing one but not the
+        // other (issue as-flag-strip-at-sign).
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "close-at-note", "open");
+
+        close_issue(
+            tmp.path(),
+            "close-at-note",
+            Some("fixed".into()),
+            Some("@jari".into()),
+            Some("Stripped the sigil at the seam.".into()),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+
+        let after = fs::read_to_string(tmp.path().join("issues/close-at-note/item.md")).unwrap();
+        // Stored bare (`jari`), never the raw `@jari`, in frontmatter.
+        assert!(after.contains("closed_by: jari"), "{after}");
+        assert!(!after.contains("closed_by: '@jari'"), "{after}");
+        assert!(!after.contains("closed_by: \"@jari\""), "{after}");
+        // The resolution block heading renders the sigil exactly once
+        // (`· @jari`), not doubled (`· @@jari`) from a re-prefixed store.
+        assert!(after.contains("· @jari"), "{after}");
+        assert!(!after.contains("· @@jari"), "{after}");
+        let parsed = crate::parser::parse_item_md_with_warnings(
+            &tmp.path().join("issues/close-at-note/item.md"),
+            "close-at-note",
+            "closed",
+        );
+        let section = crate::body_sections::parse_section(
+            &parsed.issue.body,
+            crate::body_sections::RESOLUTION,
+        );
+        assert_eq!(section.blocks.len(), 1, "warnings={:?}", section.warnings);
+        assert_eq!(section.blocks[0].author, "jari");
+        // And an interior `@` (email-shaped) is still rejected, leaving
+        // no partial write.
+        let tmp2 = fresh_repo();
+        seed_issue(tmp2.path(), "open", "close-email", "open");
+        let err = close_issue(
+            tmp2.path(),
+            "close-email",
+            Some("fixed".into()),
+            Some("jari@example.com".into()),
+            None,
+            Vec::new(),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, MutateError::Validation(_)), "{err:?}");
+    }
+
+    #[test]
     fn close_with_comment_anonymous_uses_sentinel_author() {
         // `close --comment` without `--as` still records the rationale,
         // attributed to the `issuectl` sentinel so the managed block
