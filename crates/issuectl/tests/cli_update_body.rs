@@ -40,11 +40,14 @@ fn dump(out: &Output) -> String {
     )
 }
 
-fn show_body(root: &std::path::Path, slug: &str) -> String {
+fn show_json(root: &std::path::Path, slug: &str) -> serde_json::Value {
     let show = run(root, &["--json", "show", slug]);
     assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
-    serde_json::from_slice::<serde_json::Value>(&show.stdout).expect("show stdout should be JSON")
-        ["body"]
+    serde_json::from_slice(&show.stdout).expect("show stdout should be JSON")
+}
+
+fn show_body(root: &std::path::Path, slug: &str) -> String {
+    show_json(root, slug)["body"]
         .as_str()
         .expect("body field")
         .to_string()
@@ -159,17 +162,85 @@ fn update_description_flag_replaces_body_inline() {
 
     let body = show_body(tmp.path(), "ub-inline");
     assert!(
-        body.contains("REPLACEMENT inline.") && !body.contains("ORIGINAL-BODY-MARKER"),
-        "inline replace failed: {body:?}"
+        body.contains("REPLACEMENT inline."),
+        "new body missing: {body:?}"
+    );
+    assert!(
+        !body.contains("ORIGINAL-BODY-MARKER"),
+        "old body survived inline replace: {body:?}"
     );
 }
 
 #[test]
-fn update_body_and_frontmatter_apply_atomically() {
-    // A body replacement bundled with a frontmatter PATCH lands in one
-    // call (single flock): the new body AND the new priority are both
-    // present afterwards, proving `set_body` rides the `update_issue`
-    // write path rather than a second, separate write.
+fn update_body_alias_replaces_body_inline() {
+    // `--body` is the documented alias for `--description`; exercise the
+    // public alias spelling, not just the canonical flag.
+    let tmp = fresh_repo();
+    new_issue_with_starter_body(tmp.path(), "ub-alias");
+
+    let out = run(
+        tmp.path(),
+        &["update", "ub-alias", "--body", "REPLACEMENT via alias."],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+
+    let body = show_body(tmp.path(), "ub-alias");
+    assert!(
+        body.contains("REPLACEMENT via alias."),
+        "new body missing: {body:?}"
+    );
+    assert!(
+        !body.contains("ORIGINAL-BODY-MARKER"),
+        "old body survived alias replace: {body:?}"
+    );
+}
+
+#[test]
+fn update_body_file_missing_path_errors_cleanly() {
+    let tmp = fresh_repo();
+    new_issue_with_starter_body(tmp.path(), "ub-missing");
+    let out = run(
+        tmp.path(),
+        &[
+            "update",
+            "ub-missing",
+            "--body-file",
+            tmp.path().join("does-not-exist.md").to_str().unwrap(),
+        ],
+    );
+    // A missing file is a clean runtime error (exit 1), not a panic, and
+    // the original body is left intact.
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    assert!(
+        show_body(tmp.path(), "ub-missing").contains("ORIGINAL-BODY-MARKER"),
+        "body must be untouched after a failed update"
+    );
+}
+
+#[test]
+fn update_empty_body_file_is_rejected_and_leaves_body_intact() {
+    let tmp = fresh_repo();
+    new_issue_with_starter_body(tmp.path(), "ub-empty");
+    let empty = tmp.path().join("empty.md");
+    std::fs::write(&empty, "   \n").expect("write empty");
+    let out = run(
+        tmp.path(),
+        &["update", "ub-empty", "--body-file", empty.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    assert!(
+        show_body(tmp.path(), "ub-empty").contains("ORIGINAL-BODY-MARKER"),
+        "body must be untouched after a rejected empty replacement"
+    );
+}
+
+#[test]
+fn update_body_and_frontmatter_land_in_one_call() {
+    // A body replacement bundled with a frontmatter PATCH: the new body
+    // AND the new priority are both present after a single `update`
+    // invocation. (The single-flock / single-write property is proven at
+    // the core level by `update_issue_set_body_composes_with_frontmatter
+    // _patch_atomically`, which observes both landing from one call.)
     let tmp = fresh_repo();
     new_issue_with_starter_body(tmp.path(), "ub-combo");
 
@@ -186,11 +257,86 @@ fn update_body_and_frontmatter_apply_atomically() {
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
 
-    let body = show_body(tmp.path(), "ub-combo");
-    assert!(body.contains("REPLACEMENT combined."), "body: {body:?}");
-    let show = run(tmp.path(), &["--json", "show", "ub-combo"]);
-    let json: serde_json::Value = serde_json::from_slice(&show.stdout).expect("json");
-    assert_eq!(json["priority"].as_str(), Some("high"), "{}", dump(&show));
+    let json = show_json(tmp.path(), "ub-combo");
+    assert!(
+        json["body"]
+            .as_str()
+            .unwrap()
+            .contains("REPLACEMENT combined."),
+        "body: {json}"
+    );
+    assert_eq!(json["priority"].as_str(), Some("high"), "priority: {json}");
+}
+
+#[test]
+fn update_body_alias_conflicts_with_body_file() {
+    // The mutual-exclusion group must hold for the `--body` spelling too,
+    // not only `--description`.
+    let tmp = fresh_repo();
+    new_issue_with_starter_body(tmp.path(), "ub-alias-conflict");
+    let notes = tmp.path().join("notes.md");
+    std::fs::write(&notes, "x\n").expect("write notes");
+    let out = run(
+        tmp.path(),
+        &[
+            "update",
+            "ub-alias-conflict",
+            "--body-file",
+            notes.to_str().unwrap(),
+            "--body",
+            "also inline",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", dump(&out));
+    // Body untouched — a clap usage error mutates nothing.
+    assert!(
+        show_body(tmp.path(), "ub-alias-conflict").contains("ORIGINAL-BODY-MARKER"),
+        "body must be untouched after a usage error"
+    );
+}
+
+#[test]
+fn update_body_reserved_heading_warns_nonfatally_on_both_channels() {
+    // Replacing the body with a reserved-legacy `## Notes` heading is
+    // accepted (exit 0) but warns — on stderr for humans and in the JSON
+    // `warnings` array for machines.
+    let tmp = fresh_repo();
+    new_issue_with_starter_body(tmp.path(), "ub-warn");
+    let notes = tmp.path().join("legacy.md");
+    std::fs::write(&notes, "Body.\n\n## Notes\nlegacy section.\n").expect("write notes");
+
+    // Human channel: warning on stderr, still exit 0.
+    let human = run(
+        tmp.path(),
+        &["update", "ub-warn", "--body-file", notes.to_str().unwrap()],
+    );
+    assert_eq!(human.status.code(), Some(0), "{}", dump(&human));
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(
+        stderr.contains("## Notes"),
+        "warning missing on stderr: {stderr}"
+    );
+
+    // JSON channel: warning present in the `warnings` array.
+    let json_out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "update",
+            "ub-warn",
+            "--body-file",
+            notes.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(json_out.status.code(), Some(0), "{}", dump(&json_out));
+    let json: serde_json::Value = serde_json::from_slice(&json_out.stdout).expect("json");
+    let warnings = json["warnings"].as_array().expect("warnings array");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().is_some_and(|s| s.contains("## Notes"))),
+        "warning missing in JSON: {json}"
+    );
 }
 
 #[test]
