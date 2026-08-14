@@ -1,9 +1,15 @@
 ---
 created: 2026-08-12
-updated: 2026-08-12
+updated: 2026-08-14
 type: improvement
-status: open
+status: done
 priority: normal
+commits:
+- hash: 363df7b
+  summary: 'refactor(config): return schema/transitions load by value'
+- hash: 737113a
+  summary: 'review: soften re-parse test naming, drop dead-seam comment'
+closed: 2026-08-14
 ---
 
 # Return schema/transitions load by value now that the cache is gone
