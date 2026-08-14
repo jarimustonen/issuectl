@@ -6632,22 +6632,57 @@ body_ops:
     // EventHub probe. They are hermetic (tempdir only) and deterministic:
     // each is written so that removing `WriteLock` makes it fail, not hang.
 
-    /// Returns `true` iff the repo-wide write lock is currently
-    /// unheld. Uses a non-blocking `try_lock_exclusive` on a fresh fd so
-    /// a leaked lock reports `false` instead of hanging the test.
+    /// Returns `true` iff the repo-wide write lock is currently unheld.
+    ///
+    /// Probes with a non-blocking `try_lock_exclusive` on a *fresh* fd so a
+    /// leaked lock reports `false` instead of hanging the test — but wraps
+    /// it in a short bounded retry loop. On macOS/BSD, `flock(LOCK_EX |
+    /// LOCK_NB)` can return a *transient* `EWOULDBLOCK` even when the lock
+    /// is actually free whenever many `flock` calls are in flight on the
+    /// same filesystem (the full parallel suite hammers it, and rapidly
+    /// recycled tempdir inodes widen the window). A single one-shot probe
+    /// turns that transient into a spurious "lock is held" — the flake this
+    /// helper used to have; instrumentation showed the very next probe on a
+    /// fresh fd already succeeded. Retrying `WouldBlock` on a fresh fd
+    /// until a short deadline outlasts the transient without any of the
+    /// hazards of a blocking acquire (no thread to leak, no `create_dir_all`
+    /// side effect, no weakening of "held right now" to "free eventually").
+    ///
+    /// A *genuinely* leaked lock stays `WouldBlock` for the whole window
+    /// and correctly returns `false` at the deadline. Any other error (a
+    /// missing lock file, a permissions problem) is a real bug and panics
+    /// rather than being silently reclassified as "lock still held".
     fn write_lock_is_free(root: &Path) -> bool {
+        use std::io::ErrorKind;
+        use std::time::{Duration, Instant};
+
         let path = root.join(".issuectl/write.lock");
-        let f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .expect("lock file should exist after a mutation");
-        match f.try_lock_exclusive() {
-            Ok(()) => {
-                let _ = FileExt::unlock(&f);
-                true
+        // The transient clears in microseconds; the deadline only ever
+        // bites on a genuine leak, so keep it short enough for fast
+        // regression feedback while leaving generous margin over the
+        // observed transient window.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            // A fresh open file description per attempt — this is what the
+            // instrumentation showed clears the transient `EWOULDBLOCK`.
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("lock file should exist after a mutation");
+            match f.try_lock_exclusive() {
+                Ok(()) => {
+                    let _ = FileExt::unlock(&f);
+                    return true;
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(e) => panic!("failed to probe write lock {}: {e}", path.display()),
             }
-            Err(_) => false,
         }
     }
 
