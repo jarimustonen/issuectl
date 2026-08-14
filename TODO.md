@@ -13,44 +13,48 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-14):** `main` **vihreä** (1219 testiä, 0 fail, 0 clippy-erroria), työpuu puhdas,
-`main == origin`. **Live-release yhä `v0.10.0`**, mutta mainissa on **julkaisematonta työtä**
-(8 yksikköä tämän session ekasta puoliskosta). `Cargo.toml == 0.10.0` (ei bumpattu). Ei release-gejä auki.
+**Tila (2026-08-14, jatkettu rupeama):** `main` **vihreä** (1038 testiä, 0 fail, 0 uutta clippyä,
+fmt puhdas), työpuu puhdas. **Local `main` 22 committia edellä `origin/main`:ia (pushaamatta —
+rinnakkaisworktree-politiikka).** **Live-release yhä `v0.10.0`**; mainissa ~17 julkaisematonta
+feat/fix-committia (session 1:n 8 + tämän session 8) menossa 0.11.0:aan. `Cargo.toml == 0.10.0` (ei bumpattu).
 
-**Tämä sessio, 2 vaihetta:**
+**Tämä sessio: 9-issuen DAG TYHJENNETTY.** 8 yksikköä landasi mainiin, kaikki `/llm-review`+`/assess-findings`
+läpi, 3 aaltoa (rinnakkain paitsi main.rs-kollisiot sarjassa):
+- **Aalto 1:** `@flock-write-lock` (release-gaten flaky-testi vihreäksi — deflake fresh-fd try_lock retry, 0/80 @32 threads),
+  `@dag-inprogress-is-spawnable` (ISO LINJAUS implementoitu), `@pi-mirror-hint-accuracy`.
+- **Aalto 2:** `@dag-reservations-run-id-object-shape`, `@configsource-load-return-value` (load return-by-value),
+  `@action-verb-json-echo-mutation`.
+- **Aalto 3 (sarjassa, main.rs):** `@as-flag-strip-at-sign` (`--as @jari` strippaa yhden @:n), `@update-set-body-flag`
+  (`update --body-file/--description`, stdin `-`).
 
-**1) Rupeama — 8 yksikköä landasi mainiin (4 aaltoa, ei releasea):**
-`@pidev-pi-skill-lifecycle` (pi-korpuksen lifecycle: provenance-manifesti, `pi-status` drift, `pi-prune`),
-`@collapse-configsource-seam` (ConfigSource-seamin romautus), `@flock-write-test-coverage`
-(write-under-flock-testikattavuus takaisin), `@pi-manifest-locking` (manifestin lukitus),
-**2 HIGH pi-korpus-bugia:** `@pi-corpus-symlink-traversal` (polkupako-esto) +
-`@pi-corpus-metadata-error-misclass` (pi_prune ei enää pudota manifestiriviä metadata-virheestä =
-tietohäviö-korjaus), `@dag-lists-closed-issues` (dag ei enää listaa suljettuja unscheduledissa),
-`@epic-tree-view` (`issuectl epic tree <slug>`). Kaikki `/llm-review`+`/assess-findings` läpi.
+**⚠️ RELEASE 0.11.0 EI CUTATTU — blocker `@changelog-trailers-never` (high, GLOBAL HEAD):** changelog on
+trailer-vetoinen (`issuectl changelog` kokoaa `Fixes-Issue:`/`Refs-Issue:`-trailereista), mutta MIKÄÄN ei
+injektoi niitä (`git_trailers.rs` vain PARSII; ei commit-hookia, ei worktree-merge-steppiä, CONTRIBUTING ei
+dokumentoi) → 1/63 committia v0.10.0:n jälkeen kantaa trailerin → 0.11.0:n julkaisunootit tulisivat lähes
+tyhjinä. **@jari valitsi OPTION 1:** korjaa juurisyy niin että trailer stampataan automaattisesti kun
+run/worktree sulkee issuen (orchestratectl `run merge` ja/tai `issuectl close --commit`). Design-first.
+**EI RELEASEA ennen kuin tämä landaa** (ei käsinkuratointia — @jari halusi juurisyyn).
 
-**2) PO-triage (iso karsinta):** review-cascade tuotti ~19 spin-offia; PO-kokpit (glasspad) käytiin
-läpi @jarin kanssa. **Suljettiin 14 `wontfix`** (defensiivistä/havainnointi/putkitusta epärealistisia
-uhkia vastaan — "ei fiksailla epätodennäköisiä ihmeellisyyksiä tämän maturiteetin ohjelmistossa").
-**Pidettiin 6.** **Filattiin 1 uusi:** `@dag-inprogress-is-spawnable`.
+**⚠️ PROSESSI-HAVAINTO — worktree-workerit eivät sulkeneet issueitaan:** 6:sta autonomisesta spinoffista
+**4 mergesi koodin mutta jätti issuen `open`ksi** (dag-reservations, action-verb, as-flag, update-set-body).
+Konduktori sulki ne itse verifioituaan sisällön mainista (+ kirjasi landing-commitin). **Sama juurisyy kuin
+changelog-trailers:** mikään ei stamppaa "valmis"-metadataa merge-hetkellä. `@changelog-trailers-never`-korjaus
+(close/merge → stamppaa) voi kattaa molemmat.
 
-**⚠️ ISO LINJAUS — in-progress ≠ "nyt työn alla" (`@dag-inprogress-is-spawnable`):** `issuectl dag`
-EI saa sulkea in-progressia pois `spawnable`sta. in-progress = *aloitettu, ei valmis*; dag:ia kysytään
-vain kun mikään ei ole käynnissä → in-progress-issuet ovat **resumoitavia ehdokkaita jotka on nostettava
-(aggressiivisesti)**, ei suljettava. Päällekkäisyyden esto = KUTSUJAN varausvastuu, ei dag:in. Korjaus:
-poista `!underway`-poissulku + `IN_PROGRESS`-vakio (dag.rs:80/466/470), päivitä docstring (dag.rs:44-50).
-**Sisar-issue orchestratectl-repossa:** `stint-head-of-line-in-progress-eligible` — stint/orchestrate
-head-of-line -konventio pitää linjata samaan (se sanoo nyt "eligible iff … not already in-progress").
+**SPIN-OFF-LAADUN TARKKAILU → NOSTETTU GEENERISEKSI SKILLISÄÄNNÖKSI:** projektikohtainen vahtisääntö on
+siirretty yleiseksi standing-disciplineksi **`/stint-handoff`-skilliin (orchestratectl-repo)** — worktree
+`spinoff-quality-watch-rule` (run `01m003xp0z`). Nyt voimassa **kaikissa** stinteissä. Tämän session havainto
+piti: as-flag-workerin review 8/8 löydöstä → DROP; reviewit eivät tuottaneet turhaa hiomista tällä kierroksella.
 
-**⚠️ SPIN-OFF-LAADUN TARKKAILU (UUSI, @jarin ohje):** seuraavilla korjauskierroksilla **tarkkaillaan
-tarjottujen spin-offien laatua kriittisesti.** Havainto tästä sessiosta: tämän maturiteettitason
-ohjelmistossa `/llm-review` taipuu tuottamaan tarpeettomia "keksitään keksimällä jotakin hiottavaa"
--suosituksia (14/19 spin-offia → drop). Älä ota review-cascaden spin-offeja annettuina — punnitse jokainen
-todellista arvoa vasten ennen kuin nostat sen DAG:iin.
+**ISO LINJAUS (in-progress spawnable) IMPLEMENTOITU** — `@dag-inprogress-is-spawnable` landattu (poistettu
+`!underway` + `IN_PROGRESS`-vakio dag.rs:stä, docstring/AGENTS/CHANGELOG päivitetty, testi lisätty). **Sisar
+orchestratectl-repossa:** `stint-head-of-line-in-progress-eligible` — tarkista onko vielä auki, linjaa
+head-of-line-konventio samaan.
 
-**Seuraava askel:** työstä 9-issuen DAG (alla; sisältää sisar-agentin 2026-08-14 filaaman `@update-set-body-flag`in). **Tämä kierros toimii myös tavallisten worktree-promptien
-testinä** (@jari: "testataan tavallisia worktree prompteja"). **GLOBAL HEAD-OF-LINE: `@flock-write-lock`**
-— flaky testi joka **PITÄÄ olla vihreä ennen seuraavaa releasea**; se + muu julkaisematon mainin työ menee
-seuraavaan minoriin (0.11.0). Kun DAG tyhjenee → ei enää tehtävää.
+**Seuraava askel:** **design + implementoi `@changelog-trailers-never` (option 1)** — se on GLOBAL HEAD ja
+0.11.0:n release-blocker. Kun se landaa → cut 0.11.0 (bump 0.10.0→0.11.0 + caret-dep, CHANGELOG-finalisointi
+trailereista, `release:`-commit, `ossctl release plan|cut`). Sitten jää vain `@ossctl-cut-no-publish`
+(upstream-blocked). Kun molemmat LANE C -issuet ratkennut → ei enää tehtävää.
 
 **⚠️ RELEASE-OPPI (yhä voimassa):** ossctl `release cut` EI julkaise oikeasti (`@ossctl-cut-no-publish`,
 upstream-blocked) → seuraava release vaatii manuaalisen `cargo publish -p issuectl-core` → `-p issuectl`
@@ -93,12 +97,14 @@ LANE C — release pipeline (.github/workflows/*.yml + cargo-dist + ossctl + git
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: sessio kahdessa vaiheessa. **(1) Rupeama:** 8 yksikköä landasi mainiin (pi-korpuksen lifecycle
-+ 2 HIGH pi-bugia, ConfigSource-romautus, flock-testit, dag-lists-korjaus, epic-tree) — kaikki `/llm-review`
-läpi, ei releasea. **(2) PO-triage:** review-cascaden ~19 spin-offista **14 → wontfix, 6 → keep, 1 uusi**
-(`dag-inprogress-is-spawnable`). 15 issueä terminaaliksi → pudotettu DAG:sta (8 shipattua + 14 wontfix −
-päällekkäisyydet). DAG on nyt 9 aktiivia: LANE A ruuhkainen (7, sarjata; ml. sisar-agentin `update-set-body-flag`), LANE B 1, LANE C 1 (blocked).
-Head = `flock-write-lock` (release-gate). Seuraava kierros testaa myös tavallisia worktree-prompteja.
+Kaari-lyhyesti: **9-issuen DAG tyhjennetty tässä sessiossa** — 8 yksikköä landasi mainiin (flock-release-gate
+vihreäksi, in-progress-spawnable-linjaus, dag-reservations, configsource-load-by-value, action-verb-json-echo,
+as-flag-@-strip, update-set-body, pi-mirror-hint) 3 aallossa, kaikki `/llm-review` läpi. **Release 0.11.0 EI
+cutattu:** blocker `changelog-trailers-never` (trailer-vetoinen changelog kokoaa tyhjää koska mikään ei injektoi
+trailereita) — @jari valitsi option 1 (juurisyy: stamppaa trailer close/merge-hetkellä). DAG nyt **2 aktiivia,
+molemmat LANE C:** `changelog-trailers-never` (GLOBAL HEAD, design-first, release-blocker) + `ossctl-cut-no-publish`
+(upstream-blocked). Kun molemmat ratkennut → ei enää tehtävää. Spin-off-laadun vahtisääntö nostettu geneeriseksi
+`/stint-handoff`-skillisäännöksi (orchestratectl-repo).
 
 ---
 
