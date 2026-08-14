@@ -38,16 +38,20 @@
 //!   the head advances to the next runnable member rather than stalling
 //!   the whole lane. `None` when the lane has no runnable issue (all done,
 //!   or every not-done issue still has an open blocker).
-//! - **Spawnable** = the issue is its lane's head-of-line ∧ it is not
-//!   already `in-progress` ∧ its lane/collision tokens are not currently
-//!   reserved. (Head-of-line already implies "not done" and "all blockers
-//!   done".) The `in-progress` exclusion is derived from the issue's own
-//!   `status`, independent of the caller's `--reservations` input: an
-//!   issue whose work is already underway must never read spawnable, or a
-//!   scheduler that trusts `spawnable` alone could launch a *second*
-//!   worker on it. With no reservations supplied the reservation term is
-//!   vacuously false, so a runnable, not-underway head-of-line reports
-//!   spawnable.
+//! - **Spawnable** = the issue is its lane's head-of-line ∧ its
+//!   lane/collision tokens are not currently reserved. (Head-of-line
+//!   already implies "not done" and "all blockers done".) `in-progress`
+//!   is deliberately **not** excluded: an in-progress issue means
+//!   *started, not done* — not "someone is on it right now". `dag` is
+//!   intended to be consulted only when nothing is actively running
+//!   ("what's next?"); under that caller precondition an in-progress issue
+//!   is one nobody is currently working — a half-done, idle, *resumable*
+//!   candidate that should surface rather than be hidden. This is a caller
+//!   precondition, not a property this computation can verify: preventing
+//!   two workers on the same issue is the **caller's** reservation/claim
+//!   responsibility (see the TOCTOU caveat below), not the dag's. With no
+//!   reservations supplied the reservation term is vacuously false, so a
+//!   runnable head-of-line — in-progress or not — reports spawnable.
 //!
 //! **Contract caveat (TOCTOU).** `spawnable` is *per-issue eligibility
 //! against the supplied reservation snapshot*, not a jointly-safe set:
@@ -74,10 +78,6 @@ use crate::schema::{status_class, Schema, StatusClass};
 /// it (the opposite of a normal shared lane). Distinct from an absent
 /// lane, which means "unclassified".
 pub const UNLANED: &str = "unlaned";
-
-/// The status whose presence marks an issue's work as already underway,
-/// so it is never spawnable regardless of the caller's reservations.
-const IN_PROGRESS: &str = "in-progress";
 
 /// Currently-held scheduling tokens, supplied by the caller (e.g. an
 /// orchestrator that knows which lanes/collision files its in-flight runs
@@ -449,11 +449,13 @@ impl ComputeCtx<'_> {
     /// The row still echoes the issue's *own* `lane` (so an `unlaned`
     /// sentinel surfaces), which is why the two are threaded separately.
     ///
-    /// `spawnable` = head ∧ runnable ∧ not already `in-progress` ∧ not
-    /// reserved. The runnable check is redundant for a lane head (which is
-    /// runnable by construction) but load-bearing for unscheduled issues;
-    /// the `in-progress` check keeps a second worker off work already
-    /// underway, derived from `status` independent of `res_lane`.
+    /// `spawnable` = head ∧ runnable ∧ not reserved. The runnable check is
+    /// redundant for a lane head (which is runnable by construction) but
+    /// load-bearing for unscheduled issues. `in-progress` is deliberately
+    /// NOT excluded: it means *started, not done*, and `dag` is consulted
+    /// only when nothing is running, so an in-progress head is a resumable
+    /// candidate that must surface. Preventing a double-spawn is the
+    /// caller's reservation responsibility, not this computation's.
     fn make_issue(&self, i: &Issue, pos: usize, res_lane: Option<&str>, is_head: bool) -> DagIssue {
         let empty = Vec::new();
         let blocked_by = self.graph.get(&i.slug).unwrap_or(&empty).clone();
@@ -463,12 +465,8 @@ impl ComputeCtx<'_> {
             .reservations
             .map(|r| r.reserves(res_lane, &collision))
             .unwrap_or(false);
-        let underway = i.status == IN_PROGRESS;
-        let spawnable = is_head
-            && blockers_open.is_empty()
-            && blockers_missing.is_empty()
-            && !underway
-            && !reserved;
+        let spawnable =
+            is_head && blockers_open.is_empty() && blockers_missing.is_empty() && !reserved;
         DagIssue {
             slug: i.slug.clone(),
             title: i.title.clone(),
@@ -1130,13 +1128,15 @@ mod tests {
         assert!(a.spawnable, "head is runnable — its blocker is satisfied");
     }
 
-    // ── dag-inprogress-spawnable (bug) ──────────────────────────────────
+    // ── dag-inprogress-is-spawnable (design correction) ─────────────────
 
     #[test]
-    fn in_progress_head_is_not_spawnable() {
-        // Regression: an `in-progress` issue is work already underway — it
-        // stays head-of-line but must never be spawnable, or a scheduler
-        // could launch a second worker on it. Independent of reservations.
+    fn in_progress_head_is_spawnable() {
+        // Design correction: `in-progress` means *started, not done* — not
+        // "someone is on it right now". `dag` is consulted only when nothing
+        // is running, so an in-progress head is an idle, resumable candidate
+        // that MUST surface as spawnable. Preventing a double-spawn is the
+        // caller's reservation responsibility, not the dag's.
         let issues = vec![with_lane(
             mk("a-underway", "in-progress", "normal"),
             "schema",
@@ -1146,31 +1146,30 @@ mod tests {
         assert_eq!(l.head_of_line.as_deref(), Some("a-underway"));
         let a = &l.issues[0];
         assert!(a.is_head_of_line, "still the head-of-line");
-        assert!(!a.spawnable, "in-progress work must not be spawnable");
+        assert!(a.spawnable, "in-progress head is a resumable candidate");
     }
 
     #[test]
-    fn in_progress_unscheduled_is_not_spawnable() {
-        // The bug was found on an unlaned in-progress issue reporting
-        // spawnable=true with no reservations supplied. Exercise that path.
+    fn in_progress_unscheduled_is_spawnable() {
+        // Same correction on the unscheduled path: an unlaned in-progress
+        // issue reports spawnable=true with no reservations supplied.
         let issues = vec![mk("a-underway", "in-progress", "normal")];
         let v = compute(&issues, &default_schema(), None);
         let a = &v.unscheduled[0];
         assert!(a.is_head_of_line);
         assert!(
-            !a.spawnable,
-            "in-progress unscheduled issue must not be spawnable"
+            a.spawnable,
+            "in-progress unscheduled issue is spawnable (resumable)"
         );
     }
 
     #[test]
     fn in_progress_head_keeps_following_lane_member_unspawnable() {
-        // A serial lane is a mutual-exclusion group: while its head member
-        // is `in-progress` (work underway), the lane stays occupied — the
-        // head does NOT advance to the next member, and that next member is
-        // not spawnable either. This is the intended serial semantics; the
-        // single-member `in_progress_head_is_not_spawnable` test does not
-        // exercise it.
+        // A serial lane is still a mutual-exclusion group: only the head is
+        // spawnable. The head being `in-progress` no longer blocks its OWN
+        // spawnability (it is resumable), but the member behind it is still
+        // not head → still not spawnable. The lane's serialization is
+        // unchanged; only the head's in-progress status stopped gating it.
         let issues = vec![
             with_lane(mk("a-underway", "in-progress", "normal"), "shared"),
             with_lane(mk("b-next", "open", "normal"), "shared"),
@@ -1181,12 +1180,31 @@ mod tests {
         let a = l.issues.iter().find(|i| i.slug == "a-underway").unwrap();
         let b = l.issues.iter().find(|i| i.slug == "b-next").unwrap();
         assert!(
-            a.is_head_of_line && !a.spawnable,
-            "underway head not spawnable"
+            a.is_head_of_line && a.spawnable,
+            "underway head is spawnable (resumable)"
         );
         assert!(
             !b.is_head_of_line && !b.spawnable,
-            "lane occupied by underway head — next member must not spawn"
+            "lane serializes — non-head member must not spawn"
+        );
+    }
+
+    #[test]
+    fn in_progress_head_still_reserved_by_lane() {
+        // Double-work prevention is the caller's job: when the caller feeds
+        // back a reservation for the in-progress head's lane, it reads
+        // reserved and therefore not spawnable — the mechanism that keeps a
+        // second worker off it, distinct from any status-based exclusion.
+        let issues = vec![with_lane(
+            mk("a-underway", "in-progress", "normal"),
+            "schema",
+        )];
+        let res = Reservations::from_tokens(["schema".to_string()]);
+        let v = compute(&issues, &default_schema(), Some(&res));
+        let a = &lane(&v, "schema").issues[0];
+        assert!(
+            a.reserved && !a.spawnable,
+            "a claimed lane keeps the in-progress head off the spawnable set"
         );
     }
 

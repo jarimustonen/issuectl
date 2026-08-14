@@ -99,12 +99,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AGENTS.md`, `CONTRIBUTING.md`). No behavioural change to the `issuectl`
   binary. (issue: `@wire-oss-release-as-release-path`)
 
-### Fixed
-- **`issuectl dag` no longer reports `spawnable: true` for an `in-progress`
-  issue.** An already-in-progress issue is now treated as not spawnable
-  (independent of the caller's `--reservations` input), so a scheduler cannot
-  be told to launch a second worker on work already underway. (issue:
-  `@dag-inprogress-spawnable`)
+### Changed
+- **`issuectl dag` treats an `in-progress` issue as spawnable.** Design
+  correction: `in-progress` means *started, not done* — not "someone is on
+  it right now". `dag` is consulted only when nothing is actively running
+  ("what's next?"), so under that invariant an in-progress head is an idle,
+  half-done, *resumable* candidate that must be surfaced, not hidden.
+  Preventing two workers on the same issue is the caller's reservation/claim
+  responsibility (feed the held lane/collision tokens back via
+  `--reservations`), not the dag's. This supersedes the earlier (unreleased)
+  `!underway` exclusion. (issue: `@dag-inprogress-is-spawnable`)
 
 ## [0.8.0] - 2026-08-10
 

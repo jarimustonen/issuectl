@@ -269,9 +269,11 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
   hardcoded known-key list. The DAG *computation* lives in `crate::dag`
   (head-of-line + spawnability computed on read, nothing stored); `cmd_dag`
   in `main.rs` stays thin. Two DAG semantics live only in `crate::dag`,
-  not in stored state: an `in-progress` issue is **never `spawnable`**
-  (derived from `status`, independent of `--reservations`, so a scheduler
-  can't double-spawn work already underway); and the reserved lane value
+  not in stored state: an `in-progress` issue **is still `spawnable`**
+  (in-progress means *started, not done* — `dag` is consulted only when
+  nothing is running, so an in-progress head is an idle, resumable
+  candidate that must surface; preventing a double-spawn is the caller's
+  reservation responsibility, not the dag's); and the reserved lane value
   **`lane: unlaned`** (`dag::UNLANED`) is a first-class *parallel-safe*
   marker — its members surface as unscheduled, each its own head-of-line
   and independently spawnable (never serialized with each other),
