@@ -332,22 +332,42 @@ pub fn install_skill(
             "  Use /issue-new to file an intake report and /issue-intake to process the queue."
         );
     }
-    // The pi mirror only fires for a Claude install with a resolved home — but
-    // gate the hint on the block having actually produced a mirror result, not
-    // just on the preconditions. The pi block can be skipped after those hold
-    // (lock unavailable → early return; every mirror write warned-and-skipped),
-    // leaving no pi entry in `results`; printing the hint then would claim a
-    // mirror that never happened. A pi result carries the unique
-    // [`PI_SKILL_LABEL`], so its presence means at least one skill was mirrored
-    // (created, overwritten, or already present).
-    let pi_mirrored = results.iter().any(|r| r.label == PI_SKILL_LABEL);
-    if pi_mirrored {
+    // Gate the hint on the pi block having mirrored the FULL managed set, not
+    // on the `pi_root.is_some() && claude` preconditions (see
+    // [`pi_hint_should_print`]): the block can be skipped or partial after
+    // those hold, and the hint copy claims "the same skills are mirrored".
+    if pi_hint_should_print(&results) {
         println!(
             "  The same skills are mirrored into ~/.pi/agent/skills for pi.dev (/skill:issue)."
         );
     }
     println!("  Or use `issuectl list` to browse issues from the command line.");
     Ok(())
+}
+
+/// Whether [`install_skill`] should print the pi.dev "skills mirrored" hint.
+///
+/// True only when the pi block mirrored the **full** managed set: every
+/// [`managed_pi_skills`] entry left a pi-labelled [`InstallResult`] (a mirror
+/// that was `Created`, `Overwritten`, or already present as `AlreadyExists`).
+/// This is the accurate signal for the hint's copy — "The same skills are
+/// mirrored" — which claims the whole set is present:
+///
+/// * a **skipped** block (lock unavailable → early return, or every write
+///   warned-and-skipped) leaves zero pi results → hint off;
+/// * a **partial** mirror (some per-skill writes refused, e.g. a symlink out of
+///   the corpus) leaves fewer results than the managed set → hint off, and the
+///   per-skill warnings already printed to stderr tell the user what was
+///   skipped;
+/// * a **complete** mirror leaves exactly one pi result per managed skill →
+///   hint on.
+///
+/// Keying off [`PI_SKILL_LABEL`] (never used by the repo-local results) keeps
+/// this the single chokepoint that couples the label to the hint decision.
+fn pi_hint_should_print(results: &[InstallResult]) -> bool {
+    let expected = managed_pi_skills().len();
+    let mirrored = results.iter().filter(|r| r.label == PI_SKILL_LABEL).count();
+    expected > 0 && mirrored == expected
 }
 
 /// Print the template that would be installed for the given agent to stdout.
@@ -1925,37 +1945,80 @@ mod tests {
         }
     }
 
-    /// The "skills mirrored" hint keys off a pi-labelled result being present
-    /// in the summary — not merely off the `pi_root.is_some() && claude`
-    /// preconditions. A normal Claude+pi install therefore yields at least one
-    /// [`PI_SKILL_LABEL`] result (the hint's ON signal).
+    // ── pi.dev "skills mirrored" hint gate ──────────────────────────────────
+
+    /// Directly exercises the hint predicate — the branch `install_skill`
+    /// actually flips on. Guards against a regression that re-gates the print on
+    /// the `pi_root.is_some() && claude` preconditions (which the summary-level
+    /// tests below would NOT catch, since the summary is unchanged).
     #[test]
-    fn install_summary_carries_pi_label_when_mirror_runs() {
+    fn pi_hint_predicate_requires_the_full_managed_set() {
+        let pi_result = |name: &str| InstallResult {
+            path: PathBuf::from(name),
+            label: PI_SKILL_LABEL.to_string(),
+            outcome: InstallOutcome::Created,
+        };
+        let expected = managed_pi_skills().len();
+        assert!(expected > 0, "the managed pi set must be non-empty");
+
+        // Complete: one pi result per managed skill → hint on.
+        let full: Vec<InstallResult> = managed_pi_skills()
+            .iter()
+            .map(|(name, _)| pi_result(name))
+            .collect();
+        assert!(pi_hint_should_print(&full));
+
+        // Skipped: no pi results at all → hint off.
+        assert!(!pi_hint_should_print(&[]));
+
+        // Partial: one short of the full set → hint off (the copy would
+        // over-claim "the same skills are mirrored").
+        let partial = &full[..expected - 1];
+        assert!(!pi_hint_should_print(partial));
+
+        // A repo-local result never carries the pi label, so it never counts.
+        let repo_local = InstallResult {
+            path: PathBuf::from(".claude/skills/issue/SKILL.md"),
+            label: Agent::Claude.label().to_string(),
+            outcome: InstallOutcome::Created,
+        };
+        assert!(!pi_hint_should_print(std::slice::from_ref(&repo_local)));
+    }
+
+    /// A normal Claude+pi install mirrors every managed skill, so the summary
+    /// carries one pi-labelled result per skill and the hint predicate is true.
+    #[test]
+    fn install_summary_signals_hint_when_full_mirror_runs() {
         let repo = tempfile::tempdir().unwrap();
         let pi = tempfile::tempdir().unwrap();
         let results =
             install_skill_summary(repo.path(), &[Agent::Claude], false, Some(pi.path())).unwrap();
-        assert!(
-            results.iter().any(|r| r.label == PI_SKILL_LABEL),
-            "a real pi mirror must leave a pi-labelled result (the hint's signal)"
+        assert_eq!(
+            results.iter().filter(|r| r.label == PI_SKILL_LABEL).count(),
+            managed_pi_skills().len(),
+            "a full pi mirror must leave one pi-labelled result per managed skill"
         );
+        assert!(pi_hint_should_print(&results), "hint must fire");
     }
 
     /// Regression for `pi-mirror-hint-accuracy`: when the whole pi block is
     /// skipped after the preconditions hold — here every mirror write is
     /// refused because each entry dir is a symlink out of the corpus — the
-    /// summary carries NO pi-labelled result, so the caller must NOT print the
-    /// "skills mirrored" hint. The repo-local Claude install still succeeds.
+    /// summary carries NO pi-labelled result, so the hint predicate is false.
+    /// The repo-local Claude install still succeeds and nothing escapes the
+    /// corpus into the symlinked external dirs.
     #[cfg(unix)]
     #[test]
-    fn install_summary_omits_pi_label_when_block_skipped() {
+    fn install_summary_omits_hint_when_block_skipped() {
         let repo = tempfile::tempdir().unwrap();
         let pi = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
+        let managed = managed_pi_skills();
+        assert!(!managed.is_empty(), "test requires a managed pi skill");
         // Block every managed pi mirror: point each entry dir at an external
         // target so `ensure_pi_mirror_target_within_corpus` refuses the write
         // and the caller warns-and-skips it, leaving no pi result.
-        for (name, _) in managed_pi_skills() {
+        for (name, _) in &managed {
             let external = outside.path().join(name);
             std::fs::create_dir_all(&external).unwrap();
             std::os::unix::fs::symlink(&external, pi.path().join(name)).unwrap();
@@ -1964,12 +2027,59 @@ mod tests {
         let results =
             install_skill_summary(repo.path(), &[Agent::Claude], true, Some(pi.path())).unwrap();
         assert!(
-            !results.iter().any(|r| r.label == PI_SKILL_LABEL),
-            "a fully skipped pi block must leave no pi-labelled result (hint stays off)"
+            !pi_hint_should_print(&results),
+            "a fully skipped pi block must leave the hint off"
         );
         assert!(
             repo.path().join(".claude/skills/issue/SKILL.md").exists(),
             "the repo-local Claude install must still succeed"
+        );
+        // The refusal must be a no-op on the external targets — nothing written
+        // through the symlink into the corpus-escape dirs.
+        for (name, _) in &managed {
+            assert!(
+                std::fs::read_dir(outside.path().join(name))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+                "{name}: no file may be written through the corpus-escape symlink"
+            );
+        }
+    }
+
+    /// Partial mirror: one managed skill is blocked (symlink out of the corpus)
+    /// while the rest mirror cleanly. The summary then carries fewer pi results
+    /// than the managed set, so the hint stays off — otherwise the "the same
+    /// skills are mirrored" copy would over-claim while a stderr warning names
+    /// the skipped one.
+    #[cfg(unix)]
+    #[test]
+    fn install_summary_omits_hint_on_partial_mirror() {
+        let repo = tempfile::tempdir().unwrap();
+        let pi = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let managed = managed_pi_skills();
+        assert!(
+            managed.len() >= 2,
+            "test needs a skill to block and one to keep"
+        );
+        // Block exactly one managed skill; leave the others writable.
+        let (blocked, _) = managed[0];
+        let external = outside.path().join(blocked);
+        std::fs::create_dir_all(&external).unwrap();
+        std::os::unix::fs::symlink(&external, pi.path().join(blocked)).unwrap();
+
+        let results =
+            install_skill_summary(repo.path(), &[Agent::Claude], true, Some(pi.path())).unwrap();
+        let mirrored = results.iter().filter(|r| r.label == PI_SKILL_LABEL).count();
+        assert_eq!(
+            mirrored,
+            managed.len() - 1,
+            "exactly the unblocked skills should mirror"
+        );
+        assert!(
+            !pi_hint_should_print(&results),
+            "a partial mirror must leave the hint off"
         );
     }
 
