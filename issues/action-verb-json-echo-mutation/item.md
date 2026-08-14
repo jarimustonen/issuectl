@@ -1,10 +1,14 @@
 ---
 created: 2026-08-12
-updated: 2026-08-12
+updated: 2026-08-14
 type: improvement
-status: open
+status: done
 priority: normal
 labels: [observability]
+closed: 2026-08-14
+commits:
+- hash: 1f7d668
+  summary: 'feat(json): echo mutated field in update/label/close --json results'
 ---
 
 # Action-verb --json results don't echo the mutated field
@@ -29,3 +33,9 @@ Action-verb `--json` results should echo the resulting value of the mutated fiel
 
 ## Note
 Confirmed on 0.10.0 (commit ~42291be).
+
+## Resolution
+
+### 2026-08-14T09:31:28Z · @issuectl
+
+Landed on main (1f7d668/449acd4): uniform post-mutation field echo across update/label/close --json. Worker merged code without closing; verified present on main.
