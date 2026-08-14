@@ -114,6 +114,37 @@ fn label_add_and_remove_json_echo_resulting_labels() {
         serde_json::json!(["backend"]),
         "label remove --json must echo the labels that remain"
     );
+
+    // Removing the last label echoes `null` — the same shape `show` emits
+    // for an issue that carries no labels, so both parse identically.
+    let emptied = json(&run(
+        r,
+        &["--json", "label", "label-echo", "remove", "backend"],
+    ));
+    assert_eq!(
+        emptied["labels"],
+        serde_json::Value::Null,
+        "removing the final label echoes null, mirroring `show`"
+    );
+}
+
+#[test]
+fn set_priority_json_echoes_new_priority() {
+    // `set` shares the `finish_mutation` echo path with `label`; assert the
+    // contract holds for it too, since a refactor could split it off.
+    let tmp = fresh_repo();
+    let r = tmp.path();
+    new_issue(r, "set-echo");
+
+    let v = json(&run(r, &["--json", "set", "set-echo", "priority", "high"]));
+    assert_eq!(
+        v["priority"],
+        serde_json::json!("high"),
+        "set --json must echo the resulting field value"
+    );
+    // The full core-field set is present on every mutating verb.
+    assert!(v.get("status").is_some(), "status key present");
+    assert!(v.get("labels").is_some(), "labels key present");
 }
 
 #[test]
@@ -121,6 +152,10 @@ fn close_json_echoes_resulting_status() {
     let tmp = fresh_repo();
     let r = tmp.path();
     new_issue(r, "close-echo");
+
+    // Give it a non-default priority so we can prove `close` echoes the
+    // full core-field set, not just `status`.
+    run(r, &["--json", "update", "close-echo", "--priority", "high"]);
 
     // A `task` completes as `done` (per the default transition rules);
     // `fixed` is bug-only. Let `close` pick the default closing status and
@@ -135,5 +170,16 @@ fn close_json_echoes_resulting_status() {
         v["status"],
         serde_json::json!("done"),
         "close --json must echo the resulting closing status"
+    );
+    // `close` echoes the same core-field set as the other mutating verbs,
+    // so a generic result parser needs no per-verb schema.
+    assert_eq!(
+        v["priority"],
+        serde_json::json!("high"),
+        "close --json echoes the (unchanged) priority too"
+    );
+    assert!(
+        v.get("labels").is_some(),
+        "close --json echoes the labels key too"
     );
 }

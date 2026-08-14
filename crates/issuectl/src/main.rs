@@ -4452,23 +4452,35 @@ pub(crate) struct UpdateOutcome {
     pub labels: Option<Vec<String>>,
 }
 
+/// Merge the post-mutation core fields (`status`/`priority`/`labels`) into
+/// an action verb's `--json` result object. Every mutating verb echoes the
+/// *same* field set from one shared place so the shapes cannot drift apart
+/// (issue action-verb-json-echo-mutation). `labels` mirrors `show`: `null`
+/// when the issue carries none, so a consumer parses the two identically.
+fn echo_mutated_fields(
+    report: &mut serde_json::Value,
+    status: &str,
+    priority: &str,
+    labels: &Option<Vec<String>>,
+) {
+    report["status"] = serde_json::json!(status);
+    report["priority"] = serde_json::json!(priority);
+    report["labels"] = serde_json::json!(labels);
+}
+
 fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
     let root = find_root();
     let slug = args.slug.clone();
     let out = do_update(&root, args)?;
     if json {
-        // Echo the post-mutation core fields so a caller can confirm the
-        // write from this result alone (issue action-verb-json-echo-mutation).
-        let report = serde_json::json!({
+        let mut report = serde_json::json!({
             "slug": slug,
             "dir": out.final_dir.to_string_lossy(),
             "moved_to_closed": out.moved_to_closed,
             "moved_to_open": out.moved_to_open,
             "version": out.version,
-            "status": out.status,
-            "priority": out.priority,
-            "labels": out.labels,
         });
+        echo_mutated_fields(&mut report, &out.status, &out.priority, &out.labels);
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
@@ -4597,15 +4609,17 @@ fn cmd_close(
         expected_version,
     )?;
     if json {
-        // Echo the resulting `status` so a caller can confirm which closing
-        // status landed (issue action-verb-json-echo-mutation).
         let mut report = serde_json::json!({
             "slug": slug,
             "dir": out.final_dir.to_string_lossy(),
             "moved_to_closed": out.moved_to_closed,
             "version": out.version,
-            "status": out.status,
         });
+        // Echo the same core-field set every mutating verb does, so a
+        // caller confirms the resulting closing `status` (and the
+        // unchanged priority/labels) from this one result
+        // (issue action-verb-json-echo-mutation).
+        echo_mutated_fields(&mut report, &out.status, &out.priority, &out.labels);
         if let Some(by) = closed_by {
             report["closed_by"] = serde_json::Value::String(by);
         }
@@ -5624,17 +5638,20 @@ fn finish_mutation(
         // Echo the post-mutation core fields so callers of the shared
         // mutation verbs (`label`, `set`, `check`, …) can confirm the write
         // from this result alone (issue action-verb-json-echo-mutation).
-        let report = serde_json::json!({
+        let mut report = serde_json::json!({
             "slug": slug,
             "dir": outcome.issue_dir.to_string_lossy(),
             "version": outcome.version,
             "moved_to_closed": outcome.moved_to_closed,
             "moved_to_open": outcome.moved_to_open,
-            "status": outcome.issue.status,
-            "priority": outcome.issue.priority,
-            "labels": outcome.issue.labels,
             "warnings": outcome.warnings,
         });
+        echo_mutated_fields(
+            &mut report,
+            &outcome.issue.status,
+            &outcome.issue.priority,
+            &outcome.issue.labels,
+        );
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!("{human_verb} {slug}");

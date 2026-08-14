@@ -168,6 +168,11 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
     `status`, `priority`, `labels` (from the updated issue the mutate
     call returns under its flock, never a second read) — so a caller can
     confirm the write from that one result without a follow-up `show`.
+    All mutating verbs (`update`/`close`/`label`/`set`/`check`) emit the
+    same three keys; `labels` mirrors `show` (an array, or `null` when the
+    issue carries none) so both shapes parse identically. A `--dry-run`
+    result is a preview (`dry_run: true` + `diff`), not a confirmation,
+    and deliberately does not carry these committed-state fields.
   - **Error (exit ≠ 0, nothing produced)** → one object on **stderr**:
     `{"error":{"code":"<kebab>","message":"…"}}`, with optional extra
     keys inside `error` (e.g. `matches`), and **empty stdout**. The
