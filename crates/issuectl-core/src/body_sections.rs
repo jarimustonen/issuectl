@@ -75,6 +75,23 @@ pub fn validate_author(author: &str) -> Result<()> {
     Ok(())
 }
 
+/// Normalize a `--as` author value: strip a SINGLE leading `@` — the
+/// display sigil we add ourselves in headings (`### <ts> · @<author>`)
+/// — then validate the remainder with [`validate_author`]. Attributions
+/// are *shown* as `@jari`, so an agent naturally types the `@`; this
+/// closes the asymmetry between how the author renders and how it must
+/// be entered. `@jari` → `jari`, bare `jari` is unchanged, and an
+/// interior `@` (e.g. an email) is still rejected because only the one
+/// leading sigil is stripped before validation. Returns the canonical
+/// author token to store and display. This is the single seam every
+/// `--as` call site funnels through, so the strip is not scattered
+/// across the individual CLI handlers.
+pub fn normalize_author(author: &str) -> Result<String> {
+    let stripped = author.strip_prefix('@').unwrap_or(author);
+    validate_author(stripped)?;
+    Ok(stripped.to_string())
+}
+
 /// Reject messages that cannot be safely appended. Unfenced `## `/
 /// `### ` heading lines are *not* rejected here — they are legitimate
 /// note content and are demoted to H4+ by [`demote_managed_headings`]
@@ -1196,6 +1213,29 @@ mod tests {
         assert!(validate_author("al ice").is_err());
         assert!(validate_author("a·b").is_err());
         assert!(validate_author("alice\rwith-cr").is_err());
+    }
+
+    #[test]
+    fn normalize_author_strips_single_leading_at() {
+        // A single leading sigil is stripped so `--as "@jari"` and
+        // `--as "jari"` both canonicalize to `jari`.
+        assert_eq!(normalize_author("@jari").unwrap(), "jari");
+        assert_eq!(normalize_author("jari").unwrap(), "jari");
+        assert_eq!(
+            normalize_author("agent-claude_4-7").unwrap(),
+            "agent-claude_4-7"
+        );
+        // Only ONE leading `@` is stripped: a doubled sigil leaves an
+        // `@` at the front of the remainder, which validation rejects.
+        assert!(normalize_author("@@jari").is_err());
+        // An interior `@` (e.g. an email) is still rejected — the strip
+        // touches only the leading position.
+        assert!(normalize_author("jari@example.com").is_err());
+        assert!(normalize_author("@jari@example.com").is_err());
+        // Bare `@` strips to empty, which is rejected.
+        assert!(normalize_author("@").is_err());
+        // The rest of the grammar is unchanged after stripping.
+        assert!(normalize_author("@al ice").is_err());
     }
 
     #[test]

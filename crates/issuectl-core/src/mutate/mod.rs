@@ -1508,10 +1508,20 @@ pub fn close_issue(
     // hash-stable token in the same vocabulary. Recorded as the
     // `closed_by:` frontmatter field alongside the auto-stamped
     // `closed:` date — see the status branch in `update_issue_under_lock`.
-    if let Some(author) = &closed_by {
-        crate::body_sections::validate_author(author)
-            .map_err(|e| MutateError::Validation(e.to_string()))?;
-    }
+    // Normalize the closer attribution through the shared author seam:
+    // a single leading `@` is stripped (so `close --as "@jari"` stores
+    // `jari`, matching how the sigil is *shown* in headings) and the
+    // remainder must satisfy the same grammar `note` uses. The
+    // normalized token feeds both the `closed_by:` slot and the
+    // `--comment` resolution note below, so `close --note --as` is
+    // attributed consistently.
+    let closed_by = match closed_by {
+        Some(author) => Some(
+            crate::body_sections::normalize_author(&author)
+                .map_err(|e| MutateError::Validation(e.to_string()))?,
+        ),
+        None => None,
+    };
 
     let _lock = WriteLock::acquire(root).map_err(MutateError::Io)?;
     // `update_issue_under_lock` runs `ensure_default_written` and the
@@ -1905,8 +1915,12 @@ pub fn note_issue(
             "invalid slug shape: {slug:?}"
         )));
     }
-    crate::body_sections::validate_author(author)
+    // Strip a single leading `@` and validate through the shared author
+    // seam, then attribute the note to the normalized token so
+    // `note --as "@jari"` records `jari` (matching the `@jari` we render).
+    let author = crate::body_sections::normalize_author(author)
         .map_err(|e| MutateError::Validation(e.to_string()))?;
+    let author = author.as_str();
     crate::body_sections::validate_message(message)
         .map_err(|e| MutateError::Validation(e.to_string()))?;
 

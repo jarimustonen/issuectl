@@ -4450,6 +4450,12 @@ pub(crate) struct UpdateOutcome {
     pub status: String,
     pub priority: String,
     pub labels: Option<Vec<String>>,
+    // The `closed_by:` the write actually recorded, read off the updated
+    // `Issue`. `close` normalizes the `--as` author in the core (a single
+    // leading `@` stripped), so echoing this — not the raw CLI input —
+    // keeps the human/JSON confirmation in step with the stored token
+    // (`--as "@jari"` and `--as jari` both echo `jari`).
+    pub closed_by: Option<String>,
 }
 
 /// Merge the post-mutation core fields (`status`/`priority`/`labels`) into
@@ -4584,6 +4590,7 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
         status: outcome.issue.status,
         priority: outcome.issue.priority,
         labels: outcome.issue.labels,
+        closed_by: outcome.issue.closed_by,
     })
 }
 
@@ -4598,7 +4605,6 @@ fn cmd_close(
     expected_version: Option<String>,
 ) -> Result<()> {
     let root = find_root();
-    let closed_by = author.clone();
     let out = do_close(
         &root,
         slug,
@@ -4608,6 +4614,10 @@ fn cmd_close(
         commits,
         expected_version,
     )?;
+    // Echo the closer the write actually recorded (normalized in the
+    // core — a single leading `@` stripped), not the raw `--as` input,
+    // so the human/JSON confirmation matches the stored `closed_by:`.
+    let closed_by = out.closed_by.clone();
     if json {
         let mut report = serde_json::json!({
             "slug": slug,
@@ -4678,6 +4688,7 @@ pub(crate) fn do_close(
         status: outcome.issue.status,
         priority: outcome.issue.priority,
         labels: outcome.issue.labels,
+        closed_by: outcome.issue.closed_by,
     })
 }
 
