@@ -500,15 +500,13 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // `load` re-parses on every call — it does NOT memoize. This is the
-    // invariant that made collapsing the `ConfigSource`/`UncachedConfig`
-    // seam behavior-preserving. Now that `load` returns by value there is
-    // no cached handle to compare, so the guard changes the file between
-    // two calls and asserts the second load reflects the edit — a
-    // memoizing loader would return the stale first parse and fail here.
-    // See the twin test in `schema.rs`.
+    // `load` reflects the latest on-disk file — it does not return a
+    // cached parse. The guard edits the file between two calls and
+    // asserts the second load sees the change: a loader that memoized by
+    // path would return the stale first parse and fail here. See the twin
+    // test in `schema.rs`.
     #[test]
-    fn load_re_parses_on_every_call() {
+    fn load_reflects_latest_file() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         fs::create_dir_all(root.join(".issuectl")).unwrap();
