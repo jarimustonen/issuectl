@@ -10,7 +10,7 @@
 //! `#[cfg(test)]` tests in `src/main.rs` cover the pure parse-shape and
 //! `subcommand_error_hint` logic. See `AGENTS.md` (`Tests`).
 
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
 
@@ -343,5 +343,158 @@ fn near_miss_alias_hint_plain_and_json() {
             .contains("alias for `new`"),
         "{}",
         dump(&json)
+    );
+}
+
+/// Read an issue's on-disk body (`item.md`).
+fn read_item_body(root: &std::path::Path, slug: &str) -> String {
+    std::fs::read_to_string(root.join("issues").join(slug).join("item.md"))
+        .unwrap_or_else(|e| panic!("read item.md for {slug}: {e}"))
+}
+
+/// `comment` is a visible alias for `note`: `comment <slug> --as <u>
+/// "<text>"` appends the text under `## Comments`, exactly as `note`
+/// would.
+#[test]
+fn comment_alias_appends_note() {
+    let tmp = fresh_repo();
+    seed_issue(tmp.path(), "note-me");
+    let out = run(
+        tmp.path(),
+        &[
+            "comment",
+            "note-me",
+            "--as",
+            "alice",
+            "Via the comment alias.",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+
+    let body = read_item_body(tmp.path(), "note-me");
+    assert!(
+        body.contains("## Comments"),
+        "expected a Comments section, got:\n{body}"
+    );
+    assert!(
+        body.contains("Via the comment alias."),
+        "expected the note text, got:\n{body}"
+    );
+}
+
+/// `note <slug> --as <u> --message "<text>"` sets the note body from the
+/// flag, matching `close --comment` / `new --body` vocabulary. `--body`
+/// is a visible alias for `--message`.
+#[test]
+fn note_message_flag_sets_body() {
+    let tmp = fresh_repo();
+    seed_issue(tmp.path(), "flag-me");
+
+    let msg = run(
+        tmp.path(),
+        &[
+            "note",
+            "flag-me",
+            "--as",
+            "alice",
+            "--message",
+            "Note via --message.",
+        ],
+    );
+    assert_eq!(msg.status.code(), Some(0), "{}", dump(&msg));
+    assert!(
+        read_item_body(tmp.path(), "flag-me").contains("Note via --message."),
+        "expected --message text on disk"
+    );
+
+    let body = run(
+        tmp.path(),
+        &[
+            "comment",
+            "flag-me",
+            "--as",
+            "alice",
+            "--body",
+            "Note via --body.",
+        ],
+    );
+    assert_eq!(body.status.code(), Some(0), "{}", dump(&body));
+    assert!(
+        read_item_body(tmp.path(), "flag-me").contains("Note via --body."),
+        "expected --body alias text on disk"
+    );
+}
+
+/// `comment <slug> --as <u> --body-file -` reads the note text from stdin,
+/// mirroring `new --body-file -`.
+#[test]
+fn comment_body_file_dash_reads_stdin() {
+    use std::io::Write;
+
+    let tmp = fresh_repo();
+    seed_issue(tmp.path(), "stdin-me");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_issuectl"))
+        .env_remove("RUST_BACKTRACE")
+        .env_remove("RUST_LIB_BACKTRACE")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .current_dir(tmp.path())
+        .arg("--root")
+        .arg(tmp.path())
+        .args(["comment", "stdin-me", "--as", "alice", "--body-file", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn issuectl");
+    child
+        .stdin
+        .take()
+        .expect("stdin handle")
+        .write_all(b"Piped note via stdin.\n")
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("wait");
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+
+    assert!(
+        read_item_body(tmp.path(), "stdin-me").contains("Piped note via stdin."),
+        "expected the stdin note text on disk"
+    );
+}
+
+/// Passing both the positional body and `--message` is refused by the
+/// `note_body` arg group: non-zero exit, empty stdout, and the shared
+/// `--json` usage-error envelope on stderr.
+#[test]
+fn note_positional_plus_message_flag_json_envelope() {
+    let tmp = fresh_repo();
+    seed_issue(tmp.path(), "conflict-me");
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "note",
+            "conflict-me",
+            "--as",
+            "alice",
+            "positional body",
+            "--message",
+            "flag body",
+        ],
+    );
+    assert_ne!(out.status.code(), Some(0), "{}", dump(&out));
+    assert!(
+        out.stdout.is_empty(),
+        "stdout must be empty: {}",
+        dump(&out)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "usage-error", "{}", dump(&out));
+
+    // The conflicting invocation must not have written a note.
+    assert!(
+        !read_item_body(tmp.path(), "conflict-me").contains("positional body"),
+        "a rejected note must not land on disk"
     );
 }

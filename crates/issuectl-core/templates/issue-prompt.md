@@ -264,6 +264,14 @@ Append a timestamped block to an issue's `## Comments` section
 as `update`; body-only mutation.
 
 - `issuectl --json note <slug> --as <user> "<message>"`
+- `comment` is a visible alias for `note` — `issuectl --json comment
+  <slug> --as <user> "<message>"` is identical.
+- The message text comes from **exactly one** source: the positional
+  argument, `--message`/`--body "<text>"` (mirrors `close --comment` /
+  `new --body`), `--body-file PATH` (`-` reads stdin, like `new
+  --body-file`), `--stdin`, or `--from-file PATH`. Passing two at once is
+  a usage error (`{"error":{"code":"usage-error",…}}`, non-zero exit);
+  passing none is an error too.
 - `--decision` appends to `## Decisions` instead.
 - `--agent-run` appends to `## Agent Runs` instead.
 - `--dry-run` prints a unified diff and exits 0 without writing.
