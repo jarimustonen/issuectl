@@ -174,8 +174,9 @@ The CLI does both atomically — never `git mv` by hand.
 - `issuectl --json close <slug> --status wontfix` — explicit closing status
 - `issuectl --json close <slug> --as <user>` — record the closer as the `closed_by:` frontmatter field (optional; same author grammar as `note --as`)
 - `issuectl --json close <slug> --commit HASH:summary` — also record a commit (repeatable)
+- `issuectl --json close <slug> --stamp` — after closing, amend the current HEAD commit to append a `Fixes-Issue: @<slug>` trailer, so the trailer-driven `issuectl changelog` picks up the landing commit with zero manual trailer discipline. Run it **after** committing the fix (it stamps whatever HEAD is) and **before** pushing/merging (amending rewrites HEAD's sha). Fail-safe: it never blocks the close — the `stamp` object in the JSON reports `stamped: true` (with the new `sha`), `already_present: true`, or `skipped: "<reason>"` (HEAD is a merge commit, a rebase/cherry-pick/merge is in progress, the index has staged changes, or there is no commit to stamp).
 
-Output shape (`closed_by` present only when `--as` is passed):
+Output shape (`closed_by` present only when `--as` is passed; `stamp` present only when `--stamp` is passed):
 
 ```json
 { "slug": "extremely-quiet-otter",
@@ -237,6 +238,11 @@ message, then run `issuectl sync-commits` to walk
 `commits[]`. Idempotent — safe to re-run. `--dry-run` previews
 the plan; `--no-branch-fallback` disables the implicit
 "branch named after a slug" attribution.
+
+To seed the changelog trailer without any manual discipline, close
+the issue with `issuectl close <slug> --stamp` right after committing
+the fix — it stamps the `Fixes-Issue: @<slug>` trailer onto HEAD for
+you (see the Close action above).
 
 Output shape:
 

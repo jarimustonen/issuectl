@@ -55,7 +55,7 @@ same way:
 
 ## Install or upgrade `issuectl`
 
-This skill was installed for `issuectl 0.8.1`. On the
+This skill was installed for `issuectl 0.10.0`. On the
 first invocation in a session, run `issuectl --version` and compare:
 
 - **Missing**: install one of:
@@ -63,12 +63,12 @@ first invocation in a session, run `issuectl --version` and compare:
   - **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
   - **Shell installer** (no toolchain):
     `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
-- **Older than `0.8.1`**: tell the user the skill expects
-  `0.8.1` and suggest upgrading via the same channel
+- **Older than `0.10.0`**: tell the user the skill expects
+  `0.10.0` and suggest upgrading via the same channel
   they originally used (`brew upgrade jarimustonen/issuectl/issuectl`,
   `cargo install issuectl --force`, or re-run the shell installer).
   Stop and wait — schema/CLI surface may have changed.
-- **Newer than `0.8.1`**: the installed binary is ahead
+- **Newer than `0.10.0`**: the installed binary is ahead
   of what this skill was written for. Tell the user to refresh the
   skill so the instructions match the CLI surface they actually have:
   `issuectl skill install --force` (Claude Code; add `--agent codex`
@@ -174,8 +174,9 @@ The CLI does both atomically — never `git mv` by hand.
 - `issuectl --json close <slug> --status wontfix` — explicit closing status
 - `issuectl --json close <slug> --as <user>` — record the closer as the `closed_by:` frontmatter field (optional; same author grammar as `note --as`)
 - `issuectl --json close <slug> --commit HASH:summary` — also record a commit (repeatable)
+- `issuectl --json close <slug> --stamp` — after closing, amend the current HEAD commit to append a `Fixes-Issue: @<slug>` trailer, so the trailer-driven `issuectl changelog` picks up the landing commit with zero manual trailer discipline. Run it **after** committing the fix (it stamps whatever HEAD is) and **before** pushing/merging (amending rewrites HEAD's sha). Fail-safe: it never blocks the close — the `stamp` object in the JSON reports `stamped: true` (with the new `sha`), `already_present: true`, or `skipped: "<reason>"` (HEAD is a merge commit, a rebase/cherry-pick/merge is in progress, the index has staged changes, or there is no commit to stamp).
 
-Output shape (`closed_by` present only when `--as` is passed):
+Output shape (`closed_by` present only when `--as` is passed; `stamp` present only when `--stamp` is passed):
 
 ```json
 { "slug": "extremely-quiet-otter",
@@ -237,6 +238,11 @@ message, then run `issuectl sync-commits` to walk
 `commits[]`. Idempotent — safe to re-run. `--dry-run` previews
 the plan; `--no-branch-fallback` disables the implicit
 "branch named after a slug" attribution.
+
+To seed the changelog trailer without any manual discipline, close
+the issue with `issuectl close <slug> --stamp` right after committing
+the fix — it stamps the `Fixes-Issue: @<slug>` trailer onto HEAD for
+you (see the Close action above).
 
 Output shape:
 

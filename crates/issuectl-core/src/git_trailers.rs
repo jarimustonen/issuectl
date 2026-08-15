@@ -224,6 +224,223 @@ pub fn current_branch(repo_root: &Path) -> Result<Option<String>> {
     }
 }
 
+/// Outcome of [`stamp_fixes_trailer`]. Stamping is a best-effort,
+/// fail-safe side effect: it never aborts the close it rides on, so
+/// the "couldn't stamp" cases are modelled as data (`Skipped`), not
+/// errors. Only a genuine I/O fault running `git` surfaces as `Err`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StampOutcome {
+    /// A `Fixes-Issue: @<slug>` trailer was appended and HEAD amended.
+    /// Carries the *new* HEAD sha (amending rewrites it).
+    Stamped { sha: String },
+    /// HEAD already carried a matching `Fixes-Issue:` trailer for this
+    /// slug — no amend performed, sha unchanged. Idempotent re-run.
+    AlreadyPresent { sha: String },
+    /// Stamping was skipped for a safety reason (not a git repo, no
+    /// commits, in-progress rebase/merge, HEAD is a merge commit, or
+    /// staged changes would be folded into the amend). Non-fatal.
+    Skipped { reason: String },
+}
+
+/// Amend the current HEAD commit's message to append
+/// `Fixes-Issue: @<slug>` — the exact trailer shape [`parse_trailers`]
+/// accepts and `report::changelog` compiles — so an issue closed with
+/// `issuectl close --stamp` seeds the trailer-driven changelog with
+/// zero human discipline.
+///
+/// The trailer is written with git's own `interpret-trailers`
+/// (`--if-exists doNothing`), so it lands as a real trailer in the
+/// message's last paragraph and re-running is idempotent (a second
+/// stamp adds nothing). The re-commit uses `git commit --amend
+/// --no-verify` — the tree is unchanged (message-only), so we bypass
+/// hooks to keep a message-only stamp deterministic and independent of
+/// the repo's unrelated pre-commit state.
+///
+/// **Fail-safe.** Every unsafe or ambiguous situation returns
+/// `Ok(StampOutcome::Skipped {..})` rather than erroring, so the close
+/// this rides on is never blocked or corrupted:
+/// - not inside a git repo, or HEAD has no commit yet;
+/// - an in-progress rebase / cherry-pick / merge (amending would
+///   collide with the replay);
+/// - HEAD is a merge commit (2+ parents) — the landing fix is a normal
+///   commit, and we won't rewrite a merge;
+/// - staged changes in the index (a plain `--amend` would silently fold
+///   them into the landing commit).
+///
+/// **Ordering.** Run this *after* the landing fix is committed — it
+/// stamps whatever HEAD currently is. And run it before the commit is
+/// pushed/merged: amending rewrites HEAD's sha.
+pub fn stamp_fixes_trailer(repo_root: &Path, slug: &str) -> Result<StampOutcome> {
+    if !slug::is_valid(slug) {
+        bail!("invalid slug shape: {slug:?}");
+    }
+
+    // Resolve HEAD. A failure here means "no commits yet" or "not a git
+    // repo" — nothing to stamp.
+    let head = git_stdout(repo_root, &["rev-parse", "--verify", "--quiet", "HEAD"])?;
+    let Some(head) = head else {
+        return Ok(StampOutcome::Skipped {
+            reason: "no commit at HEAD to stamp (empty repo or not a git repo)".into(),
+        });
+    };
+
+    // Bail out of any in-progress sequencer operation: amending mid
+    // rebase/cherry-pick/merge fights the replay and can orphan work.
+    let git_dir =
+        git_stdout(repo_root, &["rev-parse", "--git-dir"])?.unwrap_or_else(|| ".git".to_string());
+    let git_dir = repo_root.join(git_dir);
+    for marker in [
+        "rebase-merge",
+        "rebase-apply",
+        "CHERRY_PICK_HEAD",
+        "MERGE_HEAD",
+    ] {
+        if git_dir.join(marker).exists() {
+            return Ok(StampOutcome::Skipped {
+                reason: format!("in-progress git operation ({marker}); not amending"),
+            });
+        }
+    }
+
+    // Refuse to rewrite a merge commit: `rev-list --parents -n1` prints
+    // `<sha> <parent>...`, so >2 tokens means 2+ parents.
+    let parents =
+        git_stdout(repo_root, &["rev-list", "--parents", "-n", "1", "HEAD"])?.unwrap_or_default();
+    if parents.split_whitespace().count() > 2 {
+        return Ok(StampOutcome::Skipped {
+            reason: "HEAD is a merge commit; not amending".into(),
+        });
+    }
+
+    // Staged changes would be folded into the amend. `git diff --cached
+    // --quiet` exits non-zero when the index differs from HEAD.
+    let clean_index = Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(repo_root)
+        .status()
+        .with_context(|| "running `git diff --cached`")?
+        .success();
+    if !clean_index {
+        return Ok(StampOutcome::Skipped {
+            reason: "staged changes in the index would be folded into the amend; \
+                     commit or unstage them, then re-run"
+                .into(),
+        });
+    }
+
+    // Already stamped? Parse HEAD's message with the same rules the
+    // changelog uses and short-circuit — avoids a needless amend (which
+    // would still rewrite the sha via a fresh committer date).
+    let msg = git_stdout(repo_root, &["log", "-1", "--format=%B"])?.unwrap_or_default();
+    let (_, fixes) = parse_trailers(&msg);
+    if fixes.iter().any(|s| s == slug) {
+        return Ok(StampOutcome::AlreadyPresent { sha: head });
+    }
+
+    // Let git write the trailer so it lands in the canonical last
+    // paragraph regardless of the existing body shape.
+    let trailer = format!("Fixes-Issue: @{slug}");
+    let new_msg = git_stdin_stdout(
+        repo_root,
+        &[
+            "interpret-trailers",
+            "--if-exists",
+            "doNothing",
+            "--trailer",
+            &trailer,
+        ],
+        &msg,
+    )?;
+
+    // Amend the message only. The index is clean (guarded above), so no
+    // tree change rides along. `--no-verify`: the tree is unchanged, so
+    // the repo's pre-commit hooks have nothing new to validate, and we
+    // don't want unrelated hook state to fail a message-only stamp.
+    let status = Command::new("git")
+        .args(["commit", "--amend", "--no-verify", "--file", "-"])
+        .current_dir(repo_root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .expect("piped stdin")
+                .write_all(new_msg.as_bytes())?;
+            child.wait_with_output()
+        })
+        .with_context(|| "running `git commit --amend`")?;
+    if !status.status.success() {
+        // A failed amend (e.g. missing committer identity) is non-fatal
+        // to the close — surface it as a skip with git's own message.
+        return Ok(StampOutcome::Skipped {
+            reason: format!(
+                "`git commit --amend` failed: {}",
+                String::from_utf8_lossy(&status.stderr).trim()
+            ),
+        });
+    }
+
+    let new_head =
+        git_stdout(repo_root, &["rev-parse", "--verify", "--quiet", "HEAD"])?.unwrap_or(head);
+    Ok(StampOutcome::Stamped { sha: new_head })
+}
+
+/// Run `git <args>` and return trimmed stdout, or `None` when git exits
+/// non-zero (used for probes like `rev-parse --verify` where failure is
+/// an expected "not found" signal, not an error).
+fn git_stdout(repo_root: &Path, args: &[&str]) -> Result<Option<String>> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| format!("running `git {}`", args.join(" ")))?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(s))
+    }
+}
+
+/// Run `git <args>` feeding `input` on stdin, returning stdout. Errors
+/// if git exits non-zero (unlike [`git_stdout`], the callers here treat
+/// a failure as fatal to the operation).
+fn git_stdin_stdout(repo_root: &Path, args: &[&str], input: &str) -> Result<String> {
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawning `git {}`", args.join(" ")))?;
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input.as_bytes())
+        .with_context(|| "writing to git stdin")?;
+    let out = child
+        .wait_with_output()
+        .with_context(|| format!("running `git {}`", args.join(" ")))?;
+    if !out.status.success() {
+        bail!(
+            "`git {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Map a branch name to a slug if its name *is* a known slug or has
 /// the shape `<prefix>/<slug>` or `<prefix>-<slug>` whose tail is a
 /// known slug. `known_slugs` is the set to match against — caller
@@ -388,6 +605,168 @@ mod tests {
         let body = "x\n\nRefs-Issue: @foo/bar\n";
         let (refs, _) = parse_trailers(body);
         assert!(refs.is_empty(), "got: {refs:?}");
+    }
+
+    // --- stamp_fixes_trailer ---------------------------------------
+
+    fn git(dir: &Path, args: &[&str]) {
+        let st = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?} failed");
+    }
+
+    fn fresh_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        git(tmp.path(), &["init", "-q", "-b", "main"]);
+        for (k, v) in [("user.email", "t@example.com"), ("user.name", "t")] {
+            git(tmp.path(), &["config", "--local", k, v]);
+        }
+        tmp
+    }
+
+    // Non-empty commit: `git commit --amend` refuses to amend into an
+    // empty tree, so each commit must carry a real change (as a genuine
+    // landing commit would). Append a unique line to a tracked file.
+    fn commit(dir: &Path, msg: &str) {
+        let data = dir.join("work.txt");
+        let prev = std::fs::read_to_string(&data).unwrap_or_default();
+        std::fs::write(&data, format!("{prev}{msg}\n")).unwrap();
+        git(dir, &["add", "work.txt"]);
+        let f = dir.join(".msg");
+        std::fs::write(&f, msg).unwrap();
+        git(dir, &["commit", "-q", "-F", ".msg"]);
+        std::fs::remove_file(&f).ok();
+    }
+
+    fn head_body(dir: &Path) -> String {
+        let out = Command::new("git")
+            .args(["log", "-1", "--format=%B"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn stamp_appends_trailer_in_exact_parse_format() {
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        commit(root, "feat: do the thing\n\nlonger body\n");
+
+        let outcome = stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
+        assert!(
+            matches!(outcome, StampOutcome::Stamped { .. }),
+            "{outcome:?}"
+        );
+
+        // (a) The stamped trailer parses back to exactly this slug via
+        // the same path the changelog compiler uses.
+        let commits = parse_log(root, "").unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].fixes_issue, vec!["foo-bar-baz".to_string()]);
+        assert!(commits[0].refs_issue.is_empty());
+        // Byte-level: the trailer line is present verbatim.
+        assert!(
+            head_body(root).contains("Fixes-Issue: @foo-bar-baz"),
+            "body was: {:?}",
+            head_body(root)
+        );
+    }
+
+    #[test]
+    fn stamp_is_idempotent() {
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        commit(root, "feat: do the thing\n");
+
+        let first = stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
+        let StampOutcome::Stamped { sha } = first else {
+            panic!("expected Stamped, got {first:?}");
+        };
+        // Second stamp: trailer already present → no amend, sha stable.
+        let second = stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
+        assert_eq!(second, StampOutcome::AlreadyPresent { sha });
+        // Exactly one trailer line, not two.
+        let body = head_body(root);
+        assert_eq!(body.matches("Fixes-Issue: @foo-bar-baz").count(), 1);
+    }
+
+    #[test]
+    fn stamp_preserves_existing_trailer_block() {
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        commit(
+            root,
+            "feat: do the thing\n\nbody\n\nRefs-Issue: @other-slug-here\n",
+        );
+
+        stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
+        let commits = parse_log(root, "").unwrap();
+        // The pre-existing Refs-Issue survives and the new Fixes-Issue
+        // joins the same trailer block.
+        assert_eq!(commits[0].refs_issue, vec!["other-slug-here".to_string()]);
+        assert_eq!(commits[0].fixes_issue, vec!["foo-bar-baz".to_string()]);
+    }
+
+    #[test]
+    fn stamp_skips_when_index_has_staged_changes() {
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        commit(root, "feat: do the thing\n");
+        std::fs::write(root.join("staged.txt"), "content").unwrap();
+        git(root, &["add", "staged.txt"]);
+
+        let outcome = stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
+        assert!(
+            matches!(outcome, StampOutcome::Skipped { .. }),
+            "expected Skipped, got {outcome:?}"
+        );
+        assert!(!head_body(root).contains("Fixes-Issue"));
+    }
+
+    #[test]
+    fn stamp_skips_merge_commit() {
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        commit(root, "base");
+        git(root, &["checkout", "-q", "-b", "side"]);
+        // Distinct file per branch so the merge is conflict-free and
+        // produces a real two-parent merge commit.
+        std::fs::write(root.join("side.txt"), "s").unwrap();
+        git(root, &["add", "side.txt"]);
+        git(root, &["commit", "-q", "-m", "side work"]);
+        git(root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("main.txt"), "m").unwrap();
+        git(root, &["add", "main.txt"]);
+        git(root, &["commit", "-q", "-m", "main work"]);
+        // Force a real merge commit (two parents).
+        git(root, &["merge", "-q", "--no-ff", "--no-edit", "side"]);
+
+        let outcome = stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
+        assert!(
+            matches!(outcome, StampOutcome::Skipped { .. }),
+            "expected Skipped for merge commit, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn stamp_skips_empty_repo() {
+        let tmp = fresh_repo();
+        let outcome = stamp_fixes_trailer(tmp.path(), "foo-bar-baz").unwrap();
+        assert!(
+            matches!(outcome, StampOutcome::Skipped { .. }),
+            "expected Skipped for empty repo, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn stamp_rejects_invalid_slug() {
+        let tmp = fresh_repo();
+        commit(tmp.path(), "feat: thing\n");
+        assert!(stamp_fixes_trailer(tmp.path(), "../etc/passwd").is_err());
     }
 
     #[test]

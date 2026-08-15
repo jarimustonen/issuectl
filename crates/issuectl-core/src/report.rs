@@ -619,4 +619,50 @@ mod tests {
         assert!(md.contains("**a-fox-jr**"));
         assert!(md.contains("(fixes)"));
     }
+
+    #[test]
+    fn changelog_picks_up_close_stamped_trailer() {
+        // End-to-end (requirement b): a commit stamped by
+        // `git_trailers::stamp_fixes_trailer` (what `issuectl close
+        // --stamp` runs) is attributed to its issue by `changelog`.
+        fn git(dir: &std::path::Path, args: &[&str]) {
+            let st = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?} failed");
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "--local", "user.email", "t@example.com"]);
+        git(root, &["config", "--local", "user.name", "t"]);
+        // Non-empty commit: `--amend` (what the stamp runs) refuses an
+        // empty tree.
+        std::fs::write(root.join("fix.txt"), "the fix").unwrap();
+        git(root, &["add", "fix.txt"]);
+        std::fs::write(root.join(".msg"), "feat: land the fix\n\nbody\n").unwrap();
+        git(root, &["commit", "-q", "-F", ".msg"]);
+
+        // Stamp the landing commit exactly as `close --stamp` does.
+        let outcome = git_trailers::stamp_fixes_trailer(root, "a-fox-jr").unwrap();
+        assert!(
+            matches!(outcome, git_trailers::StampOutcome::Stamped { .. }),
+            "{outcome:?}"
+        );
+
+        let issues = [mk_issue(
+            "a-fox-jr",
+            "fixed",
+            "2026-05-01",
+            Some("2026-05-05"),
+        )];
+        let report = changelog(root, "", &issues).unwrap();
+        let feature = report.groups.get("feature").expect("feature group");
+        let entry = feature.iter().find(|e| e.slug == "a-fox-jr").unwrap();
+        assert_eq!(entry.commits.len(), 1);
+        assert!(entry.commits[0].fixes, "commit should be marked as a fix");
+        assert!(report.orphan_commits.is_empty());
+    }
 }

@@ -9,8 +9,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::{
     agents, body_sections, canonical, context, cycle as cycle_mod, dag, doctor, duplicates,
-    epic_tree, estimate as estimate_mod, fmt, hooks, init as init_cmd, merge_driver, models,
-    mutate, query, recurrence, repo, report as report_mod, schema, skill, slug, sync_commits,
+    epic_tree, estimate as estimate_mod, fmt, git_trailers, hooks, init as init_cmd, merge_driver,
+    models, mutate, query, recurrence, repo, report as report_mod, schema, skill, slug,
+    sync_commits,
 };
 
 const TOP_LEVEL_HELP: &str = "\
@@ -668,6 +669,18 @@ enum Command {
         /// Record a commit, format HASH:summary (repeatable)
         #[arg(long = "commit", value_parser = parse_non_empty)]
         commits: Vec<String>,
+
+        /// After closing, amend the current HEAD commit to append a
+        /// `Fixes-Issue: @<slug>` trailer, so the trailer-driven
+        /// `issuectl changelog` picks the landing commit up with zero
+        /// manual trailer discipline. Run this AFTER committing the fix
+        /// (it stamps whatever HEAD is) and BEFORE pushing/merging
+        /// (amending rewrites HEAD's sha). Skipped — never fails the
+        /// close — when HEAD is a merge commit, a rebase/cherry-pick/
+        /// merge is in progress, the index has staged changes, or there
+        /// is no commit to stamp.
+        #[arg(long = "stamp")]
+        stamp: bool,
 
         /// Optimistic-concurrency token; same semantics as `update`.
         #[arg(long = "expected-version", value_parser = parse_non_empty)]
@@ -2287,6 +2300,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             author,
             comment,
             commits,
+            stamp,
             expected_version,
         } => cmd_close(
             json_output,
@@ -2295,6 +2309,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             author,
             comment,
             commits,
+            stamp,
             expected_version,
         ),
         Command::Rename {
@@ -4646,6 +4661,7 @@ fn cmd_close(
     author: Option<String>,
     comment: Option<String>,
     commits: Vec<String>,
+    stamp: bool,
     expected_version: Option<String>,
 ) -> Result<()> {
     let root = find_root();
@@ -4658,6 +4674,14 @@ fn cmd_close(
         commits,
         expected_version,
     )?;
+    // Stamp the `Fixes-Issue: @<slug>` changelog trailer into HEAD only
+    // after the close itself has landed — a fail-safe side effect that
+    // never blocks the close (see `git_trailers::stamp_fixes_trailer`).
+    let stamp_outcome = if stamp {
+        Some(git_trailers::stamp_fixes_trailer(&root, slug)?)
+    } else {
+        None
+    };
     // Echo the closer the write actually recorded (normalized in the
     // core — a single leading `@` stripped), not the raw `--as` input,
     // so the human/JSON confirmation matches the stored `closed_by:`.
@@ -4677,8 +4701,14 @@ fn cmd_close(
         if let Some(by) = closed_by {
             report["closed_by"] = serde_json::Value::String(by);
         }
+        if let Some(outcome) = &stamp_outcome {
+            report["stamp"] = stamp_report_json(outcome);
+        }
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
+    }
+    if let Some(outcome) = &stamp_outcome {
+        eprintln!("{}", stamp_report_human(outcome));
     }
     if out.moved_to_closed {
         // Echo the closer when `--as` recorded one, so the human output
@@ -4691,6 +4721,38 @@ fn cmd_close(
         println!("Updated {slug}");
     }
     Ok(())
+}
+
+/// Render a [`StampOutcome`] as the `stamp` object echoed in `close
+/// --json` output, so a caller confirms whether the changelog trailer
+/// landed (and, when skipped, why) from the same result.
+fn stamp_report_json(outcome: &git_trailers::StampOutcome) -> serde_json::Value {
+    use git_trailers::StampOutcome::*;
+    match outcome {
+        Stamped { sha } => serde_json::json!({ "stamped": true, "sha": sha }),
+        AlreadyPresent { sha } => {
+            serde_json::json!({ "stamped": false, "already_present": true, "sha": sha })
+        }
+        Skipped { reason } => serde_json::json!({ "stamped": false, "skipped": reason }),
+    }
+}
+
+/// Human-readable one-liner for a [`StampOutcome`], written to stderr so
+/// it stays out of any parsed stdout.
+fn stamp_report_human(outcome: &git_trailers::StampOutcome) -> String {
+    use git_trailers::StampOutcome::*;
+    match outcome {
+        Stamped { sha } => {
+            format!(
+                "Stamped Fixes-Issue trailer into {} (HEAD amended).",
+                &sha[..sha.len().min(12)]
+            )
+        }
+        AlreadyPresent { .. } => {
+            "Fixes-Issue trailer already present on HEAD; nothing to stamp.".to_string()
+        }
+        Skipped { reason } => format!("Trailer not stamped: {reason}"),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
