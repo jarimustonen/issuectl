@@ -225,6 +225,7 @@ Common flags:
 - `--epic <slug>` / `--no-epic`
 - `--add-label LABEL` / `--remove-label LABEL` (repeatable)
 - `--add-related "@<slug>"` / `--remove-related "@<slug>"` (repeatable; bare slug also accepted)
+- `--add-blocked-by "@<slug>"` / `--remove-blocked-by "@<slug>"` (repeatable; bare slug also accepted) — set/clear DAG dependency edges (this issue is blocked by `<slug>`). Same shape as `--add-related`; equivalent to `issuectl depend add/remove`.
 - `--add-commit HASH:summary` (repeatable)
 - `--lane NAME` / `--no-lane`, `--lane-seq <int>` / `--no-lane-seq`, and `--add-collision TOKEN` / `--remove-collision TOKEN` — optional scheduling-DAG hints (a lane is a spawn-time mutual-exclusion group; collision tokens are extra shared "hot files"; `lane_seq` is a coarse intra-lane precedence key consulted after `blocked_by` and priority but before the slug tie-break, so you can pin "do this member before that one" without a fake dependency). The reserved lane value `--lane unlaned` marks an issue *confirmed parallel-safe*: `dag` treats it as independently spawnable and never serializes it with siblings (distinct from an absent lane, which means "unclassified"). Only useful to an orchestrator; `issuectl dag [--json]` renders the resulting lanes, per-lane order, `blocked_by` mirror, and computed head-of-line (deterministic, AI-first). An issue whose `status` is `in-progress` is never `spawnable` (work already underway). Pass `dag --reservations <file|-|json>` to have spawnability account for lane/collision tokens in-flight runs hold.
 
@@ -234,6 +235,7 @@ Example flows:
 - `issuectl --json update extremely-quiet-otter --assignee alice --status testing`
 - `issuectl --json update extremely-quiet-otter --add-commit "abc123:fix login state"`
 - `issuectl --json update extremely-quiet-otter --add-label backend --add-label api`
+- `issuectl --json update extremely-quiet-otter --add-blocked-by "@other-slug"` (gate this issue behind `@other-slug`)
 
 Prefer commit trailers over manual `--add-commit`. Add
 `Refs-Issue: @<slug>` (or `Fixes-Issue: @<slug>` to also signal

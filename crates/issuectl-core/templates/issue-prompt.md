@@ -175,8 +175,9 @@ The CLI does both atomically — never `git mv` by hand.
 - `issuectl --json close <slug> --status wontfix` — explicit closing status
 - `issuectl --json close <slug> --as <user>` — record the closer as the `closed_by:` frontmatter field (optional; same author grammar as `note --as`)
 - `issuectl --json close <slug> --commit HASH:summary` — also record a commit (repeatable)
+- `issuectl --json close <slug> --stamp` — after closing, rewrite the current HEAD commit's message to append a `Fixes-Issue: @<slug>` trailer, so the trailer-driven `issuectl changelog` picks up the landing commit with zero manual trailer discipline. Run it **after** committing the fix (it stamps whatever HEAD is) and **before** pushing/merging (rewriting changes HEAD's sha). Message-only — tree, author, and dates are preserved and the index is untouched. Fail-safe: it never blocks the close — the `stamp` object in the JSON reports `{"status":"stamped","sha":...,"previous_sha":...}`, `{"status":"already_present","sha":...}`, or `{"status":"skipped","reason":...}` (HEAD detached / a merge commit / signed / mid rebase-cherry-pick-merge-revert / no commit to stamp). Cannot be combined with a `--commit` that resolves to HEAD (the rewrite would orphan that recorded sha).
 
-Output shape (`closed_by` present only when `--as` is passed):
+Output shape (`closed_by` present only when `--as` is passed; `stamp` present only when `--stamp` is passed):
 
 ```json
 { "slug": "extremely-quiet-otter",
@@ -220,6 +221,7 @@ Common flags:
 - `--epic <slug>` / `--no-epic`
 - `--add-label LABEL` / `--remove-label LABEL` (repeatable)
 - `--add-related "@<slug>"` / `--remove-related "@<slug>"` (repeatable; bare slug also accepted)
+- `--add-blocked-by "@<slug>"` / `--remove-blocked-by "@<slug>"` (repeatable; bare slug also accepted) — set/clear DAG dependency edges (this issue is blocked by `<slug>`). Same shape as `--add-related`; equivalent to `issuectl depend add/remove`.
 - `--add-commit HASH:summary` (repeatable)
 - `--lane NAME` / `--no-lane`, `--lane-seq <int>` / `--no-lane-seq`, and `--add-collision TOKEN` / `--remove-collision TOKEN` — optional scheduling-DAG hints (a lane is a spawn-time mutual-exclusion group; collision tokens are extra shared "hot files"; `lane_seq` is a coarse intra-lane precedence key consulted after `blocked_by` and priority but before the slug tie-break, so you can pin "do this member before that one" without a fake dependency). The reserved lane value `--lane unlaned` marks an issue *confirmed parallel-safe*: `dag` treats it as independently spawnable and never serializes it with siblings (distinct from an absent lane, which means "unclassified"). Only useful to an orchestrator; `issuectl dag [--json]` renders the resulting lanes, per-lane order, `blocked_by` mirror, and computed head-of-line (deterministic, AI-first). An issue whose `status` is `in-progress` is never `spawnable` (work already underway). Pass `dag --reservations <file|-|json>` to have spawnability account for lane/collision tokens in-flight runs hold.
 
@@ -229,6 +231,7 @@ Example flows:
 - `issuectl --json update extremely-quiet-otter --assignee alice --status testing`
 - `issuectl --json update extremely-quiet-otter --add-commit "abc123:fix login state"`
 - `issuectl --json update extremely-quiet-otter --add-label backend --add-label api`
+- `issuectl --json update extremely-quiet-otter --add-blocked-by "@other-slug"` (gate this issue behind `@other-slug`)
 
 Prefer commit trailers over manual `--add-commit`. Add
 `Refs-Issue: @<slug>` (or `Fixes-Issue: @<slug>` to also signal
@@ -238,6 +241,11 @@ message, then run `issuectl sync-commits` to walk
 `commits[]`. Idempotent — safe to re-run. `--dry-run` previews
 the plan; `--no-branch-fallback` disables the implicit
 "branch named after a slug" attribution.
+
+To seed the changelog trailer without any manual discipline, close
+the issue with `issuectl close <slug> --stamp` right after committing
+the fix — it stamps the `Fixes-Issue: @<slug>` trailer onto HEAD for
+you (see the Close action above).
 
 Output shape:
 

@@ -597,6 +597,15 @@ enum Command {
         #[arg(long = "remove-related", value_parser = parse_non_empty)]
         remove_related: Vec<String>,
 
+        /// Add a `blocked_by:` dependency edge like "@<slug>" or bare slug
+        /// (repeatable). Mirrors `depend add`; sets the DAG blocker edge.
+        #[arg(long = "add-blocked-by", value_parser = parse_non_empty)]
+        add_blocked_by: Vec<String>,
+
+        /// Remove a `blocked_by:` dependency edge (repeatable)
+        #[arg(long = "remove-blocked-by", value_parser = parse_non_empty)]
+        remove_blocked_by: Vec<String>,
+
         /// Record a commit, format HASH:summary (repeatable)
         #[arg(long = "add-commit", value_parser = parse_non_empty)]
         add_commits: Vec<String>,
@@ -2286,6 +2295,8 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             remove_labels,
             add_related,
             remove_related,
+            add_blocked_by,
+            remove_blocked_by,
             add_commits,
             custom_fields,
             clear_fields,
@@ -2324,6 +2335,8 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
                     remove_labels,
                     add_related,
                     remove_related,
+                    add_blocked_by,
+                    remove_blocked_by,
                     add_commits,
                     custom_fields,
                     clear_fields,
@@ -4536,6 +4549,8 @@ pub(crate) struct UpdateArgs {
     pub remove_labels: Vec<String>,
     pub add_related: Vec<String>,
     pub remove_related: Vec<String>,
+    pub add_blocked_by: Vec<String>,
+    pub remove_blocked_by: Vec<String>,
     pub add_commits: Vec<String>,
     pub custom_fields: Vec<(String, String)>,
     pub clear_fields: Vec<String>,
@@ -4663,6 +4678,8 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
     req.remove_labels = args.remove_labels;
     req.add_related = args.add_related;
     req.remove_related = args.remove_related;
+    req.add_blocked_by = args.add_blocked_by;
+    req.remove_blocked_by = args.remove_blocked_by;
     req.add_commits = args
         .add_commits
         .iter()
@@ -7479,6 +7496,145 @@ mod tests {
         .unwrap();
         let content = read(&n.item_path);
         assert!(!content.contains("epic:"));
+    }
+
+    #[test]
+    fn update_add_blocked_by_writes_and_normalizes_at_sigil() {
+        // `update --add-blocked-by @foo bar` (mixed sigil) round-trips
+        // through the same flock/schema write path as `--add-related`
+        // and lands the raw `extra.blocked_by` list. The `@` is stripped
+        // on write (normalization), the same as a `depend add`.
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "Subject");
+        a.slug = Some("blk-subject".into());
+        let n = do_new(tmp.path(), a).unwrap();
+        for dep in ["blk-one", "blk-two"] {
+            let mut da = new_args("task", "Dep");
+            da.slug = Some(dep.into());
+            do_new(tmp.path(), da).unwrap();
+        }
+        do_update(
+            tmp.path(),
+            UpdateArgs {
+                slug: n.slug.clone(),
+                add_blocked_by: vec!["@blk-one".into(), "blk-two".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let content = read(&n.item_path);
+        let issue = issuectl_core::parser::parse_item_md_text_with_warnings(
+            &content,
+            &n.slug,
+            "open",
+            &n.item_path,
+        )
+        .issue;
+        assert_eq!(
+            issue.blocked_by(),
+            vec!["blk-one".to_string(), "blk-two".to_string()],
+            "both blockers must round-trip (sigil stripped): {content}"
+        );
+    }
+
+    #[test]
+    fn update_blocked_by_add_remove_round_trip() {
+        // Add two blockers, then remove one: the surviving edge stays and
+        // the dropped one is gone. Mirrors `--add-related`/`--remove-related`.
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "Subject");
+        a.slug = Some("rt-subject".into());
+        let n = do_new(tmp.path(), a).unwrap();
+        for dep in ["rt-one", "rt-two"] {
+            let mut da = new_args("task", "Dep");
+            da.slug = Some(dep.into());
+            do_new(tmp.path(), da).unwrap();
+        }
+        do_update(
+            tmp.path(),
+            UpdateArgs {
+                slug: n.slug.clone(),
+                add_blocked_by: vec!["rt-one".into(), "rt-two".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        do_update(
+            tmp.path(),
+            UpdateArgs {
+                slug: n.slug.clone(),
+                remove_blocked_by: vec!["@rt-one".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let content = read(&n.item_path);
+        let issue = issuectl_core::parser::parse_item_md_text_with_warnings(
+            &content,
+            &n.slug,
+            "open",
+            &n.item_path,
+        )
+        .issue;
+        assert_eq!(
+            issue.blocked_by(),
+            vec!["rt-two".to_string()],
+            "removed edge must be gone, survivor kept: {content}"
+        );
+    }
+
+    #[test]
+    fn update_blocked_by_json_projection_matches_show() {
+        // The `--json` projection (`project_blocked_by`) must surface a
+        // sorted/deduped/`@`-prefixed top-level `blocked_by` array and
+        // strip the raw `extra.blocked_by` copy — the same wire shape
+        // `show`/`ls`/`search --json` emit. Feed unsorted + duplicate
+        // adds and confirm the projection canonicalizes them.
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "Subject");
+        a.slug = Some("proj-subject".into());
+        let n = do_new(tmp.path(), a).unwrap();
+        for dep in ["proj-zeta", "proj-alpha"] {
+            let mut da = new_args("task", "Dep");
+            da.slug = Some(dep.into());
+            do_new(tmp.path(), da).unwrap();
+        }
+        do_update(
+            tmp.path(),
+            UpdateArgs {
+                slug: n.slug.clone(),
+                // Unsorted, with a duplicate (mixed sigil) to force dedup.
+                add_blocked_by: vec!["@proj-zeta".into(), "proj-alpha".into(), "proj-zeta".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let content = read(&n.item_path);
+        let issue = issuectl_core::parser::parse_item_md_text_with_warnings(
+            &content,
+            &n.slug,
+            "open",
+            &n.item_path,
+        )
+        .issue;
+        let mut v = serde_json::to_value(&issue).expect("Issue serializes");
+        let m = v.as_object_mut().unwrap();
+        project_blocked_by(m, &issue);
+        assert_eq!(
+            m.get("blocked_by").unwrap(),
+            &serde_json::json!(["@proj-alpha", "@proj-zeta"]),
+            "top-level projection must be sorted/deduped/@-prefixed"
+        );
+        // The raw `extra.blocked_by` copy is stripped so there is exactly
+        // one wire representation.
+        let extra_blocked = m
+            .get("extra")
+            .and_then(|e| e.as_object())
+            .and_then(|e| e.get("blocked_by"));
+        assert!(
+            extra_blocked.is_none(),
+            "raw extra.blocked_by must be stripped: {m:?}"
+        );
     }
 
     #[test]
