@@ -113,9 +113,11 @@ Use the CLI rather than greppa hakemistoa. The CLI knows the frontmatter schema.
   - `-a/--assignee USERNAME` (matches `assignee` for issues, `owner` for epics)
   - `-l/--label LABEL`
   - `-e/--epic <slug>` (children of an epic)
-  - Bare `ls` is open-only, but pinning `-s/--status` (or a `status:`/`folder:`
-    query term) auto-expands scope to all folders — so `ls -s done` /
-    `ls -s fixed` list closed and archived issues too, not just open ones.
+  - Bare `ls` is open-only, but — absent an explicit `--all`/`--closed` —
+    pinning `-s/--status` (or a `status:`/`folder:` query term) lifts that
+    open-only default, so `ls -s done` / `ls -s fixed` list closed and
+    archived issues too. `--all`/`--closed` still win: `ls --closed -s done`
+    stays scoped to the closed folder.
 - Filter via query string (same syntax as `search` and web `?q=`):
   - `issuectl --json ls "status:in-progress assignee:alice"`
   - `issuectl --json ls "-label:wontfix updated:<-14d"` (negation, relative date)

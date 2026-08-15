@@ -3287,6 +3287,29 @@ fn folder_default_filter(all: bool, closed: bool, has_query: bool) -> Option<&'s
     }
 }
 
+/// Folder scope for `list`. Explicit `--all`/`--closed` stay
+/// authoritative (so `list --closed --status done` still restricts to
+/// the closed folder rather than silently dropping the flag). Absent
+/// those, a positional query OR a positively-pinned `status:`/`folder:`
+/// term disables the implicit open-only default — otherwise
+/// `list --status done` would AND `folder:open` against a closing
+/// status and match nothing (the `list-status-done` bug). A positional
+/// query already disables the default regardless of its contents (a
+/// *negated* `-status:wontfix` term does not scope-expand on its own,
+/// but supplying it positionally does, same as any positional query).
+/// This routes through [`folder_default_filter`] so `--all`/`--closed`
+/// precedence is encoded in exactly one place.
+fn list_folder_filter(
+    q: &query::Query,
+    all: bool,
+    closed: bool,
+    has_query: bool,
+) -> Option<&'static str> {
+    let scope_pinned = q.has_positive_field(query::FieldName::Status)
+        || q.has_positive_field(query::FieldName::Folder);
+    folder_default_filter(all, closed, has_query || scope_pinned)
+}
+
 // ── Commands ────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -3355,23 +3378,7 @@ fn cmd_list(
         });
     }
 
-    // Implicit folder default: open issues only, unless the caller has
-    // positively pinned scope. `--all`/`--closed`/a positional query
-    // opt out through `folder_default_filter`. A positive `--status`
-    // (or positional `status:`) or `folder:` term — now translated into
-    // `q` above — is likewise an explicit scope pin, so the open-only
-    // default must step out of the way: otherwise `--status done` would
-    // AND `folder:open` against a closing status and match nothing (the
-    // `list-status-done` bug). This mirrors `cmd_search`'s scope rule; a
-    // *negated* term (`-status:wontfix`) is exclusion, not scope, so it
-    // does not expand scope (see `has_positive_field`).
-    let scope_pinned = q.has_positive_field(query::FieldName::Status)
-        || q.has_positive_field(query::FieldName::Folder);
-    let folder_filter = if scope_pinned {
-        None
-    } else {
-        folder_default_filter(all, closed, query_str.is_some())
-    };
+    let folder_filter = list_folder_filter(&q, all, closed, query_str.is_some());
 
     let issues = load();
     // `repo::load_issues` already returns issues sorted by slug, so
@@ -7679,50 +7686,54 @@ mod tests {
         assert_eq!(hits, vec!["amber-loud-fox".to_string()]);
     }
 
-    /// Regression for the `--status` flag scope: pre-query-engine
-    /// `ls -s fixed` returned nothing without `--all`/`--closed`
-    /// because the implicit "open only" filter ran first. The query
-    /// engine must preserve that — flag-translation must not flip
-    /// the default.
+    /// Folder-scope decision for `list` (`list_folder_filter`). Locks
+    /// the `list-status-done` contract: a positively-pinned status
+    /// disables the implicit open-only default so `ls -s done`/`-s fixed`
+    /// reach closed/archived issues, while bare `list` stays open-only
+    /// and explicit `--all`/`--closed` remain authoritative (a pinned
+    /// status must NOT silently drop `--closed`).
     #[test]
-    fn ls_flag_status_still_scoped_to_open() {
-        let tmp = fresh_repo();
-        write_raw_issue(
-            tmp.path(),
-            "amber-loud-fox",
-            "type: bug\nstatus: open\n",
-            "# Open\n",
-        );
-        write_raw_issue(
-            tmp.path(),
-            "calm-bright-newt",
-            "type: bug\nstatus: fixed\nclosed: 2026-05-01\n",
-            "# Closed\n",
-        );
+    fn list_folder_filter_scope_rules() {
+        let status_q = |v: &str| {
+            let mut q = query::Query::default();
+            q.push(query::Term::Field {
+                field: query::FieldName::Status,
+                m: query::FieldMatch::Equals(v.to_string()),
+                negated: false,
+            });
+            q
+        };
+        let bare = query::Query::default();
 
-        let issues = repo::load_issues(tmp.path());
-
-        // Reproduce the cmd_list folder-default rule for the
-        // flag-only path: open-only unless --all or --closed.
-        let mut q = query::Query::default();
-        q.push(query::Term::Field {
-            field: query::FieldName::Status,
-            m: query::FieldMatch::Equals("fixed".to_string()),
-            negated: false,
-        });
-        let folder_filter = Some("open"); // mirrors flag-only branch
-
-        let hits: Vec<_> = issues
-            .iter()
-            .filter(|i| {
-                folder_filter.map(|f| i.folder == f).unwrap_or(true) && query::matches(&q, i)
-            })
-            .map(|i| i.slug.clone())
-            .collect();
-        assert!(
-            hits.is_empty(),
-            "ls -s fixed must not surface closed issues without --all/--closed; got {hits:?}"
+        // Bare `list`: open-only default preserved.
+        assert_eq!(list_folder_filter(&bare, false, false, false), Some("open"));
+        // `-s fixed` (no --all/--closed): default steps aside → all folders.
+        assert_eq!(
+            list_folder_filter(&status_q("fixed"), false, false, false),
+            None,
+            "pinned status must lift the open-only default"
         );
+        // `--closed -s done`: --closed stays authoritative, not dropped.
+        assert_eq!(
+            list_folder_filter(&status_q("done"), false, true, false),
+            Some("closed"),
+            "--closed must survive a pinned status"
+        );
+        // `--all -s done`: no folder restriction.
+        assert_eq!(
+            list_folder_filter(&status_q("done"), true, false, false),
+            None
+        );
+        // Negated status alone does NOT scope-expand (still open-only)…
+        let neg = query::parse("-status:wontfix").unwrap();
+        assert_eq!(
+            list_folder_filter(&neg, false, false, false),
+            Some("open"),
+            "a lone negated status is exclusion, not scope"
+        );
+        // …but supplying it positionally (has_query) does, like any
+        // positional query.
+        assert_eq!(list_folder_filter(&neg, false, false, true), None);
     }
 
     /// `search -status:wontfix` should remain scoped to open. A
