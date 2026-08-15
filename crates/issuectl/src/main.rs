@@ -4389,10 +4389,9 @@ fn cmd_new(json: bool, args: NewArgs, check_duplicates: bool) -> Result<()> {
     }
     // Whether the caller asked to schedule the issue at creation. When it
     // did, `--json` echoes the resulting `lane`/`lane_seq`/`collision`
-    // back (read from the freshly-written resource) so a one-call create
-    // confirms the fields landed; a plain `new` keeps its historical
-    // output shape untouched (no lane keys added). `args` is moved into
-    // `do_new`, so capture the flag first.
+    // back so a one-call create confirms the fields landed; a plain `new`
+    // keeps its historical output shape untouched (no lane keys added).
+    // `args` is moved into `do_new`, so capture the flag first.
     let lane_requested =
         args.lane.is_some() || args.lane_seq.is_some() || !args.collision.is_empty();
     let out = do_new(&root, args)?;
@@ -4410,13 +4409,13 @@ fn cmd_new(json: bool, args: NewArgs, check_duplicates: bool) -> Result<()> {
             "warnings": out.warnings,
         });
         if lane_requested {
-            // Re-read the created resource so the echoed values are the
-            // typed, on-disk truth (numeric `lane_seq`, deduped
-            // `collision` list) rather than the raw argv.
-            let issue = issuectl_core::parser::parse_item_md(&out.item_path, &out.slug, "open");
-            report["lane"] = serde_json::json!(issue.lane);
-            report["lane_seq"] = serde_json::json!(issue.lane_seq);
-            report["collision"] = serde_json::json!(issue.collision.unwrap_or_default());
+            // Echo the values `do_new` captured under the creation lock —
+            // NOT a fresh disk read, which would race a concurrent writer
+            // (the rule `UpdateOutcome` follows). `collision` is already
+            // the deduped, on-disk list; `lane_seq` stays a JSON number.
+            report["lane"] = serde_json::json!(out.lane);
+            report["lane_seq"] = serde_json::json!(out.lane_seq);
+            report["collision"] = serde_json::json!(out.collision);
         }
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -7004,6 +7003,27 @@ mod tests {
                     vec!["crates/issuectl/src/main.rs", "foo/bar.rs"]
                 );
             }
+            _ => panic!("expected New"),
+        }
+    }
+
+    #[test]
+    fn lane_seq_parses_negative_on_new() {
+        // `allow_hyphen_values = true` exists so a negative precedence key
+        // parses as a value, not a dangling flag.
+        let cli = Cli::try_parse_from([
+            "issuectl",
+            "new",
+            "--type",
+            "task",
+            "--title",
+            "x",
+            "--lane-seq",
+            "-5",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::New { lane_seq, .. } => assert_eq!(lane_seq, Some(-5)),
             _ => panic!("expected New"),
         }
     }

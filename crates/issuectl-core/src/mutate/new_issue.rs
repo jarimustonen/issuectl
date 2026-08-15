@@ -128,6 +128,15 @@ pub struct WriteOutcome {
     /// section headings in the body (`## Notes`). Surfaced through the
     /// shared `warnings` output field; never blocks the create.
     pub warnings: Vec<String>,
+    /// Scheduling-DAG fields as committed to disk, captured while the
+    /// creation lock is still held. Callers (e.g. `cmd_new --json`) echo
+    /// these instead of re-reading the file — a post-lock reread would
+    /// race a concurrent writer and could report another process's state
+    /// (the same rule `UpdateOutcome` follows). `collision` is the deduped
+    /// on-disk list; `lane`/`lane_seq` are `None` when unset.
+    pub lane: Option<String>,
+    pub lane_seq: Option<i64>,
+    pub collision: Vec<String>,
 }
 
 /// Typed error surfaced by `do_new_locked`. Maps to `MutateError` via
@@ -236,19 +245,23 @@ pub(crate) fn do_new_locked(
     }
 
     // Scheduling-DAG fields, set at creation. Mirror the `update --lane`
-    // / `--lane-seq` / `--add-collision` validation exactly: `lane` must
-    // be non-empty (parity with `check_set_nonempty("lane", …)`), and
-    // no `collision:` token may be empty (parity with the `add_collision`
-    // empty-element gate). Belt-and-braces for the CLI (`parse_non_empty`
-    // already rejects these) and primary defense for the API `new` path.
+    // / `--lane-seq` / `--add-collision` validation *exactly*: `lane` must
+    // be non-empty (parity with `check_set_nonempty("lane", …)`), and no
+    // `collision:` token may be empty (parity with the `add_collision`
+    // empty-element gate). Both use `is_empty()`, not `trim().is_empty()`,
+    // so this path neither rejects nor accepts a value the `update` core
+    // path treats differently — the CLI's `parse_non_empty` is the layer
+    // that rejects whitespace for both verbs. Belt-and-braces for the CLI,
+    // primary defense for the API `new` path.
     if let Some(l) = &args.lane {
-        if l.trim().is_empty() {
+        if l.is_empty() {
             return Err(DoNewError::Validation(
-                "lane cannot be empty (omit --lane to leave the issue unclassified)".into(),
+                "lane: empty-string Set is not allowed (omit --lane to leave the issue unclassified)"
+                    .into(),
             ));
         }
     }
-    if args.collision.iter().any(|c| c.trim().is_empty()) {
+    if args.collision.iter().any(|c| c.is_empty()) {
         return Err(DoNewError::Validation(
             "collision contains an empty string element".into(),
         ));
@@ -294,6 +307,19 @@ pub(crate) fn do_new_locked(
     for c in &args.collision {
         write::add_to_string_list(&mut frontmatter, "collision", c).map_err(DoNewError::Io)?;
     }
+    // Read the committed `collision:` list back off the mapping so the
+    // returned value reflects the on-disk truth (deduped, in first-seen
+    // order by `add_to_string_list`) rather than the raw argv. Captured
+    // under the creation lock for the caller's `--json` echo.
+    let committed_collision: Vec<String> = frontmatter
+        .get(serde_yaml::Value::String("collision".into()))
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
     let schema =
         crate::schema::load(root).map_err(|e| DoNewError::SchemaConfig(format!("{e:#}")))?;
     {
@@ -469,6 +495,9 @@ pub(crate) fn do_new_locked(
         title: args.title,
         item_path,
         warnings,
+        lane: args.lane,
+        lane_seq: args.lane_seq,
+        collision: committed_collision,
     })
 }
 
@@ -659,7 +688,14 @@ mod tests {
         args.slug = Some("sched-feat".into());
         args.lane = Some("cli-fixes".into());
         args.lane_seq = Some(40);
-        args.collision = vec!["crates/issuectl/src/main.rs".into(), "foo/bar.rs".into()];
+        // A duplicate collision token exercises the `add_to_string_list`
+        // dedupe (same mechanics as `update --add-collision`): the repeat
+        // must collapse, first-seen order preserved.
+        args.collision = vec![
+            "crates/issuectl/src/main.rs".into(),
+            "foo/bar.rs".into(),
+            "crates/issuectl/src/main.rs".into(),
+        ];
         let out = do_new(tmp.path(), args).unwrap();
 
         let content = read(&out.item_path);
@@ -669,16 +705,21 @@ mod tests {
             "lane_seq must be an unquoted integer; got: {content}"
         );
 
+        let expected_collision = vec![
+            "crates/issuectl/src/main.rs".to_string(),
+            "foo/bar.rs".to_string(),
+        ];
+        // The outcome carries the committed (deduped) values captured under
+        // the lock — the source of the `--json` echo, so assert them here
+        // rather than re-reading disk in the CLI.
+        assert_eq!(out.lane.as_deref(), Some("cli-fixes"));
+        assert_eq!(out.lane_seq, Some(40));
+        assert_eq!(out.collision, expected_collision);
+
         let parsed = crate::parser::parse_item_md_with_warnings(&out.item_path, &out.slug, "open");
         assert_eq!(parsed.issue.lane.as_deref(), Some("cli-fixes"));
         assert_eq!(parsed.issue.lane_seq, Some(40));
-        assert_eq!(
-            parsed.issue.collision,
-            Some(vec![
-                "crates/issuectl/src/main.rs".to_string(),
-                "foo/bar.rs".to_string()
-            ])
-        );
+        assert_eq!(parsed.issue.collision, Some(expected_collision));
     }
 
     #[test]
@@ -723,23 +764,86 @@ mod tests {
             crate::canonical::canonical_hash(&plain2.issue),
             "two no-lane issues with the same authored fields must hash identically"
         );
+
+        // Conversely, setting a lane MUST perturb the canonical hash — proof
+        // the typed field is projected into the hash when `Some` (the other
+        // half of the `only when Some` guarantee).
+        let mut laned = new_args("feature", "Plain feature");
+        laned.slug = Some("plain-feat-3".into());
+        laned.lane = Some("cli-fixes".into());
+        let out3 = do_new(tmp.path(), laned).unwrap();
+        let laned_issue =
+            crate::parser::parse_item_md_with_warnings(&out3.item_path, &out3.slug, "open");
+        assert_ne!(
+            crate::canonical::canonical_hash(&plain.issue),
+            crate::canonical::canonical_hash(&laned_issue.issue),
+            "setting a lane must change the canonical hash"
+        );
+    }
+
+    #[test]
+    fn new_lane_matches_new_then_update_lane_byte_for_byte() {
+        // The feature's premise is parity with `update`: an issue born with
+        // `new --lane X` must be indistinguishable on disk from one created
+        // plain and then `update --lane X`-ed. Both project the same fields
+        // through the same `write::` setters onto a mapping with the same
+        // base key order, so the rendered item.md must be byte-identical —
+        // guarding against key-ordering drift (fmt churn) between the paths.
+        use crate::mutate::{update_issue, Patch, UpdateIssueRequest};
+
+        let tmp = fresh_repo();
+        let mut born = new_args("feature", "Same shape");
+        born.slug = Some("born-laned".into());
+        born.lane = Some("cli-fixes".into());
+        born.lane_seq = Some(7);
+        born.collision = vec!["a/b.rs".into()];
+        let born_out = do_new(tmp.path(), born).unwrap();
+        let born_text = read(&born_out.item_path);
+
+        let mut plain = new_args("feature", "Same shape");
+        plain.slug = Some("updated-laned".into());
+        let plain_out = do_new(tmp.path(), plain).unwrap();
+        update_issue(
+            tmp.path(),
+            "updated-laned",
+            UpdateIssueRequest {
+                lane: Patch::Set("cli-fixes".into()),
+                lane_seq: Patch::Set(7),
+                add_collision: vec!["a/b.rs".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let updated_text = read(&plain_out.item_path);
+
+        // Normalise only the slug-derived `# <title>` line is identical
+        // already (same title); the frontmatter must line up key-for-key.
+        assert_eq!(
+            born_text, updated_text,
+            "new --lane must render identically to new + update --lane"
+        );
     }
 
     #[test]
     fn new_rejects_empty_lane_and_empty_collision_token() {
+        // Parity with `update`'s `check_set_nonempty` / `add_collision`
+        // gate, which reject only the truly-empty string (`is_empty()`),
+        // not whitespace — the CLI's `parse_non_empty` is what rejects
+        // whitespace for both verbs.
         let tmp = fresh_repo();
         let mut args = new_args("feature", "Bad lane");
         args.slug = Some("bad-lane".into());
-        args.lane = Some("   ".into());
+        args.lane = Some(String::new());
         let err = do_new(tmp.path(), args).unwrap_err();
         assert!(
-            err.to_string().contains("lane cannot be empty"),
+            err.to_string()
+                .contains("lane: empty-string Set is not allowed"),
             "got: {err}"
         );
 
         let mut args = new_args("feature", "Bad collision");
         args.slug = Some("bad-collision".into());
-        args.collision = vec!["ok".into(), "".into()];
+        args.collision = vec!["ok".into(), String::new()];
         let err = do_new(tmp.path(), args).unwrap_err();
         assert!(
             err.to_string().contains("collision contains an empty"),
