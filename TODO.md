@@ -150,3 +150,4 @@ worktreiden takia (ks. globaali CLAUDE.md).
 
 - [ ] 🐛 Piialiisan bugiraportti: issuectl new: accept --lane (set scheduling lane at creation) — jari via Telegram ([`intake-feature-issuectl-035722451473`](issues/intake-feature-issuectl-035722451473/item.md))
 - [ ] 🐛 Piialiisan bugiraportti: issuectl update: add --blocked-by / --add-blocked-by (edit blocked_by v… — jari via Telegram ([`intake-feature-issuectl-d93eaa168c66`](issues/intake-feature-issuectl-d93eaa168c66/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: label: flag-style --remove silently no-ops with --json instead of error… — jari via Telegram ([`intake-bug-issuectl-d6947128f6c9`](issues/intake-bug-issuectl-d6947128f6c9/item.md))
