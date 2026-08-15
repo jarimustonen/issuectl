@@ -308,7 +308,10 @@ multi-field patch keeps its own concurrency contract).
   unique `- [ ]` / `- [x]` line in the issue body. Errors when
   zero or multiple checkbox lines match the substring.
 - **`issuectl label <slug> add|remove <label>`** — idempotent
-  label add / remove.
+  label add / remove. The operation also accepts the flag form
+  `issuectl label <slug> --add|--remove <label>`; pass exactly one
+  form. A malformed invocation under `--json` emits the standard
+  error envelope (never a silent no-op).
 - **`issuectl apply <patch.yaml>`** — multi-field transactional
   patch. The YAML file declares `slug:` plus any combination of
   built-in fields, `custom_fields:`, label / related list ops,

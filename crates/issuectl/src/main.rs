@@ -868,13 +868,35 @@ enum Command {
         #[arg(value_parser = parse_slug_arg)]
         slug: String,
 
-        /// Operation
+        /// Operation (positional form): `add` or `remove`. Optional only
+        /// because the `--add`/`--remove` flag form is accepted instead;
+        /// exactly one form must be supplied.
         #[arg(value_enum)]
-        op: LabelOp,
+        op: Option<LabelOp>,
 
-        /// Label
+        /// Label (positional form). Required alongside a positional `op`.
         #[arg(value_parser = parse_non_empty)]
-        label: String,
+        label: Option<String>,
+
+        /// Flag form: add this label (alias for `add <label>`), mirroring
+        /// the `--add`/`--remove` style other verbs use. Mutually
+        /// exclusive with the positional `op`/`label` and with `--remove`.
+        #[arg(
+            long,
+            value_name = "LABEL",
+            value_parser = parse_non_empty,
+            conflicts_with_all = ["op", "label", "remove"],
+        )]
+        add: Option<String>,
+
+        /// Flag form: remove this label (alias for `remove <label>`).
+        #[arg(
+            long,
+            value_name = "LABEL",
+            value_parser = parse_non_empty,
+            conflicts_with_all = ["op", "label", "add"],
+        )]
+        remove: Option<String>,
 
         /// Plan only: print a unified diff and exit 0 without writing.
         #[arg(long)]
@@ -2392,9 +2414,14 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             slug,
             op,
             label,
+            add,
+            remove,
             dry_run,
             expected_version,
-        } => cmd_label(json_output, &slug, op, &label, dry_run, expected_version),
+        } => {
+            let (op, label) = resolve_label_target(op, label, add, remove)?;
+            cmd_label(json_output, &slug, op, &label, dry_run, expected_version)
+        }
         Command::Apply { patch, dry_run } => cmd_apply(json_output, &patch, dry_run),
         Command::Bulk {
             query,
@@ -5285,6 +5312,37 @@ fn cmd_check(
     let outcome = mutate::toggle_checkbox(&root, slug, task, expected_version, dry_run)
         .map_err(anyhow::Error::new)?;
     finish_mutation(json, slug, &outcome, dry_run, "Toggled checkbox in")
+}
+
+/// Resolve the two accepted `label` invocation forms — the positional
+/// `label <slug> add|remove <label>` and the flag form
+/// `label <slug> --add|--remove <label>` — into a single `(op, label)`
+/// pair. clap's `conflicts_with_all` already rejects *mixing* the forms,
+/// so the only failure this has to name is an *incomplete* invocation (an
+/// operation with no label, or neither form at all). The error spells out
+/// BOTH accepted shapes, so a caller who reached for the flag style — the
+/// papercut in `@intake-bug-issuectl-d6947128f6c9` — is pointed at the
+/// positional form, and vice versa, instead of a bare clap `Usage:` line.
+fn resolve_label_target(
+    op: Option<LabelOp>,
+    label: Option<String>,
+    add: Option<String>,
+    remove: Option<String>,
+) -> Result<(LabelOp, String)> {
+    if let Some(label) = add {
+        return Ok((LabelOp::Add, label));
+    }
+    if let Some(label) = remove {
+        return Ok((LabelOp::Remove, label));
+    }
+    match (op, label) {
+        (Some(op), Some(label)) => Ok((op, label)),
+        _ => Err(anyhow::anyhow!(
+            "label needs an operation and a label. Use the positional form \
+             `issuectl label <slug> add|remove <label>` or the flag form \
+             `issuectl label <slug> --add|--remove <label>`."
+        )),
+    }
 }
 
 fn cmd_label(
