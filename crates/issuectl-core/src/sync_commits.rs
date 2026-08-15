@@ -62,11 +62,14 @@ pub struct SyncReport {
     pub load_warnings: Vec<String>,
     /// Machine-readable warnings for the shared `--json` `warnings`
     /// field. Currently carries the empty-default-range advisory: when
-    /// the range was defaulted (no explicit `--range`) and walked zero
-    /// commits, sync would otherwise look silently successful while
+    /// the *merge-base default* range (no explicit `--range`) walked
+    /// zero commits, sync would otherwise look silently successful while
     /// recording nothing — a common footgun when run directly on
     /// `main`, where the merge-base is often `HEAD` so the default
-    /// `<merge-base>..HEAD` collapses to `HEAD..HEAD`.
+    /// `<merge-base>..HEAD` collapses to `HEAD..HEAD`. Scoped to the
+    /// merge-base default so the no-merge-base `HEAD` fallback (whose
+    /// emptiness means an unborn repo, not a collapsed range) is not
+    /// misdiagnosed with the collapse message.
     pub warnings: Vec<String>,
 }
 
@@ -83,14 +86,22 @@ pub struct SyncOptions {
 }
 
 pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
-    // Track whether the range was defaulted so we can warn (and only
-    // warn) when the DEFAULT range is empty — an explicit `--range`
-    // that happens to be empty is a legitimate user choice we respect.
-    let used_default_range = opts.range.is_none();
+    // Track whether the range came from the *merge-base default*
+    // specifically — not an explicit `--range` (the user's own choice,
+    // respected even when empty), and not the no-merge-base `HEAD`
+    // fallback. The empty-range advisory only makes sense for the
+    // merge-base default: that is the path that silently collapses to
+    // `HEAD..HEAD` when HEAD is at/behind the base. The `HEAD` fallback
+    // walks all of history; its own emptiness (an unborn repo) is a
+    // different situation the collapse message would misdiagnose.
+    let mut used_merge_base_default = false;
     let range = match opts.range.clone() {
         Some(r) => r,
         None => match git_trailers::default_range(repo_root)? {
-            Some(r) => r,
+            Some(r) => {
+                used_merge_base_default = true;
+                r
+            }
             // No merge-base with main/master — walk all of HEAD. This
             // happens on a fresh repo or one where the conventional
             // base branches are absent. Documented in `--help`.
@@ -101,17 +112,19 @@ pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
     let commits = git_trailers::parse_log(repo_root, &range)?;
 
     let mut warnings: Vec<String> = Vec::new();
-    if used_default_range && commits.is_empty() {
-        // The default `<merge-base(HEAD, main/master)>..HEAD` collapses
-        // to `HEAD..HEAD` when run directly on main (merge-base == HEAD),
-        // scanning zero commits. Surface it so a just-landed commit
-        // isn't silently left unrecorded.
+    if used_merge_base_default && commits.is_empty() {
+        // `<merge-base(HEAD, main/master)>..HEAD` is empty whenever HEAD
+        // is at or behind that merge-base — typically running on `main`
+        // right after a commit/merge (merge-base == HEAD), or on a
+        // fully-merged branch. Surface it so a just-landed commit isn't
+        // silently left unrecorded.
         warnings.push(format!(
-            "default range {range} contains no commits — nothing was scanned. \
-             On main the merge-base is often HEAD, so the default \
-             <merge-base>..HEAD collapses to an empty range. To record the \
-             last commit on main, pass an explicit range, e.g. \
-             `--range HEAD~1..HEAD` (or `--range origin/main..HEAD` before pushing)."
+            "default range {range} scanned no commits — HEAD is at or behind its \
+             merge-base with main/master, so the default <merge-base>..HEAD range is \
+             empty and nothing was recorded (common when running on main right after \
+             a commit or merge). To record the latest commit(s), pass an explicit \
+             range, e.g. `--range origin/main..HEAD` before pushing, or (when HEAD has \
+             a parent) `--range HEAD~1..HEAD` for just the last commit."
         ));
     }
 
@@ -453,6 +466,34 @@ mod tests {
         let w = &report.warnings[0];
         assert!(w.contains("default range"), "{w}");
         assert!(w.contains("HEAD~1..HEAD"), "{w}");
+    }
+
+    #[test]
+    fn no_merge_base_head_fallback_does_not_warn() {
+        // A repo whose branch is neither `main` nor `master`: there is
+        // no merge-base default, so `run` falls back to the literal
+        // `HEAD` range (walks all history). That path must NOT get the
+        // merge-base-collapse advisory even though it, too, defaulted —
+        // its message would misdiagnose the situation.
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        seed_issue(root, "foo-bar-baz");
+        git(root, &["add", "."]);
+        commit(root, "initial\n");
+        // Rename the sole branch away from main/master so there is no
+        // merge-base default and `run` falls back to the literal `HEAD`.
+        git(root, &["branch", "-m", "trunk"]);
+
+        let report = run(
+            root,
+            SyncOptions {
+                range: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.range, "HEAD");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     }
 
     #[test]
