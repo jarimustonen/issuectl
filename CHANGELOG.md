@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-15
+
+> Note: trailer-driven changelog compilation (`issuectl changelog`) was introduced
+> mid-cycle in this release (`close --stamp`), so entries below were curated by hand
+> as a one-time transition backfill. From 0.12.0 onward, closing an issue with
+> `--stamp` populates release notes automatically.
+
+### Added
+- **`issuectl close --stamp`** — amends the current HEAD commit to append a
+  `Fixes-Issue: @<slug>` trailer in exactly the format `issuectl changelog`
+  compiles, so trailer-driven release notes accrue with zero manual discipline.
+- **`comment` alias for `note`**, and `--message` / `--body` / `--body-file -`
+  input on `note`/`comment` (previously the body was positional-only).
+- **`issuectl new --lane` / `--lane-seq` / `--add-collision`** — an issue can be
+  born into the scheduling DAG in one call, mirroring `update`.
+- **`issuectl update --add-blocked-by` / `--remove-blocked-by`** (repeatable) —
+  edit dependency edges from the CLI instead of hand-editing frontmatter.
+- **`issuectl update --body-file` / `--description`** — set or replace an existing
+  issue body (accepts `-` for stdin).
+- **`epic tree`** — render epics and their children as a tree in the CLI.
+- **pi.dev skill-corpus lifecycle** — provenance manifest, `skill pi-status`
+  (drift classification), and `skill pi-prune` (safe orphan/missing cleanup),
+  with cross-writer manifest locking.
+- **`doctor --fix` merges `## Notes` into `## Comments`** automatically when an
+  issue carries both sections.
+
+### Fixed
+- **`label … --remove … --json` no longer silently no-ops.** `label` now also
+  accepts the `--add` / `--remove` flag form, and a malformed invocation under
+  `--json` emits a proper error envelope with a non-zero exit instead of empty
+  stdout with the mutation silently skipped.
+- **`list --status done`** (and other closing statuses like `fixed` / `wontfix`)
+  now returns matching closed and archived issues, instead of "No issues found".
+- **`note` without `--as`** prints a clap missing-argument error rather than
+  generic help.
+- **`dag`** no longer excludes `in-progress` issues from the spawnable set, and no
+  longer lists closed/terminal issues in its unscheduled output.
+- **pi-corpus data-safety** — refuses directory-symlink traversal out of the
+  corpus root; no longer misclassifies metadata errors as `Missing` (which could
+  drop a manifest row); the "skills mirrored" hint is gated on the mirror block
+  actually running.
+- **CI flakiness** — deflaked the rate-limit and flock write-lock tests.
+
+### Changed
+- **`sync-commits` warns when the default range is empty on `main`** (a common
+  silent trap where the default `merge-base..HEAD` becomes `HEAD..HEAD`); the
+  warning surfaces in both text and `--json` output.
+- **Action-verb `--json` results echo the mutated field** (`status` / `priority` /
+  `labels`) so a caller can confirm a write without a follow-up `show`.
+- **`note` / `close --as`** strips a single leading `@` from the author instead of
+  rejecting it.
+- **`dag` reservations** accept a `run_id` object shape, not only an array of holds.
+- Internal: collapsed the single-implementation `ConfigSource` seam and made
+  schema/transitions load return by value now that the per-request cache is gone.
+
 ## [0.10.0] - 2026-08-12
 
 ### Removed
