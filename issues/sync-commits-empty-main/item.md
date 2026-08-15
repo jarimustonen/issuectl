@@ -7,6 +7,8 @@ status: open
 priority: normal
 labels: [sync-commits]
 lane: cli-fixes
+lane_seq: 60
+collision: [crates/issuectl/src/main.rs]
 ---
 
 # sync-commits should warn when default range is empty on main

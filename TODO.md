@@ -99,6 +99,7 @@ LANE cli-fixes — CLI surface (crates/issuectl/src/main.rs: clap args + cmd_* d
     intake-feature-issuectl-d93eaa168c66  feature; `update --add-blocked-by @<slug>` / --remove-blocked-by (repeatable) — edit blocked_by via CLI like --add-related; unblocks DAG dependency edges without hand-editing frontmatter. collision: crates/issuectl/src/main.rs
     intake-feature-issuectl-035722451473  feature; `new --lane <lane>` (+ ideally --lane-seq) so an issue is born into the DAG in one call; mirror update --lane. collision: crates/issuectl/src/main.rs
     add-comment-alias  feature; add `comment` alias for `note` and/or accept --message/--body(-file -) alongside the positional body; vocabulary split (close has --comment, note is positional). collision: crates/issuectl/src/main.rs
+    sync-commits-empty-main  bug; `sync-commits` default range on `main` is often HEAD..HEAD (merge-base == HEAD) → scans no commits, reports empty plan silently. Warn when the default range is empty on main. collision: crates/issuectl/src/main.rs
 LANE blocked-upstream — PARKED, do not spawn until upstream-ossctl fix lands
     ossctl-cut-no-publish  high · bug; ossctl release cut doesn't actually publish → manual cargo publish. BLOCKED upstream-ossctl; when fixed, remove AGENTS caveat + re-point releases to ossctl.
 ```
