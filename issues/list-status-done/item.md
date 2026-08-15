@@ -5,6 +5,9 @@ type: bug
 reporter: jari
 status: open
 priority: normal
+lane: cli-fixes
+lane_seq: 20
+collision: [crates/issuectl/src/main.rs]
 ---
 
 # list --status done returns 'No issues found' despite done issues existing

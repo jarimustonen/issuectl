@@ -7,7 +7,9 @@ status: open
 priority: normal
 labels:
 - via:agent-homebase-wrapup
-- needs-triage
+lane: cli-fixes
+lane_seq: 10
+collision: [crates/issuectl/src/main.rs]
 ---
 
 # label: flag-style --remove silently no-ops with --json instead of error…

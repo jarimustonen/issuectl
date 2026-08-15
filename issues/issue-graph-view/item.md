@@ -1,13 +1,14 @@
 ---
 created: 2026-05-06
-updated: 2026-08-10
+updated: 2026-08-15
 type: feature
-status: open
+status: obsolete
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
 labels: [v0.6.0-candidate, visualization, deferred]
+closed: 2026-08-15
 ---
 
 # Issue graph view — multiple lenses on one tool (CLI)

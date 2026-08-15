@@ -1,10 +1,13 @@
 ---
 created: 2026-08-14
-updated: 2026-08-14
+updated: 2026-08-15
 type: bug
 status: open
 priority: high
 labels: [release, changelog]
+lane: release
+lane_seq: 10
+collision: [crates/issuectl/src/main.rs]
 ---
 
 # Changelog trailers never injected → trailer-driven changelog compiles empty

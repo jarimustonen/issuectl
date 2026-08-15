@@ -5,6 +5,9 @@ type: feature
 reporter: jari
 status: open
 priority: normal
+lane: cli-fixes
+lane_seq: 50
+collision: [crates/issuectl/src/main.rs]
 ---
 
 # Add a 'comment' alias for 'note', and accept --message alongside the positional body

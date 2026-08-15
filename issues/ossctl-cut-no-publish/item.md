@@ -1,9 +1,13 @@
 ---
 created: 2026-08-10
-updated: 2026-08-10
+updated: 2026-08-15
 type: bug
 status: open
 priority: high
+lane: blocked-upstream
+lane_seq: 90
+labels:
+- blocked:upstream-ossctl
 ---
 
 # ossctl release cut does not actually publish to crates.io (real-cut no-op); use manual cargo publish until fixed
