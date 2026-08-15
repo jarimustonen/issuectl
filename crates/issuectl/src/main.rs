@@ -3355,13 +3355,23 @@ fn cmd_list(
         });
     }
 
-    // Implicit folder default depends only on the CLI flags, not on
-    // translated terms — otherwise `--status fixed` would silently
-    // surface closed issues, breaking backwards compat with the
-    // pre-query-engine `ls`. A *positional* query is the one
-    // surface where the caller has explicitly opted into "scope it
-    // yourself" mode.
-    let folder_filter = folder_default_filter(all, closed, query_str.is_some());
+    // Implicit folder default: open issues only, unless the caller has
+    // positively pinned scope. `--all`/`--closed`/a positional query
+    // opt out through `folder_default_filter`. A positive `--status`
+    // (or positional `status:`) or `folder:` term — now translated into
+    // `q` above — is likewise an explicit scope pin, so the open-only
+    // default must step out of the way: otherwise `--status done` would
+    // AND `folder:open` against a closing status and match nothing (the
+    // `list-status-done` bug). This mirrors `cmd_search`'s scope rule; a
+    // *negated* term (`-status:wontfix`) is exclusion, not scope, so it
+    // does not expand scope (see `has_positive_field`).
+    let scope_pinned = q.has_positive_field(query::FieldName::Status)
+        || q.has_positive_field(query::FieldName::Folder);
+    let folder_filter = if scope_pinned {
+        None
+    } else {
+        folder_default_filter(all, closed, query_str.is_some())
+    };
 
     let issues = load();
     // `repo::load_issues` already returns issues sorted by slug, so
