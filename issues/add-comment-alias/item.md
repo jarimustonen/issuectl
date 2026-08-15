@@ -3,11 +3,12 @@ created: 2026-08-15
 updated: 2026-08-15
 type: feature
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 lane: cli-fixes
 lane_seq: 50
 collision: [crates/issuectl/src/main.rs]
+closed: 2026-08-15
 ---
 
 # Add a 'comment' alias for 'note', and accept --message alongside the positional body
