@@ -7502,8 +7502,10 @@ mod tests {
     fn update_add_blocked_by_writes_and_normalizes_at_sigil() {
         // `update --add-blocked-by @foo bar` (mixed sigil) round-trips
         // through the same flock/schema write path as `--add-related`
-        // and lands the raw `extra.blocked_by` list. The `@` is stripped
-        // on write (normalization), the same as a `depend add`.
+        // and lands the raw `extra.blocked_by` list. Normalization
+        // rewrites every ref to the canonical `@slug` form on write (the
+        // same value that folds into `canonical_hash`), the same as a
+        // `depend add` or `--add-related`.
         let tmp = fresh_repo();
         let mut a = new_args("task", "Subject");
         a.slug = Some("blk-subject".into());
@@ -7533,7 +7535,16 @@ mod tests {
         assert_eq!(
             issue.blocked_by(),
             vec!["blk-one".to_string(), "blk-two".to_string()],
-            "both blockers must round-trip (sigil stripped): {content}"
+            "both blockers must round-trip (bare, sorted): {content}"
+        );
+        // Assert the RAW stored value, not just `blocked_by()` (which
+        // re-normalizes on read): the mixed-sigil input must be rewritten
+        // to the canonical `@slug` form on disk (insertion order), so the
+        // value folded into `canonical_hash` is the canonical one.
+        assert_eq!(
+            issue.extra.get("blocked_by"),
+            Some(&serde_json::json!(["@blk-one", "@blk-two"])),
+            "raw extra.blocked_by must be canonical @-form: {content}"
         );
     }
 
@@ -7634,6 +7645,93 @@ mod tests {
         assert!(
             extra_blocked.is_none(),
             "raw extra.blocked_by must be stripped: {m:?}"
+        );
+        // The duplicate `proj-zeta` add must not survive in RAW storage
+        // either — `write::add_to_string_list` dedups on insert — so the
+        // canonical hash never folds in a phantom duplicate that the
+        // read-time projection would otherwise paper over. Inspect the raw
+        // `extra.blocked_by` value directly (insertion order, canonical
+        // `@`-form, deduped) rather than trusting the deduping reader.
+        assert_eq!(
+            issue.extra.get("blocked_by"),
+            Some(&serde_json::json!(["@proj-zeta", "@proj-alpha"])),
+            "raw blocked_by must be deduped in storage, not just in projection: {content}"
+        );
+    }
+
+    #[test]
+    fn update_add_blocked_by_self_is_rejected() {
+        // The CLI surface must surface the core self-block guard as an
+        // error (→ `--json` error envelope + non-zero exit in `main`).
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "Subject");
+        a.slug = Some("self-blk".into());
+        let n = do_new(tmp.path(), a).unwrap();
+        let err = do_update(
+            tmp.path(),
+            UpdateArgs {
+                slug: n.slug.clone(),
+                add_blocked_by: vec!["@self-blk".into()],
+                ..Default::default()
+            },
+        )
+        .err()
+        .expect("self-block must be rejected");
+        assert!(
+            err.to_string().contains("cannot block itself"),
+            "self-block must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn update_blocked_by_add_and_remove_same_slug_is_rejected() {
+        // `--add-blocked-by @x --remove-blocked-by x` is conflicting
+        // intent (caught after normalization, so the mixed sigil still
+        // collides) — must error, not silently pick one.
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "Subject");
+        a.slug = Some("conflict-subj".into());
+        let n = do_new(tmp.path(), a).unwrap();
+        let err = do_update(
+            tmp.path(),
+            UpdateArgs {
+                slug: n.slug.clone(),
+                add_blocked_by: vec!["@dep-x".into()],
+                remove_blocked_by: vec!["dep-x".into()],
+                ..Default::default()
+            },
+        )
+        .err()
+        .expect("add+remove overlap must be rejected");
+        assert!(
+            err.to_string()
+                .contains("add_blocked_by and remove_blocked_by"),
+            "add+remove overlap must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn update_add_blocked_by_malformed_ref_is_rejected() {
+        // A malformed ref must fail validation (→ non-zero exit +
+        // `--json` error envelope), per the issue's contract.
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "Subject");
+        a.slug = Some("malformed-subj".into());
+        let n = do_new(tmp.path(), a).unwrap();
+        let err = do_update(
+            tmp.path(),
+            UpdateArgs {
+                slug: n.slug.clone(),
+                add_blocked_by: vec!["not a slug!".into()],
+                ..Default::default()
+            },
+        )
+        .err()
+        .expect("malformed ref must be rejected");
+        assert!(
+            err.to_string()
+                .contains("must be @slug or a kebab-case slug"),
+            "malformed ref must be rejected: {err}"
         );
     }
 
