@@ -60,6 +60,14 @@ pub struct SyncReport {
     /// callers can warn — silently dropping them lets sync run
     /// against a partial picture of the repo.
     pub load_warnings: Vec<String>,
+    /// Machine-readable warnings for the shared `--json` `warnings`
+    /// field. Currently carries the empty-default-range advisory: when
+    /// the range was defaulted (no explicit `--range`) and walked zero
+    /// commits, sync would otherwise look silently successful while
+    /// recording nothing — a common footgun when run directly on
+    /// `main`, where the merge-base is often `HEAD` so the default
+    /// `<merge-base>..HEAD` collapses to `HEAD..HEAD`.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -75,6 +83,10 @@ pub struct SyncOptions {
 }
 
 pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
+    // Track whether the range was defaulted so we can warn (and only
+    // warn) when the DEFAULT range is empty — an explicit `--range`
+    // that happens to be empty is a legitimate user choice we respect.
+    let used_default_range = opts.range.is_none();
     let range = match opts.range.clone() {
         Some(r) => r,
         None => match git_trailers::default_range(repo_root)? {
@@ -88,9 +100,24 @@ pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
 
     let commits = git_trailers::parse_log(repo_root, &range)?;
 
-    let (summaries, warnings) = repo::load_issue_summaries(repo_root);
+    let mut warnings: Vec<String> = Vec::new();
+    if used_default_range && commits.is_empty() {
+        // The default `<merge-base(HEAD, main/master)>..HEAD` collapses
+        // to `HEAD..HEAD` when run directly on main (merge-base == HEAD),
+        // scanning zero commits. Surface it so a just-landed commit
+        // isn't silently left unrecorded.
+        warnings.push(format!(
+            "default range {range} contains no commits — nothing was scanned. \
+             On main the merge-base is often HEAD, so the default \
+             <merge-base>..HEAD collapses to an empty range. To record the \
+             last commit on main, pass an explicit range, e.g. \
+             `--range HEAD~1..HEAD` (or `--range origin/main..HEAD` before pushing)."
+        ));
+    }
+
+    let (summaries, load_warns) = repo::load_issue_summaries(repo_root);
     let known_slugs: BTreeSet<String> = summaries.iter().map(|s| s.slug.clone()).collect();
-    let load_warnings: Vec<String> = warnings.into_iter().map(|w| w.message).collect();
+    let load_warnings: Vec<String> = load_warns.into_iter().map(|w| w.message).collect();
     let mut commit_index: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for s in &summaries {
         let m = commit_index.entry(s.slug.clone()).or_default();
@@ -177,6 +204,7 @@ pub fn run(repo_root: &Path, opts: SyncOptions) -> Result<SyncReport> {
         range,
         branch: branch_slug,
         load_warnings,
+        warnings,
     };
 
     if opts.dry_run {
@@ -399,6 +427,52 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.applied.get("foo-bar-baz").copied(), Some(1));
+    }
+
+    #[test]
+    fn empty_default_range_on_main_warns() {
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        seed_issue(root, "foo-bar-baz");
+        git(root, &["add", "."]);
+        commit(root, "initial\n");
+
+        // On `main`, merge-base(HEAD, main) == HEAD, so the defaulted
+        // range collapses to `HEAD..HEAD` and scans nothing.
+        let report = run(
+            root,
+            SyncOptions {
+                range: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(report.planned.is_empty());
+        assert!(report.applied.is_empty());
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        let w = &report.warnings[0];
+        assert!(w.contains("default range"), "{w}");
+        assert!(w.contains("HEAD~1..HEAD"), "{w}");
+    }
+
+    #[test]
+    fn explicit_empty_range_is_not_warned() {
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        seed_issue(root, "foo-bar-baz");
+        git(root, &["add", "."]);
+        commit(root, "initial\n");
+
+        // Explicit, legitimately-empty range: respect the user's choice.
+        let report = run(
+            root,
+            SyncOptions {
+                range: Some("HEAD..HEAD".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     }
 
     #[test]

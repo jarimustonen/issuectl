@@ -242,6 +242,16 @@ message, then run `issuectl sync-commits` to walk
 the plan; `--no-branch-fallback` disables the implicit
 "branch named after a slug" attribution.
 
+**Recording the last commit on `main`:** the default range is
+`<merge-base(HEAD, main/master)>..HEAD`, which on `main` collapses to
+an empty `HEAD..HEAD` (merge-base == HEAD) and scans nothing — so a
+bare `issuectl sync-commits` right after committing/merging on `main`
+records nothing. When the default range is empty, sync-commits emits a
+warning (in text and as a `warnings[]` entry in `--json`) rather than
+looking silently successful. To record the just-landed commit, pass an
+explicit range: `issuectl sync-commits --range HEAD~1..HEAD` (or
+`--range origin/main..HEAD` before pushing).
+
 To seed the changelog trailer without any manual discipline, close
 the issue with `issuectl close <slug> --stamp` right after committing
 the fix — it stamps the `Fixes-Issue: @<slug>` trailer onto HEAD for

@@ -3,7 +3,7 @@ created: 2026-08-15
 updated: 2026-08-15
 type: improvement
 assignee: ai
-status: open
+status: in-progress
 priority: normal
 labels: [sync-commits]
 lane: cli-fixes

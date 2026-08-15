@@ -1106,7 +1106,12 @@ enum Command {
         /// Range expression passed to `git log` (e.g. `main..HEAD`,
         /// `<sha>..`). Defaults to `<merge-base of HEAD and
         /// main/master>..HEAD`; falls back to `HEAD` when no
-        /// merge-base is found.
+        /// merge-base is found. NOTE: on `main` the merge-base is
+        /// often `HEAD`, so the default collapses to an empty
+        /// `HEAD..HEAD` and scans nothing — to record the last commit
+        /// on main, pass `--range HEAD~1..HEAD` (or
+        /// `--range origin/main..HEAD` before pushing). An empty
+        /// default range is surfaced as a warning.
         #[arg(long)]
         range: Option<String>,
 
@@ -5147,6 +5152,7 @@ fn cmd_sync_commits(
             "fixes_hints": report.fixes_hints.iter().collect::<Vec<_>>(),
             "unknown_slugs": report.unknown_slugs.iter().collect::<Vec<_>>(),
             "load_warnings": report.load_warnings,
+            "warnings": report.warnings,
             "dry_run": report.dry_run,
         });
         println!("{}", serde_json::to_string_pretty(&envelope)?);
@@ -5195,6 +5201,9 @@ fn cmd_sync_commits(
             eprintln!("Warning: trailer references unknown slug @{slug} (no issue with that slug)",);
         }
         for w in &report.load_warnings {
+            eprintln!("Warning: {w}");
+        }
+        for w in &report.warnings {
             eprintln!("Warning: {w}");
         }
     }
