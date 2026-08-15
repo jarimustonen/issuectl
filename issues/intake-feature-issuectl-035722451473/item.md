@@ -3,7 +3,7 @@ created: 2026-08-14
 updated: 2026-08-15
 type: feature
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 labels:
 - via:agent-homebase-wrapup

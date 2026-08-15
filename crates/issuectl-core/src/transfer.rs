@@ -218,6 +218,9 @@ impl ImportRecord {
             source: self.source,
             description: self.description,
             custom_fields: vec![],
+            lane: None,
+            lane_seq: None,
+            collision: vec![],
             status: None,
             inbox: false,
         }

@@ -521,6 +521,9 @@ fn materialize(
             ),
             (OCCURRENCE_KEY.to_string(), occurrence_key.to_string()),
         ],
+        lane: None,
+        lane_seq: None,
+        collision: vec![],
         status: None,
         inbox: false,
     };

@@ -474,6 +474,23 @@ enum Command {
         #[arg(long = "related", value_parser = parse_non_empty)]
         related: Vec<String>,
 
+        /// Set the scheduling lane at creation (see `issuectl dag`), so a
+        /// new issue is born into the DAG in one call instead of a
+        /// follow-up `update --lane`. Mirrors `update --lane`.
+        #[arg(long, value_parser = parse_non_empty)]
+        lane: Option<String>,
+
+        /// Set the coarse intra-lane precedence key at creation (see
+        /// `issuectl dag`); consulted after `blocked_by` and priority,
+        /// before the slug tie-break. Mirrors `update --lane-seq`.
+        #[arg(long = "lane-seq", allow_hyphen_values = true)]
+        lane_seq: Option<i64>,
+
+        /// Add a collision hot-file token at creation (repeatable).
+        /// Mirrors `update --add-collision`.
+        #[arg(long = "add-collision", value_parser = parse_non_empty)]
+        add_collision: Vec<String>,
+
         /// Source line for the body (e.g. "frontend/login")
         #[arg(long, value_parser = parse_non_empty)]
         source: Option<String>,
@@ -2223,6 +2240,9 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             epic,
             labels,
             related,
+            lane,
+            lane_seq,
+            add_collision,
             source,
             description,
             body_file,
@@ -2264,6 +2284,9 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
                     epic,
                     labels,
                     related,
+                    lane,
+                    lane_seq,
+                    collision: add_collision,
                     source,
                     description,
                     custom_fields,
@@ -4364,9 +4387,17 @@ fn cmd_new(json: bool, args: NewArgs, check_duplicates: bool) -> Result<()> {
         // A strong match was found and printed; refuse to create.
         std::process::exit(2);
     }
+    // Whether the caller asked to schedule the issue at creation. When it
+    // did, `--json` echoes the resulting `lane`/`lane_seq`/`collision`
+    // back (read from the freshly-written resource) so a one-call create
+    // confirms the fields landed; a plain `new` keeps its historical
+    // output shape untouched (no lane keys added). `args` is moved into
+    // `do_new`, so capture the flag first.
+    let lane_requested =
+        args.lane.is_some() || args.lane_seq.is_some() || !args.collision.is_empty();
     let out = do_new(&root, args)?;
     if json {
-        let report = serde_json::json!({
+        let mut report = serde_json::json!({
             "slug": out.slug,
             "title": out.title,
             // `path` = the item.md file; `dir` = the issue directory.
@@ -4378,6 +4409,15 @@ fn cmd_new(json: bool, args: NewArgs, check_duplicates: bool) -> Result<()> {
                 .map(|p| p.to_string_lossy().into_owned()),
             "warnings": out.warnings,
         });
+        if lane_requested {
+            // Re-read the created resource so the echoed values are the
+            // typed, on-disk truth (numeric `lane_seq`, deduped
+            // `collision` list) rather than the raw argv.
+            let issue = issuectl_core::parser::parse_item_md(&out.item_path, &out.slug, "open");
+            report["lane"] = serde_json::json!(issue.lane);
+            report["lane_seq"] = serde_json::json!(issue.lane_seq);
+            report["collision"] = serde_json::json!(issue.collision.unwrap_or_default());
+        }
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!("Created {}: {}", out.slug, out.title);
@@ -6909,6 +6949,9 @@ mod tests {
             source: None,
             description: None,
             custom_fields: vec![],
+            lane: None,
+            lane_seq: None,
+            collision: vec![],
             status: None,
             inbox: false,
         }
@@ -6923,6 +6966,46 @@ mod tests {
         let cli =
             Cli::try_parse_from(["issuectl", "create", "--type", "task", "--title", "x"]).unwrap();
         assert!(matches!(cli.command, Command::New { .. }));
+    }
+
+    #[test]
+    fn lane_flags_parse_into_new() {
+        // `new` mirrors `update`'s lane surface so an issue can be born
+        // scheduled in one call: `--lane`, `--lane-seq`, and repeatable
+        // `--add-collision` all route into the `New` variant.
+        let cli = Cli::try_parse_from([
+            "issuectl",
+            "new",
+            "--type",
+            "feature",
+            "--title",
+            "x",
+            "--lane",
+            "cli-fixes",
+            "--lane-seq",
+            "40",
+            "--add-collision",
+            "crates/issuectl/src/main.rs",
+            "--add-collision",
+            "foo/bar.rs",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::New {
+                lane,
+                lane_seq,
+                add_collision,
+                ..
+            } => {
+                assert_eq!(lane.as_deref(), Some("cli-fixes"));
+                assert_eq!(lane_seq, Some(40));
+                assert_eq!(
+                    add_collision,
+                    vec!["crates/issuectl/src/main.rs", "foo/bar.rs"]
+                );
+            }
+            _ => panic!("expected New"),
+        }
     }
 
     #[test]

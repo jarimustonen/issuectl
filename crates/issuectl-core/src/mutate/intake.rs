@@ -322,6 +322,9 @@ pub fn file(root: &Path, req: FileRequest) -> Result<FileOutcome, IntakeError> {
         source: None,
         description: req.body,
         custom_fields,
+        lane: None,
+        lane_seq: None,
+        collision: vec![],
         status: Some("untriaged".to_string()),
         inbox: false,
     };

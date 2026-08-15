@@ -443,6 +443,22 @@ For epics, use `--owner` instead of `--reporter`/`--assignee`:
 issuectl --json new --type epic --title "API v2 migration" --owner cara --priority high
 ```
 
+To **schedule the issue into the DAG at creation**, `new` mirrors `update`'s
+scheduling flags — `--lane NAME`, `--lane-seq <int>`, and repeatable
+`--add-collision TOKEN` — so an issue that should start laned is born that
+way in one call instead of a follow-up `update --lane` (same setters, same
+validation; see the `--lane`/`--lane-seq`/`--add-collision` semantics under
+`update`):
+
+```
+issuectl --json new --type feature --title "Bulk export" \
+    --lane cli-fixes --lane-seq 40 \
+    --add-collision crates/issuectl/src/main.rs
+```
+
+(An issue created without any of these hashes identically to the pre-field
+shape — the lane fields are projected only when set.)
+
 Output shape:
 
 ```json

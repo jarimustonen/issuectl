@@ -66,6 +66,23 @@ pub struct NewArgs {
     pub source: Option<String>,
     pub description: Option<String>,
     pub custom_fields: Vec<(String, String)>,
+    /// Scheduling lane set at creation (`issuectl new --lane`). `None`
+    /// leaves the issue unclassified; `Some` writes a string `lane:`
+    /// key. Mirrors the `update --lane` setter — same non-empty gate,
+    /// same reserved-custom-field key — so an issue can be born into
+    /// the DAG in one call. See `crate::dag`.
+    pub lane: Option<String>,
+    /// Coarse intra-lane precedence key set at creation
+    /// (`issuectl new --lane-seq`). `None` omits it; `Some` writes an
+    /// unquoted YAML integer `lane_seq:`. Numeric mirror of `lane`;
+    /// undeclared in the schema (like `commits`/`estimate`) but known
+    /// to doctor. See `crate::dag`.
+    pub lane_seq: Option<i64>,
+    /// Collision hot-file tokens set at creation
+    /// (`issuectl new --add-collision`, repeatable). Empty leaves no
+    /// `collision:` key; non-empty writes a deduped string list, the
+    /// same list mechanics as `update --add-collision`.
+    pub collision: Vec<String>,
     /// Creation status override. `None` ⇒ `open` (the historical
     /// default). Set to `untriaged` by `mutate::intake::file` so a filed
     /// item is created directly in its reception state.
@@ -93,12 +110,16 @@ impl Default for NewArgs {
             source: None,
             description: None,
             custom_fields: Vec::new(),
+            lane: None,
+            lane_seq: None,
+            collision: Vec::new(),
             status: None,
             inbox: false,
         }
     }
 }
 
+#[derive(Debug)]
 pub struct WriteOutcome {
     pub slug: String,
     pub title: String,
@@ -214,6 +235,25 @@ pub(crate) fn do_new_locked(
         super::validate_custom_field_value(key, value).map_err(DoNewError::Validation)?;
     }
 
+    // Scheduling-DAG fields, set at creation. Mirror the `update --lane`
+    // / `--lane-seq` / `--add-collision` validation exactly: `lane` must
+    // be non-empty (parity with `check_set_nonempty("lane", …)`), and
+    // no `collision:` token may be empty (parity with the `add_collision`
+    // empty-element gate). Belt-and-braces for the CLI (`parse_non_empty`
+    // already rejects these) and primary defense for the API `new` path.
+    if let Some(l) = &args.lane {
+        if l.trim().is_empty() {
+            return Err(DoNewError::Validation(
+                "lane cannot be empty (omit --lane to leave the issue unclassified)".into(),
+            ));
+        }
+    }
+    if args.collision.iter().any(|c| c.trim().is_empty()) {
+        return Err(DoNewError::Validation(
+            "collision contains an empty string element".into(),
+        ));
+    }
+
     let related = refs::normalize_related_refs(&args.related)
         .map_err(|e| DoNewError::Validation(format!("{e:#}")))?;
 
@@ -236,7 +276,24 @@ pub(crate) fn do_new_locked(
     // Validating the in-memory Mapping avoids the round-trip through
     // string parsing that the previous version used (and that subtly
     // duplicated the fragile `find("\n---")` splitter logic).
-    let frontmatter = write::build_new_frontmatter(&new_args);
+    let mut frontmatter = write::build_new_frontmatter(&new_args);
+    // Project the scheduling-DAG fields into the freshly-built mapping
+    // BEFORE schema validation, reusing the exact `write::` setters the
+    // `update --lane` / `--lane-seq` / `--add-collision` path uses:
+    // `set_string` for the string `lane:`, `set_i64` for the unquoted
+    // integer `lane_seq:`, and `add_to_string_list` (which dedupes) for
+    // the `collision:` list. A `NewArgs` that sets none of the three
+    // leaves `frontmatter` byte-identical to the pre-field shape, so an
+    // issue born without a lane still hashes to the golden vector.
+    if let Some(l) = &args.lane {
+        write::set_string(&mut frontmatter, "lane", l);
+    }
+    if let Some(n) = args.lane_seq {
+        write::set_i64(&mut frontmatter, "lane_seq", n);
+    }
+    for c in &args.collision {
+        write::add_to_string_list(&mut frontmatter, "collision", c).map_err(DoNewError::Io)?;
+    }
     let schema =
         crate::schema::load(root).map_err(|e| DoNewError::SchemaConfig(format!("{e:#}")))?;
     {
@@ -537,6 +594,9 @@ mod tests {
             source: None,
             description: None,
             custom_fields: vec![],
+            lane: None,
+            lane_seq: None,
+            collision: vec![],
             status: None,
             inbox: false,
         }
@@ -584,6 +644,107 @@ mod tests {
             .item_path
             .to_string_lossy()
             .contains("/login-redirect-loops/"));
+    }
+
+    #[test]
+    fn new_lane_fields_are_set_and_lift_into_typed_issue() {
+        // `new --lane`/`--lane-seq`/`--add-collision` write the
+        // scheduling-DAG fields at creation, mirroring `update`, so the
+        // issue is born into the DAG in one call. `lane_seq` must render
+        // as an *unquoted* integer (numeric field), `collision` as a
+        // string list, and all three must lift back into the typed
+        // `Issue` fields via the parser.
+        let tmp = fresh_repo();
+        let mut args = new_args("feature", "Scheduled feature");
+        args.slug = Some("sched-feat".into());
+        args.lane = Some("cli-fixes".into());
+        args.lane_seq = Some(40);
+        args.collision = vec!["crates/issuectl/src/main.rs".into(), "foo/bar.rs".into()];
+        let out = do_new(tmp.path(), args).unwrap();
+
+        let content = read(&out.item_path);
+        assert!(content.contains("lane: cli-fixes"), "got: {content}");
+        assert!(
+            content.contains("lane_seq: 40") && !content.contains("lane_seq: '40'"),
+            "lane_seq must be an unquoted integer; got: {content}"
+        );
+
+        let parsed = crate::parser::parse_item_md_with_warnings(&out.item_path, &out.slug, "open");
+        assert_eq!(parsed.issue.lane.as_deref(), Some("cli-fixes"));
+        assert_eq!(parsed.issue.lane_seq, Some(40));
+        assert_eq!(
+            parsed.issue.collision,
+            Some(vec![
+                "crates/issuectl/src/main.rs".to_string(),
+                "foo/bar.rs".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn new_without_lane_omits_the_keys_and_hashes_identically() {
+        // Load-bearing regression: an issue created WITHOUT any lane
+        // field must be byte-for-byte the pre-field shape — no `lane:`,
+        // `lane_seq:`, or `collision:` key — so it hashes identically to
+        // an equivalent issue and never regresses the golden vector
+        // (`canonical::no_lane_collision_hashes_identically` +
+        // `no_lane_seq_hashes_identically` pin the hash side).
+        let tmp = fresh_repo();
+        let mut args = new_args("feature", "Plain feature");
+        args.slug = Some("plain-feat".into());
+        let out = do_new(tmp.path(), args).unwrap();
+
+        let content = read(&out.item_path);
+        assert!(!content.contains("lane:"), "unexpected lane key: {content}");
+        assert!(
+            !content.contains("lane_seq:"),
+            "unexpected lane_seq key: {content}"
+        );
+        assert!(
+            !content.contains("collision:"),
+            "unexpected collision key: {content}"
+        );
+
+        let plain = crate::parser::parse_item_md_with_warnings(&out.item_path, &out.slug, "open");
+        assert_eq!(plain.issue.lane, None);
+        assert_eq!(plain.issue.lane_seq, None);
+        assert_eq!(plain.issue.collision, None);
+
+        // A second no-lane issue with the same authored fields hashes
+        // identically — the lane fields being absent (not `Some(..)`)
+        // keeps them out of `canonical_hash` entirely.
+        let mut args2 = new_args("feature", "Plain feature");
+        args2.slug = Some("plain-feat-2".into());
+        let out2 = do_new(tmp.path(), args2).unwrap();
+        let plain2 =
+            crate::parser::parse_item_md_with_warnings(&out2.item_path, &out2.slug, "open");
+        assert_eq!(
+            crate::canonical::canonical_hash(&plain.issue),
+            crate::canonical::canonical_hash(&plain2.issue),
+            "two no-lane issues with the same authored fields must hash identically"
+        );
+    }
+
+    #[test]
+    fn new_rejects_empty_lane_and_empty_collision_token() {
+        let tmp = fresh_repo();
+        let mut args = new_args("feature", "Bad lane");
+        args.slug = Some("bad-lane".into());
+        args.lane = Some("   ".into());
+        let err = do_new(tmp.path(), args).unwrap_err();
+        assert!(
+            err.to_string().contains("lane cannot be empty"),
+            "got: {err}"
+        );
+
+        let mut args = new_args("feature", "Bad collision");
+        args.slug = Some("bad-collision".into());
+        args.collision = vec!["ok".into(), "".into()];
+        let err = do_new(tmp.path(), args).unwrap_err();
+        assert!(
+            err.to_string().contains("collision contains an empty"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -658,9 +819,7 @@ mod tests {
         .unwrap();
         let mut args = new_args("bug", "Title");
         args.slug = Some("already-taken".into());
-        let err = do_new(tmp.path(), args)
-            .err()
-            .expect("explicit-slug collision must error");
+        let err = do_new(tmp.path(), args).unwrap_err();
         assert!(
             err.to_string().contains("already exists"),
             "expected an already-exists conflict, got {err}"
@@ -741,10 +900,7 @@ mod tests {
             "version: 1\nfields:\n  team:\n    required: true\n",
         )
         .unwrap();
-        let res = do_new(tmp.path(), new_args("bug", "Will fail"));
-        let err = res
-            .err()
-            .expect("schema-required field missing should fail");
+        let err = do_new(tmp.path(), new_args("bug", "Will fail")).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("schema") && msg.contains("team"),
