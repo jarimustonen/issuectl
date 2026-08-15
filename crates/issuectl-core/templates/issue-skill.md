@@ -272,9 +272,9 @@ as `update`; body-only mutation.
   <slug> --as <user> "<message>"` is identical.
 - The message text comes from **exactly one** source: the positional
   argument, `--message`/`--body "<text>"` (mirrors `close --comment` /
-  `new --body`), `--body-file PATH` (`-` reads stdin, like `new
-  --body-file`), `--stdin`, or `--from-file PATH`. Passing two at once is
-  a usage error (`{"error":{"code":"usage-error",…}}`, non-zero exit);
+  `new --body`), `--from-file PATH` / `--body-file PATH` (aliases; `-`
+  reads stdin, like `new --body-file`), or `--stdin`. Passing two at once
+  is a usage error (`{"error":{"code":"usage-error",…}}`, non-zero exit);
   passing none is an error too.
 - `--decision` appends to `## Decisions` instead.
 - `--agent-run` appends to `## Agent Runs` instead.

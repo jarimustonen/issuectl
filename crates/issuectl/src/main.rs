@@ -770,7 +770,7 @@ enum Command {
     #[command(group(clap::ArgGroup::new("note_body")
         .required(false)
         .multiple(false)
-        .args(["message", "message_flag", "stdin", "from_file", "body_file"])))]
+        .args(["message", "message_flag", "stdin", "from_file"])))]
     Note {
         /// Issue slug
         #[arg(value_parser = parse_slug_arg)]
@@ -797,18 +797,13 @@ enum Command {
         #[arg(long)]
         stdin: bool,
 
-        /// Read the note text from this file. Pass `-` to read stdin
-        /// (use `./-` for a file literally named `-`). Input is capped
-        /// at 10 MiB.
-        #[arg(long = "from-file", value_name = "PATH")]
+        /// Read the note text from a file. `--body-file` is a visible
+        /// alias (matching `new --body-file`), so both spellings name this
+        /// one source. Pass `-` to read stdin (use `./-` for a file
+        /// literally named `-`). Mutually exclusive with the other body
+        /// sources; capped at 10 MiB.
+        #[arg(long = "from-file", visible_alias = "body-file", value_name = "PATH")]
         from_file: Option<PathBuf>,
-
-        /// Read the note text from this file, matching `new --body-file`.
-        /// Pass `-` to read stdin (use `./-` for a file literally named
-        /// `-`). Mutually exclusive with the other body sources; capped
-        /// at 10 MiB.
-        #[arg(long = "body-file", value_name = "PATH")]
-        body_file: Option<PathBuf>,
 
         /// Append to the `## Decisions` section instead of `## Comments`.
         #[arg(long, conflicts_with = "agent_run")]
@@ -2427,7 +2422,6 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             message_flag,
             stdin,
             from_file,
-            body_file,
             decision,
             agent_run,
             dry_run,
@@ -2440,7 +2434,6 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             message_flag,
             stdin,
             from_file,
-            body_file,
             decision,
             agent_run,
             dry_run,
@@ -5221,24 +5214,24 @@ fn parse_commit_spec(spec: &str) -> Result<(String, String)> {
 }
 
 /// Resolve the note text from exactly one of: the positional `message`,
-/// the `--message`/`--body` flag (`message_flag`), `--body-file PATH`,
-/// `--stdin`, or `--from-file PATH`. clap's `note_body` arg group guards
-/// against more than one being set — so the `Option::or` chains below can
-/// never discard a value — while this fn enforces that at least one is
-/// present and that the resulting text is non-empty (a blank note is a
-/// no-op that would only clutter the issue body). Returns the text with
-/// surrounding whitespace trimmed so a stray trailing newline (e.g. from
-/// `echo … | issuectl note --stdin`) doesn't bloat the issue body.
+/// the `--message`/`--body` flag (`message_flag`), `--stdin`, or
+/// `--from-file`/`--body-file PATH`. clap's `note_body` arg group guards
+/// against more than one being set — so the `message.or(message_flag)`
+/// below (the positional and its flag spelling are necessarily two clap
+/// fields) can never discard a value — while this fn enforces that at
+/// least one is present and that the resulting text is non-empty (a blank
+/// note is a no-op that would only clutter the issue body). Returns the
+/// text with surrounding whitespace trimmed so a stray trailing newline
+/// (e.g. from `echo … | issuectl note --stdin`) doesn't bloat the body.
 fn read_message_arg(
     message: Option<String>,
     message_flag: Option<String>,
     stdin: bool,
     from_file: Option<PathBuf>,
-    body_file: Option<PathBuf>,
 ) -> Result<String> {
     let text = if let Some(m) = message.or(message_flag) {
         m
-    } else if let Some(path) = from_file.or(body_file) {
+    } else if let Some(path) = from_file {
         read_capped_file(&path, "note")?
     } else if stdin {
         read_capped_stdin("note")?
@@ -5355,13 +5348,12 @@ fn cmd_note(
     message_flag: Option<String>,
     stdin: bool,
     from_file: Option<PathBuf>,
-    body_file: Option<PathBuf>,
     decision: bool,
     agent_run: bool,
     dry_run: bool,
     expected_version: Option<String>,
 ) -> Result<()> {
-    let message = read_message_arg(message, message_flag, stdin, from_file, body_file)?;
+    let message = read_message_arg(message, message_flag, stdin, from_file)?;
     let message = message.as_str();
     let section = if decision {
         body_sections::DECISIONS
@@ -7149,7 +7141,9 @@ mod tests {
     }
 
     #[test]
-    fn body_file_parses_into_note() {
+    fn body_file_is_visible_alias_for_from_file_on_note() {
+        // `--body-file` is a visible alias of `--from-file`, so it lands in
+        // the same `from_file` field (matching `new --body-file`).
         let cli = Cli::try_parse_from([
             "issuectl",
             "comment",
@@ -7161,8 +7155,8 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Command::Note { body_file, .. } => {
-                assert_eq!(body_file.as_deref(), Some(Path::new("note.md")));
+            Command::Note { from_file, .. } => {
+                assert_eq!(from_file.as_deref(), Some(Path::new("note.md")));
             }
             _ => panic!("expected Note"),
         }
@@ -8640,7 +8634,7 @@ mod tests {
 
     #[test]
     fn read_message_arg_prefers_positional() {
-        let got = read_message_arg(Some("hello".into()), None, false, None, None).unwrap();
+        let got = read_message_arg(Some("hello".into()), None, false, None).unwrap();
         assert_eq!(got, "hello");
     }
 
@@ -8648,42 +8642,33 @@ mod tests {
     fn read_message_arg_reads_message_flag() {
         // The `--message`/`--body` flag is a first-class body source
         // alongside the positional.
-        let got = read_message_arg(None, Some("via flag".into()), false, None, None).unwrap();
+        let got = read_message_arg(None, Some("via flag".into()), false, None).unwrap();
         assert_eq!(got, "via flag");
     }
 
     #[test]
     fn read_message_arg_reads_from_file() {
+        // `--from-file` and its `--body-file` visible alias share this one
+        // `from_file` source.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("note.md");
         fs::write(&path, "from a file\n").unwrap();
-        let got = read_message_arg(None, None, false, Some(path), None).unwrap();
+        let got = read_message_arg(None, None, false, Some(path)).unwrap();
         assert_eq!(got, "from a file");
     }
 
     #[test]
-    fn read_message_arg_reads_body_file() {
-        // `--body-file PATH` reads the same way as `--from-file`, matching
-        // `new --body-file`.
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("note.md");
-        fs::write(&path, "from body-file\n").unwrap();
-        let got = read_message_arg(None, None, false, None, Some(path)).unwrap();
-        assert_eq!(got, "from body-file");
-    }
-
-    #[test]
     fn read_message_arg_requires_a_source() {
-        assert!(read_message_arg(None, None, false, None, None).is_err());
+        assert!(read_message_arg(None, None, false, None).is_err());
     }
 
     #[test]
     fn read_message_arg_rejects_blank_text() {
-        assert!(read_message_arg(Some("   \n".into()), None, false, None, None).is_err());
+        assert!(read_message_arg(Some("   \n".into()), None, false, None).is_err());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("blank.md");
         fs::write(&path, "\n\n").unwrap();
-        assert!(read_message_arg(None, None, false, Some(path), None).is_err());
+        assert!(read_message_arg(None, None, false, Some(path)).is_err());
     }
 
     // Small limit so cap tests stay sub-millisecond instead of allocating
