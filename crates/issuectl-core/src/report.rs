@@ -651,6 +651,8 @@ mod tests {
             matches!(outcome, git_trailers::StampOutcome::Stamped { .. }),
             "{outcome:?}"
         );
+        // Rewrite is message-only; the file we committed is untouched.
+        assert!(root.join("fix.txt").exists());
 
         let issues = [mk_issue(
             "a-fox-jr",

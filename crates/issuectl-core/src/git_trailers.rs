@@ -226,173 +226,245 @@ pub fn current_branch(repo_root: &Path) -> Result<Option<String>> {
 
 /// Outcome of [`stamp_fixes_trailer`]. Stamping is a best-effort,
 /// fail-safe side effect: it never aborts the close it rides on, so
-/// the "couldn't stamp" cases are modelled as data (`Skipped`), not
-/// errors. Only a genuine I/O fault running `git` surfaces as `Err`.
+/// every "couldn't / didn't stamp" case is modelled as data, never an
+/// error. The caller (`cmd_close`) maps any residual `Err` from an
+/// unexpected git fault to [`StampOutcome::Skipped`] too, so a stamp
+/// failure never turns a successful close into a command failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StampOutcome {
-    /// A `Fixes-Issue: @<slug>` trailer was appended and HEAD amended.
-    /// Carries the *new* HEAD sha (amending rewrites it).
-    Stamped { sha: String },
+    /// A `Fixes-Issue: @<slug>` trailer was written and HEAD moved to
+    /// the rewritten commit. Carries the *new* sha (`old` is the sha
+    /// before the rewrite, so a caller can fix up any reference it had
+    /// already recorded to the pre-stamp commit).
+    Stamped { old: String, sha: String },
     /// HEAD already carried a matching `Fixes-Issue:` trailer for this
-    /// slug — no amend performed, sha unchanged. Idempotent re-run.
+    /// slug — nothing rewritten, sha unchanged. Idempotent re-run.
     AlreadyPresent { sha: String },
-    /// Stamping was skipped for a safety reason (not a git repo, no
-    /// commits, in-progress rebase/merge, HEAD is a merge commit, or
-    /// staged changes would be folded into the amend). Non-fatal.
+    /// Stamping was declined for a safety reason. Non-fatal.
     Skipped { reason: String },
 }
 
-/// Amend the current HEAD commit's message to append
+/// Rewrite the current HEAD commit so its message carries
 /// `Fixes-Issue: @<slug>` — the exact trailer shape [`parse_trailers`]
 /// accepts and `report::changelog` compiles — so an issue closed with
 /// `issuectl close --stamp` seeds the trailer-driven changelog with
 /// zero human discipline.
 ///
-/// The trailer is written with git's own `interpret-trailers`
-/// (`--if-exists doNothing`), so it lands as a real trailer in the
-/// message's last paragraph and re-running is idempotent (a second
-/// stamp adds nothing). The re-commit uses `git commit --amend
-/// --no-verify` — the tree is unchanged (message-only), so we bypass
-/// hooks to keep a message-only stamp deterministic and independent of
-/// the repo's unrelated pre-commit state.
+/// **Mechanism.** Plumbing, not `git commit --amend`: the trailer is
+/// appended to the exact original message bytes (as its own paragraph,
+/// so [`parse_trailers`]' last-paragraph rule always sees it), a new
+/// commit object is built with [`git commit-tree`] over HEAD's *own*
+/// tree and parents while preserving the original author and committer
+/// identity/dates, and HEAD is moved with a compare-and-swap
+/// `git update-ref HEAD <new> <old>`. This deliberately bypasses the
+/// index, hooks, `commit.cleanup`, and GPG re-signing — the tree is
+/// provably unchanged and the ref update is atomic, so no staged change
+/// can be folded in and no concurrent HEAD move can be clobbered.
 ///
 /// **Fail-safe.** Every unsafe or ambiguous situation returns
-/// `Ok(StampOutcome::Skipped {..})` rather than erroring, so the close
-/// this rides on is never blocked or corrupted:
+/// `Ok(StampOutcome::Skipped {..})` rather than erroring:
 /// - not inside a git repo, or HEAD has no commit yet;
-/// - an in-progress rebase / cherry-pick / merge (amending would
-///   collide with the replay);
+/// - a detached HEAD (would rewrite whatever commit happens to be
+///   checked out — e.g. during `git bisect` or a manual sha checkout);
+/// - an in-progress rebase / cherry-pick / merge / revert;
 /// - HEAD is a merge commit (2+ parents) — the landing fix is a normal
 ///   commit, and we won't rewrite a merge;
-/// - staged changes in the index (a plain `--amend` would silently fold
-///   them into the landing commit).
+/// - HEAD is signed (rewriting would silently drop the signature);
+/// - the compare-and-swap ref update loses a race (HEAD moved).
 ///
 /// **Ordering.** Run this *after* the landing fix is committed — it
 /// stamps whatever HEAD currently is. And run it before the commit is
-/// pushed/merged: amending rewrites HEAD's sha.
+/// pushed/merged: rewriting changes HEAD's sha.
 pub fn stamp_fixes_trailer(repo_root: &Path, slug: &str) -> Result<StampOutcome> {
     if !slug::is_valid(slug) {
         bail!("invalid slug shape: {slug:?}");
     }
 
     // Resolve HEAD. A failure here means "no commits yet" or "not a git
-    // repo" — nothing to stamp.
-    let head = git_stdout(repo_root, &["rev-parse", "--verify", "--quiet", "HEAD"])?;
-    let Some(head) = head else {
+    // repo" — nothing to stamp. This is the one probe where a non-zero
+    // exit is an expected signal rather than a fault.
+    let Some(head) = git_probe(repo_root, &["rev-parse", "--verify", "--quiet", "HEAD"])? else {
         return Ok(StampOutcome::Skipped {
             reason: "no commit at HEAD to stamp (empty repo or not a git repo)".into(),
         });
     };
 
-    // Bail out of any in-progress sequencer operation: amending mid
-    // rebase/cherry-pick/merge fights the replay and can orphan work.
-    let git_dir =
-        git_stdout(repo_root, &["rev-parse", "--git-dir"])?.unwrap_or_else(|| ".git".to_string());
-    let git_dir = repo_root.join(git_dir);
+    // Refuse a detached HEAD: `symbolic-ref -q HEAD` fails when HEAD is
+    // not a branch. Rewriting a detached HEAD stamps whatever commit is
+    // checked out for inspection (bisect, `git checkout <sha>`), which
+    // is never the intent.
+    if git_probe(repo_root, &["symbolic-ref", "--quiet", "HEAD"])?.is_none() {
+        return Ok(StampOutcome::Skipped {
+            reason: "HEAD is detached; not rewriting".into(),
+        });
+    }
+
+    // Bail out of any in-progress sequencer operation: rewriting HEAD
+    // mid replay fights the operation and can orphan work. Resolve each
+    // marker with `rev-parse --git-path` so worktrees / `.git`-file /
+    // external git-dirs resolve correctly instead of a guessed `.git`.
     for marker in [
         "rebase-merge",
         "rebase-apply",
         "CHERRY_PICK_HEAD",
         "MERGE_HEAD",
+        "REVERT_HEAD",
     ] {
-        if git_dir.join(marker).exists() {
+        let path = git_capture(repo_root, &["rev-parse", "--git-path", marker])?;
+        // `--git-path` prints a path relative to git's cwd (repo_root);
+        // join so existence is checked there, not the process cwd.
+        if repo_root.join(path.trim_end()).exists() {
             return Ok(StampOutcome::Skipped {
-                reason: format!("in-progress git operation ({marker}); not amending"),
+                reason: format!("in-progress git operation ({marker}); not rewriting HEAD"),
             });
         }
     }
 
-    // Refuse to rewrite a merge commit: `rev-list --parents -n1` prints
-    // `<sha> <parent>...`, so >2 tokens means 2+ parents.
-    let parents =
-        git_stdout(repo_root, &["rev-list", "--parents", "-n", "1", "HEAD"])?.unwrap_or_default();
-    if parents.split_whitespace().count() > 2 {
+    // Refuse to rewrite a merge commit: `%P` lists only the parents, so
+    // >1 token means 2+ parents. A read failure here is fatal (a safety
+    // check must fail closed, not silently treat HEAD as non-merge).
+    let parents = git_capture(repo_root, &["show", "-s", "--format=%P", "HEAD"])?;
+    let parents: Vec<&str> = parents.split_whitespace().collect();
+    if parents.len() > 1 {
         return Ok(StampOutcome::Skipped {
-            reason: "HEAD is a merge commit; not amending".into(),
+            reason: "HEAD is a merge commit; not rewriting".into(),
         });
     }
 
-    // Staged changes would be folded into the amend. `git diff --cached
-    // --quiet` exits non-zero when the index differs from HEAD.
-    let clean_index = Command::new("git")
-        .args(["diff", "--cached", "--quiet"])
-        .current_dir(repo_root)
-        .status()
-        .with_context(|| "running `git diff --cached`")?
-        .success();
-    if !clean_index {
+    // Refuse to rewrite a signed commit: a rewrite would silently drop
+    // the signature (or, worse, block on a pinentry prompt). `%G?` is
+    // `N` only when there is no signature.
+    let sig = git_capture(repo_root, &["show", "-s", "--format=%G?", "HEAD"])?;
+    if sig.trim() != "N" {
         return Ok(StampOutcome::Skipped {
-            reason: "staged changes in the index would be folded into the amend; \
-                     commit or unstage them, then re-run"
-                .into(),
+            reason: "HEAD is signed; not rewriting (would drop the signature)".into(),
         });
     }
 
-    // Already stamped? Parse HEAD's message with the same rules the
-    // changelog uses and short-circuit — avoids a needless amend (which
-    // would still rewrite the sha via a fresh committer date).
-    let msg = git_stdout(repo_root, &["log", "-1", "--format=%B"])?.unwrap_or_default();
-    let (_, fixes) = parse_trailers(&msg);
+    // Read the *raw message bytes* (not lossily decoded) so a non-UTF-8
+    // commit message round-trips byte-for-byte through the rewrite.
+    let msg = git_capture_bytes(repo_root, &["show", "-s", "--format=%B", "HEAD"])?;
+
+    // Already stamped? Parse the message with the same rules the
+    // changelog uses (a lossy view is fine — slugs are ASCII) and
+    // short-circuit so a re-run is a clean no-op.
+    let (_, fixes) = parse_trailers(&String::from_utf8_lossy(&msg));
     if fixes.iter().any(|s| s == slug) {
         return Ok(StampOutcome::AlreadyPresent { sha: head });
     }
 
-    // Let git write the trailer so it lands in the canonical last
-    // paragraph regardless of the existing body shape.
-    let trailer = format!("Fixes-Issue: @{slug}");
-    let new_msg = git_stdin_stdout(
+    // Build the new message by appending the trailer to the *exact*
+    // original bytes. We construct the block ourselves rather than
+    // shelling to `interpret-trailers` so the result is guaranteed to
+    // satisfy `parse_trailers`' stricter last-paragraph grammar: the
+    // trailer goes in its own paragraph unless the last paragraph is
+    // already trailer-shaped, in which case it joins that block.
+    let mut new_msg = msg.clone();
+    while matches!(new_msg.last(), Some(b'\n' | b'\r')) {
+        new_msg.pop();
+    }
+    let last_para_is_trailers = {
+        let s = String::from_utf8_lossy(&new_msg);
+        last_paragraph_is_trailer_block(&s)
+    };
+    new_msg.extend_from_slice(if last_para_is_trailers {
+        b"\n"
+    } else {
+        b"\n\n"
+    });
+    new_msg.extend_from_slice(format!("Fixes-Issue: @{slug}\n").as_bytes());
+
+    // Postcondition: the message we are about to commit must parse back
+    // to this slug. If it somehow does not, skip WITHOUT rewriting —
+    // never report a `Stamped` the changelog can't see.
+    let (_, new_fixes) = parse_trailers(&String::from_utf8_lossy(&new_msg));
+    if !new_fixes.iter().any(|s| s == slug) {
+        return Ok(StampOutcome::Skipped {
+            reason: "constructed message does not parse back to the trailer; not rewriting".into(),
+        });
+    }
+
+    // Build the replacement commit over HEAD's own tree + parents,
+    // preserving author and committer identity/dates. commit-tree
+    // otherwise stamps the current user/now, which would rewrite
+    // authorship and reorder the commit in date-sorted changelog output.
+    let tree = git_capture(repo_root, &["show", "-s", "--format=%T", "HEAD"])?;
+    let tree = tree.trim();
+    let ident = git_capture(
         repo_root,
         &[
-            "interpret-trailers",
-            "--if-exists",
-            "doNothing",
-            "--trailer",
-            &trailer,
+            "show",
+            "-s",
+            "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+            "HEAD",
         ],
-        &msg,
     )?;
+    let ident: Vec<&str> = ident.trim_end_matches('\n').split('\0').collect();
+    if ident.len() != 6 {
+        return Ok(StampOutcome::Skipped {
+            reason: "could not read HEAD author/committer identity; not rewriting".into(),
+        });
+    }
 
-    // Amend the message only. The index is clean (guarded above), so no
-    // tree change rides along. `--no-verify`: the tree is unchanged, so
-    // the repo's pre-commit hooks have nothing new to validate, and we
-    // don't want unrelated hook state to fail a message-only stamp.
-    let status = Command::new("git")
-        .args(["commit", "--amend", "--no-verify", "--file", "-"])
+    let mut args: Vec<String> = vec!["commit-tree".into(), tree.into()];
+    for p in &parents {
+        args.push("-p".into());
+        args.push((*p).into());
+    }
+    let new_sha = git_commit_tree(repo_root, &args, &new_msg, &ident)?;
+
+    // Compare-and-swap: move HEAD only if it is still `head`. If a
+    // concurrent writer moved HEAD since we read it, this fails and we
+    // skip — never clobbering the other write, and never leaving a
+    // dangling rewrite (the new object is simply unreferenced).
+    let updated = Command::new("git")
+        .args([
+            "update-ref",
+            "-m",
+            "issuectl close --stamp",
+            "HEAD",
+            &new_sha,
+            &head,
+        ])
         .current_dir(repo_root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            child
-                .stdin
-                .take()
-                .expect("piped stdin")
-                .write_all(new_msg.as_bytes())?;
-            child.wait_with_output()
-        })
-        .with_context(|| "running `git commit --amend`")?;
-    if !status.status.success() {
-        // A failed amend (e.g. missing committer identity) is non-fatal
-        // to the close — surface it as a skip with git's own message.
+        .output()
+        .with_context(|| "running `git update-ref`")?;
+    if !updated.status.success() {
         return Ok(StampOutcome::Skipped {
             reason: format!(
-                "`git commit --amend` failed: {}",
-                String::from_utf8_lossy(&status.stderr).trim()
+                "HEAD moved during stamping; not rewriting ({})",
+                String::from_utf8_lossy(&updated.stderr).trim()
             ),
         });
     }
 
-    let new_head =
-        git_stdout(repo_root, &["rev-parse", "--verify", "--quiet", "HEAD"])?.unwrap_or(head);
-    Ok(StampOutcome::Stamped { sha: new_head })
+    Ok(StampOutcome::Stamped {
+        old: head,
+        sha: new_sha,
+    })
 }
 
-/// Run `git <args>` and return trimmed stdout, or `None` when git exits
-/// non-zero (used for probes like `rev-parse --verify` where failure is
-/// an expected "not found" signal, not an error).
-fn git_stdout(repo_root: &Path, args: &[&str]) -> Result<Option<String>> {
+/// True when `msg`'s last paragraph is a valid trailer block by
+/// [`parse_trailers`]' rules (every non-blank line is `Token: value` or
+/// a `#` comment). Used to decide whether an appended trailer joins the
+/// last paragraph or starts a new one.
+fn last_paragraph_is_trailer_block(msg: &str) -> bool {
+    let trimmed = msg.trim_end_matches(['\n', '\r']);
+    let mut block: Vec<&str> = Vec::new();
+    for line in trimmed.lines().rev() {
+        if line.trim().is_empty() {
+            break;
+        }
+        block.push(line);
+    }
+    !block.is_empty() && block.iter().all(|l| is_trailer_line(l))
+}
+
+/// Run `git <args>`, returning `Some(trimmed stdout)` on success or
+/// `None` on a non-zero exit. For probes where a non-zero exit is an
+/// *expected* signal (`rev-parse --verify`, `symbolic-ref`), never a
+/// fault to surface.
+fn git_probe(repo_root: &Path, args: &[&str]) -> Result<Option<String>> {
     let out = Command::new("git")
         .args(args)
         .current_dir(repo_root)
@@ -409,27 +481,21 @@ fn git_stdout(repo_root: &Path, args: &[&str]) -> Result<Option<String>> {
     }
 }
 
-/// Run `git <args>` feeding `input` on stdin, returning stdout. Errors
-/// if git exits non-zero (unlike [`git_stdout`], the callers here treat
-/// a failure as fatal to the operation).
-fn git_stdin_stdout(repo_root: &Path, args: &[&str], input: &str) -> Result<String> {
-    use std::io::Write;
-    let mut child = Command::new("git")
+/// Run `git <args>` and return stdout as a `String`, erroring on a
+/// non-zero exit. Unlike [`git_probe`], a failure here is a genuine
+/// fault: a safety check that cannot read git state must fail closed.
+fn git_capture(repo_root: &Path, args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8_lossy(&git_capture_bytes(repo_root, args)?).into_owned())
+}
+
+/// Like [`git_capture`] but returns the raw stdout bytes, for payloads
+/// (commit messages) that are not guaranteed UTF-8 and must not be
+/// lossily rewritten.
+fn git_capture_bytes(repo_root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let out = Command::new("git")
         .args(args)
         .current_dir(repo_root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .with_context(|| format!("spawning `git {}`", args.join(" ")))?;
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(input.as_bytes())
-        .with_context(|| "writing to git stdin")?;
-    let out = child
-        .wait_with_output()
+        .output()
         .with_context(|| format!("running `git {}`", args.join(" ")))?;
     if !out.status.success() {
         bail!(
@@ -438,7 +504,52 @@ fn git_stdin_stdout(repo_root: &Path, args: &[&str], input: &str) -> Result<Stri
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(out.stdout)
+}
+
+/// Run `git commit-tree <args>` feeding `message` bytes on stdin, with
+/// the six author/committer identity fields (`an ae aI cn ce cI`) set as
+/// environment so the new object preserves the original authorship and
+/// dates. Returns the new commit sha. The stdin write runs on a helper
+/// thread so a large message can't deadlock against git's stdout pipe.
+fn git_commit_tree(
+    repo_root: &Path,
+    args: &[String],
+    message: &[u8],
+    ident: &[&str],
+) -> Result<String> {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .env("GIT_AUTHOR_NAME", ident[0])
+        .env("GIT_AUTHOR_EMAIL", ident[1])
+        .env("GIT_AUTHOR_DATE", ident[2])
+        .env("GIT_COMMITTER_NAME", ident[3])
+        .env("GIT_COMMITTER_EMAIL", ident[4])
+        .env("GIT_COMMITTER_DATE", ident[5])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| "spawning `git commit-tree`")?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let message = message.to_vec();
+    let writer = std::thread::spawn(move || {
+        use std::io::Write;
+        let _ = stdin.write_all(&message);
+        // Drop closes the pipe, signalling EOF to git.
+    });
+    let out = child
+        .wait_with_output()
+        .with_context(|| "running `git commit-tree`")?;
+    let _ = writer.join();
+    if !out.status.success() {
+        bail!(
+            "`git commit-tree` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Map a branch name to a slug if its name *is* a known slug or has
@@ -627,9 +738,6 @@ mod tests {
         tmp
     }
 
-    // Non-empty commit: `git commit --amend` refuses to amend into an
-    // empty tree, so each commit must carry a real change (as a genuine
-    // landing commit would). Append a unique line to a tracked file.
     fn commit(dir: &Path, msg: &str) {
         let data = dir.join("work.txt");
         let prev = std::fs::read_to_string(&data).unwrap_or_default();
@@ -642,12 +750,16 @@ mod tests {
     }
 
     fn head_body(dir: &Path) -> String {
+        show(dir, "%B")
+    }
+
+    fn show(dir: &Path, format: &str) -> String {
         let out = Command::new("git")
-            .args(["log", "-1", "--format=%B"])
+            .args(["show", "-s", &format!("--format={format}")])
             .current_dir(dir)
             .output()
             .unwrap();
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
     }
 
     #[test]
@@ -655,6 +767,7 @@ mod tests {
         let tmp = fresh_repo();
         let root = tmp.path();
         commit(root, "feat: do the thing\n\nlonger body\n");
+        let tree_before = show(root, "%T");
 
         let outcome = stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
         assert!(
@@ -674,6 +787,69 @@ mod tests {
             "body was: {:?}",
             head_body(root)
         );
+        // The rewrite is message-only: the tree is untouched.
+        assert_eq!(show(root, "%T"), tree_before, "tree must not change");
+    }
+
+    #[test]
+    fn stamp_into_prose_last_paragraph_still_parses() {
+        // Regression: a body whose last paragraph is prose with NO
+        // trailing blank line (what `git commit -m` produces). The
+        // trailer must land in its OWN paragraph so `parse_trailers`'
+        // "last paragraph must be all-trailer" rule still sees it.
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        commit(root, "feat: do the thing\n\nprose tail with no newline");
+
+        let outcome = stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
+        assert!(
+            matches!(outcome, StampOutcome::Stamped { .. }),
+            "{outcome:?}"
+        );
+        let commits = parse_log(root, "").unwrap();
+        assert_eq!(
+            commits[0].fixes_issue,
+            vec!["foo-bar-baz".to_string()],
+            "trailer must be parseable; body was {:?}",
+            head_body(root)
+        );
+    }
+
+    #[test]
+    fn stamp_preserves_author_and_dates() {
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        git(root, &["config", "--local", "user.name", "Original Author"]);
+        git(
+            root,
+            &["config", "--local", "user.email", "orig@example.com"],
+        );
+        // A fixed author date in the past; committer date preserved too.
+        std::fs::write(root.join("work.txt"), "x").unwrap();
+        git(root, &["add", "work.txt"]);
+        git(
+            root,
+            &[
+                "commit",
+                "-q",
+                "--date=2020-01-02T03:04:05",
+                "-m",
+                "feat: thing",
+            ],
+        );
+        let (an, ae, ad, cd) = (
+            show(root, "%an"),
+            show(root, "%ae"),
+            show(root, "%aI"),
+            show(root, "%cI"),
+        );
+
+        stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
+
+        assert_eq!(show(root, "%an"), an, "author name preserved");
+        assert_eq!(show(root, "%ae"), ae, "author email preserved");
+        assert_eq!(show(root, "%aI"), ad, "author date preserved");
+        assert_eq!(show(root, "%cI"), cd, "committer date preserved");
     }
 
     #[test]
@@ -683,15 +859,31 @@ mod tests {
         commit(root, "feat: do the thing\n");
 
         let first = stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
-        let StampOutcome::Stamped { sha } = first else {
+        let StampOutcome::Stamped { sha, .. } = first else {
             panic!("expected Stamped, got {first:?}");
         };
-        // Second stamp: trailer already present → no amend, sha stable.
+        // Second stamp: trailer already present → no rewrite, sha stable.
         let second = stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
         assert_eq!(second, StampOutcome::AlreadyPresent { sha });
         // Exactly one trailer line, not two.
         let body = head_body(root);
         assert_eq!(body.matches("Fixes-Issue: @foo-bar-baz").count(), 1);
+    }
+
+    #[test]
+    fn stamp_adds_second_distinct_fixes_trailer() {
+        // A commit that fixes two issues: stamping a second, different
+        // slug must add it, not silently no-op.
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        commit(root, "feat: do the thing\n");
+        stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
+        stamp_fixes_trailer(root, "qux-quux-corge").unwrap();
+        let commits = parse_log(root, "").unwrap();
+        assert_eq!(
+            commits[0].fixes_issue,
+            vec!["foo-bar-baz".to_string(), "qux-quux-corge".to_string()]
+        );
     }
 
     #[test]
@@ -712,19 +904,71 @@ mod tests {
     }
 
     #[test]
-    fn stamp_skips_when_index_has_staged_changes() {
+    fn stamp_ignores_staged_changes() {
+        // Plumbing rewrites HEAD's own tree, so a dirty index is neither
+        // folded in nor a reason to skip — it is left exactly as staged.
         let tmp = fresh_repo();
         let root = tmp.path();
         commit(root, "feat: do the thing\n");
+        let tree_before = show(root, "%T");
         std::fs::write(root.join("staged.txt"), "content").unwrap();
         git(root, &["add", "staged.txt"]);
 
         let outcome = stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
         assert!(
-            matches!(outcome, StampOutcome::Skipped { .. }),
-            "expected Skipped, got {outcome:?}"
+            matches!(outcome, StampOutcome::Stamped { .. }),
+            "{outcome:?}"
         );
-        assert!(!head_body(root).contains("Fixes-Issue"));
+        // HEAD's tree unchanged (staged file not folded)…
+        assert_eq!(show(root, "%T"), tree_before);
+        // …and the staged file is still staged.
+        let staged = Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&staged.stdout).contains("staged.txt"));
+    }
+
+    #[test]
+    fn stamp_skips_detached_head() {
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        commit(root, "one\n");
+        commit(root, "two\n");
+        git(root, &["checkout", "-q", "HEAD~1"]); // detached
+        let outcome = stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
+        assert!(
+            matches!(&outcome, StampOutcome::Skipped { reason } if reason.contains("detached")),
+            "expected detached skip, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn stamp_skips_in_progress_revert() {
+        let tmp = fresh_repo();
+        let root = tmp.path();
+        commit(root, "base\n");
+        commit(root, "second\n");
+        // Simulate a revert-in-progress by creating the REVERT_HEAD
+        // marker directly — robust across git versions. The `--git-path`
+        // output is relative to root, so join it.
+        let marker = root.join(show_raw(root, &["rev-parse", "--git-path", "REVERT_HEAD"]).trim());
+        std::fs::write(&marker, show(root, "%H")).unwrap();
+        let outcome = stamp_fixes_trailer(root, "foo-bar-baz").unwrap();
+        assert!(
+            matches!(&outcome, StampOutcome::Skipped { reason } if reason.contains("REVERT_HEAD")),
+            "expected revert skip, got {outcome:?}"
+        );
+    }
+
+    fn show_raw(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
     #[test]

@@ -670,15 +670,17 @@ enum Command {
         #[arg(long = "commit", value_parser = parse_non_empty)]
         commits: Vec<String>,
 
-        /// After closing, amend the current HEAD commit to append a
-        /// `Fixes-Issue: @<slug>` trailer, so the trailer-driven
+        /// After closing, rewrite the current HEAD commit's message to
+        /// append a `Fixes-Issue: @<slug>` trailer, so the trailer-driven
         /// `issuectl changelog` picks the landing commit up with zero
         /// manual trailer discipline. Run this AFTER committing the fix
         /// (it stamps whatever HEAD is) and BEFORE pushing/merging
-        /// (amending rewrites HEAD's sha). Skipped — never fails the
-        /// close — when HEAD is a merge commit, a rebase/cherry-pick/
-        /// merge is in progress, the index has staged changes, or there
-        /// is no commit to stamp.
+        /// (rewriting changes HEAD's sha). Message-only: the tree,
+        /// author, and dates are preserved and the index is left alone.
+        /// Skipped — never fails the close — when HEAD is detached, a
+        /// merge commit, signed, mid rebase/cherry-pick/merge/revert, or
+        /// there is no commit to stamp. Cannot combine with a `--commit`
+        /// that points at HEAD (the rewrite would orphan that reference).
         #[arg(long = "stamp")]
         stamp: bool,
 
@@ -4665,6 +4667,19 @@ fn cmd_close(
     expected_version: Option<String>,
 ) -> Result<()> {
     let root = find_root();
+    // Guard the one combination `--stamp` can corrupt: recording a
+    // commit that resolves to the *current* HEAD, which stamping then
+    // rewrites — the issue would keep a reference to the pre-stamp sha.
+    // Reject before any mutation so nothing is half-written; the user
+    // can `close --stamp` and then `update --add-commit <new-sha>`.
+    if stamp {
+        if let Some(hash) = stamp_would_orphan_commit(&root, &commits) {
+            bail!(
+                "--commit {hash} resolves to the current HEAD, which --stamp rewrites; \
+                 drop --commit and record the stamped sha afterwards with `update --add-commit`"
+            );
+        }
+    }
     let out = do_close(
         &root,
         slug,
@@ -4676,9 +4691,18 @@ fn cmd_close(
     )?;
     // Stamp the `Fixes-Issue: @<slug>` changelog trailer into HEAD only
     // after the close itself has landed — a fail-safe side effect that
-    // never blocks the close (see `git_trailers::stamp_fixes_trailer`).
+    // must never block the close: any unexpected git fault is downgraded
+    // to a `Skipped` outcome rather than propagated (the close already
+    // succeeded, so failing the command here would mislead automation
+    // into thinking the close failed).
     let stamp_outcome = if stamp {
-        Some(git_trailers::stamp_fixes_trailer(&root, slug)?)
+        Some(
+            git_trailers::stamp_fixes_trailer(&root, slug).unwrap_or_else(|e| {
+                git_trailers::StampOutcome::Skipped {
+                    reason: format!("stamping failed: {e:#}"),
+                }
+            }),
+        )
     } else {
         None
     };
@@ -4723,17 +4747,61 @@ fn cmd_close(
     Ok(())
 }
 
+/// Return the offending `--commit` hash if any recorded commit resolves
+/// to the current HEAD (which `--stamp` would rewrite, orphaning the
+/// recorded reference). `None` when there is no repo/HEAD or nothing
+/// collides — a best-effort check that never itself fails the command.
+fn stamp_would_orphan_commit(root: &Path, commits: &[String]) -> Option<String> {
+    if commits.is_empty() {
+        return None;
+    }
+    let head = git_rev_parse(root, "HEAD")?;
+    for spec in commits {
+        let hash = spec.split(':').next().unwrap_or(spec).trim();
+        if hash.is_empty() {
+            continue;
+        }
+        if let Some(resolved) = git_rev_parse(root, &format!("{hash}^{{commit}}")) {
+            if resolved == head {
+                return Some(hash.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// `git rev-parse --verify --quiet <rev>` → the full sha, or `None` on
+/// any failure (not a repo, unknown rev). Never errors.
+fn git_rev_parse(root: &Path, rev: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", rev])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 /// Render a [`StampOutcome`] as the `stamp` object echoed in `close
 /// --json` output, so a caller confirms whether the changelog trailer
-/// landed (and, when skipped, why) from the same result.
+/// landed (and, when skipped, why) from the same result. Shape is a
+/// stable `{ "status": ... }` discriminator so consumers switch on one
+/// field rather than probing for presence.
 fn stamp_report_json(outcome: &git_trailers::StampOutcome) -> serde_json::Value {
     use git_trailers::StampOutcome::*;
     match outcome {
-        Stamped { sha } => serde_json::json!({ "stamped": true, "sha": sha }),
-        AlreadyPresent { sha } => {
-            serde_json::json!({ "stamped": false, "already_present": true, "sha": sha })
+        Stamped { old, sha } => {
+            serde_json::json!({ "status": "stamped", "sha": sha, "previous_sha": old })
         }
-        Skipped { reason } => serde_json::json!({ "stamped": false, "skipped": reason }),
+        AlreadyPresent { sha } => serde_json::json!({ "status": "already_present", "sha": sha }),
+        Skipped { reason } => serde_json::json!({ "status": "skipped", "reason": reason }),
     }
 }
 
@@ -4741,11 +4809,12 @@ fn stamp_report_json(outcome: &git_trailers::StampOutcome) -> serde_json::Value 
 /// it stays out of any parsed stdout.
 fn stamp_report_human(outcome: &git_trailers::StampOutcome) -> String {
     use git_trailers::StampOutcome::*;
+    let short = |sha: &str| sha[..sha.len().min(12)].to_string();
     match outcome {
-        Stamped { sha } => {
+        Stamped { sha, .. } => {
             format!(
-                "Stamped Fixes-Issue trailer into {} (HEAD amended).",
-                &sha[..sha.len().min(12)]
+                "Stamped Fixes-Issue trailer into {} (HEAD rewritten).",
+                short(sha)
             )
         }
         AlreadyPresent { .. } => {
