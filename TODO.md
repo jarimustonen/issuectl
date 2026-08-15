@@ -156,3 +156,4 @@ ks. Execution DAG yllä. Ei enää untriaged-jonossa._
 - [x] 🐛 issuectl new: accept --lane → `cli-fixes` ([`intake-feature-issuectl-035722451473`](issues/intake-feature-issuectl-035722451473/item.md))
 - [x] 🐛 issuectl update: add --add-blocked-by → `cli-fixes` ([`intake-feature-issuectl-d93eaa168c66`](issues/intake-feature-issuectl-d93eaa168c66/item.md))
 - [x] 🐛 label: --remove --json silent no-op → `cli-fixes` (HEAD of lane) ([`intake-bug-issuectl-d6947128f6c9`](issues/intake-bug-issuectl-d6947128f6c9/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: issuectl label: accept --add/--remove flag aliases (canonical skills us… — jari via Telegram ([`intake-feature-issuectl-986ecd5a58a9`](issues/intake-feature-issuectl-986ecd5a58a9/item.md))
