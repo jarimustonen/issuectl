@@ -3,11 +3,12 @@ created: 2026-08-15
 updated: 2026-08-15
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 lane: cli-fixes
 lane_seq: 20
 collision: [crates/issuectl/src/main.rs]
+closed: 2026-08-15
 ---
 
 # list --status done returns 'No issues found' despite done issues existing
