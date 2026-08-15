@@ -3,12 +3,13 @@ created: 2026-08-15
 updated: 2026-08-15
 type: improvement
 assignee: ai
-status: in-progress
+status: done
 priority: normal
 labels: [sync-commits]
 lane: cli-fixes
 lane_seq: 60
 collision: [crates/issuectl/src/main.rs]
+closed: 2026-08-15
 ---
 
 # sync-commits should warn when default range is empty on main
