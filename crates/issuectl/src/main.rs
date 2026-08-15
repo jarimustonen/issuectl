@@ -857,44 +857,58 @@ enum Command {
         expected_version: Option<String>,
     },
 
-    /// Add or remove a label. Re-running the same call is safe: a
-    /// duplicate add is a no-op on labels (the list is deduped) and
-    /// removing an absent label is a no-op too. Note that the
+    /// Add or remove a label. Two equivalent forms: the positional
+    /// `label <slug> add|remove <label>` and the flag form
+    /// `label <slug> --add|--remove <label>`; supply exactly one. Re-running
+    /// the same call is safe: a duplicate add is a no-op on labels (the list
+    /// is deduped) and removing an absent label is a no-op too. Note that the
     /// `updated:` frontmatter date is still bumped on every call —
     /// idempotency here means "won't error / won't double the
     /// label," not "byte-identical file."
+    ///
+    /// The `label_target` group makes clap enforce "exactly one form" itself,
+    /// so an incomplete invocation (bare `label <slug>`, or `op` with no
+    /// `<label>`) is a proper clap usage error — exit 2 in human mode, the
+    /// `usage-error` envelope under `--json` — never a late runtime failure.
+    #[command(group(clap::ArgGroup::new("label_target")
+        .required(true)
+        .multiple(false)
+        .args(["op", "add", "remove"])))]
     Label {
         /// Issue slug
         #[arg(value_parser = parse_slug_arg)]
         slug: String,
 
-        /// Operation (positional form): `add` or `remove`. Optional only
-        /// because the `--add`/`--remove` flag form is accepted instead;
-        /// exactly one form must be supplied.
-        #[arg(value_enum)]
+        /// Operation (positional form): `add` or `remove`. Optional at the
+        /// clap layer only so the `--add`/`--remove` flag form can stand in;
+        /// when given it `requires` the positional `<label>`.
+        #[arg(value_enum, requires = "label")]
         op: Option<LabelOp>,
 
-        /// Label (positional form). Required alongside a positional `op`.
+        /// Label (positional form). Supplied with a positional `op`; the
+        /// `op` → `label` `requires` edge makes clap demand it.
         #[arg(value_parser = parse_non_empty)]
         label: Option<String>,
 
-        /// Flag form: add this label (alias for `add <label>`), mirroring
-        /// the `--add`/`--remove` style other verbs use. Mutually
-        /// exclusive with the positional `op`/`label` and with `--remove`.
+        /// Flag form: add this label (alias for the positional `add <label>`).
+        /// In the `label_target` group, so it is mutually exclusive with the
+        /// positional `op` and with `--remove`; also conflicts with a
+        /// positional `<label>`.
         #[arg(
             long,
             value_name = "LABEL",
             value_parser = parse_non_empty,
-            conflicts_with_all = ["op", "label", "remove"],
+            conflicts_with = "label",
         )]
         add: Option<String>,
 
-        /// Flag form: remove this label (alias for `remove <label>`).
+        /// Flag form: remove this label (alias for the positional
+        /// `remove <label>`).
         #[arg(
             long,
             value_name = "LABEL",
             value_parser = parse_non_empty,
-            conflicts_with_all = ["op", "label", "add"],
+            conflicts_with = "label",
         )]
         remove: Option<String>,
 
@@ -5314,33 +5328,28 @@ fn cmd_check(
     finish_mutation(json, slug, &outcome, dry_run, "Toggled checkbox in")
 }
 
-/// Resolve the two accepted `label` invocation forms — the positional
+/// Collapse the two accepted `label` invocation forms — the positional
 /// `label <slug> add|remove <label>` and the flag form
 /// `label <slug> --add|--remove <label>` — into a single `(op, label)`
-/// pair. clap's `conflicts_with_all` already rejects *mixing* the forms,
-/// so the only failure this has to name is an *incomplete* invocation (an
-/// operation with no label, or neither form at all). The error spells out
-/// BOTH accepted shapes, so a caller who reached for the flag style — the
-/// papercut in `@intake-bug-issuectl-d6947128f6c9` — is pointed at the
-/// positional form, and vice versa, instead of a bare clap `Usage:` line.
+/// pair. The `label_target` `ArgGroup` plus the `op` → `label` `requires`
+/// edge (see the `Label` variant) make clap accept *exactly one complete
+/// form*, so every reachable input matches one of the three valid arms.
+/// The `_` arm is therefore an internal-invariant guard, not a
+/// user-facing usage error: incomplete/mixed invocations are already
+/// rejected by clap as `usage-error` before dispatch ever calls this.
 fn resolve_label_target(
     op: Option<LabelOp>,
     label: Option<String>,
     add: Option<String>,
     remove: Option<String>,
 ) -> Result<(LabelOp, String)> {
-    if let Some(label) = add {
-        return Ok((LabelOp::Add, label));
-    }
-    if let Some(label) = remove {
-        return Ok((LabelOp::Remove, label));
-    }
-    match (op, label) {
-        (Some(op), Some(label)) => Ok((op, label)),
+    match (op, label, add, remove) {
+        (Some(op), Some(label), None, None) => Ok((op, label)),
+        (None, None, Some(label), None) => Ok((LabelOp::Add, label)),
+        (None, None, None, Some(label)) => Ok((LabelOp::Remove, label)),
         _ => Err(anyhow::anyhow!(
-            "label needs an operation and a label. Use the positional form \
-             `issuectl label <slug> add|remove <label>` or the flag form \
-             `issuectl label <slug> --add|--remove <label>`."
+            "internal error: label arguments were not constrained to exactly \
+             one form by clap (this is a bug in the `label_target` arg group)"
         )),
     }
 }

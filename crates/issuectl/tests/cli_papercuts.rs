@@ -426,9 +426,18 @@ fn note_missing_as_json_emits_usage_error_envelope() {
 // line, and — the core bug — under `--json` clap's usage error escaped the
 // envelope contract entirely on some builds, reading as a silent no-op
 // (empty stdout, exit non-zero, mutation skipped). We now (a) accept the
-// flag form as an alias for the positional op, and (b) guarantee every
-// malformed `label` invocation under `--json` emits the standard error
-// envelope with empty stdout and a non-zero exit, never a silent skip.
+// flag form as an alias for the positional op, and (b) route EVERY
+// malformed `label` invocation through clap's `label_target` arg group so
+// it is a uniform `usage-error` — exit 2 in human mode, the `usage-error`
+// envelope (empty stdout, exit 1, mutation skipped) under `--json` — the
+// same code every other clap usage error carries, never a silent skip and
+// never the generic `command-failed` a late handler check would have
+// produced.
+//
+// `expect_usage_error_json` pins the full `--json` contract for one
+// malformed invocation; the table test below drives every form-shape
+// through it so a future clap refactor can't reintroduce the split
+// between clap-level and handler-level rejection.
 
 /// Reads the `labels` array of an issue as a `Vec<String>` (empty when the
 /// frontmatter has no labels — the `--json` echo renders that as `null`).
@@ -468,6 +477,32 @@ fn label_flag_form_adds_and_removes() {
     assert!(labels_of(r, "lbl-flag").is_empty());
 }
 
+/// The flag form routes through the same idempotent mutate path as the
+/// positional form: a repeated `--add` is a no-op (no double entry) and
+/// `--dry-run` writes nothing.
+#[test]
+fn label_flag_form_is_idempotent_and_honors_dry_run() {
+    let tmp = fresh_repo();
+    let r = tmp.path();
+    seed_issue(r, "lbl-idem");
+
+    run_ok(r, &["label", "lbl-idem", "--add", "infra"]);
+    run_ok(r, &["label", "lbl-idem", "--add", "infra"]);
+    assert_eq!(
+        labels_of(r, "lbl-idem"),
+        vec!["infra".to_string()],
+        "repeated --add must not double the label"
+    );
+
+    // --dry-run reports success (exit 0) but must not touch the file.
+    run_ok(r, &["label", "lbl-idem", "--remove", "infra", "--dry-run"]);
+    assert_eq!(
+        labels_of(r, "lbl-idem"),
+        vec!["infra".to_string()],
+        "--dry-run on the flag form must not mutate"
+    );
+}
+
 /// The exact invocation from the bug report — flag-style `--remove` under
 /// `--json` — now succeeds, removes the label, and echoes the resulting
 /// (empty) label set rather than silently no-op'ing.
@@ -495,20 +530,27 @@ fn label_flag_remove_json_applies_and_echoes() {
     assert!(labels_of(r, "lbl-jsonflag").is_empty());
 }
 
-/// CORE REGRESSION: a malformed `label` invocation under `--json` (here,
-/// no operation at all) MUST emit the standard error envelope on stderr,
-/// keep stdout empty, exit non-zero, and NOT touch the issue's labels — the
-/// silent-no-op the bug described must never recur.
-#[test]
-fn label_json_malformed_emits_envelope_and_skips_mutation() {
+/// Runs `label <slug-args> --json`, seeding `slug` with the label `keep`
+/// first, and asserts the FULL malformed-`--json` contract: exit 1, empty
+/// stdout, a `usage-error` envelope on stderr, and — the heart of the bug
+/// — the issue's labels untouched (no silent mutation).
+fn expect_usage_error_json(label_args: &[&str], slug: &str) {
     let tmp = fresh_repo();
     let r = tmp.path();
-    seed_issue(r, "lbl-guard");
-    run_ok(r, &["label", "lbl-guard", "add", "keep"]);
+    seed_issue(r, slug);
+    run_ok(r, &["label", slug, "add", "keep"]);
 
-    let out = run(r, &["label", "lbl-guard", "--json"]);
-    // (a) non-zero exit + EMPTY stdout + a well-formed error envelope.
-    assert_ne!(out.status.code(), Some(0), "{}", dump(&out));
+    let mut args = vec!["label"];
+    args.extend_from_slice(label_args);
+    args.push("--json");
+    let out = run(r, &args);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "malformed label under --json must exit 1; {}",
+        dump(&out)
+    );
     assert!(
         out.stdout.is_empty(),
         "stdout must be empty under --json on failure; {}",
@@ -516,48 +558,73 @@ fn label_json_malformed_emits_envelope_and_skips_mutation() {
     );
     let envelope: serde_json::Value =
         serde_json::from_slice(&out.stderr).expect("json error envelope on stderr");
-    assert!(
-        envelope["error"]["code"].is_string(),
-        "error.code must be a kebab string; {}",
+    assert_eq!(
+        envelope["error"]["code"],
+        "usage-error",
+        "every malformed label invocation must carry the shared usage-error \
+         code, not command-failed; {}",
         dump(&out)
     );
-    let message = envelope["error"]["message"]
-        .as_str()
-        .expect("error.message string");
-    // The message names both accepted forms so the caller can recover.
-    assert!(
-        message.contains("add|remove") && message.contains("--add"),
-        "message must name both label forms; got:\n{message}"
+    // The heart of the bug: the mutation must NOT have been applied.
+    assert_eq!(
+        labels_of(r, slug),
+        vec!["keep".to_string()],
+        "labels must be untouched on a rejected invocation; {}",
+        dump(&out)
     );
-    // (b) the mutation was NOT applied.
-    assert_eq!(labels_of(r, "lbl-guard"), vec!["keep".to_string()]);
 }
 
-/// Mixing the positional and flag forms is a clap usage error (exit 2)
-/// that names the conflicting args — it does not silently pick one.
+/// CORE REGRESSION: every malformed shape of `label … --json` — no
+/// operation, an operation with no label, a bad enum value, a flag with no
+/// value, an empty flag value, or any mix of the positional and flag forms
+/// (both orderings) — MUST emit the `usage-error` envelope with empty
+/// stdout and leave the labels untouched. The silent-no-op the bug
+/// described must never recur, and the code must never regress to the
+/// generic `command-failed`.
 #[test]
-fn label_rejects_mixed_positional_and_flag() {
-    let tmp = fresh_repo();
-    let r = tmp.path();
-    seed_issue(r, "lbl-mixed");
-
-    let out = run(r, &["label", "lbl-mixed", "add", "x", "--remove", "y"]);
-    assert_eq!(out.status.code(), Some(2), "{}", dump(&out));
+fn label_json_malformed_variants_emit_usage_error_and_skip_mutation() {
+    // Each case is a distinct malformed shape; the tail slug keeps the
+    // seeded repos isolated. `--json` is appended by the helper.
+    let cases: &[(&[&str], &str)] = &[
+        (&["lbl-bare"], "lbl-bare"),                     // no op at all
+        (&["lbl-noarg", "add"], "lbl-noarg"),            // op, no <label>
+        (&["lbl-noarg2", "remove"], "lbl-noarg2"),       // op, no <label>
+        (&["lbl-badenum", "frobnicate"], "lbl-badenum"), // bad enum value
+        (&["lbl-flagnoval", "--add"], "lbl-flagnoval"),  // flag, no value
+        (&["lbl-empty", "--add", ""], "lbl-empty"),      // empty flag value
+        (&["lbl-mix1", "add", "x", "--remove", "y"], "lbl-mix1"),
+        (&["lbl-mix2", "remove", "x", "--add", "y"], "lbl-mix2"),
+        (&["lbl-mix3", "--add", "x", "--remove", "y"], "lbl-mix3"),
+        (&["lbl-mix4", "--add", "x", "remove", "y"], "lbl-mix4"),
+    ];
+    for (args, slug) in cases {
+        expect_usage_error_json(args, slug);
+    }
 }
 
-/// An incomplete `label` invocation in human mode names BOTH accepted
-/// forms — the positional-only requirement is no longer a bare `Usage:`.
+/// The same malformed shapes in HUMAN mode stay clap usage errors (exit 2),
+/// unchanged from before the flag form existed — making the positionals
+/// optional at the clap layer must not silently downgrade the exit code to
+/// a runtime failure (exit 1).
 #[test]
-fn label_missing_operation_names_both_forms() {
+fn label_malformed_human_mode_keeps_usage_exit_code() {
     let tmp = fresh_repo();
     let r = tmp.path();
-    seed_issue(r, "lbl-bare");
-
-    let out = run(r, &["label", "lbl-bare"]);
-    assert_ne!(out.status.code(), Some(0), "{}", dump(&out));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("add|remove") && stderr.contains("--add"),
-        "error must name both label forms; got:\n{stderr}"
-    );
+    seed_issue(r, "lbl-exit");
+    let cases: &[&[&str]] = &[
+        &["label", "lbl-exit"],
+        &["label", "lbl-exit", "add"],
+        &["label", "lbl-exit", "frobnicate"],
+        &["label", "lbl-exit", "add", "x", "--remove", "y"],
+        &["label", "lbl-exit", "--add", "x", "--remove", "y"],
+    ];
+    for args in cases {
+        let out = run(r, args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "`{args:?}` must exit 2 (clap usage error); {}",
+            dump(&out)
+        );
+    }
 }
