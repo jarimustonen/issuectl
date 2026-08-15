@@ -3,13 +3,14 @@ created: 2026-08-14
 updated: 2026-08-15
 type: feature
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 labels:
 - via:agent-homebase-wrapup
 lane: cli-fixes
 lane_seq: 30
 collision: [crates/issuectl/src/main.rs]
+closed: 2026-08-15
 ---
 
 # issuectl update: add --blocked-by / --add-blocked-by (edit blocked_by v…
