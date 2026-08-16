@@ -22,7 +22,7 @@ fn root_help_json_is_a_single_structured_document() {
         .unwrap()
         .iter()
         .any(|command| command["name"] == "new"));
-    assert!(document["examples"].as_array().unwrap().len() >= 1);
+    assert!(!document["examples"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -43,4 +43,29 @@ fn subcommand_help_json_includes_values_and_global_json_flag() {
     assert!(flags
         .iter()
         .any(|flag| flag["long"] == "--json" && flag["global"] == true));
+}
+
+#[test]
+fn nested_and_aliased_help_json_follow_claps_resolved_command() {
+    let nested = run(&["body", "set", "--help", "--json"]);
+    assert_eq!(nested.status.code(), Some(0), "{nested:?}");
+    let nested: serde_json::Value = serde_json::from_slice(&nested.stdout).unwrap();
+    assert_eq!(
+        nested["path"],
+        serde_json::json!(["issuectl", "body", "set"])
+    );
+
+    let alias = run(&["ls", "--help", "--json"]);
+    assert_eq!(alias.status.code(), Some(0), "{alias:?}");
+    let alias: serde_json::Value = serde_json::from_slice(&alias.stdout).unwrap();
+    assert_eq!(alias["path"], serde_json::json!(["issuectl", "list"]));
+}
+
+#[test]
+fn invalid_help_invocation_remains_a_json_usage_error() {
+    let output = run(&["no-such-command", "--help", "--json"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "usage-error");
 }

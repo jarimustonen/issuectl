@@ -2085,9 +2085,14 @@ fn usage_command_path(err: &clap::Error) -> Vec<String> {
     let usage = match err.get(ContextKind::Usage) {
         Some(ContextValue::StyledStr(s)) => s.to_string(),
         Some(ContextValue::String(s)) => s.clone(),
-        _ => return Vec::new(),
+        // DisplayHelp does not carry a Usage context in clap 4.6, even
+        // though its rendered output includes the same usage line.
+        _ => err.to_string(),
     };
-    let line = usage.lines().next().unwrap_or("");
+    let line = usage
+        .lines()
+        .find(|line| line.trim_start().starts_with("Usage:"))
+        .unwrap_or("");
     let after = line.trim().trim_start_matches("Usage:").trim();
     let mut toks = after.split_whitespace();
     let _bin = toks.next(); // program name
@@ -2246,31 +2251,31 @@ fn help_argument(arg: &clap::Arg) -> help::HelpArgument {
             .get_long_help()
             .or_else(|| arg.get_help())
             .map(ToString::to_string),
-        value_names: takes_values
-            .then(|| {
-                arg.get_value_names()
-                    .unwrap_or_default()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        default: takes_values
-            .then(|| {
-                arg.get_default_values()
-                    .iter()
-                    .map(|value| value.to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default(),
-        possible_values: takes_values
-            .then(|| {
-                arg.get_possible_values()
-                    .iter()
-                    .map(|value| value.get_name().to_string())
-                    .collect()
-            })
-            .unwrap_or_default(),
+        value_names: if takes_values {
+            arg.get_value_names()
+                .unwrap_or_default()
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        } else {
+            Vec::new()
+        },
+        default: if takes_values {
+            arg.get_default_values()
+                .iter()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect()
+        } else {
+            Vec::new()
+        },
+        possible_values: if takes_values {
+            arg.get_possible_values()
+                .iter()
+                .map(|value| value.get_name().to_string())
+                .collect()
+        } else {
+            Vec::new()
+        },
         env: arg
             .get_env()
             .map(|value| value.to_string_lossy().into_owned()),
@@ -2323,74 +2328,41 @@ fn help_document(
     document
 }
 
-fn flag_takes_value(command: &ClapCommand, token: &str) -> bool {
-    let name = token
-        .trim_start_matches('-')
-        .split('=')
-        .next()
-        .unwrap_or_default();
-    !token.contains('=')
-        && command.get_arguments().any(|arg| {
-            (arg.get_long() == Some(name)
-                || arg
-                    .get_short()
-                    .is_some_and(|short| name == short.to_string()))
-                && arg.get_action().takes_values()
-        })
-}
-
-/// Locate the selected command without invoking clap's built-in help renderer.
-/// This only runs for `--help --json`; normal parsing, including usage errors,
-/// remains entirely owned by clap below.
-fn help_command_for_args<'a>(
-    root: &'a ClapCommand,
-    args: &[String],
-) -> (&'a ClapCommand, Vec<String>) {
-    let mut command = root;
+/// Print structured help after clap has already recognized a help request.
+/// The path comes from clap's usage context, so option values, aliases, and
+/// nested subcommands are interpreted by clap rather than by a second parser.
+fn print_json_help(err: &clap::Error) {
+    let root = Cli::command();
+    let command_path = usage_command_path(err);
+    let mut selected = &root;
+    for segment in &command_path {
+        let Some(subcommand) = selected
+            .get_subcommands()
+            .find(|candidate| candidate.get_name() == segment)
+        else {
+            break;
+        };
+        selected = subcommand;
+    }
     let mut path = vec![root.get_name().to_string()];
-    let mut skip_value = false;
-    for token in args {
-        if skip_value {
-            skip_value = false;
-            continue;
-        }
-        if token.starts_with('-') {
-            skip_value = flag_takes_value(command, token);
-            continue;
-        }
-        if let Some(subcommand) = command.get_subcommands().find(|candidate| {
-            candidate
-                .get_name_and_visible_aliases()
-                .contains(&token.as_str())
-        }) {
-            command = subcommand;
-            path.push(command.get_name().to_string());
-        }
-    }
-    (command, path)
-}
-
-fn try_print_json_help() -> bool {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if !args.iter().any(|arg| arg == "--json")
-        || !args.iter().any(|arg| arg == "--help" || arg == "-h")
-    {
-        return false;
-    }
-    let command = Cli::command();
-    let (selected, path) = help_command_for_args(&command, &args);
+    path.extend(command_path);
     println!(
         "{}",
-        help::render_json(&help_document(&command, selected, path))
+        help::render_json(&help_document(&root, selected, path))
             .expect("machine-readable help document must serialize")
     );
-    true
+}
+
+/// Whether `--json` was supplied as an option, rather than as a positional
+/// value after clap's `--` separator.
+fn argv_has_json_flag() -> bool {
+    std::env::args()
+        .skip(1)
+        .take_while(|arg| arg != "--")
+        .any(|arg| arg == "--json")
 }
 
 fn main() -> Result<()> {
-    if try_print_json_help() {
-        return Ok(());
-    }
     // Parse manually instead of `Cli::parse()` so clap's own usage
     // errors honour the `--json` contract too. By default clap prints
     // free-form text to stderr and exits 2 — an agent that always passes
@@ -2404,7 +2376,11 @@ fn main() -> Result<()> {
         Ok(cli) => cli,
         Err(e) => {
             use clap::error::ErrorKind;
-            let wants_json = std::env::args().skip(1).any(|a| a == "--json");
+            let wants_json = argv_has_json_flag();
+            if wants_json && e.kind() == ErrorKind::DisplayHelp {
+                print_json_help(&e);
+                return Ok(());
+            }
             // Route unrecognized-subcommand errors to a form the user can
             // actually run (e.g. `body <slug>` → `body set <slug>`, or an
             // alias near-miss → its canonical verb). See
@@ -7300,21 +7276,6 @@ mod tests {
             .possible_values
             .contains(&"bug".to_string()));
         assert_eq!(document.examples[0].argv[0], "issuectl");
-    }
-
-    #[test]
-    fn json_help_command_selection_handles_global_option_values() {
-        let root = Cli::command();
-        let args = vec![
-            "--root".to_string(),
-            "config".to_string(),
-            "new".to_string(),
-            "--help".to_string(),
-            "--json".to_string(),
-        ];
-        let (command, path) = help_command_for_args(&root, &args);
-        assert_eq!(command.get_name(), "new");
-        assert_eq!(path, ["issuectl", "new"]);
     }
 
     use super::*;
