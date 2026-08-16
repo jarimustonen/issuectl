@@ -2,7 +2,7 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: improvement
-status: open
+status: in-progress
 priority: normal
 labels: [cli-canon, tooling]
 lane: cli-canon

@@ -67,6 +67,18 @@ issuectl --json config path
 issuectl --json config show
 ```
 
+## Companion skill catalog
+
+`issuectl --json skill list` enumerates the bundled `/issue`, `/issue-new`, and
+`/issue-intake` workflows and the Claude, Codex, and pi.dev targets each can
+install. It is read-only: use it to discover the shipped catalog, not
+`issuectl skill pi-status`, which instead reports the state of the installed
+pi.dev mirror.
+
+```sh
+issuectl --json skill list
+```
+
 ## Install or upgrade `issuectl`
 
 This skill was installed for `issuectl {{ISSUECTL_VERSION}}`. On the

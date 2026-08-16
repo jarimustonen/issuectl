@@ -37,6 +37,7 @@ Examples:
   issuectl config show                     Inspect effective schema configuration
   issuectl doctor                          Health-check the repo
   issuectl doctor --fix                    Migrate legacy numbered issues
+  issuectl skill list                      List bundled /issue companion skills
   issuectl skill install                   Install /issue (+ /issue-new, /issue-intake) skills
 ";
 
@@ -1750,6 +1751,9 @@ enum HooksAction {
 
 #[derive(Subcommand)]
 enum SkillAction {
+    /// List the bundled companion skills and their install targets. Read-only;
+    /// unlike `pi-status`, this describes what this binary can install.
+    List,
     /// Install the /issue skill template into the current repo. By default
     /// installs the Claude Code skill; use --agent codex for Codex CLI, or
     /// --agent all for both. The Claude install also ships the standalone
@@ -2575,6 +2579,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             AgentsAction::Init { force } => agents::run_init(&find_root(), force, json_output),
         },
         Command::Skill { action } => match action {
+            SkillAction::List => cmd_skill_list(json_output),
             SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
             SkillAction::Print { agent } => cmd_skill_print(&agent),
             SkillAction::PiStatus => cmd_skill_pi_status(json_output),
@@ -6153,6 +6158,22 @@ fn cmd_body_set(
     } else {
         println!("Updated body of {slug}");
         emit_warnings_to_stderr(&outcome.warnings);
+    }
+    Ok(())
+}
+
+fn cmd_skill_list(json: bool) -> Result<()> {
+    let catalog = skill::skill_catalog();
+    if json {
+        println!("{}", serde_json::to_string_pretty(catalog)?);
+        return Ok(());
+    }
+
+    for entry in catalog {
+        println!("{}  {}", entry.name, entry.description);
+        for target in entry.install_targets {
+            println!("  {}  {}", target.label, target.path);
+        }
     }
     Ok(())
 }
