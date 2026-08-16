@@ -252,8 +252,8 @@ closing status, the issue is also moved to `closed/` (same as `close`).
 Common flags:
 
 - `--status STATUS` (active or closing)
-- `-t/--type TYPE` (bug, task, feature, improvement, chore, epic, or any value the repo's `.schema.yaml` adds to `fields.type.enum` — rejected with `SchemaViolation` if the new type's required body sections are missing, with a list of `## <Section>` headings to add first; rejected if combined with a close→open reopen on the same call; rejected if the resulting type+`assignee`/`owner`/`reporter` combination violates the epic↔non-epic invariants `create` enforces)
-- `--assignee USER` / `--owner USER` (epics)
+- `-t/--type TYPE` (bug, task, feature, improvement, chore, epic, or any value the repo's `.schema.yaml` adds to `fields.type.enum`; rejected with `SchemaViolation` if the new type's required body sections are missing, with a list of `## <Section>` headings to add first; rejected if combined with a close→open reopen on the same call. Changing to `epic` automatically migrates a lone `reporter:` to `owner:` and reports a warning; an assignee or a conflicting owner remains an actionable error.)
+- `--assignee USER` / `--no-assignee`, `--owner USER` (epics), and `--no-reporter`
 - `--priority low|normal|high`
 - `--epic <slug>` / `--no-epic`
 - `--add-label LABEL` / `--remove-label LABEL` (repeatable)
@@ -269,6 +269,7 @@ Example flows:
 - `issuectl --json update extremely-quiet-otter --add-commit "abc123:fix login state"`
 - `issuectl --json update extremely-quiet-otter --add-label backend --add-label api`
 - `issuectl --json update extremely-quiet-otter --add-blocked-by "@other-slug"` (gate this issue behind `@other-slug`)
+- `issuectl --json update extremely-quiet-otter --no-assignee --type epic` (clear an assignee before converting to an epic)
 
 Prefer commit trailers over manual `--add-commit`. Add
 `Refs-Issue: @<slug>` (or `Fixes-Issue: @<slug>` to also signal

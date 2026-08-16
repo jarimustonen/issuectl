@@ -3,12 +3,13 @@ created: 2026-08-16
 updated: 2026-08-16
 type: feature
 reporter: jari
-status: open
+status: done
 priority: normal
 labels:
 - via:agent-aggountant-wrapup
 lane: cli-fixes
 lane_seq: 40
+closed: 2026-08-16
 ---
 
 # update --type epic tells you to hand-edit the YAML instead of migrating…
@@ -46,3 +47,9 @@ One of:
 3. the error names an exact command to run rather than telling the user to edit the file.
 
 A CLI whose error message instructs hand-editing its own database is the part that stands out; the validation rule itself seems right.
+
+## Resolution
+
+### 2026-08-16T20:09:02Z · @issuectl
+
+Implemented all three parts: lone reporter now migrates to owner with a visible warning, update has --no-reporter and --no-assignee escape hatches, and ambiguous cases name runnable commands. Also added --no-owner so the non-epic remediation is genuinely runnable. Judgment: matching reporter and owner values are safe to collapse by removing the redundant reporter; a differing owner or any assignee remains an explicit user choice.

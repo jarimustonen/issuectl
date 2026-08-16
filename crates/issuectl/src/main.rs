@@ -596,10 +596,13 @@ enum Command {
         #[arg(short = 's', long, value_parser = parse_non_empty)]
         status: Option<String>,
 
-        /// Change the issue type. Rejected with `MutateError::SchemaViolation`
-        /// when the new type's schema-required body sections aren't already
-        /// present (the user must add them first), and rejected when combined
-        /// with a close→open reopen on the same call. Allowed values follow
+        /// Change the issue type. A lone reporter automatically becomes the
+        /// owner when changing to `epic`, with a warning; an assignee or
+        /// conflicting owner is rejected with a runnable remediation command.
+        /// Rejected with `MutateError::SchemaViolation` when the new type's
+        /// schema-required body sections aren't already present (the user must
+        /// add them first), and rejected when combined with a close→open reopen
+        /// on the same call. Allowed values follow
         /// `issues/.schema.yaml` (`fields.type.enum`); CLI accepts any
         /// non-empty string and lets schema validation do the rejecting so
         /// repos that extend the type enum work end-to-end.
@@ -610,9 +613,21 @@ enum Command {
         #[arg(short = 'a', long, value_parser = parse_non_empty)]
         assignee: Option<String>,
 
+        /// Remove the reporter
+        #[arg(long)]
+        no_reporter: bool,
+
+        /// Remove the assignee
+        #[arg(long, conflicts_with = "assignee")]
+        no_assignee: bool,
+
         /// New owner (epics)
         #[arg(long, value_parser = parse_non_empty)]
         owner: Option<String>,
+
+        /// Remove the owner
+        #[arg(long, conflicts_with = "owner")]
+        no_owner: bool,
 
         /// New priority
         #[arg(short = 'p', long, value_parser = PossibleValuesParser::new(PRIORITIES))]
@@ -2640,7 +2655,10 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             status,
             issue_type,
             assignee,
+            no_reporter,
+            no_assignee,
             owner,
+            no_owner,
             priority,
             epic,
             no_epic,
@@ -2680,7 +2698,10 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
                     status,
                     issue_type,
                     assignee,
+                    no_reporter,
+                    no_assignee,
                     owner,
+                    no_owner,
                     priority,
                     epic,
                     no_epic,
@@ -4958,7 +4979,10 @@ pub(crate) struct UpdateArgs {
     pub status: Option<String>,
     pub issue_type: Option<String>,
     pub assignee: Option<String>,
+    pub no_reporter: bool,
+    pub no_assignee: bool,
     pub owner: Option<String>,
+    pub no_owner: bool,
     pub priority: Option<String>,
     pub epic: Option<String>,
     pub no_epic: bool,
@@ -5073,9 +5097,16 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
     }
     if let Some(a) = args.assignee {
         req.assignee = Patch::Set(a);
+    } else if args.no_assignee {
+        req.assignee = Patch::Clear;
+    }
+    if args.no_reporter {
+        req.reporter = Patch::Clear;
     }
     if let Some(o) = args.owner {
         req.owner = Patch::Set(o);
+    } else if args.no_owner {
+        req.owner = Patch::Clear;
     }
     if let Some(p) = args.priority {
         req.priority = Patch::Set(p);

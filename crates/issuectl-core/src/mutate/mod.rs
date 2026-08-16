@@ -101,6 +101,8 @@ pub struct UpdateIssueRequest {
     #[serde(default)]
     pub priority: Patch<String>,
     #[serde(default)]
+    pub reporter: Patch<String>,
+    #[serde(default)]
     pub assignee: Patch<String>,
     #[serde(default)]
     pub owner: Patch<String>,
@@ -473,6 +475,7 @@ impl UpdateIssueRequest {
         matches!(self.status, Patch::Unspecified)
             && matches!(self.issue_type, Patch::Unspecified)
             && matches!(self.priority, Patch::Unspecified)
+            && matches!(self.reporter, Patch::Unspecified)
             && matches!(self.assignee, Patch::Unspecified)
             && matches!(self.owner, Patch::Unspecified)
             && matches!(self.epic, Patch::Unspecified)
@@ -524,6 +527,7 @@ impl UpdateIssueRequest {
         // (e.g. `spike`). Validation runs in step 4b under lock against
         // the post-mutation frontmatter; that's the right layer.
         check_set_nonempty("priority", &self.priority)?;
+        check_set_nonempty("reporter", &self.reporter)?;
         check_set_nonempty("assignee", &self.assignee)?;
         check_set_nonempty("owner", &self.owner)?;
         check_set_nonempty("epic", &self.epic)?;
@@ -1122,6 +1126,7 @@ fn update_issue_under_lock(
     // reserved-legacy-heading warning (merged into the returned
     // `warnings` alongside the DoD advisories below).
     let mut body_warnings: Vec<String> = Vec::new();
+    let mut type_warnings: Vec<String> = Vec::new();
     if let Some(body) = &req.set_body {
         body_warnings = crate::body_sections::reserved_section_warnings(body);
         item.body = if body.starts_with('\n') {
@@ -1211,6 +1216,7 @@ fn update_issue_under_lock(
     }
     for (key, patch) in [
         ("priority", &req.priority),
+        ("reporter", &req.reporter),
         ("assignee", &req.assignee),
         ("owner", &req.owner),
         ("epic", &req.epic),
@@ -1346,15 +1352,15 @@ fn update_issue_under_lock(
                         .into(),
                 ));
             }
-            // D1: epic↔non-epic frontmatter invariants. Mirrors
-            // `cmd_new`'s rule (`epic` uses `--owner` not assignee /
-            // reporter; non-epic types use neither). The user has to
-            // clear the offending frontmatter field manually first —
-            // CLI flags like `--no-assignee` don't exist (only
-            // `--no-epic`), so the error message points the user at a
-            // concrete next step rather than auto-clearing.
-            if let Err(e) = check_type_invariants(new_type, &item.frontmatter) {
-                return Err(e);
+            // D1: epic↔non-epic frontmatter invariants. A lone reporter
+            // maps unambiguously to an epic owner, so migrate it and report
+            // the semantic change. Assignees and conflicting owners remain
+            // caller-actionable errors with an exact CLI remedy.
+            if let Some(warning) = reconcile_type_invariants(new_type, &mut item.frontmatter, slug)?
+            {
+                written.insert("reporter".into());
+                written.insert("owner".into());
+                type_warnings.push(warning);
             }
             // C2: option 2 — reject when the new type's required body
             // sections aren't already present. Empty stubs would pass
@@ -1464,6 +1470,7 @@ fn update_issue_under_lock(
     // every return path below surfaces both to the caller in one list.
     let mut dod_warnings = dod_warnings;
     dod_warnings.append(&mut body_warnings);
+    dod_warnings.append(&mut type_warnings);
 
     // Post-mutation closing classification drives both the dry-run dir
     // prediction and the real unarchive decision below — an archived
@@ -2715,36 +2722,60 @@ fn validate_against_schema(
 
 /// Apply a `Patch<String>` onto a frontmatter mapping. `Unspecified`
 /// is a no-op; `Clear` removes the key; `Set(v)` sets the key.
-/// Enforce the same epic↔non-epic frontmatter invariants `cmd_new`
-/// enforces, against the post-mutation frontmatter. `cmd_new` rejects
-/// `epic` with `assignee`/`reporter` and rejects `owner` on non-epic
-/// types; without this, `update --type` would let you cross those
-/// lines silently. Only invoked on real type changes — same-value
-/// sets short-circuit before this so idempotent calls don't break.
-fn check_type_invariants(new_type: &str, fm: &serde_yaml::Mapping) -> Result<(), MutateError> {
-    let has_nonempty = |key: &str| -> bool {
+///
+/// Enforce epic↔non-epic invariants against post-patch frontmatter. A reporter
+/// is the same role as an epic owner, so a lone reporter is migrated. This is
+/// deliberately the only implicit conversion: an assignee or a conflicting
+/// owner requires a caller decision and therefore gets an exact CLI command.
+/// Only invoked on real type changes, preserving same-value idempotency.
+fn reconcile_type_invariants(
+    new_type: &str,
+    fm: &mut serde_yaml::Mapping,
+    slug: &str,
+) -> Result<Option<String>, MutateError> {
+    let get_nonempty = |key: &str| -> Option<String> {
         fm.get(serde_yaml::Value::String(key.into()))
             .and_then(|v| v.as_str())
-            .map(|s| !s.is_empty())
-            .unwrap_or(false)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
     };
     if new_type == "epic" {
-        if has_nonempty("assignee") || has_nonempty("reporter") {
+        let reporter = get_nonempty("reporter");
+        let owner = get_nonempty("owner");
+        let assignee = get_nonempty("assignee");
+        if assignee.is_some()
+            || reporter
+                .as_ref()
+                .is_some_and(|r| owner.as_ref().is_some_and(|o| o != r))
+        {
+            let mut clears = Vec::new();
+            if assignee.is_some() {
+                clears.push("--no-assignee");
+            }
+            if reporter
+                .as_ref()
+                .is_some_and(|r| owner.as_ref().is_some_and(|o| o != r))
+            {
+                clears.push("--no-reporter");
+            }
             return Err(MutateError::Validation(format!(
-                "type {new_type:?} uses owner, not reporter/assignee; \
-                 clear assignee/reporter from the frontmatter first \
-                 (edit the YAML directly, or use the JSON API with \
-                 `assignee: null` / `reporter: null`)"
+                "type {new_type:?} uses owner, not reporter/assignee; run `issuectl update {slug} {} --type epic`",
+                clears.join(" ")
             )));
         }
-    } else if has_nonempty("owner") {
+        if let Some(reporter) = reporter {
+            write::set_string(fm, "owner", &reporter);
+            write::remove_key(fm, "reporter");
+            return Ok(Some(format!(
+                "@{slug}: migrated reporter {reporter:?} to owner while changing type to epic"
+            )));
+        }
+    } else if get_nonempty("owner").is_some() {
         return Err(MutateError::Validation(format!(
-            "type {new_type:?} does not use owner (only `epic` does); \
-             clear owner from the frontmatter first \
-             (edit the YAML directly, or use the JSON API with `owner: null`)"
+            "type {new_type:?} does not use owner (only `epic` does); run `issuectl update {slug} --no-owner --type {new_type}`"
         )));
     }
-    Ok(())
+    Ok(None)
 }
 
 fn apply_string_patch(item: &mut ItemFile, key: &str, p: &Patch<String>) {
@@ -5837,6 +5868,43 @@ mod tests {
     }
 
     #[test]
+    fn update_type_to_epic_migrates_lone_reporter_to_owner_with_warning() {
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/type-reporter-target");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: task\ncreated: 2026-05-06\nstatus: open\npriority: normal\nreporter: alice\n---\n\n# Title\n",
+        )
+        .unwrap();
+        let before = crate::parser::parse_item_md_with_warnings(
+            &dir.join("item.md"),
+            "type-reporter-target",
+            "open",
+        )
+        .issue;
+        let before_version = canonical_hash(&before);
+        let out = update_issue(
+            tmp.path(),
+            "type-reporter-target",
+            UpdateIssueRequest {
+                issue_type: Patch::Set("epic".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let content = fs::read_to_string(dir.join("item.md")).unwrap();
+        assert!(!content.contains("reporter:"), "got: {content}");
+        assert!(content.contains("owner: alice"), "got: {content}");
+        assert!(out.warnings.iter().any(|w| w.contains("migrated reporter")));
+        // `type`, `reporter`, and `owner` are all existing canonical inputs.
+        // This semantic migration must therefore advance the version rather
+        // than changing the hash projection to conceal the conversion.
+        assert_ne!(out.version, before_version);
+        assert_eq!(out.version, canonical_hash(&out.issue));
+    }
+
+    #[test]
     fn update_type_to_epic_with_assignee_is_rejected() {
         // D1: `--type epic` on an issue with an assignee must be
         // rejected; mirrors `cmd_new`'s epic invariant.
@@ -5857,7 +5925,39 @@ mod tests {
         match err {
             MutateError::Validation(msg) => {
                 assert!(
-                    msg.contains("owner") && msg.contains("assignee"),
+                    msg.contains("issuectl update type-d1-target --no-assignee --type epic"),
+                    "got {msg}"
+                );
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_type_to_epic_with_conflicting_owner_and_reporter_is_rejected() {
+        let tmp = fresh_repo();
+        let dir = tmp.path().join("issues/type-owner-conflict-target");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("item.md"),
+            "---\ntype: task\ncreated: 2026-05-06\nstatus: open\npriority: normal\nreporter: alice\nowner: bob\n---\n\n# Title\n",
+        )
+        .unwrap();
+        let err = update_issue(
+            tmp.path(),
+            "type-owner-conflict-target",
+            UpdateIssueRequest {
+                issue_type: Patch::Set("epic".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        match err {
+            MutateError::Validation(msg) => {
+                assert!(
+                    msg.contains(
+                        "issuectl update type-owner-conflict-target --no-reporter --type epic"
+                    ),
                     "got {msg}"
                 );
             }

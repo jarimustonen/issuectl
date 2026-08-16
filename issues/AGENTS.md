@@ -12,6 +12,3 @@ note, apply) and the JSON contract.
 
 For the agent policy and schema-derived field reference, see
 `.issuectl/AGENTS.md` (created by `issuectl agents init`).
-
-For practical scheduling-DAG lane boundaries, see
-[`docs/design/lane-design.md`](../docs/design/lane-design.md).

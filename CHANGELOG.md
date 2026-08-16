@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`issuectl update --no-reporter` / `--no-assignee`** clear built-in people fields without hand-editing issue frontmatter.
 - **Lane-structure design guide:** practical guidance for choosing serial
   conflict boundaries, collision tokens, parked work, and `unlaned` issues.
 
@@ -15,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced maintainer-specific metadata, examples, and infrastructure labels with neutral or fictional values.
 
 ### Fixed
+- **`issuectl update --type epic`** now migrates an unambiguous `reporter:` to `owner:` and reports that change. Ambiguous owner/assignee cases now name the exact follow-up CLI command instead of directing users to edit YAML or use an API.
 - **`note --comment`** now works as its help promises; `close --message` is also accepted, so note and close share `--comment` / `--message` body vocabulary.
 - **Derived `create` slugs** now warn when their 2–3 significant-word, stop-word-filtered form differs from straightforward title slugification, including numeric collision suffixes.
 - **`create --help`** now correctly describes title-derived default slugs, random opt-in and fallback behavior, and numeric collision suffixes.
