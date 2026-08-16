@@ -2,9 +2,9 @@
 
 Työjono ja handoff `/stint`-työrupeamille. Tämä tiedosto on
 `/stint`:n käynnistyspiste: lue ensin alla oleva handoff-block, sitten
-Execution DAG. Issue-viittaukset ovat `@slug`-muodossa — koko backlog elää
-`issuectl`:ssä (`issuectl list`), tämä tiedosto on vain kuratoitu näkymä
-"mitä kannattaa tehdä ja missä järjestyksessä".
+aja `issuectl dag`. Issue-viittaukset ovat `@slug`-muodossa — koko backlog elää
+`issuectl`:ssä (`issuectl list` / `issuectl dag`), tämä tiedosto on vain
+kuratoitu handoff-näkymä.
 
 Operating-faktat (deploy, green gate, hot files) ovat
 [AGENTS.md](AGENTS.md#operating-facts-for-stint):ssä.
@@ -62,10 +62,6 @@ journaliin (`release verify <run-id>` näyttää unreconciled — vaaraton, ei e
 on caret-vaatimus → bumppaa se vastaamaan uutta minoria samassa release-commitissa (0.10.0 → 0.11.0).
 Vain minor/major-raja vaatii tämän, ei patch.
 
-**⚠️ Minor-bump-gotcha:** `crates/issuectl/Cargo.toml`:n sisäinen `issuectl-core = { …, version = "X" }`
-on caret-vaatimus → bumppaa se vastaamaan uutta minoria samassa release-commitissa (0.10.0 → 0.11.0).
-Vain minor/major-raja vaatii tämän, ei patch.
-
 **⚠️ Autonomy:** deployt/releaset TÄYSIN autonomisia (ei go/no-go, ei output-reviewia) — @jarin ohje 2026-08-10.
 
 **Dogfood:** `cargo install issuectl` / `brew upgrade jarimustonen/issuectl/issuectl` / `cargo install
@@ -77,75 +73,32 @@ regeneroi `release.yml`:ää.
 
 ---
 
-## Execution DAG (2026-08-16)
+## Scheduling
 
-Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
-(never copied here). Merge each round (drop landed, add active, keep existing order).
-`▶` = head-of-line snapshot — RE-COMPUTE from issuectl at pick time.
-`after <slug> (needs …)` = logical blocked_by mirror. `collision: <file>` = touches a
-second lane's hot file (spawn-time exclusion).
+Canonical scheduling lives in `issuectl` frontmatter (`lane:`, `lane_seq:`, `blocked_by:`, `collision:`). Do not maintain a markdown DAG or adjacent backlog in this file.
 
-Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
-`fn main` error rendering + `parse_apply_patch`), `mutate/` (write paths),
-`schema.rs`, skill templates, `hooks.rs`/`git_trailers.rs` (commit-hook).
+Use these views instead:
 
-<!-- execution-dag:begin -->
+```bash
+issuectl dag
+issuectl dag --json
+issuectl ls --status open
+issuectl ls --status in-progress
 ```
-GLOBAL HEAD-OF-LINE: (none spawnable) — all active work drained (7 units landed + 0.11.0 released 2026-08-16). Only ossctl-cut-no-publish remains, PARKED (upstream-blocked, do not spawn). Next round: wait for intake or pull something back from the deferred backlog.
-LANE blocked-upstream — PARKED, do not spawn until upstream-ossctl fix lands
-    ossctl-cut-no-publish  high · bug; ossctl release cut doesn't actually publish → manual cargo publish (CONFIRMED AGAIN in the 0.11.0 cut: publish-phase fails "core not visible on index within 300s", nothing uploaded). BLOCKED upstream-ossctl; when fixed, remove AGENTS caveat + re-point releases to ossctl.
-```
-<!-- execution-dag:end -->
 
-Kaari-lyhyesti: **0.11.0-release + cli-fixes-rupeama.** GLOBAL HEAD `changelog-trailers-never` landattu design-first
-(`close --stamp` → trailer-stamppaus, option 1), sitten `cli-fixes`-lane tyhjennetty sarjassa (`main.rs`-collision):
-6 unittia, kukin reviewattu + vihreä + trailer-stampattu. Sitten **0.11.0 julkaistu** (jari: option a = kertaluontoinen
-CHANGELOG-käsinbackfill kattaen kaikki v0.10.0:n jälkeen toimitetut unitit). ossctl cut failasi odotetusti
-(`ossctl-cut-no-publish`) → manuaalinen `cargo publish` + tag-fallback → crates.io + binäärit + Homebrew ulkona.
-Sivussa: `run-merge-stamp` filattu orchestratectl-repoon (end-to-end trailer-stamppauksen toinen puolisko),
-intake-duplikaatti `intake-feature-issuectl-986ecd5a58a9` suljettu obsolete. **DAG nyt tyhjä paitsi parkissa oleva
-`ossctl-cut-no-publish`.**
-
----
-
-## Adjacent backlog (deferred — DAG:n ulkopuolella, ei ajossa)
-
-Kaikki alla on labeloitu `deferred` issuectl:ssä (2026-08-04), joten ne eivät ole DAG-lanella
-eivätkä laukaise drift-checkiä. Poista `deferred`-label kun otat takaisin peliin.
-
-**Web/selain-UI: POISTETTU (`@remove-web-ui` done, 0.10.0).** Ei enää backlogissa. Kaikki entiset
-kanban/web-enhancement-issuet (13 kpl) oli jo suljettu `obsolete` (2026-08-10).
-
-**CLI-only visualisointi: `@issue-graph-view` SULJETTU `obsolete` (2026-08-15).** Ydin (worktree-planning-lens)
-toimitettu jo `issuectl dag`:na; loput (mermaid/dot/svg-export) on kapea erillinen scope. Jos kaavioviennille
-tulee konkreettinen tarve, filaa **tuore** kapea issue "lens 1: dep→mermaid" — älä reopenaa koko vanhaa visiota.
-(`@epic-tree-view` shipattiin aiemmin.)
-
-**Strateginen:** `@focus-areas` **suljettu `wontfix` (2026-08-10)** — ei nyt tarvetta. Ylätason
-päätös (ADR 0001: `areas: []` skeemakenttä) on tallessa; reopen + kirjoita implementaatio-ADR jos
-tarve palaa.
-
-_(Review-cascaden 14 wontfix-spin-offia 2026-08-14: pi-korpuksen defensiiviset kovennukset
-(`fd-relative-hardening`, `manifest-fsync-durability`, `mirror-atomic-writes`, `cross-tool-lock`,
-`prune-digest-gate`, `owned-symlink-unmanaged-hidden`, `prune-report-inaccessible`, `status-check-exit`,
-`status-shared-lock`), `dag-inprogress-schema-aware` (korvattu `dag-inprogress-is-spawnable`:lla),
-`epic-tree-human-render-control-chars`, `epic-tree-view-filters`, `load-once-thread-schema`,
-`new-and-update-blocked-by`. Perustelut issueiden `wontfix`-kommenteissa.)_
-
----
+`TODO.md` is only the session handoff and project notes; issue bodies and `issuectl dag` are the source of truth.
 
 ## Handoff-protokolla
 
-`/stint-handoff` päivittää yllä olevan **🔄 Continue here** -blockin JA mergeää
-Execution DAG:n (drop landed, add active, keep order) rupeaman lopussa, ja committaa ne
-omana committinaan (`git add TODO.md issues/ && git commit`) ennen `/wrap-up`:ia — näin
-tuore agentti voi jatkaa `jatketaan @TODO.md`:sta. Pidä `main` puhtaana rinnakkaisten
+`/stint-handoff` päivittää yllä olevan **🔄 Continue here** -blockin ja tarkistaa
+`issuectl dag` -näkymän rupeaman lopussa. Committoi vain muuttuneet polut täsmällisesti
+(`TODO.md` ja issue-tiedostot, jos niitä muutettiin) ennen `/wrap-up`:ia, jotta tuore
+agentti voi jatkaa `jatketaan @TODO.md`:sta. Pidä `main` puhtaana rinnakkaisten
 worktreiden takia (ks. globaali CLAUDE.md).
 
 ## Piialiisan bugiraportit
 
-_Kaikki kolme triageed + foldattu DAGiin (2026-08-15, `needs-triage` poistettu) — nyt `cli-fixes`-lanen nodeja,
-ks. Execution DAG yllä. Ei enää untriaged-jonossa._
+_Kaikki kolme triageed + lanetettu `issuectl`-frontmatteriin (2026-08-15, `needs-triage` poistettu). Ei enää untriaged-jonossa._
 
 - [x] 🐛 issuectl new: accept --lane → `cli-fixes` ([`intake-feature-issuectl-035722451473`](issues/intake-feature-issuectl-035722451473/item.md))
 - [x] 🐛 issuectl update: add --add-blocked-by → `cli-fixes` ([`intake-feature-issuectl-d93eaa168c66`](issues/intake-feature-issuectl-d93eaa168c66/item.md))
