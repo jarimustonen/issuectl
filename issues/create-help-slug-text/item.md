@@ -2,10 +2,11 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: bug
-status: open
+status: fixed
 priority: normal
 lane: cli-fixes
 lane_seq: 20
+closed: 2026-08-16
 ---
 
 # create --help text contradicts actual default slug behaviour
@@ -53,3 +54,9 @@ the same kind of drift while in there.
 - Fix the `create` help text (`crates/issuectl/src/main.rs` clap attributes).
 - Sweep sibling help strings for other claims that no longer match behaviour.
 - Add a test if one can meaningfully pin help/behaviour agreement.
+
+## Resolution
+
+### 2026-08-16T19:24:24Z · @issuectl
+
+Corrected create help to describe title-derived default slugs, numeric collision suffixes, random opt-in, and fallback behavior; added a regression test.
