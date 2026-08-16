@@ -2,10 +2,11 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: feature
-status: open
+status: done
 priority: normal
 lane: cli-fixes
 lane_seq: 70
+closed: 2026-08-16
 ---
 
 # Surface lane-design guidance in dag --help and show per-lane depth
