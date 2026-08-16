@@ -49,9 +49,21 @@ same way:
   (string array). `open` uses `is_dir` (bool: was `--dir` requested) so it
   never collides with the `dir` directory field.
 
+## Configuration inspection
+
+Before a write from an unfamiliar directory, inspect the repo schema location and
+its effective policy. `config show` reports every value with `source: "file"`
+when it was declared in `issues/.schema.yaml`, or `source: "default"` when the
+built-in schema supplies it:
+
+```sh
+issuectl --json config path
+issuectl --json config show
+```
+
 ## Install or upgrade `issuectl`
 
-This skill was installed for `issuectl 0.10.0`. On the
+This skill was installed for `issuectl 0.11.0`. On the
 first invocation in a session, run `issuectl --version` and compare:
 
 - **Missing**: install one of:
@@ -59,12 +71,12 @@ first invocation in a session, run `issuectl --version` and compare:
   - **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
   - **Shell installer** (no toolchain):
     `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
-- **Older than `0.10.0`**: tell the user the skill expects
-  `0.10.0` and suggest upgrading via the same channel
+- **Older than `0.11.0`**: tell the user the skill expects
+  `0.11.0` and suggest upgrading via the same channel
   they originally used (`brew upgrade jarimustonen/issuectl/issuectl`,
   `cargo install issuectl --force`, or re-run the shell installer).
   Stop and wait — schema/CLI surface may have changed.
-- **Newer than `0.10.0`**: the installed binary is ahead
+- **Newer than `0.11.0`**: the installed binary is ahead
   of what this skill was written for. Tell the user to refresh the
   skill so the instructions match the CLI surface they actually have:
   `issuectl skill install --force` (Claude Code; add `--agent codex`

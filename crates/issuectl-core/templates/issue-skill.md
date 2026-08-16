@@ -53,6 +53,18 @@ same way:
   (string array). `open` uses `is_dir` (bool: was `--dir` requested) so it
   never collides with the `dir` directory field.
 
+## Configuration inspection
+
+Before a write from an unfamiliar directory, inspect the repo schema location and
+its effective policy. `config show` reports every value with `source: "file"`
+when it was declared in `issues/.schema.yaml`, or `source: "default"` when the
+built-in schema supplies it:
+
+```sh
+issuectl --json config path
+issuectl --json config show
+```
+
 ## Install or upgrade `issuectl`
 
 This skill was installed for `issuectl {{ISSUECTL_VERSION}}`. On the

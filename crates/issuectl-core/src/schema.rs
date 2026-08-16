@@ -28,14 +28,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 
 pub const SCHEMA_RELATIVE_PATH: &str = "issues/.schema.yaml";
 
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schema {
     #[serde(default = "default_version")]
@@ -93,7 +93,7 @@ pub struct Schema {
 }
 
 /// Severity knob for the Definition-of-Done gate. Default = warn.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DodConfig {
     /// When true, the gate blocks the write; otherwise it surfaces as
@@ -108,7 +108,7 @@ pub struct DodConfig {
 /// `Closing` (issue is finished — `done`, `wontfix`, `archived`, etc.).
 /// All `Closing` variants share lifecycle behaviour; the task brief
 /// explicitly defers a multi-flavoured taxonomy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StatusClass {
     Active,
@@ -119,7 +119,7 @@ fn default_version() -> u32 {
     SUPPORTED_SCHEMA_VERSION
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldSpec {
     #[serde(default)]
@@ -144,7 +144,7 @@ pub struct FieldSpec {
 /// A conditional-requirement predicate for a [`FieldSpec`]. v1 only
 /// supports gating on the issue's status lifecycle class; the struct
 /// shape leaves room to add further conditions without a format break.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequiredWhen {
     /// The owning field is required when the issue's `status` resolves

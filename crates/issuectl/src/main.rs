@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::{
-    agents, body_sections, canonical, context, cycle as cycle_mod, dag, doctor, duplicates,
+    agents, body_sections, canonical, config, context, cycle as cycle_mod, dag, doctor, duplicates,
     epic_tree, estimate as estimate_mod, fmt, git_trailers, hooks, init as init_cmd, merge_driver,
     models, mutate, query, recurrence, repo, report as report_mod, schema, skill, slug,
     sync_commits,
@@ -34,6 +34,7 @@ Examples:
   issuectl import json issues.json          Import issues from a JSON file
   issuectl import github --repo o/r         Import open GitHub issues via gh
   issuectl init                            Bootstrap a new repo (schema, agents, skill)
+  issuectl config show                     Inspect effective schema configuration
   issuectl doctor                          Health-check the repo
   issuectl doctor --fix                    Migrate legacy numbered issues
   issuectl skill install                   Install /issue (+ /issue-new, /issue-intake) skills
@@ -277,6 +278,12 @@ fn parse_slug_arg(s: &str) -> std::result::Result<String, String> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect the effective schema configuration and its sources
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
     /// List or query issues by frontmatter fields
     #[command(alias = "ls")]
     List {
@@ -1451,6 +1458,14 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Print the effective schema configuration file path
+    Path,
+    /// Show each effective schema value and whether it came from the repo file or a built-in default
+    Show,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum ExportFmt {
     Json,
@@ -2218,6 +2233,7 @@ fn main() -> Result<()> {
 
 fn dispatch(command: Command, json_output: bool) -> Result<()> {
     match command {
+        Command::Config { action } => cmd_config(json_output, action),
         Command::List {
             query,
             assignee,
@@ -3311,6 +3327,35 @@ fn cmd_prompt(json: bool, template: &str, slug: &str, write: bool) -> Result<()>
         );
     } else {
         print!("{rendered}");
+    }
+    Ok(())
+}
+
+fn cmd_config(json: bool, action: ConfigAction) -> Result<()> {
+    let root = find_root();
+    match action {
+        ConfigAction::Path => {
+            let path = config::path(&root);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "path": path }))?
+                );
+            } else {
+                println!("{}", path.display());
+            }
+        }
+        ConfigAction::Show => {
+            let report = config::show(&root)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{}", report.path.display());
+                for (key, resolved) in report.values {
+                    println!("{key} [{}]: {}", resolved.source.as_str(), resolved.value);
+                }
+            }
+        }
     }
     Ok(())
 }

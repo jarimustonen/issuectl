@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
++- **`issuectl config path` / `issuectl config show`** — inspect the schema
++  configuration path and each effective schema value. `show --json` reports
++  per-value provenance as `source: "file"` for `issues/.schema.yaml` entries
++  and `source: "default"` for built-in values.
+
 ## [0.11.0] - 2026-08-15
 
 > Note: trailer-driven changelog compilation (`issuectl changelog`) was introduced
