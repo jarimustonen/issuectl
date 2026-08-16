@@ -460,7 +460,9 @@ enum Command {
         all: bool,
     },
 
-    /// Create a new issue or epic. Pass `--slug <descriptive-2-3-word-kebab>` derived from the title; a random `intensifier-adjective-noun` slug is the fallback when `--slug` is omitted
+    /// Create a new issue or epic.
+    ///
+    /// When neither `--slug` nor `--slug-random` is supplied, derive a descriptive 2-3 word kebab slug from the title; collisions get a numeric suffix. Use `--slug-random` to opt into a random `intensifier-adjective-noun` slug. Titles with no sensible slug fall back to random.
     #[command(visible_alias = "new")]
     #[command(group(clap::ArgGroup::new("title_input").required(true).multiple(false).args(["title_pos", "title_flag"])))]
     Create {
@@ -4992,7 +4994,7 @@ pub(crate) struct UpdateOutcome {
     // `Issue`. `close` normalizes the `--as` author in the core (a single
     // leading `@` stripped), so echoing this — not the raw CLI input —
     // keeps the human/JSON confirmation in step with the stored token
-    // (`--as "@jari"` and `--as jari` both echo `jari`).
+    // (`--as "@example-user"` and `--as example-user` both echo `example-user`).
     pub closed_by: Option<String>,
     /// Non-fatal advisories from the write (e.g. a replacement body that
     /// carries a reserved-legacy section heading via `--body-file`).
@@ -7362,6 +7364,35 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn create_help_describes_title_derived_slug_policy() {
+        let root = Cli::command();
+        let create = root
+            .get_subcommands()
+            .find(|command| command.get_name() == "create")
+            .unwrap();
+        let document = help_document(
+            &root,
+            create,
+            vec!["issuectl".to_string(), "create".to_string()],
+        );
+        let description = document
+            .description
+            .expect("create subcommand must have a long description");
+
+        assert!(description.contains("neither `--slug` nor `--slug-random` is supplied"));
+        assert!(description.contains("derive a descriptive 2-3 word kebab slug from the title"));
+        assert!(description.contains("collisions get a numeric suffix"));
+        assert!(description.contains("`--slug-random` to opt into a random"));
+        assert!(description.contains("Titles with no sensible slug fall back to random"));
+        assert!(create
+            .get_arguments()
+            .any(|arg| arg.get_long() == Some("slug")));
+        assert!(create
+            .get_arguments()
+            .any(|arg| arg.get_long() == Some("slug-random")));
+    }
 
     fn fresh_repo() -> TempDir {
         let tmp = tempfile::tempdir().unwrap();
