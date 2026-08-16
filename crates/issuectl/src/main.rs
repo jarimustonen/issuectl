@@ -740,9 +740,14 @@ enum Command {
 
         /// Closing rationale, appended as a timestamped block under a
         /// `## Resolution` section in one step (no separate `note` +
-        /// commit). `--note` is an alias. Attributed to `--as` when
-        /// given, else recorded under `@issuectl`.
-        #[arg(long = "comment", visible_alias = "note", value_parser = parse_non_empty)]
+        /// commit). `--note` (compatibility) and `--message` are aliases.
+        /// `--comment` / `--message` are the shared note body vocabulary.
+        /// Attributed to `--as` when given, else recorded under `@issuectl`.
+        #[arg(
+            long = "comment",
+            visible_aliases = ["note", "message"],
+            value_parser = parse_non_empty
+        )]
         comment: Option<String>,
 
         /// Record a commit, format HASH:summary (repeatable)
@@ -815,8 +820,8 @@ enum Command {
     /// Invokable as `comment` too.
     ///
     /// The note text comes from exactly one source — the positional
-    /// argument, `--message`/`--body`, `--body-file PATH` (`-` = stdin),
-    /// `--stdin`, or `--from-file PATH`. The `note_body` arg group makes
+    /// argument, `--message`/`--body`/`--comment`, `--body-file PATH`
+    /// (`-` = stdin), `--stdin`, or `--from-file PATH`. The `note_body` arg group makes
     /// clap enforce the at-most-one rule (passing two is a usage error);
     /// passing none is left to the handler (existing behavior/error).
     #[command(visible_alias = "comment")]
@@ -839,11 +844,15 @@ enum Command {
         #[arg(value_parser = parse_non_empty)]
         message: Option<String>,
 
-        /// Note text as a flag; `--body` is an alias. Mirrors `close
-        /// --comment` and `create --body`, so the whole family shares one
-        /// vocabulary. Mutually exclusive with the positional body and the
-        /// other body-source flags.
-        #[arg(long = "message", visible_alias = "body", value_parser = parse_non_empty)]
+        /// Note text as a flag; `--body` and `--comment` are aliases.
+        /// Mirrors `close --comment`/`--message` and `create --body`, so the
+        /// whole family shares one vocabulary. Mutually exclusive with the
+        /// positional body and the other body-source flags.
+        #[arg(
+            long = "message",
+            visible_aliases = ["body", "comment"],
+            value_parser = parse_non_empty
+        )]
         message_flag: Option<String>,
 
         /// Read the note text from stdin instead of a positional argument
@@ -5217,6 +5226,7 @@ fn cmd_close(
         if let Some(outcome) = &stamp_outcome {
             report["stamp"] = stamp_report_json(outcome);
         }
+        report["warnings"] = serde_json::json!(out.warnings);
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
@@ -5233,6 +5243,7 @@ fn cmd_close(
     } else {
         println!("Updated {slug}");
     }
+    emit_warnings_to_stderr(&out.warnings);
     Ok(())
 }
 
@@ -5587,17 +5598,23 @@ fn read_message_arg(
     stdin: bool,
     from_file: Option<PathBuf>,
 ) -> Result<String> {
-    let text = if let Some(m) = message.or(message_flag) {
-        m
-    } else if let Some(path) = from_file {
-        read_capped_file(&path, "note")?
-    } else if stdin {
-        read_capped_stdin("note")?
-    } else {
-        bail!(
-            "provide the note text as an argument, or use --message/--body, \
-             --body-file PATH (- for stdin), --stdin, or --from-file PATH"
-        );
+    let text = match (message, message_flag) {
+        (Some(_), Some(_)) => {
+            bail!("internal error: clap `note_body` did not enforce a single note text source")
+        }
+        (Some(message), None) | (None, Some(message)) => message,
+        (None, None) => {
+            if let Some(path) = from_file {
+                read_capped_file(&path, "note")?
+            } else if stdin {
+                read_capped_stdin("note")?
+            } else {
+                bail!(
+                    "provide the note text as an argument, or use --message/--body/--comment, \
+                     --body-file PATH (- for stdin), --stdin, or --from-file PATH"
+                );
+            }
+        }
     };
     let text = text.trim();
     if text.is_empty() {
@@ -7570,14 +7587,29 @@ mod tests {
     }
 
     #[test]
-    fn body_flag_is_alias_for_message_on_note() {
-        // `--body` is a visible alias of `--message`, matching `close
-        // --comment`/`create --body` vocabulary.
-        let cli = Cli::try_parse_from(["issuectl", "note", "sl-ug", "--as", "u", "--body", "hi"])
-            .unwrap();
-        match cli.command {
-            Command::Note { message_flag, .. } => assert_eq!(message_flag.as_deref(), Some("hi")),
-            _ => panic!("expected Note"),
+    fn body_and_comment_flags_are_aliases_for_message_on_note() {
+        // The note family accepts both the `create --body` and `close
+        // --comment` spellings, so its advertised shared vocabulary is real.
+        for flag in ["--body", "--comment"] {
+            let cli = Cli::try_parse_from(["issuectl", "note", "sl-ug", "--as", "u", flag, "hi"])
+                .unwrap();
+            match cli.command {
+                Command::Note { message_flag, .. } => {
+                    assert_eq!(message_flag.as_deref(), Some("hi"))
+                }
+                _ => panic!("expected Note"),
+            }
+        }
+    }
+
+    #[test]
+    fn message_and_note_are_aliases_for_comment_on_close() {
+        for flag in ["--message", "--note"] {
+            let cli = Cli::try_parse_from(["issuectl", "close", "sl-ug", flag, "done"]).unwrap();
+            match cli.command {
+                Command::Close { comment, .. } => assert_eq!(comment.as_deref(), Some("done")),
+                _ => panic!("expected Close"),
+            }
         }
     }
 
@@ -7601,6 +7633,25 @@ mod tests {
             }
             _ => panic!("expected Note"),
         }
+    }
+
+    #[test]
+    fn unknown_note_flag_is_named_by_clap() {
+        let err = Cli::try_parse_from([
+            "issuectl",
+            "note",
+            "sl-ug",
+            "--as",
+            "u",
+            "--not-a-note-flag",
+            "hi",
+        ])
+        .map(|_| ())
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("--not-a-note-flag"),
+            "usage error must name the offending flag: {err}"
+        );
     }
 
     #[test]
@@ -9082,6 +9133,13 @@ mod tests {
     fn read_message_arg_prefers_positional() {
         let got = read_message_arg(Some("hello".into()), None, false, None).unwrap();
         assert_eq!(got, "hello");
+    }
+
+    #[test]
+    fn read_message_arg_rejects_two_inline_sources() {
+        let err = read_message_arg(Some("positional".into()), Some("flag".into()), false, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("note_body"), "got: {err}");
     }
 
     #[test]

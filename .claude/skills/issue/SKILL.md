@@ -214,6 +214,7 @@ The CLI does both atomically — never `git mv` by hand.
 - `issuectl --json close <slug>` — defaults to `fixed` for bugs, `done` otherwise
 - `issuectl --json close <slug> --status wontfix` — explicit closing status
 - `issuectl --json close <slug> --as <user>` — record the closer as the `closed_by:` frontmatter field (optional; same author grammar as `note --as`)
+- `issuectl --json close <slug> --comment "resolution"` — append the resolution rationale; `--note` and `--message` are aliases
 - `issuectl --json close <slug> --commit HASH:summary` — also record a commit (repeatable)
 - `issuectl --json close <slug> --stamp` — after closing, rewrite the current HEAD commit's message to append a `Fixes-Issue: @<slug>` trailer, so the trailer-driven `issuectl changelog` picks up the landing commit with zero manual trailer discipline. Run it **after** committing the fix (it stamps whatever HEAD is) and **before** pushing/merging (rewriting changes HEAD's sha). Message-only — tree, author, and dates are preserved and the index is untouched. Fail-safe: it never blocks the close — the `stamp` object in the JSON reports `{"status":"stamped","sha":...,"previous_sha":...}`, `{"status":"already_present","sha":...}`, or `{"status":"skipped","reason":...}` (HEAD detached / a merge commit / signed / mid rebase-cherry-pick-merge-revert / no commit to stamp). Cannot be combined with a `--commit` that resolves to HEAD (the rewrite would orphan that recorded sha).
 
@@ -317,8 +318,9 @@ as `update`; body-only mutation.
 - `comment` is a visible alias for `note` — `issuectl --json comment
   <slug> --as <user> "<message>"` is identical.
 - The message text comes from **exactly one** source: the positional
-  argument, `--message`/`--body "<text>"` (mirrors `close --comment` /
-  `create --body`), `--from-file PATH` / `--body-file PATH` (aliases; `-`
+  argument, `--message`/`--body`/`--comment "<text>"` (mirrors
+  `close --comment`/`--message` and `create --body`), `--from-file PATH` /
+  `--body-file PATH` (aliases; `-`
   reads stdin, like `create --body-file`), or `--stdin`. Passing two at once
   is a usage error (`{"error":{"code":"usage-error",…}}`, non-zero exit);
   passing none is an error too.
