@@ -2174,6 +2174,7 @@ fn essential_frontmatter_absent_from_mapping(mapping: Option<&serde_yaml::Mappin
     !has("status") || !has("type")
 }
 
+#[allow(dead_code)] // retained as the SystemClock convenience for inline tests.
 fn apply(
     repo_root: &Path,
     actions: DoctorActions,

@@ -7,6 +7,9 @@ priority: normal
 labels: [tooling, cli-canon]
 lane: cli-canon
 lane_seq: 80
+commits:
+- hash: db047aaec356bf85b3f6d1f8b2b3e1a8620cdef5
+  summary: inject Clock into core time paths
 ---
 
 # cli-canon: §22 Internal layout: library-first core/cli split
