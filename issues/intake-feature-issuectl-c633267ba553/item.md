@@ -3,12 +3,13 @@ created: 2026-08-16
 updated: 2026-08-16
 type: feature
 reporter: jari
-status: open
+status: done
 priority: normal
 labels:
 - via:agent-aggountant-wrapup
 lane: docs
 lane_seq: 10
+closed: 2026-08-16
 ---
 
 # Document how to design a lane structure: lanes are serial queues, so la…
@@ -42,3 +43,9 @@ A short "designing a lane structure" section in the `dag` docs (or `dag --help`'
 Optional and smaller: `issuectl dag` could surface per-lane depth and the count of spawnable heads, which is the number a user actually wants when asking "how parallel is my plan right now".
 
 Filed from aggountant, where the restructure landed as 9 lanes / 8 spawnable heads.
+
+## Resolution
+
+### 2026-08-16T18:49:25Z · @issuectl
+
+Published docs/design/lane-design.md. Deferred dag --help guidance and per-lane depth/spawnable-head output to @surface-lane-design in lane cli-fixes.
