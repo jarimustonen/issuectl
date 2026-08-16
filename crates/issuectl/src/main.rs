@@ -37,7 +37,7 @@ Examples:
   issuectl config show                     Inspect effective schema configuration
   issuectl doctor                          Health-check the repo
   issuectl doctor --fix                    Migrate legacy numbered issues
-  issuectl skill list                      List bundled /issue companion skills
+  issuectl skill list                      List bundled companion skills
   issuectl skill install                   Install /issue (+ /issue-new, /issue-intake) skills
 ";
 
@@ -6165,14 +6165,23 @@ fn cmd_body_set(
 fn cmd_skill_list(json: bool) -> Result<()> {
     let catalog = skill::skill_catalog();
     if json {
-        println!("{}", serde_json::to_string_pretty(catalog)?);
+        println!("{}", serde_json::to_string_pretty(&catalog)?);
         return Ok(());
     }
 
-    for entry in catalog {
+    let agent_width = catalog
+        .iter()
+        .flat_map(|entry| &entry.install_targets)
+        .map(|target| target.agent.len())
+        .max()
+        .unwrap_or(0);
+    for entry in &catalog {
         println!("{}  {}", entry.name, entry.description);
-        for target in entry.install_targets {
-            println!("  {}  {}", target.label, target.path);
+        for target in &entry.install_targets {
+            println!(
+                "  [{:agent_width$}] {}  {}",
+                target.agent, target.label, target.path
+            );
         }
     }
     Ok(())

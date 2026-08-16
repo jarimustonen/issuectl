@@ -12,105 +12,77 @@ const ISSUE_INTAKE_TEMPLATE: &str = include_str!("../templates/issue-intake-skil
 const ISSUE_INTAKE_CODEX_TEMPLATE: &str = include_str!("../templates/issue-intake-prompt.md");
 pub const ISSUES_AGENTS_TEMPLATE: &str = include_str!("../templates/issues-agents.md");
 
-/// One install destination for a bundled companion skill. `agent` matches the
-/// `skill install --agent` vocabulary, except `pi`, which is the derived
-/// pi.dev mirror created by a Claude install.
+/// One install destination for a bundled companion skill. `agent` is always a
+/// value accepted by `skill install --agent`; pi.dev is deliberately absent
+/// because it is a derived mirror of a Claude install, not an independently
+/// selectable format (inspect that mirror with `skill pi-status`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SkillInstallTarget {
-    pub agent: &'static str,
-    pub label: &'static str,
-    pub path: &'static str,
+    pub agent: String,
+    pub label: String,
+    pub path: String,
 }
 
 /// A bundled companion skill that `issuectl skill install` can write.
-///
-/// This catalog is the read-only source for `skill list`; installation and the
-/// pi.dev lifecycle derive their names/templates from the same skill types
-/// below, keeping the public catalog and shipped files in lockstep.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SkillCatalogEntry {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub install_targets: &'static [SkillInstallTarget],
+    pub name: String,
+    pub description: String,
+    pub install_targets: Vec<SkillInstallTarget>,
 }
 
-const ISSUE_TARGETS: &[SkillInstallTarget] = &[
+fn install_target(agent: Agent, label: &str, path: PathBuf) -> SkillInstallTarget {
     SkillInstallTarget {
-        agent: "claude",
-        label: "Claude Code skill",
-        path: ".claude/skills/issue/SKILL.md",
-    },
-    SkillInstallTarget {
-        agent: "codex",
-        label: "Codex prompt",
-        path: ".codex/prompts/issue.md",
-    },
-    SkillInstallTarget {
-        agent: "pi",
-        label: "pi.dev skill mirror",
-        path: "~/.pi/agent/skills/issue/SKILL.md",
-    },
-];
-
-const ISSUE_NEW_TARGETS: &[SkillInstallTarget] = &[
-    SkillInstallTarget {
-        agent: "claude",
-        label: "Claude Code intake filing skill",
-        path: ".claude/skills/issue-new/SKILL.md",
-    },
-    SkillInstallTarget {
-        agent: "codex",
-        label: "Codex intake filing prompt",
-        path: ".codex/prompts/issue-new.md",
-    },
-    SkillInstallTarget {
-        agent: "pi",
-        label: "pi.dev skill mirror",
-        path: "~/.pi/agent/skills/issue-new/SKILL.md",
-    },
-];
-
-const ISSUE_INTAKE_TARGETS: &[SkillInstallTarget] = &[
-    SkillInstallTarget {
-        agent: "claude",
-        label: "Claude Code intake processing skill",
-        path: ".claude/skills/issue-intake/SKILL.md",
-    },
-    SkillInstallTarget {
-        agent: "codex",
-        label: "Codex intake processing prompt",
-        path: ".codex/prompts/issue-intake.md",
-    },
-    SkillInstallTarget {
-        agent: "pi",
-        label: "pi.dev skill mirror",
-        path: "~/.pi/agent/skills/issue-intake/SKILL.md",
-    },
-];
-
-const SKILL_CATALOG: &[SkillCatalogEntry] = &[
-    SkillCatalogEntry {
-        name: "issue",
-        description: "Manage issues and epics in issues/.",
-        install_targets: ISSUE_TARGETS,
-    },
-    SkillCatalogEntry {
-        name: "issue-new",
-        description: "Faithfully file an incoming bug report or feature request into intake.",
-        install_targets: ISSUE_NEW_TARGETS,
-    },
-    SkillCatalogEntry {
-        name: "issue-intake",
-        description: "Read and brief the actionable intake queue without applying a disposition.",
-        install_targets: ISSUE_INTAKE_TARGETS,
-    },
-];
+        agent: agent.argument().to_string(),
+        label: label.to_string(),
+        path: path.display().to_string(),
+    }
+}
 
 /// Return the bundled companion-skill catalog in stable install order.
-/// Read-only: this describes what the binary can install and never inspects or
-/// changes the pi.dev mirror.
-pub fn skill_catalog() -> &'static [SkillCatalogEntry] {
-    SKILL_CATALOG
+///
+/// The catalog derives names, labels, and paths from the same `Agent` and
+/// `IntakeSkill` methods that installation uses. Read-only: it describes the
+/// Claude and Codex variants this binary can install, never inspecting or
+/// changing the derived pi.dev mirror.
+pub fn skill_catalog() -> Vec<SkillCatalogEntry> {
+    let root = Path::new("");
+    let agents = [Agent::Claude, Agent::Codex];
+    let mut catalog = Vec::with_capacity(1 + IntakeSkill::ALL.len());
+
+    catalog.push(SkillCatalogEntry {
+        name: Agent::Claude.skill_name().unwrap_or("issue").to_string(),
+        description: "Manage issues and epics in issues/.".to_string(),
+        install_targets: agents
+            .iter()
+            .map(|agent| install_target(*agent, agent.label(), agent.install_path(root)))
+            .collect(),
+    });
+    for skill in IntakeSkill::ALL {
+        let description = match skill {
+            IntakeSkill::IssueNew => {
+                "Faithfully file an incoming bug report or feature request into intake."
+            }
+            IntakeSkill::IssueIntake => {
+                "Read and brief the actionable intake queue without applying a disposition."
+            }
+        };
+        catalog.push(SkillCatalogEntry {
+            name: skill.slug().to_string(),
+            description: description.to_string(),
+            install_targets: agents
+                .iter()
+                .map(|agent| {
+                    install_target(
+                        *agent,
+                        skill.label(*agent),
+                        skill.install_path(*agent, root),
+                    )
+                })
+                .collect(),
+        });
+    }
+    catalog
 }
 
 /// Label for a skill copy mirrored into pi.dev's skill corpus.
@@ -151,6 +123,14 @@ pub enum Agent {
 }
 
 impl Agent {
+    /// The value accepted by `skill install --agent` for this concrete format.
+    pub fn argument(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
     pub fn from_str(s: &str) -> Result<Self> {
         match s {
             "claude" => Ok(Self::Claude),
@@ -2451,26 +2431,44 @@ mod tests {
 
     #[test]
     fn skill_catalog_lists_every_shipped_skill_and_install_target() {
+        let root = Path::new("");
         let catalog = skill_catalog();
-        let names: Vec<_> = catalog.iter().map(|skill| skill.name).collect();
-        assert_eq!(names, ["issue", "issue-new", "issue-intake"]);
+        let mut expected_names = vec![Agent::Claude.skill_name().unwrap().to_string()];
+        expected_names.extend(
+            IntakeSkill::ALL
+                .iter()
+                .map(|skill| skill.slug().to_string()),
+        );
+        assert_eq!(
+            catalog.iter().map(|skill| &skill.name).collect::<Vec<_>>(),
+            expected_names.iter().collect::<Vec<_>>()
+        );
 
-        for skill in catalog {
-            assert!(!skill.description.is_empty());
-            assert_eq!(
-                skill
-                    .install_targets
-                    .iter()
-                    .map(|target| target.agent)
-                    .collect::<Vec<_>>(),
-                ["claude", "codex", "pi"],
-                "{} must expose its Claude, Codex, and pi.dev targets",
-                skill.name
-            );
-            assert!(skill
+        for (entry, intake_skill) in catalog.iter().skip(1).zip(IntakeSkill::ALL) {
+            assert!(!entry.description.is_empty());
+            for (target, agent) in entry
                 .install_targets
                 .iter()
-                .all(|target| !target.label.is_empty() && !target.path.is_empty()));
+                .zip([Agent::Claude, Agent::Codex])
+            {
+                assert_eq!(target.agent, agent.argument());
+                assert_eq!(target.label, intake_skill.label(agent));
+                assert_eq!(
+                    target.path,
+                    intake_skill.install_path(agent, root).display().to_string()
+                );
+            }
+        }
+
+        let issue = &catalog[0];
+        for (target, agent) in issue
+            .install_targets
+            .iter()
+            .zip([Agent::Claude, Agent::Codex])
+        {
+            assert_eq!(target.agent, agent.argument());
+            assert_eq!(target.label, agent.label());
+            assert_eq!(target.path, agent.install_path(root).display().to_string());
         }
     }
 
