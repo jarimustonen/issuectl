@@ -61,19 +61,32 @@ taaksepäin yhteensopivuutta vielä"*.
   neuvoo DAG-drift-checkiin `jq '.lanes[].nodes[].slug'`, mutta `issuectl dag --json` emittoi
   `.lanes[].issues[]` → tyhjä oikea puoli → **jokainen aktiivinen issue näyttää puuttuvan DAGista**.
 
-**Seuraava askel:** `cli-canon`-lane tyhjennetty, 0.13.0 ulkona. DAGissa aktiivisena vain `@create-help-slug-text`
-(lane `cli-fixes`) + parkissa `@ossctl-cut-no-publish`.
+**Seuraava askel:** `cli-canon`-lane tyhjennetty, 0.13.0 ulkona. **Seuraava rupeama voi käynnistää kolme lanea
+rinnakkain** (`cli-fixes` sarjassa + `docs` + `audit`); GLOBAL HEAD = `@intake-bug-issuectl-06c42e2d1123`.
+Parkissa edelleen `@ossctl-cut-no-publish`.
 
-**⚠️ VIISI UNTRIAGOITUA INTAKE-ITEMIÄ ODOTTAA ACKIA** (saapui 2026-08-16 session aikana sisarrepojen
-wrap-upeista, kaikki `needs-triage`). Esitelty jarille handoffissa, ei vielä dispositioitu:
-- `@intake-bug-issuectl-06c42e2d1123` — `doctor --fix` laskee jäljellä olevat findingit väärin (raportoi 1, listaa 9)
-- `@intake-bug-issuectl-715670f2607f` — `note` hylkää `--comment` vaikka oma help lupaa sen
-- `@intake-bug-issuectl-7a79c97d9fa8` — johdettu slug typistyy hiljaisesti (**liittyy** `@create-help-slug-text`iin,
-  sama slug-logiikka → kannattaa lanettaa samaan `cli-fixes`-laneen peräkkäin, ei rinnakkain)
-- `@intake-feature-issuectl-c633267ba553` — lane-rakenteen suunnittelu pitäisi dokumentoida (lanet ovat sarjallisia
-  jonoja → laneus maksaa rinnakkaisuutta). **Osui tämän rupeaman kipupisteeseen:** 6 unittia yhdessä lanessa = 0
-  rinnakkaisuutta, ~5 h sarjassa.
-- `@intake-feature-issuectl-ff7665d266e6` — `update --type epic` käskee käsin editoimaan YAMLia migraation sijaan
+**Triage tehty (`/triage-unlaned-issues`, jari ackasi kaikki 2026-08-16):** kuusi DAGin ulkopuolista issueta
+triagattu, `needs-triage` poistettu viideltä intake-itemiltä ja kaikki lanetettu. **Kolme lanea = kolme
+rinnakkaista työtä** (ensi rupeaman lähtöasetelma):
+
+- **`cli-fixes` (sarjassa, sama keskeinen tiedosto — 5 unittia):**
+  1. `@intake-bug-issuectl-06c42e2d1123` (seq 10, **priority high**) — `doctor --fix` laskee jäljellä olevat
+     findingit väärin (raportoi 1, listaa 9). **Nostettu kärkeen:** tiivistysrivi on se, jonka agentti/CI lukee
+     päättääkseen onko repo puhdas → väärä yhteenveto ohjaa koneellista päätöksentekoa harhaan.
+  2. `@create-help-slug-text` (seq 20) — `create --help` väittää väärää oletusslug-käytöstä
+  3. `@intake-bug-issuectl-7a79c97d9fa8` (seq 30) — johdettu slug typistyy hiljaisesti. **Vieretysten edellisen
+     kanssa tarkoituksella:** sama slug-alue, yksi siivous. Huom: typistys *on* tarkoitettua (2–3 sanaa) —
+     vika on näkymättömyydessä, ei säännössä.
+  4. `@intake-feature-issuectl-ff7665d266e6` (seq 40) — `update --type epic` käskee käsin editoimaan YAMLia
+  5. `@intake-bug-issuectl-715670f2607f` (seq 50) — `note` hylkää `--comment` vaikka oma help lupaa sen
+- **`docs` (rinnakkainen):** `@intake-feature-issuectl-c633267ba553` — lane-rakenteen suunnitteluohje (lanet ovat
+  sarjallisia jonoja → laneus maksaa rinnakkaisuutta). **Osui tämän rupeaman kipupisteeseen:** 6 unittia yhdessä
+  lanessa = 0 rinnakkaisuutta, ~5 h sarjassa.
+- **`audit` (rinnakkainen):** `@audit-no-user-specifics` — julkisen paketin tarkistus henkilökohtaisten tietojen
+  varalta. **Esiskannaus tehty triagessa: paketti näyttää puhtaalta** (ainoat tilitunnusosumat ovat aidot
+  Homebrew/GitHub-asennuskanavat, yksityisten repojen nimiä ei lainkaan). Yksi osuma: tämän repon `AGENTS.md`
+  viittaa henkilökohtaiseen hakemistopolkuun `~/Sources/project-canon`. Issue vaatii kirjatun tuloksen myös
+  silloin kun tulos on "puhdas".
 
 **⚠️ INTAKE-PREDIKAATTI-SUDENKUOPPA:** `/stint-handoff`:n dokumentoitu detect-predikaatti on `open ∧ via:telegram ∧
 needs-triage`, mutta intakea saapuu nyt myös `via:agent-*`-provenanssilla (sisarrepojen wrap-upit `intakectl
