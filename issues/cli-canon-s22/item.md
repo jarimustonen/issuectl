@@ -10,6 +10,10 @@ lane_seq: 80
 commits:
 - hash: db047aaec356bf85b3f6d1f8b2b3e1a8620cdef5
   summary: inject Clock into core time paths
+- hash: d5c6af8
+  summary: 'chore: record clock injection work'
+- hash: 9a0704b
+  summary: 'fix: make fixed clocks deterministic'
 ---
 
 # cli-canon: §22 Internal layout: library-first core/cli split

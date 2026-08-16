@@ -1573,6 +1573,7 @@ pub fn close_issue(
 }
 
 /// Clock-injected variant of [`close_issue`].
+#[allow(clippy::too_many_arguments)]
 pub fn close_issue_via(
     root: &Path,
     slug: &str,
@@ -2030,6 +2031,7 @@ pub fn note_issue(
 }
 
 /// Clock-injected variant of [`note_issue`].
+#[allow(clippy::too_many_arguments)]
 pub fn note_issue_via(
     root: &Path,
     slug: &str,
