@@ -1107,6 +1107,9 @@ fn update_issue_under_lock(
         } else {
             None
         };
+    // Snapshot once so a mutation crossing midnight keeps all derived
+    // provenance fields internally consistent.
+    let today = clock.today_string();
     let mut moved_to_closed = false;
     let mut moved_to_open = false;
 
@@ -1161,7 +1164,7 @@ fn update_issue_under_lock(
                 .frontmatter
                 .contains_key(serde_yaml::Value::String("closed".into()));
             if !prev_closing || !has_closed {
-                write::set_string(&mut item.frontmatter, "closed", &clock.today_string());
+                write::set_string(&mut item.frontmatter, "closed", &today);
             }
             // `closed_by:` tracks `closed:`. An explicit attribution
             // (`close --as`, or a PATCH populating the slot) is written /
@@ -1314,15 +1317,14 @@ fn update_issue_under_lock(
         }
     }
 
-    write::set_string(&mut item.frontmatter, "updated", &clock.today_string());
+    write::set_string(&mut item.frontmatter, "updated", &today);
 
     // Reopen flow: when transitioning closing → active, append a
     // `## Reopen Notes — <date>` section so the rationale isn't
     // implicit. One section per transition (multiple reopens stack).
     if moved_to_open {
         let trimmed_body = item.body.trim_start_matches('\n');
-        let with_section =
-            crate::body_sections::append_reopen_notes(trimmed_body, &clock.today_string());
+        let with_section = crate::body_sections::append_reopen_notes(trimmed_body, &today);
         item.body = crate::body_sections::canonicalise_body_leading(&with_section);
     }
 
@@ -1558,6 +1560,29 @@ pub fn close_issue(
     commits: Vec<CommitSpec>,
     expected_version: Option<String>,
 ) -> Result<UpdateOutcome, MutateError> {
+    close_issue_via(
+        root,
+        slug,
+        status_override,
+        closed_by,
+        comment,
+        commits,
+        expected_version,
+        &SystemClock,
+    )
+}
+
+/// Clock-injected variant of [`close_issue`].
+pub fn close_issue_via(
+    root: &Path,
+    slug: &str,
+    status_override: Option<String>,
+    closed_by: Option<String>,
+    comment: Option<String>,
+    commits: Vec<CommitSpec>,
+    expected_version: Option<String>,
+    clock: &dyn Clock,
+) -> Result<UpdateOutcome, MutateError> {
     if !crate::slug::is_valid(slug) {
         return Err(MutateError::Validation(format!(
             "invalid slug shape: {slug:?}"
@@ -1691,7 +1716,7 @@ pub fn close_issue(
         req_normalized,
         &schema,
         &rules,
-        &SystemClock,
+        clock,
     )
 }
 
@@ -1829,7 +1854,18 @@ pub fn update_body(
     body: String,
     dry_run: bool,
 ) -> Result<UpdateOutcome, MutateError> {
-    let clock = SystemClock;
+    update_body_via(root, slug, expected_version, body, dry_run, &SystemClock)
+}
+
+/// Clock-injected variant of [`update_body`].
+pub fn update_body_via(
+    root: &Path,
+    slug: &str,
+    expected_version: Option<String>,
+    body: String,
+    dry_run: bool,
+    clock: &dyn Clock,
+) -> Result<UpdateOutcome, MutateError> {
     if !crate::slug::is_valid(slug) {
         return Err(MutateError::Validation(format!(
             "invalid slug shape: {slug:?}"
@@ -1981,7 +2017,29 @@ pub fn note_issue(
     expected_version: Option<String>,
     dry_run: bool,
 ) -> Result<UpdateOutcome, MutateError> {
-    let clock = SystemClock;
+    note_issue_via(
+        root,
+        slug,
+        author,
+        message,
+        section,
+        expected_version,
+        dry_run,
+        &SystemClock,
+    )
+}
+
+/// Clock-injected variant of [`note_issue`].
+pub fn note_issue_via(
+    root: &Path,
+    slug: &str,
+    author: &str,
+    message: &str,
+    section: &str,
+    expected_version: Option<String>,
+    dry_run: bool,
+    clock: &dyn Clock,
+) -> Result<UpdateOutcome, MutateError> {
     if !crate::slug::is_valid(slug) {
         return Err(MutateError::Validation(format!(
             "invalid slug shape: {slug:?}"
@@ -2037,7 +2095,7 @@ pub fn note_issue(
             None
         };
     let block = crate::body_sections::render_note_block(
-        &crate::body_sections::now_iso_via(&clock),
+        &crate::body_sections::now_iso_via(clock),
         author,
         message,
     )
@@ -2125,7 +2183,25 @@ pub fn toggle_checkbox(
     expected_version: Option<String>,
     dry_run: bool,
 ) -> Result<UpdateOutcome, MutateError> {
-    let clock = SystemClock;
+    toggle_checkbox_via(
+        root,
+        slug,
+        substring,
+        expected_version,
+        dry_run,
+        &SystemClock,
+    )
+}
+
+/// Clock-injected variant of [`toggle_checkbox`].
+pub fn toggle_checkbox_via(
+    root: &Path,
+    slug: &str,
+    substring: &str,
+    expected_version: Option<String>,
+    dry_run: bool,
+    clock: &dyn Clock,
+) -> Result<UpdateOutcome, MutateError> {
     if !crate::slug::is_valid(slug) {
         return Err(MutateError::Validation(format!(
             "invalid slug shape: {slug:?}"

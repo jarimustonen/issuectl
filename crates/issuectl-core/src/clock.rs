@@ -7,14 +7,12 @@ use chrono::{DateTime, Local, NaiveDate, Utc};
 /// Callers use [`SystemClock`] in normal operation and [`FixedClock`] in
 /// deterministic tests. Dates intentionally use the local calendar because
 /// persisted `closed:` and `updated:` values historically do too.
-pub trait Clock {
+pub trait Clock: Send + Sync {
     /// The current instant in UTC.
     fn now_utc(&self) -> DateTime<Utc>;
 
-    /// Today's local calendar date.
-    fn today(&self) -> NaiveDate {
-        self.now_utc().with_timezone(&Local).date_naive()
-    }
+    /// Today's calendar date in the clock's explicitly defined timezone.
+    fn today(&self) -> NaiveDate;
 
     /// Today's local calendar date in the persisted frontmatter format.
     fn today_string(&self) -> String {
@@ -29,6 +27,10 @@ pub struct SystemClock;
 impl Clock for SystemClock {
     fn now_utc(&self) -> DateTime<Utc> {
         Utc::now()
+    }
+
+    fn today(&self) -> NaiveDate {
+        self.now_utc().with_timezone(&Local).date_naive()
     }
 }
 
@@ -47,6 +49,10 @@ impl FixedClock {
 impl Clock for FixedClock {
     fn now_utc(&self) -> DateTime<Utc> {
         self.now
+    }
+
+    fn today(&self) -> NaiveDate {
+        self.now.date_naive()
     }
 }
 
