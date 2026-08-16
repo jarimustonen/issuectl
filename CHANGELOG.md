@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-16
+
 ### Added
 - **Machine-readable help** — `issuectl --help --json` and every subcommand's
   `--help --json` emit a structured help document with subcommands, flags,
