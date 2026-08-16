@@ -13,43 +13,59 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-16, 0.11.0-release + cli-fixes-rupeama):** `main` **vihreä** (1058 testiä, fmt+clippy puhtaat —
-0 uutta clippy-varoitusta, 52 pre-existing). **`origin/main` == `main` (pushattu).** **Live-release nyt `v0.11.0`**
-(crates.io + binäärit + Homebrew + tag kaikki ulkona). `Cargo.toml == 0.11.0`. **Aktiivinen työ tyhjä** — DAG:ssa
-vain parkissa oleva `@ossctl-cut-no-publish` (upstream-blocked). Ei ajossa olevia workereita.
+**Tila (2026-08-16, cli-canon-rupeama + 0.12.0 & 0.13.0 julkaistu):** `main` **vihreä** (1070 testiä, fmt+clippy
+puhtaat — 0 uutta clippy-varoitusta, 52 pre-existing). **`origin/main` == `main` (pushattu).** **Live-release nyt
+`v0.13.0`** (crates.io + binäärit + Homebrew + tag kaikki ulkona, 14 assetia). `Cargo.toml == 0.13.0`.
+**Aktiivinen työ tyhjä** — DAG:ssa vain parkissa oleva `@ossctl-cut-no-publish` (upstream-blocked). Ei ajossa
+olevia workereita.
 
-**Tämä sessio: 7 unittia landattu + 0.11.0 julkaistu.** Kulku:
-1. **DAG-merge:** foldattu uusi `@sync-commits-empty-main` `cli-fixes`-laneen (collision main.rs, seq 60).
-2. **Release-lane:** `@changelog-trailers-never` (GLOBAL HEAD) landattu design-first — **`issuectl close --stamp`**
-   amendaa HEADin `Fixes-Issue: @<slug>`-trailerilla (option 1, issuectl-puoli; 4-model review). Trailer-vetoinen
-   `issuectl changelog` toimii nyt eteenpäin nolla-vaivalla.
-3. **cli-fixes-lane (kaikki sarjassa `main.rs`-collisionin takia, kukin reviewattu + vihreä + trailer-stampattu):**
-   `@intake-bug-issuectl-d6947128f6c9` (label --remove --json error-envelope + flag-form), `@list-status-done`
-   (--status done palauttaa closed/archived), `@intake-feature-issuectl-d93eaa168c66` (update --add-blocked-by),
-   `@intake-feature-issuectl-035722451473` (new --lane/--lane-seq/--add-collision), `@add-comment-alias`
-   (comment-alias + --message/--body-file), `@sync-commits-empty-main` (tyhjän default-rangen varoitus).
-4. **RELEASE 0.11.0 (jari valitsi OPTION a — kertaluontoinen käsinbackfill):** CHANGELOG `[0.11.0]` kuratoitu
-   käsin kattaen KAIKKI v0.10.0:n jälkeen toimitetut unitit (tämän session 8 + ~15 historiallista trailerittomasta
-   pushatusta committista), + huomautus että trailer-automaatio alkoi kesken syklin (0.12.0→ automaattinen).
-   Bump 0.10.0→0.11.0 (root + caret-dep), `release: 0.11.0`-commit, push.
-5. **ossctl cut EPÄONNISTUI (odotettu `@ossctl-cut-no-publish`-bugi):** publish-phase failasi, MITÄÄN ei uploadattu
-   (varmistettu crates.io-indeksistä). → **manuaalinen fallback (AGENTS RELEASE-OPPI):** `cargo publish -p
-   issuectl-core` → `-p issuectl` → `git tag v0.11.0` → push tag. Molemmat cratet crates.io:ssa, release.yml
-   (cargo-dist) ajoi vihreänä → binäärit + Homebrew-formula + GitHub Release.
+**Tämä sessio: koko `cli-canon`-lane (6 unittia) läpi + KAKSI julkaisua.** Kaikki sarjassa `main.rs`-collisionin
+takia; jokainen reviewattu (`/llm-review` + `/assess-findings`) + täysi green gate + `close --stamp`.
+
+**0.12.0 (additiiviset):**
+1. `@cli-canon-config` — §8 `config path` / `config show`, per-arvo provenienssi (`source: "file"|"default"`).
+2. `@cli-canon-skill-list` — §15 `skill list`, täydentää `list/install/print`-triadin.
+3. `@cli-canon-help-json` — §14 `--help --json` juurelle + alikomennoille; tekstihelp ennallaan.
+
+**0.13.0 (BREAKING):**
+4. `@cli-canon-json-envelope` — §10 **koko `--json`-pinta enveloppiin**: `{"schema_version":1,"data":…,
+   "warnings":[]}` stdoutiin, virheet `{"schema_version":1,"error":{…}}` stderriin. Lisäksi `version [--json]`
+   (`supported_schemas[]` + `skills[{name,cli_version,schema_version}]`) §17-driftauditia varten.
+5. `@cli-canon-create-verb` — §7 `create` on nyt primääri luontiverbi, `new` jää aliakseksi.
+6. `@cli-canon-s22-clock` — §22:n **Clock-osuus**: injektoitava `Clock` (`crates/issuectl-core/src/clock.rs`,
+   sama seam-idiomi kuin `ConfigSource`). Kaikki 14 suoraa `now()`-kutsua coresta pois; ainoa jäljellä oleva on
+   Clockin oma real-toteutus. Deterministiset testit arkistobucketoinnille + kuunvaihdoksen rajatapaukselle.
+
+**⚠️ BREAKING-MUUTOKSEN SEURAUS (0.13.0):** kaikki `issuectl --json` -kuluttajat rikkoutuivat. Mukana tulevat
+skill-templatet + `CLAUDE.md`:n sopimuskuvaus päivitettiin samassa committissa, MUTTA sisarrepojen omat skriptit
+eivät — ne pitää siirtää lukemaan `.data`-kentän alta. @jarin päätös 2026-08-16: *"ei haittaa, emme tue
+taaksepäin yhteensopivuutta vielä"*.
 
 **Sivutuotteet:**
-- **Orchestratectl-issue filattu:** `run-merge-stamp` (orchestratectl-repo) — `run merge` pitäisi stampata
-  Fixes-Issue-traileri landing-committiin, jotta "nolla-vaivaa"-lupaus on end-to-end (issuectl-puoli tehty
-  `close --stamp`:llä; tämä on toinen puolisko). Tähän asti workereille briefataan `close --stamp`.
-- **Intake-duplikaatti suljettu:** `@intake-feature-issuectl-986ecd5a58a9` (label --add/--remove flag-aliakset)
-  suljettu `obsolete` — jo toimitettu 0.11.0:ssa (`@intake-bug-issuectl-d6947128f6c9`).
+- **`@cli-canon-s22`:n premissi oli VIRHEELLINEN ja korjattiin issueen.** Audit (`project-canon review
+  --assume-defaults`) väitti *"no `crates/` directory — no core/cli split"*; todellisuudessa split on ollut
+  olemassa pitkään ja core on jo clap-vapaa. §22:sta tehtiin siis vain Clock-osuus. Kaksi tietoista **hylkäystä**
+  kirjattu issueen perusteluineen: (a) **I/O:n poisto coresta** — issuectl on tiedostojärjestelmäpohjainen
+  tracker, markdown-tiedostot *ovat* domain; abstrahointi olisi coren uudelleenkirjoitus ilman testattavuushyötyä
+  (testit jo hermeettisiä tempdireillä). (b) **crate-nimen vaihto `issuectl-cli`:ksi** — rikkoisi julkaistun
+  crates.io-nimen kosmetiikan vuoksi. Jos nämä halutaan avata, ne ovat issuessa dokumentoituina.
+- **CHANGELOG-korjaus:** `config`-worker vuoti diff-markkerit (`+`-merkit) CHANGELOGiin; korjattu käsin
+  (`docs(changelog): fix leaked diff markers`).
+- **Huomio, ei vielä filattu:** `create --help` -teksti sanoo satunnaisslugin olevan oletus kun `--slug` puuttuu,
+  mutta `CLAUDE.md`:n mukaan oletus on **otsikosta johdettu** slug ja satunnainen on vain fallback. Help-teksti
+  näyttää jääneen jälkeen todellisesta käytöksestä. Kannattaa filata + verifioida kumpi on oikeassa.
 
-**Seuraava askel:** **ei aktiivista työtä.** Kaikki laned unitit landattu, 0.11.0 ulkona. `@ossctl-cut-no-publish`
-pysyy parkissa kunnes upstream-ossctl korjaa. Uusi rupeama = odota intakea (`/issue-intake` / `/stint-start`
-nostaa jonon) tai ota `deferred`-backlogista jokin takaisin peliin. Jos releaset halutaan taas ossctl:n kautta,
-se vaatii `@ossctl-cut-no-publish`-fixin ensin.
+**Seuraava askel:** **ei aktiivista työtä.** `cli-canon`-lane tyhjennetty, 0.13.0 ulkona.
+`@ossctl-cut-no-publish` pysyy parkissa kunnes upstream-ossctl korjaa. Uusi rupeama = odota intakea
+(`/issue-intake` / `/stint-start` nostaa jonon), filaa yllä oleva `create --help` -epäjohdonmukaisuus, tai ota
+`deferred`-backlogista jokin takaisin peliin.
 
-**⚠️ RELEASE-OPPI (VAHVISTUI TÄSSÄ SESSIOSSA):** ossctl `release cut` EI julkaise oikeasti
+**⚠️ Siivousta odottava:** `issuectl__worktrees/wt-01m04ygzhw-canon-review-issuectl` (@286dcb3, **locked**) on
+edellisen session canon-review-ajosta eikä liity tähän rupeamaan. Jätetty koskematta — poista käsin jos on
+turha (`git worktree remove --force` + `git branch -D`).
+
+**⚠️ RELEASE-OPPI (0.12.0 ja 0.13.0 ajettiin suoraan manuaalireitillä — ossctl:ää ei edes yritetty, koska
+`@ossctl-cut-no-publish` on yhä auki; molemmat menivät läpi puhtaasti):** ossctl `release cut` EI julkaise oikeasti
 (`@ossctl-cut-no-publish`, upstream-blocked) — publish-phase failaa ("core not visible on index within 300s"),
 MITÄÄN ei uploadata. → release vaatii manuaalisen `cargo publish -p issuectl-core` → (odota indeksi) →
 `-p issuectl` → `git tag vX.Y.Z <release-commit>` → `git push origin vX.Y.Z` -fallbackin. Tag laukaisee
@@ -59,7 +75,7 @@ uploadattu** ennen manuaalista publishia (double-publish failaa). ossctl-run jä
 journaliin (`release verify <run-id>` näyttää unreconciled — vaaraton, ei estä mitään).
 
 **⚠️ Minor-bump-gotcha:** `crates/issuectl/Cargo.toml`:n sisäinen `issuectl-core = { …, version = "X" }`
-on caret-vaatimus → bumppaa se vastaamaan uutta minoria samassa release-commitissa (0.10.0 → 0.11.0).
+on caret-vaatimus → bumppaa se vastaamaan uutta minoria samassa release-commitissa (0.12.0 → 0.13.0).
 Vain minor/major-raja vaatii tämän, ei patch.
 
 **⚠️ Autonomy:** deployt/releaset TÄYSIN autonomisia (ei go/no-go, ei output-reviewia) — @jarin ohje 2026-08-10.
