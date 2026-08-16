@@ -13,53 +13,54 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-15, triage + jononrakennus-sessio):** `main` viimeksi tunnettu **vihreä** (1038 testiä),
-työpuu: vain tämän handoffin DAG-editit committaamatta (tämä commit hoitaa). **`origin/main` == `main`
-(pushattu tämän session alussa — rebase+push, ei enää pushaamattomia committeja).** **Live-release yhä
-`v0.10.0`**; mainissa ~17 julkaisematonta feat/fix-committia menossa 0.11.0:aan. `Cargo.toml == 0.10.0`
-(ei bumpattu).
+**Tila (2026-08-16, 0.11.0-release + cli-fixes-rupeama):** `main` **vihreä** (1058 testiä, fmt+clippy puhtaat —
+0 uutta clippy-varoitusta, 52 pre-existing). **`origin/main` == `main` (pushattu).** **Live-release nyt `v0.11.0`**
+(crates.io + binäärit + Homebrew + tag kaikki ulkona). `Cargo.toml == 0.11.0`. **Aktiivinen työ tyhjä** — DAG:ssa
+vain parkissa oleva `@ossctl-cut-no-publish` (upstream-blocked). Ei ajossa olevia workereita.
 
-**Tämä sessio: EI koodia landattu — triage + uuden työjonon rakennus.** Kulku:
-1. **Rebase+push:** `main` oli 23 edellä / 3 jäljessä originia. 3 uutta intake-issuea saapunut (agent-homebase-
-   wrapup): `@intake-feature-issuectl-035722451473` (new --lane), `@intake-feature-issuectl-d93eaa168c66`
-   (update --add-blocked-by), `@intake-bug-issuectl-d6947128f6c9` (label --remove --json no-op). Rebattu +
-   pushattu → haara ehjä.
-2. **Deep triage (`/triage-bugs`):** 8 open∧¬laned issuea. DAG oli **täysin tyhjä** (0 lanea) edellisen rupeaman
-   jäljiltä.
-3. **Uusi työjono rakennettu (@jarin pyyntö "kaikki tulee tehdyksi"):** 7 laned, 1 suljettu. `@issue-graph-view`
-   **suljettu `obsolete`** (ydin toimitettu jo `issuectl dag`:na; jos mermaid-export tarvitaan, filaa tuoreena
-   kapeana lens-1-issuena).
+**Tämä sessio: 7 unittia landattu + 0.11.0 julkaistu.** Kulku:
+1. **DAG-merge:** foldattu uusi `@sync-commits-empty-main` `cli-fixes`-laneen (collision main.rs, seq 60).
+2. **Release-lane:** `@changelog-trailers-never` (GLOBAL HEAD) landattu design-first — **`issuectl close --stamp`**
+   amendaa HEADin `Fixes-Issue: @<slug>`-trailerilla (option 1, issuectl-puoli; 4-model review). Trailer-vetoinen
+   `issuectl changelog` toimii nyt eteenpäin nolla-vaivalla.
+3. **cli-fixes-lane (kaikki sarjassa `main.rs`-collisionin takia, kukin reviewattu + vihreä + trailer-stampattu):**
+   `@intake-bug-issuectl-d6947128f6c9` (label --remove --json error-envelope + flag-form), `@list-status-done`
+   (--status done palauttaa closed/archived), `@intake-feature-issuectl-d93eaa168c66` (update --add-blocked-by),
+   `@intake-feature-issuectl-035722451473` (new --lane/--lane-seq/--add-collision), `@add-comment-alias`
+   (comment-alias + --message/--body-file), `@sync-commits-empty-main` (tyhjän default-rangen varoitus).
+4. **RELEASE 0.11.0 (jari valitsi OPTION a — kertaluontoinen käsinbackfill):** CHANGELOG `[0.11.0]` kuratoitu
+   käsin kattaen KAIKKI v0.10.0:n jälkeen toimitetut unitit (tämän session 8 + ~15 historiallista trailerittomasta
+   pushatusta committista), + huomautus että trailer-automaatio alkoi kesken syklin (0.12.0→ automaattinen).
+   Bump 0.10.0→0.11.0 (root + caret-dep), `release: 0.11.0`-commit, push.
+5. **ossctl cut EPÄONNISTUI (odotettu `@ossctl-cut-no-publish`-bugi):** publish-phase failasi, MITÄÄN ei uploadattu
+   (varmistettu crates.io-indeksistä). → **manuaalinen fallback (AGENTS RELEASE-OPPI):** `cargo publish -p
+   issuectl-core` → `-p issuectl` → `git tag v0.11.0` → push tag. Molemmat cratet crates.io:ssa, release.yml
+   (cargo-dist) ajoi vihreänä → binäärit + Homebrew-formula + GitHub Release.
 
-**Uusi DAG (frontmatter `lane:`/`lane_seq:`/`collision:` asetettu — `issuectl dag` ja tämä TODO nyt yhtäpitävät):**
-- **LANE `release`:** `@changelog-trailers-never` (GLOBAL HEAD, high, 0.11.0-blocker).
-- **LANE `cli-fixes` (sarjassa, `main.rs`-perhe, bugit ensin):** `@intake-bug-issuectl-d6947128f6c9` →
-  `@list-status-done` → `@intake-feature-issuectl-d93eaa168c66` → `@intake-feature-issuectl-035722451473` →
-  `@add-comment-alias`.
-- **LANE `blocked-upstream` (PARKISSA — ei spawnata):** `@ossctl-cut-no-publish` (upstream-ossctl-blocked).
+**Sivutuotteet:**
+- **Orchestratectl-issue filattu:** `run-merge-stamp` (orchestratectl-repo) — `run merge` pitäisi stampata
+  Fixes-Issue-traileri landing-committiin, jotta "nolla-vaivaa"-lupaus on end-to-end (issuectl-puoli tehty
+  `close --stamp`:llä; tämä on toinen puolisko). Tähän asti workereille briefataan `close --stamp`.
+- **Intake-duplikaatti suljettu:** `@intake-feature-issuectl-986ecd5a58a9` (label --add/--remove flag-aliakset)
+  suljettu `obsolete` — jo toimitettu 0.11.0:ssa (`@intake-bug-issuectl-d6947128f6c9`).
 
-Molemmat aktiiviset lanet kantavat `collision: crates/issuectl/src/main.rs` → scheduler ei spawnaa kahta
-`main.rs`:ää muokkaavaa yhtä aikaa (kaikki CLI-argumentit + dispatch ovat yhdessä `main.rs`:ssä).
+**Seuraava askel:** **ei aktiivista työtä.** Kaikki laned unitit landattu, 0.11.0 ulkona. `@ossctl-cut-no-publish`
+pysyy parkissa kunnes upstream-ossctl korjaa. Uusi rupeama = odota intakea (`/issue-intake` / `/stint-start`
+nostaa jonon) tai ota `deferred`-backlogista jokin takaisin peliin. Jos releaset halutaan taas ossctl:n kautta,
+se vaatii `@ossctl-cut-no-publish`-fixin ensin.
 
-**⚠️ RELEASE 0.11.0 EI CUTATTU — blocker `@changelog-trailers-never` (high, GLOBAL HEAD):** changelog on
-trailer-vetoinen (`issuectl changelog` kokoaa `Fixes-Issue:`/`Refs-Issue:`-trailereista), mutta MIKÄÄN ei
-injektoi niitä (`git_trailers.rs` vain PARSII; ei commit-hookia, ei worktree-merge-steppiä, CONTRIBUTING ei
-dokumentoi) → 1/63 committia v0.10.0:n jälkeen kantaa trailerin → 0.11.0:n julkaisunootit tulisivat lähes
-tyhjinä. **@jari valitsi OPTION 1:** korjaa juurisyy niin että trailer stampataan automaattisesti kun
-run/worktree sulkee issuen (orchestratectl `run merge` ja/tai `issuectl close --commit`). Design-first.
-**EI RELEASEA ennen kuin tämä landaa** (ei käsinkuratointia — @jari halusi juurisyyn).
+**⚠️ RELEASE-OPPI (VAHVISTUI TÄSSÄ SESSIOSSA):** ossctl `release cut` EI julkaise oikeasti
+(`@ossctl-cut-no-publish`, upstream-blocked) — publish-phase failaa ("core not visible on index within 300s"),
+MITÄÄN ei uploadata. → release vaatii manuaalisen `cargo publish -p issuectl-core` → (odota indeksi) →
+`-p issuectl` → `git tag vX.Y.Z <release-commit>` → `git push origin vX.Y.Z` -fallbackin. Tag laukaisee
+`release.yml`:n (cargo-dist) → binäärit + Homebrew (EI double-publishaa crates.io:ta). Ennen fallbackia: bump +
+CHANGELOG-finalisointi + `release:`-commit + push main. **Varmista aina crates.io-indeksistä ETTEI core jo
+uploadattu** ennen manuaalista publishia (double-publish failaa). ossctl-run jää `in_progress`-tilaan sen omaan
+journaliin (`release verify <run-id>` näyttää unreconciled — vaaraton, ei estä mitään).
 
-**Seuraava askel:** **design + implementoi `@changelog-trailers-never` (option 1)** — GLOBAL HEAD ja 0.11.0:n
-release-blocker. Rinnalla ajettavissa `cli-fixes`-lane (bugit ensin: `label`-json-no-op, `list --status done`),
-mutta koska molemmat lanet jakavat `main.rs`-collisionin, scheduler sarjoittaa headit — käytännössä yksi
-worktree kerrallaan. Kun `changelog-trailers-never` landaa → cut 0.11.0 (bump 0.10.0→0.11.0 + caret-dep,
-CHANGELOG-finalisointi trailereista, `release:`-commit, `ossctl release plan|cut`). `@ossctl-cut-no-publish`
-pysyy parkissa kunnes upstream-ossctl korjaa. Kun `cli-fixes` tyhjenee + changelog-trailers landaa + ossctl
-ratkeaa → ei enää tehtävää.
-
-**⚠️ RELEASE-OPPI (yhä voimassa):** ossctl `release cut` EI julkaise oikeasti (`@ossctl-cut-no-publish`,
-upstream-blocked) → seuraava release vaatii manuaalisen `cargo publish -p issuectl-core` → `-p issuectl`
-→ tag → push -fallbackin. `ossctl release cut` julkaisee PUUN version, EI bumppaa → bump +
-CHANGELOG-finalisointi + `release:`-commit ENNEN cutia.
+**⚠️ Minor-bump-gotcha:** `crates/issuectl/Cargo.toml`:n sisäinen `issuectl-core = { …, version = "X" }`
+on caret-vaatimus → bumppaa se vastaamaan uutta minoria samassa release-commitissa (0.10.0 → 0.11.0).
+Vain minor/major-raja vaatii tämän, ei patch.
 
 **⚠️ Minor-bump-gotcha:** `crates/issuectl/Cargo.toml`:n sisäinen `issuectl-core = { …, version = "X" }`
 on caret-vaatimus → bumppaa se vastaamaan uutta minoria samassa release-commitissa (0.10.0 → 0.11.0).
@@ -76,7 +77,7 @@ regeneroi `release.yml`:ää.
 
 ---
 
-## Execution DAG (2026-08-15)
+## Execution DAG (2026-08-16)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge each round (drop landed, add active, keep existing order).
@@ -90,28 +91,20 @@ Lanes = hot-file families (AGENTS.md): `main.rs` (clap + cmd_* handlers +
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: changelog-trailers-never   ← highest value: 0.11.0 release-blocker, design-first (option 1 = stamp trailer at close/merge). cli-fixes lane spawnable but shares main.rs collision → serialized behind whatever main.rs worker is live. ossctl-cut-no-publish PARKED (upstream-blocked, do not spawn).
-LANE release — release pipeline (git_trailers.rs / commit-hook + issuectl close (mutate) + orchestratectl run merge)
-  ▶ changelog-trailers-never  high · bug; nothing injects Fixes-Issue/Refs-Issue trailers → trailer-driven `issuectl changelog` compiles near-empty (1/63 commits since v0.10.0) → 0.11.0 release notes would be misleading. DESIGN-FIRST: prefer stamping the trailer at close/merge (option 1 — orchestratectl run merge and/or `issuectl close --commit`). collision: crates/issuectl/src/main.rs
-LANE cli-fixes — CLI surface (crates/issuectl/src/main.rs: clap args + cmd_* dispatch); SEQUENTIAL, bugs first
-  ▶ intake-bug-issuectl-d6947128f6c9  bug; `label <slug> --remove <l> --json` prints EMPTY stdout + silently skips the mutation (no error envelope, exit 0). Flag-style --remove on positional-only OP; --json must emit a JSON error envelope + non-zero exit. collision: crates/issuectl/src/main.rs
-    list-status-done  bug; `list --status done` returns "No issues found" though done issues exist (filter ignores closing statuses done/fixed/wontfix). collision: crates/issuectl/src/main.rs
-    intake-feature-issuectl-d93eaa168c66  feature; `update --add-blocked-by @<slug>` / --remove-blocked-by (repeatable) — edit blocked_by via CLI like --add-related; unblocks DAG dependency edges without hand-editing frontmatter. collision: crates/issuectl/src/main.rs
-    intake-feature-issuectl-035722451473  feature; `new --lane <lane>` (+ ideally --lane-seq) so an issue is born into the DAG in one call; mirror update --lane. collision: crates/issuectl/src/main.rs
-    add-comment-alias  feature; add `comment` alias for `note` and/or accept --message/--body(-file -) alongside the positional body; vocabulary split (close has --comment, note is positional). collision: crates/issuectl/src/main.rs
-    sync-commits-empty-main  bug; `sync-commits` default range on `main` is often HEAD..HEAD (merge-base == HEAD) → scans no commits, reports empty plan silently. Warn when the default range is empty on main. collision: crates/issuectl/src/main.rs
+GLOBAL HEAD-OF-LINE: (none spawnable) — all active work drained (7 units landed + 0.11.0 released 2026-08-16). Only ossctl-cut-no-publish remains, PARKED (upstream-blocked, do not spawn). Next round: wait for intake or pull something back from the deferred backlog.
 LANE blocked-upstream — PARKED, do not spawn until upstream-ossctl fix lands
-    ossctl-cut-no-publish  high · bug; ossctl release cut doesn't actually publish → manual cargo publish. BLOCKED upstream-ossctl; when fixed, remove AGENTS caveat + re-point releases to ossctl.
+    ossctl-cut-no-publish  high · bug; ossctl release cut doesn't actually publish → manual cargo publish (CONFIRMED AGAIN in the 0.11.0 cut: publish-phase fails "core not visible on index within 300s", nothing uploaded). BLOCKED upstream-ossctl; when fixed, remove AGENTS caveat + re-point releases to ossctl.
 ```
 <!-- execution-dag:end -->
 
-Kaari-lyhyesti: **triage + jononrakennus-sessio (ei koodia landattu).** Edellinen 9-issuen DAG oli tyhjennetty,
-DAG jäi tyhjäksi (0 lanea). Tässä sessiossa: rebase+push (3 uutta intake-issuea originista), deep triage 8:sta
-open∧¬laned issuesta, ja **uusi DAG rakennettu** @jarin "kaikki tulee tehdyksi" -pyynnöstä. 7 laned 3 laneen
-(`release`, `cli-fixes` sarjassa, `blocked-upstream` parkissa), 1 suljettu (`issue-graph-view` obsolete). GLOBAL
-HEAD `changelog-trailers-never` (0.11.0-blocker, design-first, option 1). `cli-fixes` jakaa `main.rs`-collisionin
-`release`-lanen kanssa → scheduler sarjoittaa. `ossctl-cut-no-publish` parkissa (upstream-blocked). Kun changelog-
-trailers landaa + cli-fixes tyhjenee + ossctl ratkeaa → ei enää tehtävää.
+Kaari-lyhyesti: **0.11.0-release + cli-fixes-rupeama.** GLOBAL HEAD `changelog-trailers-never` landattu design-first
+(`close --stamp` → trailer-stamppaus, option 1), sitten `cli-fixes`-lane tyhjennetty sarjassa (`main.rs`-collision):
+6 unittia, kukin reviewattu + vihreä + trailer-stampattu. Sitten **0.11.0 julkaistu** (jari: option a = kertaluontoinen
+CHANGELOG-käsinbackfill kattaen kaikki v0.10.0:n jälkeen toimitetut unitit). ossctl cut failasi odotetusti
+(`ossctl-cut-no-publish`) → manuaalinen `cargo publish` + tag-fallback → crates.io + binäärit + Homebrew ulkona.
+Sivussa: `run-merge-stamp` filattu orchestratectl-repoon (end-to-end trailer-stamppauksen toinen puolisko),
+intake-duplikaatti `intake-feature-issuectl-986ecd5a58a9` suljettu obsolete. **DAG nyt tyhjä paitsi parkissa oleva
+`ossctl-cut-no-publish`.**
 
 ---
 
@@ -156,5 +149,5 @@ ks. Execution DAG yllä. Ei enää untriaged-jonossa._
 
 - [x] 🐛 issuectl new: accept --lane → `cli-fixes` ([`intake-feature-issuectl-035722451473`](issues/intake-feature-issuectl-035722451473/item.md))
 - [x] 🐛 issuectl update: add --add-blocked-by → `cli-fixes` ([`intake-feature-issuectl-d93eaa168c66`](issues/intake-feature-issuectl-d93eaa168c66/item.md))
-- [x] 🐛 label: --remove --json silent no-op → `cli-fixes` (HEAD of lane) ([`intake-bug-issuectl-d6947128f6c9`](issues/intake-bug-issuectl-d6947128f6c9/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: issuectl label: accept --add/--remove flag aliases (canonical skills us… — jari via Telegram ([`intake-feature-issuectl-986ecd5a58a9`](issues/intake-feature-issuectl-986ecd5a58a9/item.md))
+- [x] 🐛 label: --remove --json silent no-op → landattu 0.11.0:ssa ([`intake-bug-issuectl-d6947128f6c9`](issues/intake-bug-issuectl-d6947128f6c9/item.md))
+- [x] 🐛 label: accept --add/--remove flag aliases → **suljettu `obsolete` (2026-08-16)**, duplikaatti — jo toimitettu 0.11.0:ssa `intake-bug-issuectl-d6947128f6c9`:llä ([`intake-feature-issuectl-986ecd5a58a9`](issues/intake-feature-issuectl-986ecd5a58a9/item.md))

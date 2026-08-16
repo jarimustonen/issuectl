@@ -1,13 +1,14 @@
 ---
 created: 2026-08-15
-updated: 2026-08-15
+updated: 2026-08-16
 type: feature
 reporter: jari
-status: open
+status: obsolete
 priority: normal
 labels:
 - via:agent-intakectl-conductor
 - needs-triage
+closed: 2026-08-16
 ---
 
 # issuectl label: accept --add/--remove flag aliases (canonical skills us…
@@ -50,3 +51,9 @@ Low severity (workaround: use positional `add`/`remove`), but it makes the canon
 documented lifecycle commands in the core stint/wrap-up/triage skills fail on first
 use for every agent that trusts them. Recommend the flag-alias route so the skills'
 existing syntax becomes correct.
+
+## Resolution
+
+### 2026-08-16T08:08:12Z · @issuectl
+
+Already delivered in v0.11.0: intake-bug-issuectl-d6947128f6c9 added the `label --add/--remove` flag form (positional + flag both accepted; see `issuectl label --help`). Duplicate/obsolete on arrival — the intake conductor filed it just after the equivalent bug was laned.
