@@ -7,14 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-16
+
 ### Changed
-- **Core clock injection.** Time-dependent core operations now use an injectable `Clock`, making mutation stamps, archive eligibility, and doctor date fallbacks deterministic in tests.
-- **`issuectl create` is now the primary issue-creation verb.** `issuectl new` remains a working alias.
 - **BREAKING: versioned JSON envelopes.** Every `--json` success now returns
   `{ "schema_version": 1, "data": …, "warnings": [] }`; consumers must move
   all prior top-level result lookups to `.data` and read warnings from the
   envelope. Every JSON error now includes `schema_version` on stderr. Added
   `issuectl version [--json]` for one-call CLI/schema/skill drift audits.
+- **`issuectl create` is now the primary issue-creation verb.** `issuectl new` remains a working alias.
+- **Core clock injection.** Time-dependent core operations now use an injectable `Clock`, making mutation stamps, archive eligibility, and doctor date fallbacks deterministic in tests.
 
 ## [0.12.0] - 2026-08-16
 
