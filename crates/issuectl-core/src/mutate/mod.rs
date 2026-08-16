@@ -1596,8 +1596,8 @@ pub fn close_issue_via(
     // `closed_by:` frontmatter field alongside the auto-stamped
     // `closed:` date — see the status branch in `update_issue_under_lock`.
     // Normalize the closer attribution through the shared author seam:
-    // a single leading `@` is stripped (so `close --as "@jari"` stores
-    // `jari`, matching how the sigil is *shown* in headings) and the
+    // a single leading `@` is stripped (so `close --as "@alice"` stores
+    // `alice`, matching how the sigil is *shown* in headings) and the
     // remainder must satisfy the same grammar `note` uses. The
     // normalized token feeds both the `closed_by:` slot and the
     // `--comment` resolution note below, so `close --note --as` is
@@ -2049,7 +2049,7 @@ pub fn note_issue_via(
     }
     // Strip a single leading `@` and validate through the shared author
     // seam, then attribute the note to the normalized token so
-    // `note --as "@jari"` records `jari` (matching the `@jari` we render).
+    // `note --as "@alice"` records `alice` (matching the `@alice` we render).
     let author = crate::body_sections::normalize_author(author)
         .map_err(|e| MutateError::Validation(e.to_string()))?;
     let author = author.as_str();
@@ -5208,7 +5208,7 @@ mod tests {
             tmp.path(),
             "close-attributed",
             Some("wontfix".into()),
-            Some("jari".into()),
+            Some("alice".into()),
             None,
             Vec::new(),
             None,
@@ -5217,7 +5217,7 @@ mod tests {
 
         let after = fs::read_to_string(tmp.path().join("issues/close-attributed/item.md")).unwrap();
         assert!(after.contains("status: wontfix"), "{after}");
-        assert!(after.contains("closed_by: jari"), "{after}");
+        assert!(after.contains("closed_by: alice"), "{after}");
         // The closer surfaces via the typed `Issue::closed_by` field —
         // not `extra`, which no longer carries it once the parser lifts
         // the key into the first-class slot.
@@ -5226,7 +5226,7 @@ mod tests {
             "close-attributed",
             "open",
         );
-        assert_eq!(parsed.issue.closed_by.as_deref(), Some("jari"));
+        assert_eq!(parsed.issue.closed_by.as_deref(), Some("alice"));
         assert!(
             !parsed.issue.extra.contains_key("closed_by"),
             "closed_by must not remain in extra"
@@ -5284,7 +5284,7 @@ mod tests {
             tmp.path(),
             "reopen-clears-closer",
             Some("wontfix".into()),
-            Some("jari".into()),
+            Some("alice".into()),
             None,
             Vec::new(),
             None,
@@ -5318,7 +5318,7 @@ mod tests {
             tmp.path(),
             "close-to-open",
             Some("open".into()),
-            Some("jari".into()),
+            Some("alice".into()),
             None,
             Vec::new(),
             None,
@@ -5343,7 +5343,7 @@ mod tests {
             tmp.path(),
             "reopen-smuggle",
             Some("wontfix".into()),
-            Some("jari".into()),
+            Some("alice".into()),
             None,
             Vec::new(),
             None,
@@ -5388,7 +5388,7 @@ mod tests {
             tmp.path(),
             "restatus-closer",
             Some("fixed".into()),
-            Some("jari".into()),
+            Some("alice".into()),
             None,
             Vec::new(),
             None,
@@ -5403,7 +5403,7 @@ mod tests {
 
         let after = fs::read_to_string(tmp.path().join("issues/restatus-closer/item.md")).unwrap();
         assert!(after.contains("status: wontfix"), "{after}");
-        assert!(after.contains("closed_by: jari"), "{after}");
+        assert!(after.contains("closed_by: alice"), "{after}");
     }
 
     #[test]
@@ -5484,9 +5484,9 @@ mod tests {
 
     #[test]
     fn close_with_at_prefixed_closer_strips_sigil_across_both_write_sites() {
-        // `close --as "@jari" --comment "..."` normalizes the single
+        // `close --as "@alice" --comment "..."` normalizes the single
         // leading `@` at the shared author seam, so the SAME stored token
-        // `jari` lands in both write sites the closer feeds: the
+        // `alice` lands in both write sites the closer feeds: the
         // `closed_by:` frontmatter slot and the `## Resolution` block
         // author. Guards against a refactor normalizing one but not the
         // other (issue as-flag-strip-at-sign).
@@ -5497,7 +5497,7 @@ mod tests {
             tmp.path(),
             "close-at-note",
             Some("fixed".into()),
-            Some("@jari".into()),
+            Some("@alice".into()),
             Some("Stripped the sigil at the seam.".into()),
             Vec::new(),
             None,
@@ -5505,14 +5505,14 @@ mod tests {
         .unwrap();
 
         let after = fs::read_to_string(tmp.path().join("issues/close-at-note/item.md")).unwrap();
-        // Stored bare (`jari`), never the raw `@jari`, in frontmatter.
-        assert!(after.contains("closed_by: jari"), "{after}");
-        assert!(!after.contains("closed_by: '@jari'"), "{after}");
-        assert!(!after.contains("closed_by: \"@jari\""), "{after}");
+        // Stored bare (`alice`), never the raw `@alice`, in frontmatter.
+        assert!(after.contains("closed_by: alice"), "{after}");
+        assert!(!after.contains("closed_by: '@alice'"), "{after}");
+        assert!(!after.contains("closed_by: \"@alice\""), "{after}");
         // The resolution block heading renders the sigil exactly once
-        // (`· @jari`), not doubled (`· @@jari`) from a re-prefixed store.
-        assert!(after.contains("· @jari"), "{after}");
-        assert!(!after.contains("· @@jari"), "{after}");
+        // (`· @alice`), not doubled (`· @@alice`) from a re-prefixed store.
+        assert!(after.contains("· @alice"), "{after}");
+        assert!(!after.contains("· @@alice"), "{after}");
         let parsed = crate::parser::parse_item_md_with_warnings(
             &tmp.path().join("issues/close-at-note/item.md"),
             "close-at-note",
@@ -5523,7 +5523,7 @@ mod tests {
             crate::body_sections::RESOLUTION,
         );
         assert_eq!(section.blocks.len(), 1, "warnings={:?}", section.warnings);
-        assert_eq!(section.blocks[0].author, "jari");
+        assert_eq!(section.blocks[0].author, "alice");
         // And an interior `@` (email-shaped) is still rejected, leaving
         // no partial write.
         let tmp2 = fresh_repo();
@@ -5532,7 +5532,7 @@ mod tests {
             tmp2.path(),
             "close-email",
             Some("fixed".into()),
-            Some("jari@example.com".into()),
+            Some("alice@example.com".into()),
             None,
             Vec::new(),
             None,

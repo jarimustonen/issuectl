@@ -855,7 +855,7 @@ fn classify_exit(
 /// schema findings as preflight blockers forced users with hundreds
 /// of pre-existing schema violations to hand-fix every one of them
 /// before doctor would lift a finger — the largest single adoption
-/// blocker reported in 3DBear 0.5.1 feedback (@intensely-ill-garden,
+/// blocker reported in downstream project 0.5.1 feedback (@intensely-ill-garden,
 /// @staggeringly-important-zoo).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BlockerScope {
@@ -4775,7 +4775,7 @@ mod tests {
         put_flat(
             &tmp,
             "stranded-closer-here",
-            "---\ntype: bug\nstatus: open\npriority: normal\nclosed_by: jari\n---\n# S\n",
+            "---\ntype: bug\nstatus: open\npriority: normal\nclosed_by: alice\n---\n# S\n",
         );
         let r = scan(tmp.path()).unwrap();
         assert!(
@@ -6615,7 +6615,7 @@ mod tests {
     }
 
     /// Issue @ridiculously-outrageous-fold: long warning lists
-    /// collapse to a one-liner when not `--verbose`. The 3DBear
+    /// collapse to a one-liner when not `--verbose`. The downstream project
     /// migration printed 240 layout-migration entries every
     /// iteration of "fix-something-rerun-doctor" loops; this
     /// verifies the actual rendered text on both sides of the
@@ -7206,13 +7206,13 @@ mod tests {
 
     /// Regression: a non-escaping repo-relative pointer with a
     /// GitHub-style `#L<n>` line anchor — the actual Class-2 shape
-    /// from the 3DBear bug report. The path resolves under the issue
+    /// from the downstream project bug report. The path resolves under the issue
     /// dir (not via `..`), so the heuristic that gates the repo-root
     /// existence check on the anchor shape is what saves it.
     #[test]
     fn broken_refs_skips_repo_relative_code_pointer_with_line_anchor() {
         let tmp = fresh_repo();
-        // Mirror the 3DBear shape: a real source file lives at the
+        // Mirror the downstream project shape: a real source file lives at the
         // repo root and is referenced from the issue body with a
         // `#L<n>` permalink fragment.
         fs::create_dir_all(tmp.path().join("kurssi-ai-server/src/cli")).unwrap();

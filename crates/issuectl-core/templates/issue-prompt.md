@@ -215,7 +215,7 @@ Output shape (`closed_by` present only when `--as` is passed; `stamp` present on
 ```json
 { "slug": "extremely-quiet-otter",
   "dir": "/abs/path/issues/closed/extremely-quiet-otter",
-  "moved_to_closed": true, "version": "sha256:...", "closed_by": "jari" }
+  "moved_to_closed": true, "version": "sha256:...", "closed_by": "alice" }
 ```
 
 Reopening (`update --status <active>`) clears `closed_by` alongside `closed:`.

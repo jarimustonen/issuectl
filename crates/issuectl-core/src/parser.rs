@@ -560,10 +560,10 @@ mod tests {
         // `Issue::closed_by` slot and NOT in `extra`, so it has exactly
         // one representation on the wire and in the hash.
         let text = "---\ntype: bug\nstatus: wontfix\npriority: normal\n\
-                    closed: 2026-05-06\nclosed_by: jari\n---\n\n# Title\n";
+                    closed: 2026-05-06\nclosed_by: alice\n---\n\n# Title\n";
         let parsed =
             parse_item_md_text_with_warnings(text, "some-slug", "closed", Path::new("<test>"));
-        assert_eq!(parsed.issue.closed_by.as_deref(), Some("jari"));
+        assert_eq!(parsed.issue.closed_by.as_deref(), Some("alice"));
         assert!(
             !parsed.issue.extra.contains_key("closed_by"),
             "closed_by must not remain in extra: {:?}",

@@ -9,7 +9,7 @@ pre-1.0.
 
 Please **do not** open a public GitHub issue for security vulnerabilities.
 
-Email **jari.mustonen@iki.fi** with:
+Open a [private GitHub security advisory](https://github.com/jarimustonen/issuectl/security/advisories/new) with:
 
 - A description of the issue
 - Steps to reproduce

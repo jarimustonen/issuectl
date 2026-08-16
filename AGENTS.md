@@ -10,7 +10,7 @@ frontmatter. See [README.md](README.md) for a user-facing overview.
 
 ## CLI Design Principles
 
-Use the `/ai-first-cli-canon` skill shipped by `project-canon` as the maintained AI-first CLI canon. It is the binding reference for CLI surface work: strict input validation, `--json` output, JSONL logs, no interactive prompts, informative errors and composable commands. Do not keep or edit a repo-local `ai-first-cli-canon` copy; update the canon in `~/Sources/project-canon` and reinstall the skill from the released tool.
+Use the `/ai-first-cli-canon` skill shipped by `project-canon` as the maintained AI-first CLI canon. It is the binding reference for CLI surface work: strict input validation, `--json` output, JSONL logs, no interactive prompts, informative errors and composable commands. Do not keep or edit a repo-local `ai-first-cli-canon` copy; update the canon through the `project-canon` tool and reinstall the released skill.
 
 
 ## Critical rule: keep the skill in sync with the CLI

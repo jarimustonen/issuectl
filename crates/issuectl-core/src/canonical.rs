@@ -292,11 +292,12 @@ mod tests {
         // An issue carrying the closer in the typed slot must hash
         // identically to the pre-promotion shape (same key in `extra`).
         let mut typed = issue("foo", "closed", "done", "body");
-        typed.closed_by = Some("jari".to_string());
+        typed.closed_by = Some("alice".to_string());
         let mut legacy = issue("foo", "closed", "done", "body");
-        legacy
-            .extra
-            .insert("closed_by".into(), serde_json::Value::String("jari".into()));
+        legacy.extra.insert(
+            "closed_by".into(),
+            serde_json::Value::String("alice".into()),
+        );
         assert_eq!(canonical_hash(&typed), canonical_hash(&legacy));
     }
 
@@ -460,8 +461,8 @@ mod tests {
     fn closed_by_value_changes_hash() {
         let mut a = issue("foo", "closed", "done", "body");
         let mut b = issue("foo", "closed", "done", "body");
-        a.closed_by = Some("jari".to_string());
-        b.closed_by = Some("alice".to_string());
+        a.closed_by = Some("alice".to_string());
+        b.closed_by = Some("bob".to_string());
         assert_ne!(canonical_hash(&a), canonical_hash(&b));
     }
 
@@ -469,7 +470,7 @@ mod tests {
     fn closed_by_presence_changes_hash() {
         let a = issue("foo", "closed", "done", "body");
         let mut b = issue("foo", "closed", "done", "body");
-        b.closed_by = Some("jari".to_string());
+        b.closed_by = Some("alice".to_string());
         assert_ne!(canonical_hash(&a), canonical_hash(&b));
     }
 

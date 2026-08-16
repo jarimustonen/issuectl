@@ -323,7 +323,7 @@ mod tests {
         let dir = root.join("issues").join(slug);
         std::fs::create_dir_all(&dir).unwrap();
         let body = format!(
-            "---\ncreated: 2026-01-01\nupdated: 2026-01-01\ntype: feature\nstatus: open\npriority: normal\nassignee: jari\n---\n\n# {slug}\n\nbody\n"
+            "---\ncreated: 2026-01-01\nupdated: 2026-01-01\ntype: feature\nstatus: open\npriority: normal\nassignee: alice\n---\n\n# {slug}\n\nbody\n"
         );
         std::fs::write(dir.join("item.md"), body).unwrap();
     }

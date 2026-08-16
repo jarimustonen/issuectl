@@ -31,7 +31,7 @@ targets = [
     "x86_64-unknown-linux-musl",
     "x86_64-pc-windows-msvc",
 ]
-# NOTE: no `x86_64-apple-darwin`. The macOS build runs on the self-hosted `hauis`
+# NOTE: no `x86_64-apple-darwin`. The macOS build runs on a self-hosted macOS ARM64
 # runner (below), which uses Homebrew Rust (no rustup) and so cannot cross-compile
 # the Intel-mac target — same constraint, same choice as orchestratectl. Apple
 # silicon is covered natively; Intel-mac users install via `cargo install issuectl`.
@@ -50,14 +50,13 @@ github-attestations = true
 # create `v*` tags, on which commits) with a GitHub tag-protection ruleset.
 pr-run-mode = "skip"
 
-# PERSONAL / NON-STANDARD infra override (NOT issuectl canon — do not generate this
-# for other projects). Build the macOS targets on the self-hosted `hauis` runner
-# (a personal Apple-silicon Mac registered to this repo) instead of GitHub's
+# REPOSITORY-SPECIFIC / NON-STANDARD infrastructure override (NOT issuectl canon — do not generate this
+# for other projects). Build the macOS targets on a self-hosted macOS ARM64 runner
+# (an Apple-silicon machine registered to this repo) instead of GitHub's
 # hosted macOS queue, which was taking 45+ min just to allocate. Other users of
 # issuectl will not have this runner, so issuectl never emits this section by default;
-# it is repo-local infra. hauis is arm64; this repo intentionally does not build
-# x86_64-apple-darwin. Each of Jari's four CLI repos has an identically-labelled
-# `hauis` self-hosted runner (self-hosted,macOS,ARM64); a bare `self-hosted`
+# it is repo-local infrastructure. The runner is arm64; this repo intentionally does not build
+# x86_64-apple-darwin. A bare `self-hosted` runner label (self-hosted,macOS,ARM64)
 # runs-on matches it (the only self-hosted runner on the repo). This sub-table
 # MUST stay at the end — a `[dist.*]` table placed among the `[dist]` scalar keys
 # would swallow every key after it.

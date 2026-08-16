@@ -83,3 +83,15 @@ found. Companion work in `project-canon`: `portable-neutral-defaults` (the concr
 and `canon-no-user-specifics` (promoting this rule to a canon section with a mechanical
 `doctor` check, so it is enforced rather than remembered). Once that check ships, this audit
 becomes automated — this issue is the one-time manual pass.
+
+### 2026-08-16T18:51:46Z · @audit-bot
+
+Audit evidence (2026-08-16):
+
+- Swept tracked source, templates, dogfooded skills/prompts, root configuration, tests, fixtures, and package manifests with `git grep -n -i -E "jarimustonen|jari|mustonen|crmctl|tilictl|intakectl|aggountant|~/Sources|/Users/...|hostnames|internal domains"`, then repeated the scan against `cargo package -p issuectl --list` and `cargo package -p issuectl-core --list`.
+- Removed the `~/Sources/project-canon` instruction from root `AGENTS.md`; replaced maintainer-specific metadata, security contact, test/example authors, package comments, and the self-hosted runner hostname with neutral or fictional values. Regenerated the dogfooded skills with `issuectl skill install --agent all --force`.
+- Retained only legitimate public GitHub and Homebrew distribution URLs for `jarimustonen/issuectl`, as required.
+- Found one prohibited maintainer-specific example in `crates/issuectl/src/main.rs`; it is outside this worktree's allowed edit scope. Filed @neutralize-main-author-example in lane `cli-fixes` with the exact location and required correction.
+- `docs/` was deliberately not edited because another worker owns it this round.
+
+Validation: `cargo fmt --all --check` passed. `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` are running as the green gate.

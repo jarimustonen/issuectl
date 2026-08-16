@@ -60,7 +60,7 @@ pub(crate) fn rewrite_slug_ref(raw: &str, old: &str, new: &str) -> Option<String
 /// kebab-slug characters (`[a-z0-9-]`) immediately following an `@`; the
 /// maximal-munch means `@old-suffix` is NOT matched when `old` is the
 /// rename source. An `@` directly preceded by an alphanumeric (e.g. an
-/// email local part like `jari@old-host`) is skipped so we only touch
+/// email local part like `alice@old-host`) is skipped so we only touch
 /// standalone `@slug` mentions.
 ///
 /// Fenced code blocks, inline code spans (`` `…` ``), and markdown
@@ -346,12 +346,12 @@ mod tests {
     #[test]
     fn rewrite_body_refs_skips_email_local_parts() {
         let (out, n) = rewrite_body_refs(
-            "mail jari@old-tame-fox but ping @old-tame-fox",
+            "mail alice@old-tame-fox but ping @old-tame-fox",
             "old-tame-fox",
             "new-wild-elk",
         );
         assert_eq!(n, 1);
-        assert_eq!(out, "mail jari@old-tame-fox but ping @new-wild-elk");
+        assert_eq!(out, "mail alice@old-tame-fox but ping @new-wild-elk");
     }
 
     #[test]

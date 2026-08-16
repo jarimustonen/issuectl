@@ -9,7 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Lane-structure design guide:** practical guidance for choosing serial
-+  conflict boundaries, collision tokens, parked work, and `unlaned` issues.
+  conflict boundaries, collision tokens, parked work, and `unlaned` issues.
+
+### Changed
+- Replaced maintainer-specific metadata, examples, and infrastructure labels with neutral or fictional values.
 
 ## [0.13.0] - 2026-08-16
 
@@ -654,7 +657,7 @@ human-readable digest.
 
 ## [0.5.2] - 2026-05-13
 
-Bug-fix and quality-of-life release driven by the 3DBear monorepo
+Bug-fix and quality-of-life release driven by the downstream monorepo
 adoption feedback plus an internals cleanup wave. No breaking changes.
 Highlights:
 
@@ -737,7 +740,7 @@ Highlights:
   dependency cycles, status/timestamp consistency) are present.
   Layout migration is a directory rename and is independent of
   frontmatter content; gating it on schema cleanliness was the
-  largest single adoption blocker reported in 3DBear 0.5.1 feedback
+  largest single adoption blocker reported in downstream 0.5.1 feedback
   (240 dirs need layout migration, 216 schema violations — `--fix`
   would refuse until every violation was hand-fixed first against the
   pre-migration layout). Schema findings still drive exit-1 so they

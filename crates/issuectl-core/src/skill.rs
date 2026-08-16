@@ -200,7 +200,7 @@ impl Agent {
 /// each of these ships in **both** formats: a Claude skill under
 /// `.claude/skills/` and a Codex prompt under `.codex/prompts/` (frontmatter
 /// stripped, body identical). They are installed once per selected agent, so
-/// Jari's fleet-apply hook distributes them the same way it distributes
+/// the deployment hook distributes them the same way it distributes
 /// `/issue`. Their bodies live in `crates/issuectl-core/templates/` (source of
 /// truth — a `*-skill.md` Claude variant and a `*-prompt.md` Codex variant per
 /// skill) and are dogfooded into this repo; the

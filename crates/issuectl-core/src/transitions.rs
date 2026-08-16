@@ -735,7 +735,7 @@ mod tests {
             ..Default::default()
         });
         let mut i = make_issue("done", "epic", "");
-        i.owner = Some("jari".into());
+        i.owner = Some("alice".into());
         assert!(evaluate_transition(&rules, &i, "in-progress").is_empty());
     }
 

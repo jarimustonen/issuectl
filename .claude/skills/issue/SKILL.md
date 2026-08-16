@@ -88,7 +88,7 @@ issuectl --json skill list
 
 ## Install or upgrade `issuectl`
 
-This skill was installed for `issuectl 0.12.0`. On the
+This skill was installed for `issuectl 0.13.0`. On the
 first invocation in a session, run `issuectl --version` and compare:
 
 - **Missing**: install one of:
@@ -96,12 +96,12 @@ first invocation in a session, run `issuectl --version` and compare:
   - **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
   - **Shell installer** (no toolchain):
     `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
-- **Older than `0.12.0`**: tell the user the skill expects
-  `0.12.0` and suggest upgrading via the same channel
+- **Older than `0.13.0`**: tell the user the skill expects
+  `0.13.0` and suggest upgrading via the same channel
   they originally used (`brew upgrade jarimustonen/issuectl/issuectl`,
   `cargo install issuectl --force`, or re-run the shell installer).
   Stop and wait — schema/CLI surface may have changed.
-- **Newer than `0.12.0`**: the installed binary is ahead
+- **Newer than `0.13.0`**: the installed binary is ahead
   of what this skill was written for. Tell the user to refresh the
   skill so the instructions match the CLI surface they actually have:
   `issuectl skill install --force` (Claude Code; add `--agent codex`
@@ -219,7 +219,7 @@ Output shape (`closed_by` present only when `--as` is passed; `stamp` present on
 ```json
 { "slug": "extremely-quiet-otter",
   "dir": "/abs/path/issues/closed/extremely-quiet-otter",
-  "moved_to_closed": true, "version": "sha256:...", "closed_by": "jari" }
+  "moved_to_closed": true, "version": "sha256:...", "closed_by": "alice" }
 ```
 
 Reopening (`update --status <active>`) clears `closed_by` alongside `closed:`.
