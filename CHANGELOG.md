@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Machine-readable help** — `issuectl --help --json` and every subcommand's
+  `--help --json` emit a structured help document with subcommands, flags,
+  arguments, accepted values, defaults, environment mappings, and runnable
+  examples.
 - **`issuectl skill list`** — enumerate the bundled `/issue`, `/issue-new`, and
   `/issue-intake` workflows with their Claude Code and Codex install targets,
   without inspecting or changing the derived pi.dev mirror.

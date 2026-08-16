@@ -19,6 +19,12 @@ Determine the action from the user's message and arguments. If unclear, ask.
 structured and reliable to parse; the human-readable mode is for
 terminal users only. All examples below already include `--json`.
 
+For an unfamiliar command, discover its exact flags and arguments without
+scraping text help: run `issuectl <command> --help --json`. The response has
+`subcommands`, `flags`, `args`, `examples`, accepted `possible_values`, and
+any `env` mapping. For example, use `issuectl new --help --json` before filing
+an issue.
+
 `issuectl` validates inputs strictly (rejects unknown values for `--type`,
 `--priority`, `--status`, etc.) and exits non-zero on errors. Read stderr
 when a command fails — the error message names the offending value and

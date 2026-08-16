@@ -4,14 +4,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::builder::PossibleValuesParser;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Command as ClapCommand, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::{
     agents, body_sections, canonical, config, context, cycle as cycle_mod, dag, doctor, duplicates,
-    epic_tree, estimate as estimate_mod, fmt, git_trailers, hooks, init as init_cmd, merge_driver,
-    models, mutate, query, recurrence, repo, report as report_mod, schema, skill, slug,
-    sync_commits,
+    epic_tree, estimate as estimate_mod, fmt, git_trailers, help, hooks, init as init_cmd,
+    merge_driver, models, mutate, query, recurrence, repo, report as report_mod, schema, skill,
+    slug, sync_commits,
 };
 
 const TOP_LEVEL_HELP: &str = "\
@@ -2162,7 +2162,235 @@ fn subcommand_error_hint(err: &clap::Error) -> Option<String> {
     None
 }
 
+/// Return examples for the commands agents most often use. The argv arrays are
+/// intentionally shell-independent: callers can pass them directly to a
+/// process launcher without reparsing a shell string.
+fn help_examples(path: &[String]) -> Vec<help::HelpExample> {
+    let examples = match path.get(1).map(String::as_str) {
+        None => vec![
+            ("List open issues", &["issuectl", "list"][..]),
+            (
+                "Show an issue as JSON",
+                &["issuectl", "show", "login-loop", "--json"][..],
+            ),
+            (
+                "Create a bug",
+                &["issuectl", "new", "--type", "bug", "--title", "Login loop"][..],
+            ),
+            (
+                "Update an issue status",
+                &[
+                    "issuectl",
+                    "update",
+                    "login-loop",
+                    "--status",
+                    "in-progress",
+                ][..],
+            ),
+        ],
+        Some("new") => vec![(
+            "Create a bug with a descriptive title",
+            &["issuectl", "new", "--type", "bug", "--title", "Login loop"][..],
+        )],
+        Some("list") => vec![(
+            "List open bugs as JSON",
+            &["issuectl", "list", "--type", "bug", "--json"][..],
+        )],
+        Some("show") => vec![(
+            "Show one issue as JSON",
+            &["issuectl", "show", "login-loop", "--json"][..],
+        )],
+        Some("update") => vec![(
+            "Set an issue status",
+            &[
+                "issuectl",
+                "update",
+                "login-loop",
+                "--status",
+                "in-progress",
+            ][..],
+        )],
+        Some("close") => vec![(
+            "Close an issue as fixed",
+            &["issuectl", "close", "login-loop", "--status", "fixed"][..],
+        )],
+        Some("search") => vec![("Search issue text", &["issuectl", "search", "login"][..])],
+        Some("config") => vec![(
+            "Show effective configuration",
+            &["issuectl", "config", "show", "--json"][..],
+        )],
+        Some("skill") => vec![(
+            "List bundled skills",
+            &["issuectl", "skill", "list", "--json"][..],
+        )],
+        _ => Vec::new(),
+    };
+    examples
+        .into_iter()
+        .map(|(description, argv)| help::HelpExample {
+            description: description.to_string(),
+            argv: argv.iter().map(|part| (*part).to_string()).collect(),
+        })
+        .collect()
+}
+
+fn help_argument(arg: &clap::Arg) -> help::HelpArgument {
+    let takes_values = arg.get_action().takes_values();
+    help::HelpArgument {
+        name: arg.get_id().to_string(),
+        short: arg.get_short().map(|short| format!("-{short}")),
+        long: arg.get_long().map(|long| format!("--{long}")),
+        required: arg.is_required_set(),
+        global: arg.is_global_set(),
+        description: arg
+            .get_long_help()
+            .or_else(|| arg.get_help())
+            .map(ToString::to_string),
+        value_names: takes_values
+            .then(|| {
+                arg.get_value_names()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        default: takes_values
+            .then(|| {
+                arg.get_default_values()
+                    .iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        possible_values: takes_values
+            .then(|| {
+                arg.get_possible_values()
+                    .iter()
+                    .map(|value| value.get_name().to_string())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        env: arg
+            .get_env()
+            .map(|value| value.to_string_lossy().into_owned()),
+    }
+}
+
+/// Convert clap's command metadata into the core-owned serializable model.
+fn help_document(
+    root: &ClapCommand,
+    command: &ClapCommand,
+    path: Vec<String>,
+) -> help::HelpDocument {
+    let mut document = help::HelpDocument::new(path, command.get_name().to_string());
+    document.description = command
+        .get_long_about()
+        .or_else(|| command.get_about())
+        .map(ToString::to_string);
+    document.subcommands = command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+        .map(|subcommand| help::HelpSubcommand {
+            name: subcommand.get_name().to_string(),
+            aliases: subcommand
+                .get_name_and_visible_aliases()
+                .into_iter()
+                .skip(1)
+                .map(str::to_string)
+                .collect(),
+            description: subcommand
+                .get_long_about()
+                .or_else(|| subcommand.get_about())
+                .map(ToString::to_string),
+        })
+        .collect();
+    for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
+        if arg.is_positional() {
+            document.args.push(help_argument(arg));
+        } else {
+            document.flags.push(help_argument(arg));
+        }
+    }
+    if command.get_name() != root.get_name() {
+        document.flags.extend(
+            root.get_arguments()
+                .filter(|arg| arg.is_global_set() && !arg.is_hide_set())
+                .map(help_argument),
+        );
+    }
+    document.examples = help_examples(&document.path);
+    document
+}
+
+fn flag_takes_value(command: &ClapCommand, token: &str) -> bool {
+    let name = token
+        .trim_start_matches('-')
+        .split('=')
+        .next()
+        .unwrap_or_default();
+    !token.contains('=')
+        && command.get_arguments().any(|arg| {
+            (arg.get_long() == Some(name)
+                || arg
+                    .get_short()
+                    .is_some_and(|short| name == short.to_string()))
+                && arg.get_action().takes_values()
+        })
+}
+
+/// Locate the selected command without invoking clap's built-in help renderer.
+/// This only runs for `--help --json`; normal parsing, including usage errors,
+/// remains entirely owned by clap below.
+fn help_command_for_args<'a>(
+    root: &'a ClapCommand,
+    args: &[String],
+) -> (&'a ClapCommand, Vec<String>) {
+    let mut command = root;
+    let mut path = vec![root.get_name().to_string()];
+    let mut skip_value = false;
+    for token in args {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if token.starts_with('-') {
+            skip_value = flag_takes_value(command, token);
+            continue;
+        }
+        if let Some(subcommand) = command.get_subcommands().find(|candidate| {
+            candidate
+                .get_name_and_visible_aliases()
+                .contains(&token.as_str())
+        }) {
+            command = subcommand;
+            path.push(command.get_name().to_string());
+        }
+    }
+    (command, path)
+}
+
+fn try_print_json_help() -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.iter().any(|arg| arg == "--json")
+        || !args.iter().any(|arg| arg == "--help" || arg == "-h")
+    {
+        return false;
+    }
+    let command = Cli::command();
+    let (selected, path) = help_command_for_args(&command, &args);
+    println!(
+        "{}",
+        help::render_json(&help_document(&command, selected, path))
+            .expect("machine-readable help document must serialize")
+    );
+    true
+}
+
 fn main() -> Result<()> {
+    if try_print_json_help() {
+        return Ok(());
+    }
     // Parse manually instead of `Cli::parse()` so clap's own usage
     // errors honour the `--json` contract too. By default clap prints
     // free-form text to stderr and exits 2 — an agent that always passes
@@ -7051,6 +7279,44 @@ fn cmd_metrics(json: bool, since: Option<String>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn help_document_includes_global_flags_and_new_examples() {
+        let root = Cli::command();
+        let new = root
+            .get_subcommands()
+            .find(|command| command.get_name() == "new")
+            .unwrap();
+        let document = help_document(&root, new, vec!["issuectl".to_string(), "new".to_string()]);
+
+        assert!(document
+            .flags
+            .iter()
+            .any(|flag| flag.long.as_deref() == Some("--json") && flag.global));
+        assert!(document
+            .flags
+            .iter()
+            .find(|flag| flag.long.as_deref() == Some("--type"))
+            .unwrap()
+            .possible_values
+            .contains(&"bug".to_string()));
+        assert_eq!(document.examples[0].argv[0], "issuectl");
+    }
+
+    #[test]
+    fn json_help_command_selection_handles_global_option_values() {
+        let root = Cli::command();
+        let args = vec![
+            "--root".to_string(),
+            "config".to_string(),
+            "new".to_string(),
+            "--help".to_string(),
+            "--json".to_string(),
+        ];
+        let (command, path) = help_command_for_args(&root, &args);
+        assert_eq!(command.get_name(), "new");
+        assert_eq!(path, ["issuectl", "new"]);
+    }
+
     use super::*;
     use std::fs;
     use tempfile::TempDir;

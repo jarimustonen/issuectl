@@ -67,6 +67,8 @@ pub mod fmt;
 #[doc(hidden)]
 pub mod git_trailers;
 #[doc(hidden)]
+pub mod help;
+#[doc(hidden)]
 pub mod hooks;
 #[doc(hidden)]
 pub mod init;
