@@ -1,9 +1,9 @@
-//! Golden tests for `issuectl new`'s terminal output. These lock the
+//! Golden tests for `issuectl create`'s terminal output. These lock the
 //! byte-identical CLI output promise from the typed-error refactor
 //! (commit c272404) end-to-end. The inline test in `src/mutate.rs`
 //! (`do_new_error_to_anyhow_text_matches_per_variant`) covers the
 //! `From<DoNewError> for anyhow::Error` conversion but cannot observe
-//! `cmd_new`'s `println!` formatting or `main()`'s `anyhow::Error`
+//! the creation handler's `println!` formatting or `main()`'s `anyhow::Error`
 //! Debug rendering. These tests fill that gap.
 //!
 //! Assertions for project-owned text (validation/conflict/schema-violation
@@ -21,7 +21,7 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 /// Creates a tempdir with an empty `issues/` directory. The first
-/// `issuectl new` invocation against the result will bootstrap a
+/// `issuectl create` invocation against the result will bootstrap a
 /// default `.schema.yaml`. Tests that need a pre-existing schema
 /// should write one directly after calling this.
 fn fresh_repo() -> TempDir {
@@ -78,7 +78,7 @@ fn new_success_writes_file_and_prints_created_lines() {
     let out = run(
         tmp.path(),
         &[
-            "new", "--type", "bug", "--title", "Hello", "--slug", "ab-cd",
+            "create", "--type", "bug", "--title", "Hello", "--slug", "ab-cd",
         ],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
@@ -99,7 +99,7 @@ fn new_json_success_prints_expected_payload() {
     let out = run(
         tmp.path(),
         &[
-            "--json", "new", "--type", "bug", "--title", "Hello", "--slug", "ab-cd",
+            "--json", "create", "--type", "bug", "--title", "Hello", "--slug", "ab-cd",
         ],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
@@ -126,7 +126,7 @@ fn new_with_reserved_notes_section_warns_on_stderr_but_succeeds() {
     let out = run(
         tmp.path(),
         &[
-            "new",
+            "create",
             "--type",
             "bug",
             "--title",
@@ -154,7 +154,7 @@ fn new_json_with_reserved_notes_section_populates_warnings() {
         tmp.path(),
         &[
             "--json",
-            "new",
+            "create",
             "--type",
             "bug",
             "--title",
@@ -167,7 +167,7 @@ fn new_json_with_reserved_notes_section_populates_warnings() {
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("new --json stdout should be JSON");
+        serde_json::from_slice(&out.stdout).expect("create --json stdout should be JSON");
     let warnings = v["warnings"].as_array().expect("warnings array");
     assert_eq!(warnings.len(), 1, "{}", dump(&out));
     assert!(warnings[0].as_str().unwrap().contains("## Notes"));
@@ -182,7 +182,7 @@ fn new_with_body_file_reserved_section_warns() {
         tmp.path(),
         &[
             "--json",
-            "new",
+            "create",
             "--type",
             "bug",
             "--title",
@@ -195,7 +195,7 @@ fn new_with_body_file_reserved_section_warns() {
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("new --json stdout should be JSON");
+        serde_json::from_slice(&out.stdout).expect("create --json stdout should be JSON");
     let warnings = v["warnings"].as_array().expect("warnings array");
     assert_eq!(warnings.len(), 1, "{}", dump(&out));
     assert!(warnings[0].as_str().unwrap().contains("## Notes"));
@@ -208,7 +208,7 @@ fn body_set_with_reserved_section_warns_on_stderr_and_json() {
     let created = run(
         tmp.path(),
         &[
-            "new", "--type", "bug", "--title", "Target", "--slug", "bs-notes",
+            "create", "--type", "bug", "--title", "Target", "--slug", "bs-notes",
         ],
     );
     assert_eq!(created.status.code(), Some(0), "{}", dump(&created));
@@ -271,7 +271,7 @@ fn show_field(root: &std::path::Path, slug: &str, field: &str) -> String {
         .to_string()
 }
 
-/// `low` is the lowest priority value: accepted on `new`, `ls -p`, and
+/// `low` is the lowest priority value: accepted on `create`, `ls -p`, and
 /// `update`, while the default stays `normal`. Guards the widened
 /// `PRIORITIES` set against a regression back to two-valued (and against
 /// the default silently shifting off `normal`).
@@ -279,12 +279,12 @@ fn show_field(root: &std::path::Path, slug: &str, field: &str) -> String {
 fn priority_low_is_accepted_end_to_end() {
     let tmp = fresh_repo();
 
-    // `new --priority low` succeeds and persists the field (verified
+    // `create --priority low` succeeds and persists the field (verified
     // through the machine-facing `show` payload, not raw file text).
     let out = run(
         tmp.path(),
         &[
-            "new",
+            "create",
             "--type",
             "bug",
             "--title",
@@ -305,7 +305,7 @@ fn priority_low_is_accepted_end_to_end() {
     let out = run(
         tmp.path(),
         &[
-            "new", "--type", "task", "--title", "Bump me", "--slug", "bu-mp",
+            "create", "--type", "task", "--title", "Bump me", "--slug", "bu-mp",
         ],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
@@ -353,7 +353,7 @@ fn priority_outside_set_is_rejected_with_possible_values() {
     let out = run(
         tmp.path(),
         &[
-            "new",
+            "create",
             "--type",
             "task",
             "--title",
@@ -564,7 +564,7 @@ fn json_update_without_expected_version_succeeds() {
     let out = run(
         tmp.path(),
         &[
-            "new", "--type", "task", "--title", "Optional", "--slug", "op-ti",
+            "create", "--type", "task", "--title", "Optional", "--slug", "op-ti",
         ],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
@@ -600,7 +600,7 @@ fn json_close_without_expected_version_succeeds() {
     let out = run(
         tmp.path(),
         &[
-            "new", "--type", "bug", "--title", "Closes", "--slug", "cl-os",
+            "create", "--type", "bug", "--title", "Closes", "--slug", "cl-os",
         ],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
@@ -630,7 +630,9 @@ fn json_write_wrong_expected_version_still_conflicts() {
     let tmp = fresh_repo();
     let out = run(
         tmp.path(),
-        &["new", "--type", "task", "--title", "Cas", "--slug", "ca-sw"],
+        &[
+            "create", "--type", "task", "--title", "Cas", "--slug", "ca-sw",
+        ],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
 
@@ -696,7 +698,7 @@ fn json_remaining_verbs_tokenless_writes_succeed_with_version() {
     let out = run(
         tmp.path(),
         &[
-            "new", "--type", "task", "--title", "Verbs", "--slug", "ve-rb",
+            "create", "--type", "task", "--title", "Verbs", "--slug", "ve-rb",
         ],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
@@ -704,7 +706,7 @@ fn json_remaining_verbs_tokenless_writes_succeed_with_version() {
     let out = run(
         tmp.path(),
         &[
-            "new", "--type", "task", "--title", "Block", "--slug", "bl-ok",
+            "create", "--type", "task", "--title", "Block", "--slug", "bl-ok",
         ],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
@@ -819,7 +821,7 @@ fn new_without_slug_derives_from_title() {
         tmp.path(),
         &[
             "--json",
-            "new",
+            "create",
             "--type",
             "bug",
             "--title",
@@ -828,7 +830,7 @@ fn new_without_slug_derives_from_title() {
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("new stdout should be JSON");
+        serde_json::from_slice(&out.stdout).expect("create stdout should be JSON");
     let v = v["data"].clone();
     assert_eq!(v["slug"], "login-redirect-loops", "{}", dump(&out));
     assert!(
@@ -850,7 +852,7 @@ fn new_slug_random_conflicts_with_slug() {
     let out = run(
         tmp.path(),
         &[
-            "new",
+            "create",
             "--type",
             "bug",
             "--title",
@@ -874,7 +876,9 @@ fn new_validation_owner_on_non_epic_fails() {
     let tmp = fresh_repo();
     let out = run(
         tmp.path(),
-        &["new", "--type", "bug", "--title", "x", "--owner", "alice"],
+        &[
+            "create", "--type", "bug", "--title", "x", "--owner", "alice",
+        ],
     );
     assert_failure(&out, "Error: --owner is only valid with --type epic\n");
 }
@@ -889,7 +893,7 @@ fn new_conflict_slug_already_taken_fails() {
     let out = run(
         tmp.path(),
         &[
-            "new",
+            "create",
             "--type",
             "bug",
             "--title",
@@ -915,7 +919,7 @@ fn new_schema_violation_missing_required_field_fails() {
     )
     .unwrap();
 
-    let out = run(tmp.path(), &["new", "--type", "bug", "--title", "x"]);
+    let out = run(tmp.path(), &["create", "--type", "bug", "--title", "x"]);
     assert_failure(&out, "Error: schema: missing required field \"team\"\n");
 }
 
@@ -929,7 +933,7 @@ fn new_schema_config_malformed_yaml_fails() {
     let schema_path = tmp.path().join("issues/.schema.yaml");
     std::fs::write(&schema_path, "version: 1\nfields: : :\n").unwrap();
 
-    let out = run(tmp.path(), &["new", "--type", "bug", "--title", "x"]);
+    let out = run(tmp.path(), &["create", "--type", "bug", "--title", "x"]);
     assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
     assert!(out.stdout.is_empty(), "{}", dump(&out));
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -958,7 +962,7 @@ fn new_io_failure_chmod_readonly_fails() {
     // tempdir cleanup never inherits a 0o500 directory.
     //
     // Setup writes the schema file directly rather than seeding via a
-    // successful `new` run, so this test's failure mode is independent
+    // successful `create` run, so this test's failure mode is independent
     // of regressions in the success path.
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -1010,7 +1014,7 @@ fn new_io_failure_chmod_readonly_fails() {
     let out = run(
         tmp.path(),
         &[
-            "new",
+            "create",
             "--type",
             "bug",
             "--title",
@@ -1063,7 +1067,7 @@ fn new_body_file_writes_markdown_below_heading() {
     let out = run(
         tmp.path(),
         &[
-            "new",
+            "create",
             "--type",
             "feature",
             "--title",
@@ -1103,7 +1107,7 @@ fn new_body_file_preserves_leading_indentation() {
     let out = run(
         tmp.path(),
         &[
-            "new",
+            "create",
             "--type",
             "feature",
             "--title",
@@ -1137,7 +1141,7 @@ fn new_body_file_dash_reads_stdin() {
         .arg("--root")
         .arg(tmp.path())
         .args([
-            "new",
+            "create",
             "--type",
             "feature",
             "--title",
@@ -1176,7 +1180,7 @@ fn new_body_file_conflicts_with_body_plain_is_clap_usage_error() {
     let out = run(
         tmp.path(),
         &[
-            "new",
+            "create",
             "--type",
             "feature",
             "--title",
@@ -1207,7 +1211,7 @@ fn new_body_file_conflicts_with_body_json_is_usage_error_envelope() {
         tmp.path(),
         &[
             "--json",
-            "new",
+            "create",
             "--type",
             "feature",
             "--title",
@@ -1234,7 +1238,7 @@ fn new_body_file_missing_path_errors_cleanly() {
     let out = run(
         tmp.path(),
         &[
-            "new",
+            "create",
             "--type",
             "feature",
             "--title",
@@ -1266,7 +1270,7 @@ fn new_body_file_missing_path_json_is_clean_envelope() {
         tmp.path(),
         &[
             "--json",
-            "new",
+            "create",
             "--type",
             "feature",
             "--title",
@@ -1300,7 +1304,7 @@ fn show_json_exposes_blocked_by_and_derived_blocks() {
     for (title, slug) in [("Dependent", "dp-end"), ("Blocker", "bl-ocker")] {
         let out = run(
             tmp.path(),
-            &["new", "--type", "task", "--title", title, "--slug", slug],
+            &["create", "--type", "task", "--title", title, "--slug", slug],
         );
         assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     }
@@ -1376,7 +1380,9 @@ fn show_json_canonicalizes_raw_blocked_by_frontmatter() {
     let tmp = fresh_repo();
     let out = run(
         tmp.path(),
-        &["new", "--type", "task", "--title", "Raw", "--slug", "ra-w"],
+        &[
+            "create", "--type", "task", "--title", "Raw", "--slug", "ra-w",
+        ],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
 
@@ -1420,7 +1426,7 @@ fn ls_json_exposes_blocked_by_and_strips_extra_copy() {
     for (title, slug) in [("Dependent", "dp-end"), ("Blocker", "bl-ocker")] {
         let out = run(
             tmp.path(),
-            &["new", "--type", "task", "--title", title, "--slug", slug],
+            &["create", "--type", "task", "--title", title, "--slug", slug],
         );
         assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     }
@@ -1504,7 +1510,7 @@ fn ls_json_canonicalizes_blocked_by_and_preserves_other_extra() {
     for (title, slug) in [("Messy array", "ma-ss"), ("Scalar", "sc-al")] {
         let out = run(
             tmp.path(),
-            &["new", "--type", "task", "--title", title, "--slug", slug],
+            &["create", "--type", "task", "--title", title, "--slug", slug],
         );
         assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     }
@@ -1579,7 +1585,7 @@ fn search_json_exposes_blocked_by_and_strips_extra_copy() {
     for (title, slug) in [("Dependent", "dp-end"), ("Blocker", "bl-ocker")] {
         let out = run(
             tmp.path(),
-            &["new", "--type", "task", "--title", title, "--slug", slug],
+            &["create", "--type", "task", "--title", title, "--slug", slug],
         );
         assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     }
@@ -1634,4 +1640,23 @@ fn search_json_exposes_blocked_by_and_strips_extra_copy() {
         "{}",
         dump(&search)
     );
+}
+
+#[test]
+fn new_alias_creates_issue() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &[
+            "new",
+            "--type",
+            "task",
+            "--title",
+            "Alias works",
+            "--slug",
+            "alias-works",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    assert!(tmp.path().join("issues/alias-works/item.md").is_file());
 }

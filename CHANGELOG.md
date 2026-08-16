@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **`issuectl create` is now the primary issue-creation verb.** `issuectl new` remains a working alias.
 - **BREAKING: versioned JSON envelopes.** Every `--json` success now returns
   `{ "schema_version": 1, "data": …, "warnings": [] }`; consumers must move
   all prior top-level result lookups to `.data` and read warnings from the

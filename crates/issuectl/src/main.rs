@@ -63,7 +63,7 @@ Examples:
   issuectl open extremely-quiet-otter          Edit item.md in $EDITOR
   issuectl search redirect                 Keyword search
   issuectl duplicates                      Flag likely-duplicate issue pairs
-  issuectl new --type bug --title \"...\" --slug login-loop    Create a new issue
+  issuectl create --type bug --title \"...\" --slug login-loop    Create a new issue
   issuectl update <slug> --status testing  Change status
   issuectl close <slug> --status fixed     Set a closing status (fixed/done/...)
   issuectl attach <slug> shot.png log.txt  Copy files into the issue's attachments/
@@ -306,7 +306,7 @@ fn parse_slug_arg(s: &str) -> std::result::Result<String, String> {
     // allowed). The central resolver (`repo::resolve_slug_input`,
     // called from `locate_issue_full`) expands a unique prefix to the
     // matching canonical slug, so `issuectl show extremely` works the
-    // same as the full slug. Creation paths (`new --slug`, `rename
+    // same as the full slug. Creation paths (`create --slug`, `rename
     // new_slug`) still apply the stricter `slug::is_valid` check
     // server-side so a single-segment input cannot land on disk.
     if !slug::is_valid_prefix(&s) {
@@ -461,15 +461,15 @@ enum Command {
     },
 
     /// Create a new issue or epic. Pass `--slug <descriptive-2-3-word-kebab>` derived from the title; a random `intensifier-adjective-noun` slug is the fallback when `--slug` is omitted
-    #[command(visible_alias = "create")]
+    #[command(visible_alias = "new")]
     #[command(group(clap::ArgGroup::new("title_input").required(true).multiple(false).args(["title_pos", "title_flag"])))]
-    New {
+    Create {
         /// Item type
         #[arg(short = 't', long = "type", value_parser = PossibleValuesParser::new(ISSUE_TYPES))]
         issue_type: String,
 
         /// Item title (markdown heading), as a positional argument —
-        /// e.g. `new "Login loops" --type bug`. Mutually exclusive with
+        /// e.g. `create "Login loops" --type bug`. Mutually exclusive with
         /// `--title`; exactly one of the two is required.
         #[arg(value_name = "TITLE", value_parser = parse_non_empty)]
         title_pos: Option<String>,
@@ -679,7 +679,7 @@ enum Command {
         add_commits: Vec<String>,
 
         /// Set a custom frontmatter field (repeatable). Format `key=value`.
-        /// Mirrors `new --field`. Built-in fields use their dedicated
+        /// Mirrors `create --field`. Built-in fields use their dedicated
         /// flags (`--status`, `--priority`, ...).
         #[arg(long = "field", value_parser = parse_custom_field)]
         custom_fields: Vec<(String, String)>,
@@ -692,7 +692,7 @@ enum Command {
         clear_fields: Vec<String>,
 
         /// Replace the issue body with this free text. `--body` is accepted
-        /// as an alias. Mirrors `new`'s `--description`/`--body`; the whole
+        /// as an alias. Mirrors `create`'s `--description`/`--body`; the whole
         /// existing body is replaced (frontmatter is untouched). Mutually
         /// exclusive with `--body-file`.
         #[arg(long, visible_alias = "body", value_parser = parse_non_empty)]
@@ -838,7 +838,7 @@ enum Command {
         message: Option<String>,
 
         /// Note text as a flag; `--body` is an alias. Mirrors `close
-        /// --comment` and `new --body`, so the whole family shares one
+        /// --comment` and `create --body`, so the whole family shares one
         /// vocabulary. Mutually exclusive with the positional body and the
         /// other body-source flags.
         #[arg(long = "message", visible_alias = "body", value_parser = parse_non_empty)]
@@ -849,7 +849,7 @@ enum Command {
         stdin: bool,
 
         /// Read the note text from a file. `--body-file` is a visible
-        /// alias (matching `new --body-file`), so both spellings name this
+        /// alias (matching `create --body-file`), so both spellings name this
         /// one source. Pass `-` to read stdin (use `./-` for a file
         /// literally named `-`). Mutually exclusive with the other body
         /// sources; capped at 10 MiB.
@@ -1364,7 +1364,7 @@ enum Command {
     },
 
     /// Import issues from an external source. Each issue is created fresh
-    /// through the same validation path as `issuectl new`: it gets a new
+    /// through the same validation path as `issuectl create`: it gets a new
     /// slug and `open` status. Source status (so closed issues arrive
     /// open), dates, commits, and custom fields are not carried over.
     Import {
@@ -2116,7 +2116,7 @@ fn fail(json: bool, code: i32, err_code: &str, message: &str, extra: serde_json:
 /// "unrecognized subcommand" errors: when a near-miss lands on one of
 /// these aliases, the tip names the canonical verb the user can rely on.
 const SUBCOMMAND_ALIASES: &[(&str, &str)] =
-    &[("create", "new"), ("ls", "list"), ("dups", "duplicates")];
+    &[("new", "create"), ("ls", "list"), ("dups", "duplicates")];
 
 /// The subcommand path clap was parsing when it produced `err`, taken
 /// from the error's `Usage` context line (`Usage: <bin> <sub...>
@@ -2224,7 +2224,14 @@ fn help_examples(path: &[String]) -> Vec<help::HelpExample> {
             ),
             (
                 "Create a bug",
-                &["issuectl", "new", "--type", "bug", "--title", "Login loop"][..],
+                &[
+                    "issuectl",
+                    "create",
+                    "--type",
+                    "bug",
+                    "--title",
+                    "Login loop",
+                ][..],
             ),
             (
                 "Update an issue status",
@@ -2237,9 +2244,16 @@ fn help_examples(path: &[String]) -> Vec<help::HelpExample> {
                 ][..],
             ),
         ],
-        Some("new") => vec![(
+        Some("create") => vec![(
             "Create a bug with a descriptive title",
-            &["issuectl", "new", "--type", "bug", "--title", "Login loop"][..],
+            &[
+                "issuectl",
+                "create",
+                "--type",
+                "bug",
+                "--title",
+                "Login loop",
+            ][..],
         )],
         Some("list") => vec![(
             "List open bugs as JSON",
@@ -2538,7 +2552,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             threshold,
             all,
         } => cmd_duplicates(json_output, slug.as_deref(), threshold, all),
-        Command::New {
+        Command::Create {
             issue_type,
             title_pos,
             title_flag,
@@ -2601,7 +2615,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
                     source,
                     description,
                     custom_fields,
-                    // `new` never files into a reception state — status is
+                    // `create` never files into a reception state — status is
                     // fixed at `open`. Intake filing goes through
                     // `issuectl intake file`.
                     status: None,
@@ -2643,7 +2657,7 @@ fn dispatch(command: Command, json_output: bool) -> Result<()> {
             // for `-`) here — before `cmd_update` — so all body I/O + the
             // input cap stay in the CLI layer and the resolved markdown
             // flows through the same flock/schema write path as an inline
-            // `--description`. Mirrors the `new` command's body handling.
+            // `--description`. Mirrors the `create` command's body handling.
             let set_body = match body_file {
                 Some(path) => Some(read_body_file_arg(&path)?),
                 None => description,
@@ -4666,7 +4680,7 @@ fn cmd_duplicates(json: bool, slug: Option<&str>, threshold: Option<f64>, all: b
 
 use mutate::new_issue::{do_new, NewArgs};
 
-/// Pre-creation duplicate check for `new --check-duplicates`. Builds a
+/// Pre-creation duplicate check for `create --check-duplicates`. Builds a
 /// synthetic issue from the prospective fields, scores it against the
 /// existing open issues, and prints any strong matches. Returns `true`
 /// when at least one strong match was found (the caller then refuses to
@@ -4748,7 +4762,7 @@ fn cmd_new(json: bool, args: NewArgs, check_duplicates: bool) -> Result<()> {
     }
     // Whether the caller asked to schedule the issue at creation. When it
     // did, `--json` echoes the resulting `lane`/`lane_seq`/`collision`
-    // back so a one-call create confirms the fields landed; a plain `new`
+    // back so a one-call create confirms the fields landed; a plain `create`
     // keeps its historical output shape untouched (no lane keys added).
     // `args` is moved into `do_new`, so capture the flag first.
     let lane_requested =
@@ -5657,7 +5671,7 @@ fn read_capped_file(path: &Path, what: &str) -> Result<String> {
     read_capped(file, MAX_INPUT_BYTES, what, path.display())
 }
 
-/// Read the initial issue body for `issuectl new --body-file PATH`.
+/// Read the initial issue body for `issuectl create --body-file PATH`.
 /// A path of `-` means stdin (via [`read_capped_file`]'s convention),
 /// capped at [`MAX_INPUT_BYTES`].
 ///
@@ -7323,9 +7337,13 @@ mod tests {
         let root = Cli::command();
         let new = root
             .get_subcommands()
-            .find(|command| command.get_name() == "new")
+            .find(|command| command.get_name() == "create")
             .unwrap();
-        let document = help_document(&root, new, vec!["issuectl".to_string(), "new".to_string()]);
+        let document = help_document(
+            &root,
+            new,
+            vec!["issuectl".to_string(), "create".to_string()],
+        );
 
         assert!(document
             .flags
@@ -7380,20 +7398,20 @@ mod tests {
     }
 
     #[test]
-    fn create_is_visible_alias_for_new() {
+    fn new_alias_resolves_to_create() {
         let cli =
-            Cli::try_parse_from(["issuectl", "create", "--type", "task", "--title", "x"]).unwrap();
-        assert!(matches!(cli.command, Command::New { .. }));
+            Cli::try_parse_from(["issuectl", "new", "--type", "task", "--title", "x"]).unwrap();
+        assert!(matches!(cli.command, Command::Create { .. }));
     }
 
     #[test]
-    fn lane_flags_parse_into_new() {
-        // `new` mirrors `update`'s lane surface so an issue can be born
+    fn lane_flags_parse_into_create() {
+        // `create` mirrors `update`'s lane surface so an issue can be born
         // scheduled in one call: `--lane`, `--lane-seq`, and repeatable
-        // `--add-collision` all route into the `New` variant.
+        // `--add-collision` all route into the `Create` variant.
         let cli = Cli::try_parse_from([
             "issuectl",
-            "new",
+            "create",
             "--type",
             "feature",
             "--title",
@@ -7409,7 +7427,7 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Command::New {
+            Command::Create {
                 lane,
                 lane_seq,
                 add_collision,
@@ -7422,17 +7440,17 @@ mod tests {
                     vec!["crates/issuectl/src/main.rs", "foo/bar.rs"]
                 );
             }
-            _ => panic!("expected New"),
+            _ => panic!("expected Create"),
         }
     }
 
     #[test]
-    fn lane_seq_parses_negative_on_new() {
+    fn lane_seq_parses_negative_on_create() {
         // `allow_hyphen_values = true` exists so a negative precedence key
         // parses as a value, not a dangling flag.
         let cli = Cli::try_parse_from([
             "issuectl",
-            "new",
+            "create",
             "--type",
             "task",
             "--title",
@@ -7442,28 +7460,30 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Command::New { lane_seq, .. } => assert_eq!(lane_seq, Some(-5)),
-            _ => panic!("expected New"),
+            Command::Create { lane_seq, .. } => assert_eq!(lane_seq, Some(-5)),
+            _ => panic!("expected Create"),
         }
     }
 
     #[test]
-    fn body_flag_is_alias_for_description_on_new() {
+    fn body_flag_is_alias_for_description_on_create() {
         let cli = Cli::try_parse_from([
-            "issuectl", "new", "--type", "task", "--title", "x", "--body", "hello",
+            "issuectl", "create", "--type", "task", "--title", "x", "--body", "hello",
         ])
         .unwrap();
         match cli.command {
-            Command::New { description, .. } => assert_eq!(description.as_deref(), Some("hello")),
-            _ => panic!("expected New"),
+            Command::Create { description, .. } => {
+                assert_eq!(description.as_deref(), Some("hello"))
+            }
+            _ => panic!("expected Create"),
         }
     }
 
     #[test]
-    fn body_file_flag_parses_into_body_file_on_new() {
+    fn body_file_flag_parses_into_body_file_on_create() {
         let cli = Cli::try_parse_from([
             "issuectl",
-            "new",
+            "create",
             "--type",
             "task",
             "--title",
@@ -7473,7 +7493,7 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Command::New {
+            Command::Create {
                 body_file,
                 description,
                 ..
@@ -7481,7 +7501,7 @@ mod tests {
                 assert_eq!(body_file.as_deref(), Some(Path::new("notes.md")));
                 assert_eq!(description, None);
             }
-            _ => panic!("expected New"),
+            _ => panic!("expected Create"),
         }
     }
 
@@ -7521,7 +7541,7 @@ mod tests {
     #[test]
     fn body_flag_is_alias_for_message_on_note() {
         // `--body` is a visible alias of `--message`, matching `close
-        // --comment`/`new --body` vocabulary.
+        // --comment`/`create --body` vocabulary.
         let cli = Cli::try_parse_from(["issuectl", "note", "sl-ug", "--as", "u", "--body", "hi"])
             .unwrap();
         match cli.command {
@@ -7533,7 +7553,7 @@ mod tests {
     #[test]
     fn body_file_is_visible_alias_for_from_file_on_note() {
         // `--body-file` is a visible alias of `--from-file`, so it lands in
-        // the same `from_file` field (matching `new --body-file`).
+        // the same `from_file` field (matching `create --body-file`).
         let cli = Cli::try_parse_from([
             "issuectl",
             "comment",
@@ -7608,10 +7628,10 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Command::New { body_file, .. } => {
+            Command::Create { body_file, .. } => {
                 assert_eq!(body_file.as_deref(), Some(Path::new("-")));
             }
-            _ => panic!("expected New"),
+            _ => panic!("expected Create"),
         }
     }
 
@@ -7797,15 +7817,18 @@ mod tests {
     #[test]
     fn alias_near_miss_routes_to_canonical_verb() {
         // `creat` is a near-miss for the `create` alias, which resolves to
-        // `new`. clap 4.6 (pinned in Cargo.lock) deterministically offers
+        // `create`. clap 4.6 (pinned in Cargo.lock) deterministically offers
         // `create` among its suggestions, so the hint must fire and name
         // the canonical verb.
         let err = Cli::try_parse_from(["issuectl", "creat"])
             .err()
             .expect("expected a parse error");
         let hint = subcommand_error_hint(&err)
-            .expect("`creat` should route through the `create` alias to `new`");
-        assert!(hint.contains("new"), "hint should name `new`, was: {hint}");
+            .expect("`creat` should route through the `create` alias to `create`");
+        assert!(
+            hint.contains("new"),
+            "hint should name `create`, was: {hint}"
+        );
     }
 
     #[test]
@@ -7838,7 +7861,7 @@ mod tests {
     }
 
     /// clap's own internal-consistency check: catches invalid arg IDs,
-    /// duplicate names, and — critically for `new` — a `title_input`
+    /// duplicate names, and — critically for `create` — a `title_input`
     /// group that references a renamed/removed field. This is the
     /// build-time backstop for the `dispatch` arm that merges
     /// `title_pos`/`title_flag` and errors if neither is present.
@@ -7848,10 +7871,10 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    /// The `new` title group must stay `required` (so "neither" is
+    /// The `create` title group must stay `required` (so "neither" is
     /// rejected) and mutually exclusive (so "both" is rejected). A
     /// refactor that drops `.required(true)` would compile and pass the
-    /// happy-path tests while letting a title-less `new` reach the
+    /// happy-path tests while letting a title-less `create` reach the
     /// `dispatch` merge; this pins the wiring the merge relies on.
     #[test]
     fn new_title_input_group_is_required_and_exclusive() {
@@ -7859,8 +7882,8 @@ mod tests {
         let cmd = Cli::command();
         let new_sub = cmd
             .get_subcommands()
-            .find(|s| s.get_name() == "new")
-            .expect("`new` subcommand present");
+            .find(|s| s.get_name() == "create")
+            .expect("`create` subcommand present");
         // `is_multiple` is a `&mut self` builder getter, so work on an
         // owned clone.
         let mut group = new_sub

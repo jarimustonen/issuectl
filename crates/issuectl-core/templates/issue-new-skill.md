@@ -60,7 +60,7 @@ From `$ARGUMENTS` and the surrounding context, assemble:
 - **`--provenance <source>`** *(required)* — where it came from: `telegram`,
   `email`, `slack`,
   `github`, `phone`, … This is a real field, **not** the body source-line
-  (`--source` on plain `new` is unrelated). The repo may constrain the accepted
+  (`--source` on plain `create` is unrelated). The repo may constrain the accepted
   value set; an unknown value is rejected with the list of accepted ones. For an
   open-ended source use `--provenance other --provenance-detail "<free text>"`.
 - **`--source-ref "<external id>"`** — the external message identity, e.g.

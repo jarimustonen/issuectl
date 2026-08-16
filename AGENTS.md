@@ -249,7 +249,7 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
   are a caller-supplied input (`--reservations`), never read from an
   orchestrator — issuectl stays orchestrator-agnostic.
 - **The CLI default slug is title-derived; random is the opt-in/
-  fallback.** `issuectl new "<title>"` with no `--slug` derives a
+  fallback.** `issuectl create "<title>"` with no `--slug` derives a
   descriptive 2–3 word kebab slug from the title (the pure
   `slug::derive_from_title` helper in `issuectl-core`), lowercasing,
   stripping stop-words, and trimming to a clean slug. The random
@@ -261,7 +261,7 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
   on collision; the derived-default path disambiguates silently with a
   numeric suffix (`-2`, `-3`, …) in its own `claim_derived_slug` loop;
   the random path retries internally in `claim_random_slug`. The
-  non-`new` programmatic callers choose deliberately: `intake file` and
+  non-`create` programmatic callers choose deliberately: `intake file` and
   recurring occurrences force `slug_random` (untrusted/sensitive titles;
   many occurrences of one title), while `import` inherits the
   title-derived default.
@@ -348,7 +348,7 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
   enforce it. Do not add it to issuectl-core or this repo's
   `AGENTS.md` — let the upstream skill stay the single source.
 - **Per-issue `attachments/` and `fixtures/` directories.** Created on
-  demand via `ensure_issue_subdir` (not eagerly by `issuectl new`,
+  demand via `ensure_issue_subdir` (not eagerly by `issuectl create`,
   since git drops empty dirs). Relative body-image / link targets
   resolve relative to the issue dir; the extractor is hardened
   against `../` and backslash path traversal. `doctor` emits

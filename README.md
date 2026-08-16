@@ -56,7 +56,7 @@ terminal too, but the design centre is the agent.
 
 ## Features at a glance
 
-**Core lifecycle.** `new`, `update`, `note`, `close`, `rename`,
+**Core lifecycle.** `create`, `update`, `note`, `close`, `rename`,
 `show`, `list`, `search`, `stats`, `fmt`.
 
 **Lightweight planning.**
@@ -98,7 +98,7 @@ terminal too, but the design centre is the agent.
   every query-matched issue under a single repo-wide lock;
   `--dry-run` shows the per-issue diff.
 - `pick [QUERY]` — interactive fuzzy picker; prints the chosen slug.
-- `triage` / `new --inbox` — `issues/inbox/<slug>/` landing zone for
+- `triage` / `create --inbox` — `issues/inbox/<slug>/` landing zone for
   drafts; `triage <slug>` promotes one to the canonical layout.
 - `scan-todos` — finds `// TODO(issue: <slug>)` markers in source;
   reports stale, untracked, and unknown hits;
@@ -220,7 +220,7 @@ cd path/to/your/repo
 issuectl init
 
 # Create your first issue with a descriptive 2-3 word slug from the title.
-issuectl new --type bug \
+issuectl create --type bug \
     --slug login-redirect-loops \
     --title "Login loops on Safari after SSO" \
     --reporter alice --assignee bob --priority high
@@ -257,7 +257,7 @@ natural-language request into the right command. A typical exchange:
 The agent reads `/issue`, picks a descriptive slug, and runs:
 
 ```sh
-issuectl --json new --type bug \
+issuectl --json create --type bug \
     --slug login-redirect-loops \
     --title "Login loops on Safari after SSO" \
     --reporter alice --assignee bob --priority high
@@ -314,12 +314,12 @@ output is stable and documented.
 ### Create, mutate, and resolve
 
 ```sh
-issuectl new --type bug \
+issuectl create --type bug \
     --slug login-redirect-loops \
     --title "Login loops on Safari" \
     --reporter alice --assignee bob
 
-issuectl new --type epic --title "API v2 migration" \
+issuectl create --type epic --title "API v2 migration" \
     --slug api-v2-migration \
     --owner cara --priority high
 

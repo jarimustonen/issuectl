@@ -10,6 +10,18 @@ fn run(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn root_help_lists_create_as_primary_and_new_as_alias() {
+    let output = run(&["--help"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        help.contains("  create") && help.contains("[aliases: new]"),
+        "{help}"
+    );
+}
+
+#[test]
 fn root_help_json_is_a_single_structured_document() {
     let output = run(&["--help", "--json"]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
@@ -23,20 +35,20 @@ fn root_help_json_is_a_single_structured_document() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|command| command["name"] == "new"));
+        .any(|command| command["name"] == "create"));
     assert!(!document["examples"].as_array().unwrap().is_empty());
 }
 
 #[test]
 fn subcommand_help_json_includes_values_and_global_json_flag() {
-    let output = run(&["new", "--help", "--json"]);
+    let output = run(&["create", "--help", "--json"]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert!(output.stderr.is_empty(), "{output:?}");
 
     let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(document["schema_version"], 1);
     let document = document["data"].clone();
-    assert_eq!(document["path"], serde_json::json!(["issuectl", "new"]));
+    assert_eq!(document["path"], serde_json::json!(["issuectl", "create"]));
     let flags = document["flags"].as_array().unwrap();
     let issue_type = flags.iter().find(|flag| flag["long"] == "--type").unwrap();
     assert!(issue_type["possible_values"]

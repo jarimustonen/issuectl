@@ -4,7 +4,7 @@
 Manage issues and epics in `issues/` using the `issuectl` CLI as the primary
 interface. The user's message determines the action:
 
-- **Create**: user describes a problem, task, or feature → `issuectl new "<title>" ...` (the slug is derived from the title by default; see "Identifiers" for slug policy)
+- **Create**: user describes a problem, task, or feature → `issuectl create "<title>" ...` (the slug is derived from the title by default; see "Identifiers" for slug policy)
 - **Search/list**: user asks to find, list, or check issues → `issuectl ls`, `issuectl show`, `issuectl search`
 - **Close**: user says an issue is done/resolved → `issuectl close <slug>`
 - **Update**: user wants to change status, assignee, or other details → `issuectl update <slug> ...`
@@ -18,7 +18,7 @@ terminal users only. All examples below already include `--json`.
 For an unfamiliar command, discover its exact flags and arguments without
 scraping text help: run `issuectl <command> --help --json`. Read its `data`
 object, which has `subcommands`, `flags`, `args`, `examples`, accepted
-`possible_values`, and any `env` mapping. For example, use `issuectl new --help --json` before filing
+`possible_values`, and any `env` mapping. For example, use `issuectl create --help --json` before filing
 an issue.
 
 `issuectl` validates inputs strictly (rejects unknown values for `--type`,
@@ -110,7 +110,7 @@ first invocation in a session, run `issuectl --version` and compare:
 ## Identifiers
 
 Issues are identified by short kebab-case slugs (the primary key in
-every command that takes an issue argument). By default `issuectl new`
+every command that takes an issue argument). By default `issuectl create`
 **derives a descriptive 2-3 word slug from the title** (e.g.
 `login-redirect-loops`) — the slug shows up in directory names, branch
 names, and every agent command, so a recognizable one pays off. Pass
@@ -248,7 +248,7 @@ closing status, the issue is also moved to `closed/` (same as `close`).
 Common flags:
 
 - `--status STATUS` (active or closing)
-- `-t/--type TYPE` (bug, task, feature, improvement, chore, epic, or any value the repo's `.schema.yaml` adds to `fields.type.enum` — rejected with `SchemaViolation` if the new type's required body sections are missing, with a list of `## <Section>` headings to add first; rejected if combined with a close→open reopen on the same call; rejected if the resulting type+`assignee`/`owner`/`reporter` combination violates the epic↔non-epic invariants `new` enforces)
+- `-t/--type TYPE` (bug, task, feature, improvement, chore, epic, or any value the repo's `.schema.yaml` adds to `fields.type.enum` — rejected with `SchemaViolation` if the new type's required body sections are missing, with a list of `## <Section>` headings to add first; rejected if combined with a close→open reopen on the same call; rejected if the resulting type+`assignee`/`owner`/`reporter` combination violates the epic↔non-epic invariants `create` enforces)
 - `--assignee USER` / `--owner USER` (epics)
 - `--priority low|normal|high`
 - `--epic <slug>` / `--no-epic`
@@ -311,8 +311,8 @@ as `update`; body-only mutation.
   <slug> --as <user> "<message>"` is identical.
 - The message text comes from **exactly one** source: the positional
   argument, `--message`/`--body "<text>"` (mirrors `close --comment` /
-  `new --body`), `--from-file PATH` / `--body-file PATH` (aliases; `-`
-  reads stdin, like `new --body-file`), or `--stdin`. Passing two at once
+  `create --body`), `--from-file PATH` / `--body-file PATH` (aliases; `-`
+  reads stdin, like `create --body-file`), or `--stdin`. Passing two at once
   is a usage error (`{"error":{"code":"usage-error",…}}`, non-zero exit);
   passing none is an error too.
 - `--decision` appends to `## Decisions` instead.
@@ -441,7 +441,7 @@ suggest creating an epic instead.
 
 #### 2. Create with the CLI
 
-**The slug is derived from the title by default.** `issuectl new "Login
+**The slug is derived from the title by default.** `issuectl create "Login
 redirect loops on safari"` auto-derives `login-redirect-loops` — lowercased,
 stop-words stripped, trimmed to 2-3 words — so you normally don't pass
 `--slug` at all. If the derived slug collides with an existing issue, the
@@ -455,7 +455,7 @@ slug instead. The CLI also falls back to a random slug automatically when
 the title yields no sensible slug (empty, all stop-words, or non-ASCII).
 
 ```
-issuectl --json new \
+issuectl --json create \
     --type bug \
     --title "Login redirect loops on safari" \
     --reporter alice \
@@ -469,9 +469,9 @@ issuectl --json new \
 `--slug` is needed. Add `--slug <kebab>` to override, or `--slug-random`
 to force a random slug.)
 
-`create` is accepted as an alias for `new`, and `--body` as an alias
+`new` is accepted as an alias for `create`, and `--body` as an alias
 for `--description`, so `issuectl --json create --type task --title X
---body "…"` works identically — canonical forms stay `new` /
+--body "…"` works identically — canonical forms stay `create` /
 `--description`. To set the initial body from a file instead of inline
 text, use `--body-file <path>` (mutually exclusive with
 `--description`/`--body` — combining them is a usage error); pass `-`
@@ -480,21 +480,21 @@ The file's markdown is written below the `# <title>` heading, so a
 fully-formed issue can be filed in one argv:
 
 ```
-issuectl --json new --type feature --title "Bulk export" --body-file notes.md
-printf '## Context\n\nPiped body.\n' | issuectl --json new --type task --title X --body-file -
+issuectl --json create --type feature --title "Bulk export" --body-file notes.md
+printf '## Context\n\nPiped body.\n' | issuectl --json create --type task --title X --body-file -
 ```
 
 The title may also be passed positionally
-(`issuectl new "Login redirect loops" --type bug`) instead of via
+(`issuectl create "Login redirect loops" --type bug`) instead of via
 `--title`; pass exactly one of the two (both/neither is an error).
 
 For epics, use `--owner` instead of `--reporter`/`--assignee`:
 
 ```
-issuectl --json new --type epic --title "API v2 migration" --owner cara --priority high
+issuectl --json create --type epic --title "API v2 migration" --owner cara --priority high
 ```
 
-To **schedule the issue into the DAG at creation**, `new` mirrors `update`'s
+To **schedule the issue into the DAG at creation**, `create` mirrors `update`'s
 scheduling flags — `--lane NAME`, `--lane-seq <int>`, and repeatable
 `--add-collision TOKEN` — so an issue that should start laned is born that
 way in one call instead of a follow-up `update --lane` (same setters, same
@@ -502,7 +502,7 @@ validation; see the `--lane`/`--lane-seq`/`--add-collision` semantics under
 `update`):
 
 ```
-issuectl --json new --type feature --title "Bulk export" \
+issuectl --json create --type feature --title "Bulk export" \
     --lane cli-fixes --lane-seq 40 \
     --add-collision crates/issuectl/src/main.rs
 ```
@@ -529,7 +529,7 @@ Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slu
 
 #### 3. Flesh out the body
 
-`issuectl new` writes a minimal body (`# Title`, optional `_Source: ..._`,
+`issuectl create` writes a minimal body (`# Title`, optional `_Source: ..._`,
 `## Description`). For bugs, append `## Reproduction` and `## Quick Test`
 sections by editing the item.md directly (use the `dir` or `item_path`
 from the JSON output to find it). For epics, add `## Goal`, `## Issues`,
@@ -631,7 +631,7 @@ issuectl intake reopen    <slug> [--to untriaged|open] --reason "…"  --json  #
   error codes include `transition-illegal`, `duplicate-source-ref`,
   `protected-field`.
 
-**Never file a reception item with plain `new`** — `new` fixes the creation
+**Never file a reception item with plain `create`** — `create` fixes the creation
 status at `open`. Reception filing goes through `issuectl intake file`.
 
 The `/issue-intake` skill drives the developer/PM side (queue → drive
