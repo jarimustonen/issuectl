@@ -3339,7 +3339,9 @@ fn cmd_config(json: bool, action: ConfigAction) -> Result<()> {
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({ "path": path }))?
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({ "path": path.to_string_lossy() })
+                    )?
                 );
             } else {
                 println!("{}", path.display());
@@ -3350,9 +3352,23 @@ fn cmd_config(json: bool, action: ConfigAction) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                println!("{}", report.path.display());
+                let file_state = if report.exists {
+                    ""
+                } else {
+                    " (missing; built-in defaults apply)"
+                };
+                println!("{}{file_state}", report.path);
                 for (key, resolved) in report.values {
-                    println!("{key} [{}]: {}", resolved.source.as_str(), resolved.value);
+                    let value = serde_json::to_string_pretty(&resolved.value)?;
+                    if value.contains('\n') {
+                        println!(
+                            "{key} [{}]:\n  {}",
+                            resolved.source.as_str(),
+                            value.replace('\n', "\n  ")
+                        );
+                    } else {
+                        println!("{key} [{}]: {value}", resolved.source.as_str());
+                    }
                 }
             }
         }

@@ -28,11 +28,17 @@ fn run(root: &Path, args: &[&str]) -> Output {
 fn config_path_reports_the_schema_path_in_text_and_json() {
     let tmp = fresh_repo();
     let root = tmp.path();
-    let expected = root.join("issues/.schema.yaml").to_string_lossy().into_owned();
+    let expected = root
+        .join("issues/.schema.yaml")
+        .to_string_lossy()
+        .into_owned();
 
     let text = run(root, &["config", "path"]);
     assert_eq!(text.status.code(), Some(0), "{text:?}");
-    assert_eq!(String::from_utf8(text.stdout).unwrap(), format!("{expected}\n"));
+    assert_eq!(
+        String::from_utf8(text.stdout).unwrap(),
+        format!("{expected}\n")
+    );
 
     let json = run(root, &["--json", "config", "path"]);
     assert_eq!(json.status.code(), Some(0), "{json:?}");
@@ -54,6 +60,11 @@ fn config_show_reports_effective_values_and_sources() {
     let json = run(root, &["--json", "config", "show"]);
     assert_eq!(json.status.code(), Some(0), "{json:?}");
     let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        value["path"],
+        root.join("issues/.schema.yaml").to_string_lossy().as_ref()
+    );
+    assert_eq!(value["exists"], true);
     assert_eq!(value["values"]["schema.fields.priority"]["source"], "file");
     assert_eq!(value["values"]["schema.fields.status"]["source"], "default");
 

@@ -54,7 +54,9 @@ same way:
 Before a write from an unfamiliar directory, inspect the repo schema location and
 its effective policy. `config show` reports every value with `source: "file"`
 when it was declared in `issues/.schema.yaml`, or `source: "default"` when the
-built-in schema supplies it:
+built-in schema supplies it. `config path --json` returns `{ "path": "..." }`;
+`config show --json` returns `{ "path": "...", "exists": true|false, "values":
+{ "schema.fields.priority": { "value": {…}, "source": "file|default" } } }`.
 
 ```sh
 issuectl --json config path

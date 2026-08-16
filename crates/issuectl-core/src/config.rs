@@ -25,7 +25,12 @@ use crate::schema;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValueSource {
+    /// The repo schema explicitly declared this key. This remains `file` even
+    /// when its value equals today's built-in default: the declaration pins
+    /// policy across a future default change.
     File,
+    /// No repo declaration supplied the key, so issuectl's built-in schema or
+    /// lifecycle fallback resolved it.
     Default,
 }
 
@@ -49,8 +54,11 @@ pub struct ResolvedValue {
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigShow {
     /// The schema configuration path, whether or not the optional file exists.
-    pub path: PathBuf,
-    /// Effective values, indexed by stable dotted schema keys.
+    pub path: String,
+    /// Whether the repo supplied a schema file at [`path`](Self::path).
+    pub exists: bool,
+    /// Effective values, indexed by stable dotted schema keys. Each value is
+    /// `{ "value": <resolved JSON value>, "source": "file" | "default" }`.
     pub values: BTreeMap<String, ResolvedValue>,
 }
 
@@ -65,6 +73,7 @@ pub fn path(root: &Path) -> PathBuf {
 /// rest of the CLI.
 pub fn show(root: &Path) -> Result<ConfigShow> {
     let path = path(root);
+    let exists = path.is_file();
     let effective = schema::load(root)?;
     let raw = load_raw_file(&path)?;
     let mut values = BTreeMap::new();
@@ -98,12 +107,20 @@ pub fn show(root: &Path) -> Result<ConfigShow> {
             map_entry_source_for(&raw, "body_sections", name),
         )?;
     }
-    for (name, class) in &effective.status_classes {
+    // Lifecycle classes have a code-level built-in fallback, so the
+    // `status_classes` map alone is not the effective policy. Project every
+    // status the schema accepts through that fallback and retain the source of
+    // an explicit repo override when one exists.
+    let mut status_names = schema::status_universe(&effective);
+    // A project may classify a custom status that is not in its declared
+    // status enum. Include that explicit policy too rather than hiding it.
+    status_names.extend(effective.status_classes.keys().cloned());
+    for name in status_names {
         insert(
             &mut values,
             &format!("schema.status_classes.{name}"),
-            class,
-            map_entry_source_for(&raw, "status_classes", name),
+            &schema::status_class(&effective, &name),
+            map_entry_source_for(&raw, "status_classes", &name),
         )?;
     }
     for (name, target) in &effective.status_aliases {
@@ -123,7 +140,11 @@ pub fn show(root: &Path) -> Result<ConfigShow> {
         )?;
     }
 
-    Ok(ConfigShow { path, values })
+    Ok(ConfigShow {
+        path: path.to_string_lossy().into_owned(),
+        exists,
+        values,
+    })
 }
 
 fn insert<T: Serialize>(
@@ -160,16 +181,16 @@ fn yaml_key(key: &str) -> YamlValue {
 fn source_for(raw: &Option<YamlValue>, key: &str) -> ValueSource {
     raw.as_ref()
         .and_then(YamlValue::as_mapping)
-        .and_then(|map| map.get(&yaml_key(key)))
+        .and_then(|map| map.get(yaml_key(key)))
         .map_or(ValueSource::Default, |_| ValueSource::File)
 }
 
 fn nested_source_for(raw: &Option<YamlValue>, parent: &str, key: &str) -> ValueSource {
     raw.as_ref()
         .and_then(YamlValue::as_mapping)
-        .and_then(|map| map.get(&yaml_key(parent)))
+        .and_then(|map| map.get(yaml_key(parent)))
         .and_then(YamlValue::as_mapping)
-        .and_then(|map| map.get(&yaml_key(key)))
+        .and_then(|map| map.get(yaml_key(key)))
         .map_or(ValueSource::Default, |_| ValueSource::File)
 }
 
@@ -196,7 +217,11 @@ mod tests {
         let tmp = tempdir().unwrap();
         let report = show(tmp.path()).unwrap();
 
-        assert_eq!(report.path, tmp.path().join("issues/.schema.yaml"));
+        assert_eq!(
+            report.path,
+            tmp.path().join("issues/.schema.yaml").to_string_lossy()
+        );
+        assert!(!report.exists);
         assert_eq!(
             report.values["schema.fields.status"].source,
             ValueSource::Default
@@ -209,16 +234,41 @@ mod tests {
     }
 
     #[test]
+    fn report_covers_every_serialized_schema_section() {
+        let tmp = tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  priority:\n    required: false\ndod:\n  strict: true\nbody_sections:\n  task: [Overview]\nstatus_classes:\n  archived: closing\nstatus_aliases:\n  legacy-open: open\ntype_aliases:\n  legacy-task: task\n",
+        )
+        .unwrap();
+        let report = show(tmp.path()).unwrap();
+        let schema = serde_json::to_value(schema::default_schema()).unwrap();
+        for section in schema.as_object().unwrap().keys() {
+            let prefix = format!("schema.{section}");
+            let nested_prefix = format!("{prefix}.");
+            assert!(
+                report
+                    .values
+                    .keys()
+                    .any(|key| key == &prefix || key.starts_with(&nested_prefix)),
+                "config show is missing schema section {section}"
+            );
+        }
+    }
+
+    #[test]
     fn file_overrides_are_reported_per_value() {
         let tmp = tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("issues")).unwrap();
         fs::write(
             tmp.path().join("issues/.schema.yaml"),
-            "version: 1\ndod:\n  strict: true\nfields:\n  priority:\n    required: false\n",
+            "version: 1\ndod:\n  strict: true\nfields:\n  priority:\n    required: false\nstatus_classes:\n  archived: closing\n",
         )
         .unwrap();
 
         let report = show(tmp.path()).unwrap();
+        assert!(report.exists);
         assert_eq!(report.values["schema.version"].source, ValueSource::File);
         assert_eq!(report.values["schema.dod.strict"].source, ValueSource::File);
         assert_eq!(
@@ -228,6 +278,18 @@ mod tests {
         assert_eq!(
             report.values["schema.fields.status"].source,
             ValueSource::Default
+        );
+        assert_eq!(
+            report.values["schema.status_classes.done"].value,
+            serde_json::json!("closing")
+        );
+        assert_eq!(
+            report.values["schema.status_classes.done"].source,
+            ValueSource::Default
+        );
+        assert_eq!(
+            report.values["schema.status_classes.archived"].source,
+            ValueSource::File
         );
     }
 }
