@@ -253,14 +253,14 @@ Common flags:
 
 - `--status STATUS` (active or closing)
 - `-t/--type TYPE` (bug, task, feature, improvement, chore, epic, or any value the repo's `.schema.yaml` adds to `fields.type.enum`; rejected with `SchemaViolation` if the new type's required body sections are missing, with a list of `## <Section>` headings to add first; rejected if combined with a close→open reopen on the same call. Changing to `epic` automatically migrates a lone `reporter:` to `owner:` and reports a warning; an assignee or a conflicting owner remains an actionable error.)
-- `--assignee USER` / `--no-assignee`, `--owner USER` (epics), and `--no-reporter`
+- `--assignee USER` / `--no-assignee`, `--owner USER` / `--no-owner` (epics), and `--no-reporter`
 - `--priority low|normal|high`
 - `--epic <slug>` / `--no-epic`
 - `--add-label LABEL` / `--remove-label LABEL` (repeatable)
 - `--add-related "@<slug>"` / `--remove-related "@<slug>"` (repeatable; bare slug also accepted)
 - `--add-blocked-by "@<slug>"` / `--remove-blocked-by "@<slug>"` (repeatable; bare slug also accepted) — set/clear DAG dependency edges (this issue is blocked by `<slug>`). Same shape as `--add-related`; equivalent to `issuectl depend add/remove`.
 - `--add-commit HASH:summary` (repeatable)
-- `--lane NAME` / `--no-lane`, `--lane-seq <int>` / `--no-lane-seq`, and `--add-collision TOKEN` / `--remove-collision TOKEN` — optional scheduling-DAG hints (a lane is a spawn-time mutual-exclusion group; collision tokens are extra shared "hot files"; `lane_seq` is a coarse intra-lane precedence key consulted after `blocked_by` and priority but before the slug tie-break, so you can pin "do this member before that one" without a fake dependency). The reserved lane value `--lane unlaned` marks an issue *confirmed parallel-safe*: `dag` treats it as independently spawnable and never serializes it with siblings (distinct from an absent lane, which means "unclassified"). Only useful to an orchestrator; `issuectl dag [--json]` renders the resulting lanes, per-lane order, `blocked_by` mirror, and computed head-of-line (deterministic, AI-first). An issue whose `status` is `in-progress` is never `spawnable` (work already underway). Pass `dag --reservations <file|-|json>` to have spawnability account for lane/collision tokens in-flight runs hold.
+- `--lane NAME` / `--no-lane`, `--lane-seq <int>` / `--no-lane-seq`, and `--add-collision TOKEN` / `--remove-collision TOKEN` — optional scheduling-DAG hints. A lane is a serial queue, so only its head can spawn: choose lanes as independently mergeable conflict boundaries, not themes. The number of ordinary lanes is the parallelism budget; use shared `collision:` tokens for cross-lane hot files rather than merging whole lanes. `lane_seq` is a coarse intra-lane precedence key consulted after `blocked_by` and priority but before the slug tie-break, so you can pin "do this member before that one" without a fake dependency. The reserved lane value `--lane unlaned` marks an issue *confirmed parallel-safe*: `dag` treats every member as independently headed and spawnable, never serializing siblings. It differs from an absent lane, which means "unclassified". `issuectl dag [--json]` renders lanes, their serial `depth`, head-of-line, and total `spawnable_heads` so callers can see current parallelism. An `in-progress` head remains spawnable: it is resumable work, and callers prevent duplicate runs with reservations. See `docs/design/lane-design.md` for the full guidance. Pass `dag --reservations <file|-|json>` to have spawnability account for lane/collision tokens in-flight runs hold.
 
 Example flows:
 
@@ -270,6 +270,7 @@ Example flows:
 - `issuectl --json update extremely-quiet-otter --add-label backend --add-label api`
 - `issuectl --json update extremely-quiet-otter --add-blocked-by "@other-slug"` (gate this issue behind `@other-slug`)
 - `issuectl --json update extremely-quiet-otter --no-assignee --type epic` (clear an assignee before converting to an epic)
+- `issuectl --json update extremely-quiet-otter --no-owner --type task` (clear an epic owner before converting to a non-epic)
 
 Prefer commit trailers over manual `--add-commit`. Add
 `Refs-Issue: @<slug>` (or `Fixes-Issue: @<slug>` to also signal

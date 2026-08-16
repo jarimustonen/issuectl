@@ -8,11 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`issuectl dag` lane depth and parallelism:** each rendered lane now reports its serial `depth`, while human and JSON output report the current `spawnable_heads` count.
 - **`issuectl update --no-reporter` / `--no-assignee`** clear built-in people fields without hand-editing issue frontmatter.
 - **Lane-structure design guide:** practical guidance for choosing serial
   conflict boundaries, collision tokens, parked work, and `unlaned` issues.
 
 ### Changed
+- **`issuectl dag --help`** now explains how to design lanes as independently mergeable serial queues rather than theme buckets, including `collision:` hot-file handling and the distinction between `unlaned` and absent lanes.
 - Replaced maintainer-specific metadata, examples, and infrastructure labels with neutral or fictional values.
 
 ### Fixed

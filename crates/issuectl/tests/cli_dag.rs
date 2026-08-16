@@ -105,6 +105,7 @@ fn dag_json_shape_and_head_of_line() {
     let tmp = scheduled_repo();
     let v = json(&run(tmp.path(), &["--json", "dag"]));
     assert_eq!(v["schema_version"].as_u64(), Some(1));
+    assert_eq!(v["spawnable_heads"], serde_json::json!(3));
     assert_eq!(v["reservations_applied"], serde_json::json!(false));
 
     let lanes = v["lanes"].as_array().expect("lanes array");
@@ -113,6 +114,7 @@ fn dag_json_shape_and_head_of_line() {
     assert_eq!(lanes[1]["lane"], "schema");
 
     let schema = &lanes[1];
+    assert_eq!(schema["depth"], serde_json::json!(2));
     assert_eq!(schema["head_of_line"], "schema-a");
     let issues = schema["issues"].as_array().unwrap();
     assert_eq!(issues[0]["slug"], "schema-a");
@@ -129,6 +131,19 @@ fn dag_json_shape_and_head_of_line() {
     assert_eq!(uns.len(), 1);
     assert_eq!(uns[0]["slug"], "loose-one");
     assert_eq!(uns[0]["spawnable"], serde_json::json!(true));
+}
+
+#[test]
+fn dag_human_output_includes_depth_and_spawnable_heads() {
+    let tmp = scheduled_repo();
+    let out = run(tmp.path(), &["dag"]);
+    assert_eq!(out.status.code(), Some(0), "dag: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("spawnable heads: 3"), "got: {stdout}");
+    assert!(
+        stdout.contains("lane schema (depth: 2, head-of-line: schema-a)"),
+        "got: {stdout}"
+    );
 }
 
 #[test]

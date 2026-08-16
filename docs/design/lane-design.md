@@ -55,3 +55,10 @@ need `shared.rs`, keep their lanes separate and give those two issues
 split it so later work no longer needs that collision. Put standing findings in
 `parked`, and mark reviewed, independent leftovers as `unlaned`; leave an
 issue with no lane only while it still needs classification.
+
+## Dogfood lesson
+
+`issuectl` itself once ran six `cli-fixes` issues in one lane. They were all
+serial slices, so that theme-shaped lane serialized the work session. Splitting
+future work by independently mergeable conflict boundaries gives the same plan
+more usable parallelism without weakening collision safety.

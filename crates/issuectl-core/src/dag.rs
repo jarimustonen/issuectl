@@ -290,6 +290,9 @@ pub struct DagIssue {
 #[derive(Debug, Clone, Serialize)]
 pub struct DagLane {
     pub lane: String,
+    /// Number of live issues in this serial lane. This is its scheduling
+    /// depth: only one member, the head-of-line, can be spawnable at once.
+    pub depth: usize,
     /// First *runnable* issue in `issues` order — not done and with every
     /// `blocked_by` dependency satisfied — or null when no member is
     /// currently runnable (all done, or every not-done member is still
@@ -308,6 +311,10 @@ pub struct DagView {
     /// On-disk schema version of the loaded repo schema, surfaced per the
     /// AI-first contract.
     pub schema_version: u32,
+    /// Number of rows currently eligible to spawn. This includes ordinary
+    /// lane heads and independently-headed unscheduled / `unlaned` issues,
+    /// and is derived from the computed `DagIssue::spawnable` predicates.
+    pub spawnable_heads: usize,
     /// Whether a caller-supplied reservations set was applied.
     pub reservations_applied: bool,
     /// Lanes, ordered by lane name. Terminal (closing-status) issues are
@@ -388,7 +395,7 @@ pub fn compute(issues: &[Issue], schema: &Schema, reservations: Option<&Reservat
         reservations,
     };
 
-    let lanes = by_lane
+    let lanes: Vec<DagLane> = by_lane
         .into_iter()
         .map(|(lane, members)| build_lane(lane, &order_lane(&members, &graph), &ctx))
         .collect();
@@ -398,14 +405,22 @@ pub fn compute(issues: &[Issue], schema: &Schema, reservations: Option<&Reservat
     // Terminal issues were already filtered out of the bucket above, so
     // every unscheduled issue is a non-done, independent head; `spawnable`
     // still requires blockers to be satisfied.
-    let unscheduled = tiebreak_sorted(&unscheduled)
+    let unscheduled: Vec<DagIssue> = tiebreak_sorted(&unscheduled)
         .iter()
         .enumerate()
         .map(|(pos, i)| ctx.make_issue(i, pos, None, true))
         .collect();
 
+    let spawnable_heads = lanes
+        .iter()
+        .flat_map(|lane| &lane.issues)
+        .chain(unscheduled.iter())
+        .filter(|issue| issue.spawnable)
+        .count();
+
     DagView {
         schema_version: schema.version,
+        spawnable_heads,
         reservations_applied: reservations.is_some(),
         lanes,
         unscheduled,
@@ -617,7 +632,7 @@ fn build_lane(lane: &str, ordered: &[&Issue], ctx: &ComputeCtx<'_>) -> DagLane {
         .find(|i| ctx.is_runnable(i))
         .map(|i| i.slug.clone());
 
-    let issues = ordered
+    let issues: Vec<DagIssue> = ordered
         .iter()
         .enumerate()
         .map(|(pos, i)| {
@@ -628,6 +643,7 @@ fn build_lane(lane: &str, ordered: &[&Issue], ctx: &ComputeCtx<'_>) -> DagLane {
 
     DagLane {
         lane: lane.to_string(),
+        depth: issues.len(),
         head_of_line: head,
         issues,
     }
@@ -1158,6 +1174,22 @@ mod tests {
     }
 
     // ── dag-inprogress-is-spawnable (design correction) ─────────────────
+
+    #[test]
+    fn depth_and_spawnable_head_count_include_in_progress_and_unlaned() {
+        // Counts must derive from the rendered spawnable predicates: the
+        // in-progress ordinary-lane head and both parallel-safe `unlaned`
+        // rows are eligible, while the second ordinary-lane member is not.
+        let issues = vec![
+            with_lane(mk("a-underway", "in-progress", "normal"), "schema"),
+            with_lane(mk("b-next", "open", "normal"), "schema"),
+            with_lane(mk("c-safe", "open", "normal"), UNLANED),
+            with_lane(mk("d-safe", "open", "normal"), UNLANED),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        assert_eq!(lane(&v, "schema").depth, 2);
+        assert_eq!(v.spawnable_heads, 3);
+    }
 
     #[test]
     fn in_progress_head_is_spawnable() {

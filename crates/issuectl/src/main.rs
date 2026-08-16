@@ -1450,12 +1450,26 @@ enum Command {
     },
 
     /// Render the scheduling DAG: lanes, per-lane order, `blocked_by`
-    /// mirror, and a computed head-of-line, all derived on read from the
-    /// `lane` / `collision` fields joined with live status. Deterministic
-    /// and AI-first (`--json` carries `schema_version`). Optionally pass
-    /// `--reservations` so spawnability accounts for the lane/collision
-    /// tokens an orchestrator's in-flight runs already hold; issuectl
-    /// never reads that from orchestratectl itself.
+    /// mirror, and computed heads-of-line, all derived on read from the
+    /// `lane` / `collision` fields joined with live status. The output
+    /// reports each lane's serial depth and the current count of spawnable
+    /// heads: the practical answer to "how parallel is my plan right now?"
+    ///
+    /// Design lanes as serial queues, not theme labels: only each lane's
+    /// head-of-line can spawn, so the number of lanes is the parallelism
+    /// budget and a nine-issue theme lane is nine serial slices. Put lane
+    /// boundaries at independently mergeable conflict boundaries. A shared
+    /// cross-lane file belongs in `collision:`, not by merging whole lanes;
+    /// a hot file attracting many issues is a scheduling problem.
+    ///
+    /// `lane: unlaned` means confirmed parallel-safe work: every member is
+    /// independently headed and spawnable. It differs from an absent lane,
+    /// which means unclassified work. See `docs/design/lane-design.md` for
+    /// the full lane-design guidance. Deterministic and AI-first (`--json`
+    /// carries `schema_version`). Optionally pass `--reservations` so
+    /// spawnability accounts for the lane/collision tokens an orchestrator's
+    /// in-flight runs already hold; issuectl never reads that from
+    /// orchestratectl itself.
     Dag {
         /// Caller-supplied live run reservations, as JSON. Accepts a file
         /// path, `-` for stdin, or an inline JSON string. Shapes:
@@ -5936,9 +5950,13 @@ fn print_dag_human(view: &dag::DagView) {
         println!("(no issues)");
         return;
     }
+    println!("spawnable heads: {}", view.spawnable_heads);
     for lane in &view.lanes {
         let head = lane.head_of_line.as_deref().unwrap_or("—");
-        println!("lane {} (head-of-line: {head})", lane.lane);
+        println!(
+            "lane {} (depth: {}, head-of-line: {head})",
+            lane.lane, lane.depth
+        );
         for i in &lane.issues {
             print_dag_row(mark(i), i);
         }
