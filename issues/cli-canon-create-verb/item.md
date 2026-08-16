@@ -2,7 +2,7 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: improvement
-status: in-progress
+status: done
 priority: normal
 labels: [cli-canon, tooling]
 lane: cli-canon
@@ -12,6 +12,7 @@ commits:
   summary: 'feat(cli): make create the primary issue verb'
 - hash: 99d996b
   summary: 'test(cli): cover create alias routing'
+closed: 2026-08-16
 ---
 
 # cli-canon: §7 prefer create over new as primary verb
