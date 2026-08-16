@@ -15,10 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`issuectl skill list`** — enumerate the bundled `/issue`, `/issue-new`, and
   `/issue-intake` workflows with their Claude Code and Codex install targets,
   without inspecting or changing the derived pi.dev mirror.
-- **`issuectl config path` / `issuectl config show` — inspect the schema
-+  configuration path and each effective schema value. `show --json` reports
-+  per-value provenance as `source: "file"` for `issues/.schema.yaml` entries
-+  and `source: "default"` for built-in values.
+- **`issuectl config path` / `issuectl config show`** — inspect the schema
+  configuration path and each effective schema value. `show --json` reports
+  per-value provenance as `source: "file"` for `issues/.schema.yaml` entries
+  and `source: "default"` for built-in values.
 
 ## [0.11.0] - 2026-08-15
 
