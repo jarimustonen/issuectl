@@ -10,6 +10,8 @@ lane_seq: 40
 commits:
 - hash: 26b38e86a3f73d1201904855c53a09136a4c70fb
   summary: 'feat(skill): list bundled companion skills'
+- hash: 9eab29f58e4481e18ae4ba8bf900622f453d75cd
+  summary: 'fix(skill): keep list catalog aligned with install'
 ---
 
 # cli-canon: §15 skill list subcommand
