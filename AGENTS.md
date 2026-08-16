@@ -201,6 +201,29 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
   (see its `lib.rs` doc comment) — `pub` items there are *not* a
   semver contract. The semver contract lives in the `issuectl`
   binary's CLI surface.
+  - **Two canon-§22 asks are deliberately REJECTED — do not "fix" them.**
+    The AI-first CLI canon's §22 (library-first layout) additionally asks
+    for a core with **no I/O** and a cli crate named `*-cli`. Both were
+    considered and declined (2026-08-16, `@cli-canon-s22`):
+    - **I/O stays in `issuectl-core`.** issuectl is a filesystem-backed
+      tracker whose markdown files *are* the domain; ~27 core modules
+      touch `std::fs` by design. Hiding the disk behind a trait would be
+      a full rewrite of core for no testability gain — the tests are
+      already hermetic via tempdirs. The §22 rationale (unit-testable
+      domain without the CLI shell) is already satisfied: core has **no
+      `clap` dependency**, and `Clock` covers the one genuinely
+      untestable ambient dependency.
+    - **The binary crate stays `issuectl`, not `issuectl-cli`.** It is
+      published on crates.io under that name; renaming breaks the
+      published name for cosmetic conformance.
+    What §22 *did* yield is the `Clock` seam (below).
+  - **Verify a canon-audit finding before acting on it.** The
+    `project-canon review --assume-defaults` pass that filed
+    `@cli-canon-s22` reported *"no `crates/` directory — no core/cli
+    split"*, which was simply false — the split predates the audit and
+    core was already clap-free. Audit findings are recommendations
+    produced from a partial read; confirm the "Observed:" claim against
+    the tree before you lane work off it.
 - **`blocked_by` stays in `extra`; its JSON top-level is a *canonical
   projection*, not a typed field.** Unlike `closed_by` (typed) or
   `related`/`labels` (plain-serialized), `blocked_by` is deliberately
@@ -318,6 +341,28 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
   the `load_issues_with_warnings_via(root, config)` pattern: the `_via`
   variant takes the config; the no-config alias delegates to
   `UncachedConfig` for CLI ergonomics.
+- **Wall-clock time goes through `Clock`, never a bare `Utc::now()`.**
+  `clock.rs` defines the `Clock` trait (`now_utc` / `today` /
+  `today_string`) with `SystemClock` for production and `FixedClock` for
+  deterministic tests — the same load-site-seam idiom as `ConfigSource`
+  above. Time-dependent domain paths (`write`, `doctor`, `stale`,
+  `query`, `report`, `recurrence`, `cycle`) take the clock rather than
+  reading the system time themselves, so date-derived behaviour —
+  `closed:`/`updated:` stamping, `issues/archive/YYYY/MM/` bucketing,
+  doctor's today-fallback when stamping a coerced legacy status,
+  staleness windows — is pinnable in tests. **The only legitimate
+  `Utc::now()` in `issuectl-core` is inside `SystemClock`**; a new one
+  anywhere else is the warning sign that a path skipped the seam (grep
+  `Local::now()\|Utc::now()` under `crates/issuectl-core/src` — it should
+  match exactly once).
+  - **Timezone asymmetry, deliberate:** `SystemClock::today()` converts
+    to `Local` before taking the date (persisted `closed:` / `updated:`
+    values historically use the local calendar), while `FixedClock::today()`
+    takes the date straight off its UTC instant. So a `FixedClock` pinned
+    near midnight UTC does not necessarily reproduce what `SystemClock`
+    would report in a non-UTC zone. Pin test instants mid-day UTC unless
+    the test is specifically about a date boundary, and construct the
+    boundary case deliberately rather than assuming the two agree.
 - **Schema `required_when` + status/type aliases drive `doctor --fix`
   coercion.** A `FieldSpec.required_when: { status_class: <class> }`
   declares conditional required fields; built-in: `closed` is required
