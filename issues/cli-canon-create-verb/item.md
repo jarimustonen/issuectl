@@ -7,6 +7,9 @@ priority: normal
 labels: [cli-canon, tooling]
 lane: cli-canon
 lane_seq: 70
+commits:
+- hash: 225652d
+  summary: 'feat(cli): make create the primary issue verb'
 ---
 
 # cli-canon: §7 prefer create over new as primary verb
