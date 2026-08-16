@@ -94,7 +94,7 @@ pub fn normalize_author(author: &str) -> Result<String> {
 
 /// Reject messages that cannot be safely appended. Unfenced `## `/
 /// `### ` heading lines are *not* rejected here — they are legitimate
-/// note content and are demoted to H4+ by [`demote_managed_headings`]
+/// note content and are demoted to H4+ by `demote_managed_headings`
 /// at render time so they cannot be mistaken for a managed section /
 /// block boundary. The one structural hazard demotion can't fix is an
 /// unclosed fence (round-2 finding O10): it would silently swallow

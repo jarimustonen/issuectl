@@ -22,7 +22,7 @@
 //!   keeps its status; the stale label is dropped with a warning. A closed
 //!   item is never reopened.
 //! - **Idempotent + per-issue atomic.** Each issue's write goes through the
-//!   shared [`super::update_issue_under_lock`] (one tempfile-rename). A
+//!   shared `super::update_issue_under_lock` (one tempfile-rename). A
 //!   second run finds the legacy labels already gone and is a no-op.
 //! - **Per-issue error isolation.** In `--apply`, a schema rejection or I/O
 //!   failure on one item records an `error` on that action and leaves it

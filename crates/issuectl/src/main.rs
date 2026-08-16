@@ -606,7 +606,7 @@ enum Command {
         #[arg(long = "remove-label", value_parser = parse_non_empty)]
         remove_labels: Vec<String>,
 
-        /// Add a related reference like "@<slug>" or bare slug (repeatable)
+        /// Add a related reference like `@<slug>` or a bare slug (repeatable)
         #[arg(long = "add-related", value_parser = parse_non_empty)]
         add_related: Vec<String>,
 
@@ -614,7 +614,7 @@ enum Command {
         #[arg(long = "remove-related", value_parser = parse_non_empty)]
         remove_related: Vec<String>,
 
-        /// Add a `blocked_by:` dependency edge like "@<slug>" or bare slug
+        /// Add a `blocked_by:` dependency edge like `@<slug>` or a bare slug
         /// (repeatable). Mirrors `depend add`; sets the DAG blocker edge.
         #[arg(long = "add-blocked-by", value_parser = parse_non_empty)]
         add_blocked_by: Vec<String>,
@@ -1270,13 +1270,13 @@ enum Command {
     },
 
     /// Generate shell completion scripts. Pipe to your shell's
-    /// completion directory (e.g. `issuectl completions zsh
-    /// > ~/.zsh/completions/_issuectl`). The generated script statically
+    /// completion directory, for example with `issuectl completions zsh`
+    /// redirected to `~/.zsh/completions/_issuectl`. The generated script statically
     /// covers subcommand and option names; dynamic value completions for
     /// slugs / statuses / labels / users are exposed via the hidden
-    /// helper `issuectl _complete <kind>` which prints one value per
-    /// line — the generated script (with manual wiring) or a shell
-    /// completion hook can consume that helper.
+    /// helper `issuectl _complete <kind>` which prints one value on each
+    /// line; the generated script (with manual wiring) or a shell completion
+    /// hook can consume that helper.
     Completions {
         /// Shell to generate completions for.
         #[arg(value_enum)]
@@ -4059,7 +4059,7 @@ fn cmd_schedule_list(json: bool) -> Result<()> {
     } else if defs.is_empty() {
         println!("(no recurrences in .issuectl/recurrences/)");
     } else {
-        println!("{:<24} {:<18} {}", "NAME", "SCHEDULE", "TITLE");
+        println!("{:<24} {:<18} TITLE", "NAME", "SCHEDULE");
         for d in &defs {
             println!("{:<24} {:<18} {}", d.name, d.file.schedule, d.file.title);
         }
@@ -4929,7 +4929,7 @@ fn git_rev_parse(root: &Path, rev: &str) -> Option<String> {
     }
 }
 
-/// Render a [`StampOutcome`] as the `stamp` object echoed in `close
+/// Render a `StampOutcome` as the `stamp` object echoed in `close
 /// --json` output, so a caller confirms whether the changelog trailer
 /// landed (and, when skipped, why) from the same result. Shape is a
 /// stable `{ "status": ... }` discriminator so consumers switch on one
@@ -4945,7 +4945,7 @@ fn stamp_report_json(outcome: &git_trailers::StampOutcome) -> serde_json::Value 
     }
 }
 
-/// Human-readable one-liner for a [`StampOutcome`], written to stderr so
+/// Human-readable one-liner for a `StampOutcome`, written to stderr so
 /// it stays out of any parsed stdout.
 fn stamp_report_human(outcome: &git_trailers::StampOutcome) -> String {
     use git_trailers::StampOutcome::*;

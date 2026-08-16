@@ -102,7 +102,7 @@ impl Agent {
 /// `/issue`. Their bodies live in `crates/issuectl-core/templates/` (source of
 /// truth — a `*-skill.md` Claude variant and a `*-prompt.md` Codex variant per
 /// skill) and are dogfooded into this repo; the
-/// [`tests::dogfooded_copies_match_templates`] test keeps every copy in sync.
+/// `tests::dogfooded_copies_match_templates` test keeps every copy in sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntakeSkill {
     /// `/issue-new` — the thin filing half of the intake flow.
@@ -479,7 +479,7 @@ fn install_pi_mirror(
 /// corpus root. The mirror target is `<pi_root>/<name>/SKILL.md`; a symlink at
 /// the intermediate `<pi_root>/<name>` directory OR at the final `SKILL.md`
 /// would make `std::fs::write` follow the link and overwrite a file *outside*
-/// the corpus ([`is_valid_skill_name`] vets only the manifest key, never the
+/// the corpus (`is_valid_skill_name` vets only the manifest key, never the
 /// on-disk shape of the path it names). Both components are inspected with
 /// `symlink_metadata`, which never follows the final component, so a directory
 /// symlink is seen as a symlink rather than as its (external) target.
@@ -601,7 +601,7 @@ fn install_rendered_file(
 // issue). Every path that walks, deletes, or overwrites under `pi_root` refuses
 // to follow a directory/`SKILL.md` symlink out of the corpus: the walk gate in
 // [`classify_pi_corpus`] (symlinked entry → `Unmanaged`, never read through),
-// the delete gate [`orphan_is_safely_removable`], and the write gate
+// the delete gate `orphan_is_safely_removable`, and the write gate
 // [`ensure_pi_mirror_target_within_corpus`], all via `symlink_metadata` (which
 // never follows the final component). `save_pi_manifest` creates its temp file
 // with `O_EXCL` so a pre-planted symlink at the temp name is refused too. These
@@ -639,7 +639,7 @@ const PI_MANIFEST_TOOL: &str = "issuectl";
 /// Reuses the repo-wide [`crate::mutate::WriteLock`] flock helper rather than
 /// hand-rolling a second locking primitive: it creates `<pi_root>/.issuectl/`
 /// (a dotfile dir the corpus scanner already ignores — see
-/// [`is_valid_skill_name`]) and takes an exclusive `flock(2)` on `write.lock`
+/// `is_valid_skill_name`) and takes an exclusive `flock(2)` on `write.lock`
 /// there, released when the returned guard drops. `WriteLock::acquire`
 /// `create_dir_all`s that dir first, so this succeeds even when `pi_root` does
 /// not yet exist (the first install).
@@ -662,7 +662,7 @@ fn acquire_pi_lock(pi_root: &Path) -> Result<crate::mutate::WriteLock> {
 pub struct PiManifest {
     /// Schema version of the manifest file itself.
     pub manifest_version: u32,
-    /// Owning tool — always [`PI_MANIFEST_TOOL`].
+    /// Owning tool — always `PI_MANIFEST_TOOL`.
     pub tool: String,
     /// `skill name → entry`, a `BTreeMap` for a stable, diff-friendly order.
     pub skills: BTreeMap<String, PiManifestEntry>,
@@ -738,7 +738,7 @@ fn is_valid_skill_name(name: &str) -> bool {
 ///   yet" case;
 /// - `Ok(Some(manifest))` when it parses, is stamped with our tool, and carries
 ///   a supported schema version — with any structurally-unsafe skill keys
-///   dropped ([`is_valid_skill_name`]);
+///   dropped (`is_valid_skill_name`);
 /// - `Err(..)` when the file is present but unreadable, corrupt (bad JSON),
 ///   owned by another tool, or an unsupported schema version.
 ///
@@ -985,7 +985,7 @@ impl PiStatusReport {
 /// Directory names of the current skill entries physically present under
 /// `pi_root` (each `<name>/` holding a mirrored skill). The manifest file, any
 /// stray non-directory entries, and any name that is not a safe single
-/// component ([`is_valid_skill_name`], which also excludes dotfiles) are
+/// component (`is_valid_skill_name`, which also excludes dotfiles) are
 /// ignored.
 fn on_disk_skill_dirs(pi_root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(pi_root) else {
@@ -1244,12 +1244,12 @@ fn orphan_is_safely_removable(dir: &Path, skill_md: &Path) -> bool {
 ///   unsupported version) via the strict loader — acting on the empty view a
 ///   lenient load would produce could drop provenance or misjudge ownership.
 /// - Manifest keys are validated to safe single path components at load time
-///   ([`is_valid_skill_name`]), so a tampered key like `../../x` can never steer
+///   (`is_valid_skill_name`), so a tampered key like `../../x` can never steer
 ///   a delete outside the corpus.
 /// - An orphan removal drops **only** a regular-file `SKILL.md` and then the dir
 ///   *if it is now empty*; a symlinked/odd `SKILL.md` or a dir with sibling
 ///   files is reported in `skipped`, not deleted (see
-///   [`orphan_is_safely_removable`]).
+///   `orphan_is_safely_removable`).
 pub fn pi_prune(pi_root: &Path, apply: bool) -> Result<PiPruneOutcome> {
     // Hold the corpus lock across the whole load → classify → delete → save so a
     // concurrent `skill install` (or a second prune) from another repo cannot
@@ -2101,7 +2101,7 @@ mod tests {
         // corpus root also carries the out-of-band provenance manifest (a file,
         // not a mirrored skill) and the `.issuectl` advisory-lock dir — both
         // dotfiles the corpus scanner ignores. Filter to genuine skill dirs
-        // exactly as production does ([`is_valid_skill_name`], which excludes
+        // exactly as production does (`is_valid_skill_name`, which excludes
         // dotfiles) before comparing.
         let mut names: Vec<String> = std::fs::read_dir(pi.path())
             .unwrap()

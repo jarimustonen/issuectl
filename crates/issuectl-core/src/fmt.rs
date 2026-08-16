@@ -175,7 +175,7 @@ fn sort_array_fields(map: &mut Mapping) {
 /// between `---` and first non-blank line, single trailing newline.
 ///
 /// The output starts with `\n` so `serialize_item`'s "---\n" + body
-/// produces "---\n\n<line>" — the blank-line policy.
+/// produces `"---\n\n<line>"` — the blank-line policy.
 fn normalise_body(body: &str) -> String {
     let lf = body.replace("\r\n", "\n").replace('\r', "\n");
     let lines: Vec<&str> = lf.split('\n').collect();

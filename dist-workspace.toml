@@ -1,0 +1,65 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist' (cargo-dist). issuectl is a portable, POSIX-friendly CLI
+# (no fork/tmux/signal machinery), so the target set is broad. The tag-triggered
+# `.github/workflows/release.yml` is GENERATED from this [dist] section via
+# `dist generate` — edit config here, then regenerate; never hand-edit the
+# workflow. Only `crates/issuectl` is marked distributable (its
+# `[package.metadata.dist] dist = true`), so the produced binary artifact is
+# `issuectl`.
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax). Pinned to
+# the version this config was generated against so a regenerated workflow and
+# the local `dist` stay in lockstep.
+cargo-dist-version = "0.28.2"
+# CI backend.
+ci = "github"
+# Installer scripts generated as release assets: curl-to-shell (Unix) and
+# iwr-to-powershell (Windows). Homebrew auto-publish is deliberately NOT enabled
+# here — that needs a tap write token and is owned by the separate
+# `homebrew-adapter-first-formula` issue.
+installers = ["shell", "powershell"]
+# Cross-platform binary matrix (Rust target-triple syntax): macOS (arm64), Linux (arm64 + x86_64), and Windows x86_64. The Linux targets use
+# `musl`, not `gnu`, so the binaries are statically linked and run on any distro
+# regardless of its glibc vintage — issuectl is pure Rust with no C dependencies,
+# so musl is a clean fit and avoids a `GLIBC_x.y not found` cliff on older LTS
+# systems.
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+]
+# NOTE: no `x86_64-apple-darwin`. The macOS build runs on the self-hosted `hauis`
+# runner (below), which uses Homebrew Rust (no rustup) and so cannot cross-compile
+# the Intel-mac target — same constraint, same choice as orchestratectl. Apple
+# silicon is covered natively; Intel-mac users install via `cargo install issuectl`.
+# Where to host releases.
+hosting = "github"
+# Generate GitHub build-provenance attestations for the release artifacts
+# (`gh attestation verify`). A native, secret-free supply-chain signal for a CLI
+# whose install path is curl-to-shell; cargo-dist scopes the extra `id-token` /
+# `attestations` permissions to the publishing job.
+github-attestations = true
+# `pr-run-mode = skip` drops the PR plan-only job, so the workflow never runs on
+# pull requests, and on pushes it fires only on tags. NOTE the tag filter is
+# broader than `vX.Y.Z`: cargo-dist emits a semver-shaped glob
+# (`**[0-9]+.[0-9]+.[0-9]+*`) that also matches e.g. `pkg/1.2.3`. Glob filtering
+# is not an authorization boundary — enforce release-tag discipline (who may
+# create `v*` tags, on which commits) with a GitHub tag-protection ruleset.
+pr-run-mode = "skip"
+
+# PERSONAL / NON-STANDARD infra override (NOT issuectl canon — do not generate this
+# for other projects). Build the macOS targets on the self-hosted `hauis` runner
+# (a personal Apple-silicon Mac registered to this repo) instead of GitHub's
+# hosted macOS queue, which was taking 45+ min just to allocate. Other users of
+# issuectl will not have this runner, so issuectl never emits this section by default;
+# it is repo-local infra. hauis is arm64; this repo intentionally does not build
+# x86_64-apple-darwin. Each of Jari's four CLI repos has an identically-labelled
+# `hauis` self-hosted runner (self-hosted,macOS,ARM64); a bare `self-hosted`
+# runs-on matches it (the only self-hosted runner on the repo). This sub-table
+# MUST stay at the end — a `[dist.*]` table placed among the `[dist]` scalar keys
+# would swallow every key after it.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "self-hosted"

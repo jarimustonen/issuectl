@@ -20,6 +20,9 @@ exclude = [
     ".codex/**",
 ]
 
+[package.metadata.dist]
+dist = true
+
 [[bin]]
 name = "issuectl"
 path = "src/main.rs"

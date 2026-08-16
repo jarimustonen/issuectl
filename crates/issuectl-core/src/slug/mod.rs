@@ -78,7 +78,7 @@ const STOP_WORDS: &[&str] = &[
 /// Derive a descriptive 2–3 word kebab slug from an issue `title`.
 ///
 /// Lowercases, tokenizes on any non-alphanumeric boundary, drops
-/// [`STOP_WORDS`], and joins the first [`DERIVED_SLUG_MAX_WORDS`] content
+/// `STOP_WORDS`, and joins the first `DERIVED_SLUG_MAX_WORDS` content
 /// words with `-`. Returns `None` when the title yields no sensible slug —
 /// empty/whitespace/punctuation-only, all stop-words (zero content words),
 /// only one usable word, or non-ASCII words that cannot form a valid ASCII
@@ -154,7 +154,7 @@ fn candidate_words(title: &str) -> Vec<String> {
 }
 
 /// Generate a slug that does not collide with an existing directory under
-/// `issues/{open,closed}/<slug>/`. Loops up to [`COLLISION_RETRY_CAP`]
+/// `issues/{open,closed}/<slug>/`. Loops up to `COLLISION_RETRY_CAP`
 /// times. With ~105M combinations (1094 intensifiers' worth ≈ 99 ×
 /// 1094 adjectives × 978 nouns), the birthday-paradox 50% mark sits
 /// around 12 000 issues — eight retries against any realistic

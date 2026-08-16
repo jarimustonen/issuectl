@@ -5,14 +5,14 @@
 //! `note`: it takes the repo `flock` once, validates the source state,
 //! then applies the status change, the structured field(s), and the
 //! `## Comments` audit note in **one** atomic write via
-//! [`super::update_issue_under_lock`] — so a crash can never leave the
+//! `super::update_issue_under_lock` — so a crash can never leave the
 //! status changed but the note lost.
 //!
 //! Two enforcement tiers, per OD-9:
 //!
-//! - **Intrinsic invariants** ([`intrinsic_transition_violations`]) hold
+//! - **Intrinsic invariants** (`intrinsic_transition_violations`) hold
 //!   with or without `.issuectl/transitions.yaml`. They live in
-//!   [`super::update_issue_under_lock`], so the generic `set status`
+//!   `super::update_issue_under_lock`, so the generic `set status`
 //!   path routes through the exact same validators — the intake verbs
 //!   are not a privileged bypass, and `set` is not an unprivileged one.
 //! - **Per-verb source-state preconditions** (e.g. `accept` refuses a
@@ -751,7 +751,7 @@ pub fn retype(root: &Path, slug: &str, to: &str) -> Result<UpdateOutcome, Intake
 
 /// Reopen a closed item back into an active state (`untriaged` by
 /// default, or `open`). The `changes_status` normalization in
-/// [`apply_locked`] clears every stale lifecycle field; the reason lives
+/// `apply_locked` clears every stale lifecycle field; the reason lives
 /// only in the audit note (and the `## Reopen Notes` section the shared
 /// path appends), not in a dangling `disposition_note`.
 pub fn reopen(
@@ -800,7 +800,7 @@ pub fn withdraw(root: &Path, slug: &str, reason: &str) -> Result<UpdateOutcome, 
 // ── Intrinsic invariants (shared with generic `set status`) ──────────────
 
 /// Always-on, config-independent transition invariants (OD-9 A). Called
-/// from [`super::update_issue_under_lock`] whenever a write changes
+/// from `super::update_issue_under_lock` whenever a write changes
 /// `status` or `type`, so the generic `set status` path enforces the
 /// same rules as the intake verbs. Returns one message per violation.
 pub(crate) fn intrinsic_transition_violations(

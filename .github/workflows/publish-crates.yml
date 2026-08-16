@@ -1,0 +1,107 @@
+name: Publish to crates.io
+
+# Triggers on the version-tag push (the SAME tag cargo-dist's release.yml keys
+# off), so crates.io publishing happens in CI with no dependency on a local
+# token. Requires a CARGO_REGISTRY_TOKEN repo secret with publish scope
+# (set once: `gh secret set CARGO_REGISTRY_TOKEN --repo jarimustonen/issuectl`).
+#
+# NOTE: we do NOT trigger on `release: published`. cargo-dist creates the GitHub
+# Release with the default GITHUB_TOKEN, and GitHub does not emit workflow events
+# (incl. `release`) for actions taken by GITHUB_TOKEN — so a `release`-triggered
+# job never fires on a real cargo-dist cut. Keying off the tag push is the
+# verified working trigger. This runs in parallel with release.yml (the crates
+# publish needs only the tagged source, not the built binaries).
+#
+# issuectl is a two-crate workspace: `issuectl` depends on `issuectl-core`,
+# so the members MUST publish in dependency order — `issuectl-core` first,
+# then `issuectl` after its dependency is visible on the index. Modern `cargo
+# publish` waits for the just-published crate to appear on the index before it
+# returns, so a plain sequential publish is safe; the explicit retry loop below is
+# belt-and-suspenders against index propagation lag.
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Run cargo publish --dry-run instead of publishing"
+        required: false
+        default: "false"
+
+jobs:
+  publish:
+    name: cargo publish (workspace, dep-order)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify
+        run: cargo build --release
+
+      - name: Publish (dry-run)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry-run == 'true' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish -p issuectl-core --dry-run
+          # `issuectl` can't be dry-run-verified until issuectl-core is on the index,
+          # so a dry-run only covers the leaf crate.
+
+      - name: Publish (dep-order)
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry-run != 'true') }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Publish a crate, tolerating "already exists on crates.io index" as
+          # success. The engine (`issuectl release cut`) publishes both crates
+          # directly, and the version-tag push ALSO triggers this workflow, so a
+          # crate version is frequently already on the index by the time CI runs.
+          # A plain `cargo publish` exits 101 in that case; under `set -e` that
+          # would abort the step and mark a fully-successful release RED. Any
+          # OTHER failure (network, auth, verification) still propagates.
+          publish() {
+            local pkg="$1"
+            local out rc
+            # Capture combined output and the real exit code. The command
+            # substitution is its own statement (not `local out=$(…)`, which
+            # would mask cargo's status), and the `if` keeps the failure out of
+            # `set -e`'s reach.
+            if out="$(CARGO_TERM_COLOR=never cargo publish -p "$pkg" 2>&1)"; then
+              rc=0
+            else
+              rc=$?
+            fi
+            printf '%s\n' "$out"
+            if [ "$rc" -eq 0 ]; then
+              return 0
+            fi
+            # Tolerate ONLY cargo's exact duplicate-version diagnostic for THIS
+            # package, e.g. "error: crate issuectl-core@0.2.4 already exists on
+            # crates.io index". A here-string (not a pipe) avoids a pipefail
+            # SIGPIPE false-negative from grep -q closing the pipe early. Any
+            # other failure (network, auth, verification) still propagates.
+            if grep -Eqi "crate ${pkg}@[^[:space:]]+ already exists on crates\.io index" <<<"$out"; then
+              echo "$pkg already on the crates.io index — treating as success."
+              return 0
+            fi
+            return "$rc"
+          }
+
+          echo "Publishing issuectl-core…"
+          publish issuectl-core
+          echo "Publishing issuectl (retry until issuectl-core is index-visible)…"
+          for attempt in 1 2 3 4 5 6; do
+            if publish issuectl; then
+              echo "issuectl published."
+              exit 0
+            fi
+            echo "attempt $attempt failed (issuectl-core may not be index-visible yet); waiting 30s…"
+            sleep 30
+          done
+          echo "issuectl failed to publish after retries" >&2
+          exit 1

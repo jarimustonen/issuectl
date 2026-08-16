@@ -415,9 +415,9 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
 - See [issues/AGENTS.md](issues/AGENTS.md) for how this project's own
   issue tracker is organized.
 
-## Operating facts (for /stint)
+## Operating policy (for `/stint`)
 
-Facts a `/stint` orchestrator needs. The work queue and session handoff
+`/stint` reads this section for how to run a work-session in this repo. The work queue and session handoff
 live in [TODO.md](TODO.md); this section is the project's operating
 policy.
 
@@ -439,41 +439,48 @@ policy.
   release verify` is a read-only reconcile against the registry. The tag then
   triggers
   `cargo-dist` (`.github/workflows/release.yml`) → GitHub Release with
-  binaries + shell installer + the Homebrew formula pushed to
-  `jarimustonen/homebrew-issuectl`. `release.yml` is a **binary-only
-  backend** — it does NOT publish to crates.io, so there is no
-  double-publish and **no manual `gh workflow run` step**. (The old
-  `publish-crates.yml` was retired 2026-08-10 by
-  `@wire-oss-release-as-release-path`: its `release: [published]` trigger
-  never fired because cargo-dist publishes the Release with `GITHUB_TOKEN`,
-  which does not fire downstream workflows.) Full steps:
-  [CONTRIBUTING.md](CONTRIBUTING.md) "Per-release steps".
-- **Deploy/release autonomy: FULLY autonomous — no go/no-go, no output
-  review.** The conductor **cuts and publishes releases automatically** and
-  **decides autonomously whether** a release is warranted — run `ossctl
-  release plan --version X.Y.Z` then `ossctl release cut --plan <id>
-  --version X.Y.Z` (after the `release:` version-bump + CHANGELOG commit —
-  see "What deploy means here"); the cut publishes both crates to crates.io
-  and pushes the tag (which fires `release.yml` for binaries). **No confirmation at any point, and the user does NOT want to
-  review the `release plan` (or any deploy) output before it runs** — do not
-  pause to show it for approval. Run the release end-to-end and report the
-  outcome afterward. This holds for the **first** release on a newly-wired
-  path too, and there is no separate crates.io trigger (the publish is part
-  of the cut). (Reaffirmed + strengthened 2026-08-10 on explicit user
-  instruction — "deployt ja releaset saa tehdä automaattisesti"; supersedes
-  the earlier go/no-go rule and any "show the plan first" caveat.) Use
-  judgement only on *timing* — batch trivial changes, don't release off a
-  red or half-landed `main`; the bar is a green gate **plus** a complete
-  CHANGELOG `[Unreleased]`. If a cut is interrupted, `ossctl release resume`
-  reconciles and continues; `ossctl release verify` is a read-only reconcile
-  against the registry.
+  cross-platform binaries + shell/powershell installers, while the same tag
+  also triggers `.github/workflows/publish-crates.yml` for an idempotent
+  crates.io publish in dependency order (`issuectl-core` first, then
+  `issuectl`). `release.yml` is a **binary-only backend** — it does NOT
+  publish to crates.io, so there is no double-publish inside cargo-dist; the
+  separate crates workflow tolerates versions that the engine already
+  published. Full steps: [CONTRIBUTING.md](CONTRIBUTING.md) "Per-release steps".
+- **Releases MAY be cut automatically whenever there is something to release** (maintainer
+  decision, 2026-08-05). Publishing `issuectl` itself (crates.io / GitHub Release / Homebrew)
+  no longer requires an explicit per-release go: when `main` carries unreleased user-facing
+  changes, `/stint` may bump the version, finalize the CHANGELOG, and run the release recipe
+  as an owned Phase-3 act — no confirmation needed. Preconditions still hold: the green gate
+  passes, and `cargo publish` runs `--dry-run` first. crates.io publishes are irreversible
+  (yank-only), so never publish red, and report each step.
+- **The ENGINE-DRIVEN cut (`ossctl release cut`) is fully autonomous — NO go/no-go checkpoint,
+  ever** (maintainer decision, 2026-08-06). Running the release *through the engine* — the full
+  multi-target flow (crates.io ×2 + cargo-dist binaries + the Homebrew tap) — requires **no
+  permission and no pause before the irreversible publish**, not for the first-ever engine cut,
+  not for the homebrew leg (the homebrew leg is the most important target — it must be cut, not
+  dropped). Do **not** stop to ask "shall I cut?" — just run the recipe end to end and report
+  as you go. The safety is structural, not a human gate: `ossctl release plan` seals a
+  content-addressed plan (a side-effect-free preview the agent inspects), the coordinator runs
+  `dry-run-all` before any publish, `issuectl-core`→`issuectl` ordering + index-wait guard the
+  crates.io partial-publish case, and `ossctl release resume`/`abandon` recover an interrupted
+  run. Still: green gate first, dry-run/plan first, never publish red, report each phase.
+- **Git: `pull --rebase` → `push` is always allowed, no confirmation** (maintainer
+  decision, 2026-08-05). On this repo the agent may run the pull-rebase-push sequence
+  (`git pull --rebase origin main` then `git push origin main`, and pushing tags) on its own
+  whenever `main` is clean and green — publishing commits to the remote does not need a
+  separate go. Still: never force-push a shared branch, and never push a red tree.
 - **Live-version check.** Shipped: `git tag --sort=-creatordate | head
   -1` and `grep '^version' Cargo.toml`. Published: crates.io / the
   Homebrew tap. Compare against `main` before recommending a release.
-- **Green gate (must pass before recommending a release).** `cargo
-  test` (unit + integration), `cargo clippy --all-targets` (no new
-  warnings), `cargo fmt --all --check`. CI (`.github/workflows/ci.yml`)
-  runs the same on every PR.
+- **Green gate** (must pass before a unit counts as landed):
+  - `cargo fmt --all --check`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace`
+  - `cargo build --workspace` (release build not required per-unit)
+  - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` — **CI runs this and it
+    is easy to miss locally**: broken intra-doc links (`[`Foo`]` to a moved/renamed/private
+    item, redundant explicit link targets) fail the `docs` job even when tests pass. Run it
+    before landing any unit that touches doc comments (`//!` / `///`).
 - **Hot files (sequence, do not parallelise).** `crates/issuectl/src/main.rs`
   (all `cmd_*` handlers + clap structs), `crates/issuectl-core/src/mutate/`
   (every write path routes here), `crates/issuectl-core/src/schema.rs`,
