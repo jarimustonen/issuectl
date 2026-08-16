@@ -2,7 +2,7 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: improvement
-status: in-progress
+status: done
 priority: normal
 labels: [cli-canon, tooling]
 lane: cli-canon
@@ -12,6 +12,7 @@ commits:
   summary: 'feat(skill): list bundled companion skills'
 - hash: 9eab29f58e4481e18ae4ba8bf900622f453d75cd
   summary: 'fix(skill): keep list catalog aligned with install'
+closed: 2026-08-16
 ---
 
 # cli-canon: §15 skill list subcommand
