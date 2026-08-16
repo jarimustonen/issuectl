@@ -317,22 +317,22 @@ fn body_slug_hint_json_envelope() {
     );
 }
 
-/// A top-level near-miss for the `create` alias prints a routing tip
-/// naming the canonical `new` — plain path exits 2 with the tip on stderr,
-/// and `--json` folds it into the shared usage-error envelope (exit 1).
+/// A top-level near-miss for the `new` alias prints a routing tip naming
+/// canonical `create`: plain path exits 2 with the tip on stderr, and
+/// `--json` folds it into the shared usage-error envelope (exit 1).
 #[test]
 fn near_miss_alias_hint_plain_and_json() {
     let tmp = fresh_repo();
 
-    let plain = run(tmp.path(), &["creat"]);
+    let plain = run(tmp.path(), &["neew"]);
     assert_eq!(plain.status.code(), Some(2), "{}", dump(&plain));
     let stderr = String::from_utf8_lossy(&plain.stderr);
     assert!(
-        stderr.contains("alias for `new`"),
-        "plain stderr should route to `new`, got:\n{stderr}"
+        stderr.contains("alias for `create`"),
+        "plain stderr should route to `create`, got:\n{stderr}"
     );
 
-    let json = run(tmp.path(), &["--json", "creat"]);
+    let json = run(tmp.path(), &["--json", "neew"]);
     assert_eq!(json.status.code(), Some(1), "{}", dump(&json));
     assert!(json.stdout.is_empty(), "{}", dump(&json));
     let v: serde_json::Value = serde_json::from_slice(&json.stderr).expect("stderr JSON");
@@ -341,7 +341,7 @@ fn near_miss_alias_hint_plain_and_json() {
         v["error"]["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("alias for `new`"),
+            .contains("alias for `create`"),
         "{}",
         dump(&json)
     );

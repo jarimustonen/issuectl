@@ -7816,18 +7816,20 @@ mod tests {
 
     #[test]
     fn alias_near_miss_routes_to_canonical_verb() {
-        // `creat` is a near-miss for the `create` alias, which resolves to
-        // `create`. clap 4.6 (pinned in Cargo.lock) deterministically offers
-        // `create` among its suggestions, so the hint must fire and name
-        // the canonical verb.
-        let err = Cli::try_parse_from(["issuectl", "creat"])
+        // `neew` is a near miss for the visible `new` alias. Its routing
+        // hint must name both the alias and its canonical `create` target.
+        let err = Cli::try_parse_from(["issuectl", "neew"])
             .err()
             .expect("expected a parse error");
         let hint = subcommand_error_hint(&err)
-            .expect("`creat` should route through the `create` alias to `create`");
+            .expect("`neew` should route through visible `new` to canonical `create`");
         assert!(
             hint.contains("new"),
-            "hint should name `create`, was: {hint}"
+            "hint should mention alias, was: {hint}"
+        );
+        assert!(
+            hint.contains("issuectl create"),
+            "hint should name canonical `create`, was: {hint}"
         );
     }
 

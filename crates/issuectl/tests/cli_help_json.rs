@@ -31,11 +31,13 @@ fn root_help_json_is_a_single_structured_document() {
     assert_eq!(document["schema_version"], 1);
     let document = document["data"].clone();
     assert_eq!(document["path"], serde_json::json!(["issuectl"]));
-    assert!(document["subcommands"]
+    let create = document["subcommands"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|command| command["name"] == "create"));
+        .find(|command| command["name"] == "create")
+        .expect("create subcommand");
+    assert_eq!(create["aliases"], serde_json::json!(["new"]));
     assert!(!document["examples"].as_array().unwrap().is_empty());
 }
 
@@ -77,6 +79,14 @@ fn nested_and_aliased_help_json_follow_claps_resolved_command() {
     let alias: serde_json::Value = serde_json::from_slice(&alias.stdout).unwrap();
     let alias = alias["data"].clone();
     assert_eq!(alias["path"], serde_json::json!(["issuectl", "list"]));
+
+    let new_alias = run(&["new", "--help", "--json"]);
+    assert_eq!(new_alias.status.code(), Some(0), "{new_alias:?}");
+    let new_alias: serde_json::Value = serde_json::from_slice(&new_alias.stdout).unwrap();
+    assert_eq!(
+        new_alias["data"]["path"],
+        serde_json::json!(["issuectl", "create"])
+    );
 }
 
 #[test]
