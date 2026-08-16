@@ -2,7 +2,7 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: improvement
-status: open
+status: in-progress
 priority: normal
 labels: [tooling, cli-canon]
 lane: cli-canon
@@ -13,22 +13,12 @@ lane_seq: 80
 
 ## Description
 
-Filed by the `stack-cli-alignment` comparative-audit rollout (homebase epic),
-via `project-canon review --assume-defaults` (project-canon 0.1.1). Advisory
-recommendation — **severity: should**, never a release-readiness failure.
+Filed by the `stack-cli-alignment` comparative-audit rollout (homebase epic), via `project-canon review --assume-defaults` (project-canon 0.1.1). Advisory recommendation: **severity: should**, never a release-readiness failure.
 
-**Canon:** AGENTS-AI-FIRST-CLI.md §22 — Internal layout: library-first core/cli split.
+**Correction (2026-08-16):** the original `--assume-defaults` audit misread this repository. The workspace already has `crates/issuectl` and `crates/issuectl-core`; the core crate is already clap-free. This issue's remaining actionable delta is an injected `Clock` seam in core for deterministic date-derived behavior and tests.
 
-**Observed:** no `crates/` directory — no core/cli split.
+**Canon:** AGENTS-AI-FIRST-CLI.md §22, with the clock requirement from §19.
 
-**Expected:** a library-first layout —
-`crates/issuectl-core` (pure domain logic, **no clap / no I/O**) plus `crates/issuectl-cli`
-(the clap surface + I/O), with an **injected `Clock`** in core for testable time,
-and shared plumbing factored into a thin `*-cli-common`-style crate where the family
-converges on one.
+**Deliberate decisions:** I/O remains in `issuectl-core` because the filesystem-backed issue records are this project's domain, so abstracting disk access would not improve its hermetic-tempdir tests. The published `issuectl` crate is not renamed to `issuectl-cli`, because that would break its crates.io name. A `*-cli-common` crate is not added because the family has not converged on one.
 
-**Why:** keeps domain logic unit-testable without the CLI shell, matches the
-reference-tier tools (ossctl, orchestratectl), and is the single remaining canon gap
-this repo carries per the family audit.
-
-**Check:** read `Cargo.toml` members; grep the core for `clap` / I/O imports.
+**Check:** read `Cargo.toml` members; verify `issuectl-core` has no clap dependency; exercise time-dependent core behavior through a fixed `Clock`.

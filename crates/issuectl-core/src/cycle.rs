@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{Datelike, Local, NaiveDate};
+use chrono::{Datelike, NaiveDate};
 use serde_json::Value as JsonValue;
 
 use crate::models::Issue;
@@ -48,7 +48,12 @@ pub fn iso_week_label(date: NaiveDate) -> String {
 
 /// The cycle label for "today" in the local timezone.
 pub fn current_cycle() -> String {
-    iso_week_label(Local::now().date_naive())
+    current_cycle_via(&crate::clock::SystemClock)
+}
+
+/// Clock-injected variant of [`current_cycle`].
+pub fn current_cycle_via(clock: &dyn crate::clock::Clock) -> String {
+    iso_week_label(clock.today())
 }
 
 /// Rollup counts for a single cycle.

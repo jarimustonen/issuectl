@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value as JsonValue;
 
+use crate::clock::Clock;
 use crate::cycle::issue_cycle;
 use crate::models::Issue;
 
@@ -241,7 +242,7 @@ pub fn workload(issues: &[Issue]) -> Workload {
 
 // ── Burndown ────────────────────────────────────────────────────────────────
 
-use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
+use chrono::{Datelike, Duration, NaiveDate, Weekday};
 
 /// One day of the burndown chart.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -300,7 +301,7 @@ fn parse_ymd(s: &str) -> Option<NaiveDate> {
 
 /// Compute the burndown for `cycle` across `issues`. `today` is
 /// passed in (rather than read from the wall clock) so callers can
-/// test deterministically; pass `Local::now().date_naive()` in
+/// test deterministically; pass `Clock::today()` in
 /// production.
 pub fn burndown_for(issues: &[Issue], cycle: &str, today: NaiveDate) -> Burndown {
     let in_scope: Vec<&Issue> = issues
@@ -396,7 +397,7 @@ pub fn burndown_for(issues: &[Issue], cycle: &str, today: NaiveDate) -> Burndown
 
 /// Wall-clock convenience used by the CLI.
 pub fn burndown(issues: &[Issue], cycle: &str) -> Burndown {
-    burndown_for(issues, cycle, Local::now().date_naive())
+    burndown_for(issues, cycle, crate::clock::SystemClock.today())
 }
 
 /// Render a Burndown as a fixed-width ASCII chart suitable for

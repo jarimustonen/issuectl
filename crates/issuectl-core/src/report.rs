@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
+use crate::clock::Clock;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::NaiveDate;
 use serde::Serialize;
@@ -409,7 +410,7 @@ pub struct CycleTimeStats {
 /// Convenience: same as [`metrics`] but uses today's local date as
 /// the reference point.
 pub fn metrics_today(issues: &[Issue], since_days: Option<i64>) -> MetricsReport {
-    metrics(issues, since_days, chrono::Local::now().date_naive())
+    metrics(issues, since_days, crate::clock::SystemClock.today())
 }
 
 pub fn metrics(issues: &[Issue], since_days: Option<i64>, today: NaiveDate) -> MetricsReport {

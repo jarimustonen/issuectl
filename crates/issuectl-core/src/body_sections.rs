@@ -13,7 +13,9 @@
 use std::sync::OnceLock;
 
 use anyhow::{bail, Result};
-use chrono::{SecondsFormat, Utc};
+use chrono::SecondsFormat;
+
+use crate::clock::{Clock, SystemClock};
 use regex::Regex;
 
 /// Canonical section name for free-form human/agent comments.
@@ -41,7 +43,12 @@ pub const LEGACY_SECTION_ALIASES: &[(&str, &str)] = &[("Notes", COMMENTS)];
 
 /// Format the timestamp half of a block heading. UTC, second-precision.
 pub fn now_iso() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+    now_iso_via(&SystemClock)
+}
+
+/// Clock-injected variant of [`now_iso`].
+pub fn now_iso_via(clock: &dyn Clock) -> String {
+    clock.now_utc().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 /// Reject author strings that would let the heading shape be

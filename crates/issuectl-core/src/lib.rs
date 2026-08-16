@@ -47,6 +47,8 @@ pub mod body_sections;
 #[doc(hidden)]
 pub mod canonical;
 #[doc(hidden)]
+pub mod clock;
+#[doc(hidden)]
 pub mod config;
 #[doc(hidden)]
 pub mod context;

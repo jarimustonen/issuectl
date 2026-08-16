@@ -8,7 +8,9 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{Local, NaiveDate};
+use chrono::NaiveDate;
+
+use crate::clock::{Clock, SystemClock};
 use serde::Serialize;
 
 use super::{MutateError, WriteLock};
@@ -53,10 +55,20 @@ pub fn archive_closed(
     older_than_days: i64,
     dry_run: bool,
 ) -> Result<ArchiveReport, MutateError> {
+    archive_closed_via(repo_root, older_than_days, dry_run, &SystemClock)
+}
+
+/// Clock-injected variant of [`archive_closed`].
+pub fn archive_closed_via(
+    repo_root: &Path,
+    older_than_days: i64,
+    dry_run: bool,
+    clock: &dyn Clock,
+) -> Result<ArchiveReport, MutateError> {
     let _lock = WriteLock::acquire(repo_root).map_err(MutateError::Io)?;
     let schema =
         crate::schema::load(repo_root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
-    let today = Local::now().date_naive();
+    let today = clock.today();
     // One archive-tree walk shared across every per-slug layout resolve
     // below, keeping the batch O(N) rather than O(N·archive).
     let archive_root = repo_root.join("issues").join(repo::ARCHIVE_DIR);
@@ -177,6 +189,7 @@ fn perform_move(mv: &ArchiveMove) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use std::fs;
     use tempfile::TempDir;
 
@@ -201,7 +214,15 @@ mod tests {
     fn archives_old_closed_issue() {
         let tmp = repo();
         seed(&tmp, "old-done-fox", "fixed", Some("2020-01-01"));
-        let report = archive_closed(tmp.path(), 90, false).unwrap();
+        let report = archive_closed_via(
+            tmp.path(),
+            90,
+            false,
+            &crate::clock::FixedClock::new(
+                chrono::Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap(),
+            ),
+        )
+        .unwrap();
         assert_eq!(report.archived.len(), 1);
         assert!(!tmp.path().join("issues/old-done-fox").exists());
         assert!(tmp
@@ -213,16 +234,38 @@ mod tests {
     #[test]
     fn skips_recently_closed_and_open_issues() {
         let tmp = repo();
-        let recent = chrono::Local::now()
-            .date_naive()
-            .format("%Y-%m-%d")
-            .to_string();
+        let recent = "2026-02-28".to_string();
         seed(&tmp, "fresh-done-owl", "fixed", Some(&recent));
         seed(&tmp, "active-open-elk", "open", None);
-        let report = archive_closed(tmp.path(), 90, false).unwrap();
+        let report = archive_closed_via(
+            tmp.path(),
+            90,
+            false,
+            &crate::clock::FixedClock::new(
+                chrono::Utc
+                    .with_ymd_and_hms(2026, 2, 28, 23, 59, 59)
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
         assert!(report.archived.is_empty());
         assert!(tmp.path().join("issues/fresh-done-owl").exists());
         assert!(tmp.path().join("issues/active-open-elk").exists());
+    }
+
+    #[test]
+    fn fixed_clock_buckets_month_boundary_from_closed_date() {
+        let tmp = repo();
+        seed(&tmp, "month-end-otter", "fixed", Some("2026-01-31"));
+        let clock = crate::clock::FixedClock::new(
+            chrono::Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap(),
+        );
+        let report = archive_closed_via(tmp.path(), 29, false, &clock).unwrap();
+        assert_eq!(report.archived[0].dated, "2026-01-31");
+        assert!(tmp
+            .path()
+            .join("issues/archive/2026/01/month-end-otter/item.md")
+            .is_file());
     }
 
     #[test]

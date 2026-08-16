@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use chrono::{Local, NaiveDate};
+use chrono::NaiveDate;
 use serde::Serialize;
 
 use crate::models::Issue;
@@ -44,8 +44,13 @@ pub struct StaleReport {
 /// excluded — staleness is about active work going cold, not cold
 /// storage. Uses today's local date as the anchor.
 pub fn find_stale(repo_root: &Path, days: i64) -> StaleReport {
+    find_stale_via(repo_root, days, &crate::clock::SystemClock)
+}
+
+/// Clock-injected variant of [`find_stale`].
+pub fn find_stale_via(repo_root: &Path, days: i64, clock: &dyn crate::clock::Clock) -> StaleReport {
     let issues = crate::repo::load_issues(repo_root);
-    find_stale_at(repo_root, &issues, days, Local::now().date_naive())
+    find_stale_at(repo_root, &issues, days, clock.today())
 }
 
 /// Testable core: takes the loaded issues and an explicit `today`

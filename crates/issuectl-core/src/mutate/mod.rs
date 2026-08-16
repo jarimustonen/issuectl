@@ -30,6 +30,7 @@ use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use crate::canonical::canonical_hash;
+use crate::clock::{Clock, SystemClock};
 use crate::models::Issue;
 use crate::repo::{self, folder_for_status};
 use crate::write::{self, ItemFile};
@@ -885,6 +886,16 @@ pub fn update_issue(
     slug: &str,
     req: UpdateIssueRequest,
 ) -> Result<UpdateOutcome, MutateError> {
+    update_issue_via(root, slug, req, &SystemClock)
+}
+
+/// Clock-injected variant of [`update_issue`].
+pub fn update_issue_via(
+    root: &Path,
+    slug: &str,
+    req: UpdateIssueRequest,
+    clock: &dyn Clock,
+) -> Result<UpdateOutcome, MutateError> {
     if !crate::slug::is_valid(slug) {
         return Err(MutateError::Validation(format!(
             "invalid slug shape: {slug:?}"
@@ -985,7 +996,7 @@ pub fn update_issue(
     let schema =
         crate::schema::load(root).map_err(|e| MutateError::SchemaConfig(format!("{e:#}")))?;
     let rules = load_validated_rules(root, &schema)?;
-    update_issue_under_lock(root, slug, item_path, req, &schema, &rules)
+    update_issue_under_lock(root, slug, item_path, req, &schema, &rules, clock)
 }
 
 /// Load `.issuectl/transitions.yaml` and cross-validate every status
@@ -1048,6 +1059,7 @@ fn update_issue_under_lock(
     req: UpdateIssueRequest,
     schema: &crate::schema::Schema,
     rules: &crate::transitions::TransitionRules,
+    clock: &dyn Clock,
 ) -> Result<UpdateOutcome, MutateError> {
     let folder = "open"; // placeholder; folder is derived from status post-write
 
@@ -1149,7 +1161,7 @@ fn update_issue_under_lock(
                 .frontmatter
                 .contains_key(serde_yaml::Value::String("closed".into()));
             if !prev_closing || !has_closed {
-                write::set_string(&mut item.frontmatter, "closed", &write::today());
+                write::set_string(&mut item.frontmatter, "closed", &clock.today_string());
             }
             // `closed_by:` tracks `closed:`. An explicit attribution
             // (`close --as`, or a PATCH populating the slot) is written /
@@ -1302,14 +1314,15 @@ fn update_issue_under_lock(
         }
     }
 
-    write::set_string(&mut item.frontmatter, "updated", &write::today());
+    write::set_string(&mut item.frontmatter, "updated", &clock.today_string());
 
     // Reopen flow: when transitioning closing → active, append a
     // `## Reopen Notes — <date>` section so the rationale isn't
     // implicit. One section per transition (multiple reopens stack).
     if moved_to_open {
         let trimmed_body = item.body.trim_start_matches('\n');
-        let with_section = crate::body_sections::append_reopen_notes(trimmed_body, &write::today());
+        let with_section =
+            crate::body_sections::append_reopen_notes(trimmed_body, &clock.today_string());
         item.body = crate::body_sections::canonicalise_body_leading(&with_section);
     }
 
@@ -1374,7 +1387,7 @@ fn update_issue_under_lock(
     // failing op rolls back the entire transaction (the in-memory
     // `item` is dropped without writing).
     for (i, op) in req.body_ops.iter().enumerate() {
-        apply_body_op(&mut item, i, op)?;
+        apply_body_op(&mut item, i, op, clock)?;
     }
 
     // 4b) schema validation against the post-mutation frontmatter. The
@@ -1671,7 +1684,15 @@ pub fn close_issue(
     req_normalized.remove_related = normalized_remove_related;
     req_normalized.validate()?;
     let rules = load_validated_rules(root, &schema)?;
-    update_issue_under_lock(root, slug, item_path, req_normalized, &schema, &rules)
+    update_issue_under_lock(
+        root,
+        slug,
+        item_path,
+        req_normalized,
+        &schema,
+        &rules,
+        &SystemClock,
+    )
 }
 
 /// Apply the *same* mutation to many issues under a single repo-wide
@@ -1725,8 +1746,9 @@ pub fn bulk_update(
     for slug in slugs {
         let req = prepare_bulk_req(make_req(true))?;
         let item_path = locate_for_dry_run(root, slug)?;
-        let outcome = update_issue_under_lock(root, slug, item_path, req, &schema, &rules)
-            .map_err(|e| with_slug_context(slug, e))?;
+        let outcome =
+            update_issue_under_lock(root, slug, item_path, req, &schema, &rules, &SystemClock)
+                .map_err(|e| with_slug_context(slug, e))?;
         planned.push(outcome);
     }
     if dry_run {
@@ -1739,7 +1761,7 @@ pub fn bulk_update(
     for (i, slug) in slugs.iter().enumerate() {
         let req = prepare_bulk_req(make_req(false))?;
         let item_path = locate_for_dry_run(root, slug)?;
-        match update_issue_under_lock(root, slug, item_path, req, &schema, &rules) {
+        match update_issue_under_lock(root, slug, item_path, req, &schema, &rules, &SystemClock) {
             Ok(o) => outcomes.push(o),
             Err(e) => {
                 let written = slugs[..i]
@@ -1807,6 +1829,7 @@ pub fn update_body(
     body: String,
     dry_run: bool,
 ) -> Result<UpdateOutcome, MutateError> {
+    let clock = SystemClock;
     if !crate::slug::is_valid(slug) {
         return Err(MutateError::Validation(format!(
             "invalid slug shape: {slug:?}"
@@ -1872,7 +1895,7 @@ pub fn update_body(
     } else {
         format!("\n{body}")
     };
-    write::set_string(&mut item.frontmatter, "updated", &write::today());
+    write::set_string(&mut item.frontmatter, "updated", &clock.today_string());
 
     // Schema validation: body-set doesn't change frontmatter shape but
     // the schema may have tightened since the last write. Refusing here
@@ -1958,6 +1981,7 @@ pub fn note_issue(
     expected_version: Option<String>,
     dry_run: bool,
 ) -> Result<UpdateOutcome, MutateError> {
+    let clock = SystemClock;
     if !crate::slug::is_valid(slug) {
         return Err(MutateError::Validation(format!(
             "invalid slug shape: {slug:?}"
@@ -2012,16 +2036,19 @@ pub fn note_issue(
         } else {
             None
         };
-    let block =
-        crate::body_sections::render_note_block(&crate::body_sections::now_iso(), author, message)
-            .map_err(|e| MutateError::Validation(e.to_string()))?;
+    let block = crate::body_sections::render_note_block(
+        &crate::body_sections::now_iso_via(&clock),
+        author,
+        message,
+    )
+    .map_err(|e| MutateError::Validation(e.to_string()))?;
     let trimmed_body = item.body.trim_start_matches('\n');
     let appended = crate::body_sections::append_block(trimmed_body, section, &block);
     // Canonicalise leading-newline shape so `serialize_item` always
     // produces `---\n\n<body>` rather than leaving a legacy
     // no-blank-line file in a state `fmt` would still want to change.
     item.body = crate::body_sections::canonicalise_body_leading(&appended);
-    write::set_string(&mut item.frontmatter, "updated", &write::today());
+    write::set_string(&mut item.frontmatter, "updated", &clock.today_string());
 
     // Schema validation runs on every write surface for parity with
     // `update_body` / `update_issue` — without this, a tightened
@@ -2098,6 +2125,7 @@ pub fn toggle_checkbox(
     expected_version: Option<String>,
     dry_run: bool,
 ) -> Result<UpdateOutcome, MutateError> {
+    let clock = SystemClock;
     if !crate::slug::is_valid(slug) {
         return Err(MutateError::Validation(format!(
             "invalid slug shape: {slug:?}"
@@ -2149,7 +2177,7 @@ pub fn toggle_checkbox(
         };
     let new_body = toggle_checkbox_in_body(&item.body, substring)?;
     item.body = new_body;
-    write::set_string(&mut item.frontmatter, "updated", &write::today());
+    write::set_string(&mut item.frontmatter, "updated", &clock.today_string());
 
     validate_against_schema(root, &item.frontmatter)?;
 
@@ -2261,7 +2289,12 @@ fn transition_warnings(
 /// `cmd_note` / `cmd_check` use also drive the transactional `apply`
 /// path — keeping the rendering, fence handling, and error messages
 /// identical across surfaces.
-fn apply_body_op(item: &mut ItemFile, index: usize, op: &BodyOp) -> Result<(), MutateError> {
+fn apply_body_op(
+    item: &mut ItemFile,
+    index: usize,
+    op: &BodyOp,
+    clock: &dyn Clock,
+) -> Result<(), MutateError> {
     match op {
         BodyOp::SetCheckbox(set) => {
             let new_body = set_checkbox_in_body(&item.body, &set.match_substring, set.checked)
@@ -2279,7 +2312,7 @@ fn apply_body_op(item: &mut ItemFile, index: usize, op: &BodyOp) -> Result<(), M
             crate::body_sections::validate_message(&note.message)
                 .map_err(|e| MutateError::Validation(format!("body_ops[{index}].message: {e}")))?;
             let block = crate::body_sections::render_note_block(
-                &crate::body_sections::now_iso(),
+                &crate::body_sections::now_iso_via(clock),
                 &note.author,
                 &note.message,
             )
@@ -4286,6 +4319,25 @@ mod tests {
         );
         let after = fs::read_to_string(dir.join("item.md")).unwrap();
         assert_eq!(before, after, "schema-rejected PATCH must not write");
+    }
+
+    #[test]
+    fn fixed_clock_stamps_closed_and_updated_dates() {
+        use chrono::TimeZone;
+
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "clocked-close", "open");
+        let clock = crate::clock::FixedClock::new(
+            chrono::Utc.with_ymd_and_hms(2026, 1, 31, 12, 0, 0).unwrap(),
+        );
+        let req = UpdateIssueRequest {
+            status: Patch::Set("fixed".into()),
+            ..Default::default()
+        };
+        update_issue_via(tmp.path(), "clocked-close", req, &clock).unwrap();
+        let text = fs::read_to_string(tmp.path().join("issues/clocked-close/item.md")).unwrap();
+        assert!(text.contains("closed: 2026-01-31"));
+        assert!(text.contains("updated: 2026-01-31"));
     }
 
     #[test]

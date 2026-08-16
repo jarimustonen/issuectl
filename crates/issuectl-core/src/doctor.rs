@@ -657,15 +657,26 @@ fn rel(repo_root: &Path, p: &Path) -> String {
 }
 
 pub fn run(repo_root: &Path, fix: bool, json: bool, verbose: bool) -> Result<()> {
-    let mut findings = scan(repo_root)?;
+    run_via(repo_root, fix, json, verbose, &crate::clock::SystemClock)
+}
+
+/// Clock-injected variant of [`run`].
+pub fn run_via(
+    repo_root: &Path,
+    fix: bool,
+    json: bool,
+    verbose: bool,
+    clock: &dyn crate::clock::Clock,
+) -> Result<()> {
+    let mut findings = scan_via(repo_root, clock)?;
     let outcome: Option<ApplyOutcome> = if fix {
         // D2: hold the repo write lock through the apply pass so doctor
         // doesn't race CLI/server mutations. Re-scan under the lock to
         // ensure the plan reflects the locked-state filesystem.
         let lock = crate::mutate::WriteLock::acquire(repo_root)?;
-        findings = scan(repo_root)?;
+        findings = scan_via(repo_root, clock)?;
         let actions = DoctorActions::from_findings(&mut findings);
-        let outcome = apply(repo_root, actions, &lock)?;
+        let outcome = apply_via(repo_root, actions, &lock, clock)?;
         // ALWAYS re-scan after apply, regardless of fix_applied. The
         // call to `DoctorActions::from_findings` drained findings via
         // `mem::take` (legacy_dirs / flat_layout_plan / notes_to_rename
@@ -675,7 +686,7 @@ pub fn run(repo_root: &Path, fix: bool, json: bool, verbose: bool) -> Result<()>
         // the user would see "doctor: cannot apply --fix" with NONE of
         // the actual to-do lists below. Caches are hot post-apply, so
         // the I/O is negligible.
-        findings = scan(repo_root)?;
+        findings = scan_via(repo_root, clock)?;
         Some(outcome)
     } else {
         None
@@ -1022,7 +1033,13 @@ fn blockers_for(findings: &DoctorFindings, scope: BlockerScope) -> Vec<String> {
     blockers
 }
 
+#[allow(dead_code)] // retained as the SystemClock convenience for inline tests.
 fn scan(repo_root: &Path) -> Result<DoctorFindings> {
+    scan_via(repo_root, &crate::clock::SystemClock)
+}
+
+/// Clock-injected scan used by [`run_via`] and deterministic tests.
+fn scan_via(repo_root: &Path, clock: &dyn crate::clock::Clock) -> Result<DoctorFindings> {
     let mut report = DoctorFindings::default();
     let scan = scan_issues(repo_root)?;
 
@@ -1139,7 +1156,7 @@ fn scan(repo_root: &Path) -> Result<DoctorFindings> {
     // before running `--fix`.
     populate_notes_migration(&scan, &mut report);
 
-    populate_extended_validation(&scan, schema_value.as_ref(), &mut report);
+    populate_extended_validation(&scan, schema_value.as_ref(), &mut report, clock);
 
     populate_attachment_health(&scan, repo_root, &mut report);
 
@@ -1352,6 +1369,7 @@ fn populate_extended_validation(
     scan: &ScanResult,
     schema: Option<&schema::Schema>,
     report: &mut DoctorFindings,
+    clock: &dyn crate::clock::Clock,
 ) {
     use chrono::NaiveDate;
 
@@ -1450,7 +1468,7 @@ fn populate_extended_validation(
         }
     }
 
-    let today = chrono::Local::now().date_naive();
+    let today = clock.today();
     let existing_slugs: BTreeSet<String> = by_slug.keys().cloned().collect();
     let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
@@ -2158,8 +2176,18 @@ fn essential_frontmatter_absent_from_mapping(mapping: Option<&serde_yaml::Mappin
 
 fn apply(
     repo_root: &Path,
+    actions: DoctorActions,
+    lock: &crate::mutate::WriteLock,
+) -> Result<ApplyOutcome> {
+    apply_via(repo_root, actions, lock, &crate::clock::SystemClock)
+}
+
+/// Clock-injected apply phase used by [`run_via`].
+fn apply_via(
+    repo_root: &Path,
     mut actions: DoctorActions,
     lock: &crate::mutate::WriteLock,
+    clock: &dyn crate::clock::Clock,
 ) -> Result<ApplyOutcome> {
     let mut outcome = ApplyOutcome::default();
 
@@ -2215,12 +2243,12 @@ fn apply(
     // loaded post-bootstrap so a repo with no prior `.schema.yaml`
     // still gets the built-in alias table.
     let apply_schema = schema::load(repo_root)?;
-    apply_alias_coercions(&mut actions, &mut outcome, &apply_schema)?;
+    apply_alias_coercions(&mut actions, &mut outcome, &apply_schema, clock)?;
 
     // Status/folder reconciliation runs BEFORE the flat-layout
     // migration so the rewrites land at the legacy path that scan()
     // recorded; the subsequent migration moves the corrected file.
-    apply_status_reconciliation(&mut actions, &mut outcome)?;
+    apply_status_reconciliation(&mut actions, &mut outcome, clock)?;
 
     // Notes → Comments migration is independent of layout migration:
     // it touches body markdown of flat-layout dirs only, never moves
@@ -2263,7 +2291,7 @@ fn apply(
             // Re-scan so the NN-rename pass operates on fresh
             // `old_path`s and picks up frontmatter-only legacy issues
             // that just moved into the flat layout.
-            let fresh = scan(repo_root)?;
+            let fresh = scan_via(repo_root, clock)?;
             // Re-check `apply_blockers` (the layout-fatal subset)
             // against the fresh scan before the NN-rename phase.
             // Phase 5 can surface a layout-fatal condition that was
@@ -2511,10 +2539,16 @@ fn apply_orphan_tempfiles(actions: &mut DoctorActions, outcome: &mut ApplyOutcom
 /// that touched `item.md`, the file's mtime, then today(). All steps are
 /// best-effort — any failure (not a git repo, untracked file, unreadable
 /// metadata) falls through to the next source.
+#[allow(dead_code)] // retained as the SystemClock convenience for inline tests.
 fn derive_closed_date(item_path: &Path) -> String {
+    derive_closed_date_via(item_path, &crate::clock::SystemClock)
+}
+
+/// Clock-injected variant of [`derive_closed_date`].
+fn derive_closed_date_via(item_path: &Path, clock: &dyn crate::clock::Clock) -> String {
     git_last_commit_date(item_path)
         .or_else(|| file_mtime_date(item_path))
-        .unwrap_or_else(write::today)
+        .unwrap_or_else(|| clock.today_string())
 }
 
 /// Author date (`%aI`, strict ISO 8601) of the last commit that touched
@@ -2561,6 +2595,7 @@ fn file_mtime_date(item_path: &Path) -> Option<String> {
 fn apply_status_reconciliation(
     actions: &mut DoctorActions,
     outcome: &mut ApplyOutcome,
+    clock: &dyn crate::clock::Clock,
 ) -> Result<()> {
     let active_to_closed = std::mem::take(&mut actions.closed_with_active_status);
     let closing_to_open = std::mem::take(&mut actions.open_with_closing_status);
@@ -2577,7 +2612,7 @@ fn apply_status_reconciliation(
             write::set_string(
                 &mut item.frontmatter,
                 "closed",
-                &derive_closed_date(&item_path),
+                &derive_closed_date_via(&item_path, clock),
             );
         }
         write::write_item(&item_path, &item)?;
@@ -2607,6 +2642,7 @@ fn apply_alias_coercions(
     actions: &mut DoctorActions,
     outcome: &mut ApplyOutcome,
     schema: &schema::Schema,
+    clock: &dyn crate::clock::Clock,
 ) -> Result<()> {
     let planned = std::mem::take(&mut actions.alias_coercions);
     // Group consecutive coercions that share an `item_path` so an issue
@@ -2662,7 +2698,7 @@ fn apply_alias_coercions(
                 write::set_string(
                     &mut item.frontmatter,
                     "closed",
-                    &derive_closed_date(&item_path),
+                    &derive_closed_date_via(&item_path, clock),
                 );
             }
         }
@@ -4939,6 +4975,20 @@ mod tests {
         // A file just created in this test has an mtime of ~now, so the
         // mtime tier should resolve to today (both use local time).
         assert_eq!(date, write::today(), "mtime fallback should be today");
+    }
+
+    #[test]
+    fn fixed_clock_supplies_legacy_closed_date_when_history_is_unavailable() {
+        use chrono::TimeZone;
+
+        let tmp = fresh_repo();
+        let clock = crate::clock::FixedClock::new(
+            chrono::Utc.with_ymd_and_hms(2026, 2, 28, 12, 0, 0).unwrap(),
+        );
+        assert_eq!(
+            derive_closed_date_via(&tmp.path().join("missing/item.md"), &clock),
+            "2026-02-28"
+        );
     }
 
     #[test]

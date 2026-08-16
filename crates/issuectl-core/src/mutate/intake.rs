@@ -491,8 +491,16 @@ fn apply_locked(
     }
     req.validate().map_err(IntakeError::from)?;
     let rules = super::load_validated_rules(root, schema).map_err(IntakeError::from)?;
-    super::update_issue_under_lock(root, slug, item_path, req, schema, &rules)
-        .map_err(IntakeError::from)
+    super::update_issue_under_lock(
+        root,
+        slug,
+        item_path,
+        req,
+        schema,
+        &rules,
+        &crate::clock::SystemClock,
+    )
+    .map_err(IntakeError::from)
 }
 
 /// `untriaged|deferred|needs-info → open`. Refuses a closed item

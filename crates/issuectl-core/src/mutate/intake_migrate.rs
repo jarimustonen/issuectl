@@ -372,7 +372,15 @@ fn apply_one(
     }
     req.validate()?;
     let item_path = super::locate_for_dry_run(root, &action.slug)?;
-    super::update_issue_under_lock(root, &action.slug, item_path, req, schema, rules)?;
+    super::update_issue_under_lock(
+        root,
+        &action.slug,
+        item_path,
+        req,
+        schema,
+        rules,
+        &crate::clock::SystemClock,
+    )?;
     Ok(())
 }
 

@@ -3,12 +3,17 @@ use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 
+use crate::clock::{Clock, SystemClock};
 use anyhow::{bail, Context, Result};
-use chrono::Local;
 use serde_yaml::{Mapping, Value};
 
 pub fn today() -> String {
-    Local::now().format("%Y-%m-%d").to_string()
+    today_via(&SystemClock)
+}
+
+/// Clock-injected variant of [`today`].
+pub fn today_via(clock: &dyn Clock) -> String {
+    clock.today_string()
 }
 
 /// Generate a kebab-case slug from a title. Preserves Unicode alphanumerics

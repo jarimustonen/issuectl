@@ -28,6 +28,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use crate::clock::Clock;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use cron::Schedule;
@@ -336,7 +337,7 @@ pub fn fires_between(
 /// dedup makes it idempotent at the materialization level.
 ///
 /// `now` is injected so tests can pin the wall clock; production
-/// callers pass `Utc::now()`.
+/// callers pass `Clock::now_utc()`.
 pub fn run(root: &Path, now: DateTime<Utc>, dry_run: bool) -> Result<RunReport> {
     // Hold the repo-wide flock around the manifest read/process/write
     // window. Without this, two parallel `schedule run` invocations
@@ -383,7 +384,7 @@ fn manifest_changed(a: &Manifest, b: &Manifest) -> bool {
 /// Wall-clock variant of [`run`] — convenience for the CLI so it
 /// doesn't have to depend on `chrono` directly.
 pub fn run_now(root: &Path, dry_run: bool) -> Result<RunReport> {
-    run(root, Utc::now(), dry_run)
+    run(root, crate::clock::SystemClock.now_utc(), dry_run)
 }
 
 fn run_one(

@@ -37,7 +37,9 @@
 use std::collections::BTreeMap;
 
 use anyhow::{anyhow, bail, Result};
-use chrono::{Duration, Local, NaiveDate};
+use chrono::{Duration, NaiveDate};
+
+use crate::clock::Clock;
 
 use crate::models::Issue;
 
@@ -235,7 +237,7 @@ impl<'a> MatchCtx<'a> {
     /// Today's local-date anchor + the supplied graph. Convenience for
     /// CLI call sites that don't need a controlled clock.
     pub fn today(graph: &'a BTreeMap<String, Vec<String>>) -> Self {
-        Self::new(Local::now().date_naive(), graph)
+        Self::new(crate::clock::SystemClock.today(), graph)
     }
 }
 
@@ -260,7 +262,7 @@ pub fn build_blocked_by_graph(issues: &[Issue]) -> BTreeMap<String, Vec<String>>
 /// this entry point — use [`matches_with`] with a populated graph to
 /// enable that filter.
 pub fn matches(q: &Query, i: &Issue) -> bool {
-    matches_at(q, i, Local::now().date_naive())
+    matches_at(q, i, crate::clock::SystemClock.today())
 }
 
 /// Like [`matches`], but takes the "today" anchor explicitly. Used
