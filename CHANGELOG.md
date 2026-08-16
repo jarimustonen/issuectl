@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Replaced maintainer-specific metadata, examples, and infrastructure labels with neutral or fictional values.
 
+### Fixed
+- **`doctor --fix` remaining-findings summary** now counts every unresolved finding it lists, rather than grouped critical diagnostic categories.
+
 ## [0.13.0] - 2026-08-16
 
 ### Changed

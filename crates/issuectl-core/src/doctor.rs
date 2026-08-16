@@ -817,7 +817,7 @@ fn classify_exit(
                         error_code: "doctor-partial",
                         message: format!(
                             "doctor --fix partial: {} unfixable finding(s) remain",
-                            crit.len()
+                            remaining_finding_count(findings)
                         ),
                     };
                 }
@@ -3108,6 +3108,87 @@ fn print_section<T>(
     print!("{buf}");
 }
 
+/// Count the individual unresolved findings rendered by a completed
+/// `doctor --fix` pass. This deliberately counts entries, rather than
+/// `critical_blockers()`' grouped diagnostic categories: one category can
+/// contain many issues, and warning-only findings are still printed beside
+/// critical ones for the user to resolve.
+fn remaining_finding_count(report: &DoctorFindings) -> usize {
+    report.legacy_dirs.len()
+        + planned_moves(report).len()
+        + report.flat_layout_conflicts.len()
+        + report.invalid_slugs.len()
+        + report.duplicate_slugs.len()
+        + report.missing_item_md.len()
+        + report.orphan_epic_refs.len()
+        + report.parse_errors.len()
+        + report.notes_to_rename.len()
+        + report.notes_conflicts.len()
+        + report.schema_violations.len()
+        + report.alias_coercions.len()
+        + usize::from(report.schema_parse_error.is_some())
+        + report.broken_refs.len()
+        + report.blocked_by_cycles.len()
+        + report.blocked_by_self.len()
+        + report.status_consistency.len()
+        + report.timestamp_issues.len()
+        + report.unknown_keys.len()
+        + report.unknown_reviewers.len()
+        + report.conflict_markers.len()
+        + report.orphan_tempfiles.len()
+        + report.symlinked_dirs.len()
+        + report.both_open_and_closed.len()
+        + report.closed_with_active_status.len()
+        + report.open_with_closing_status.len()
+        + report.transition_warnings.len()
+        + report.missing_body_sections.len()
+        + usize::from(report.agents_md_drift)
+        + usize::from(report.agents_md_malformed.is_some())
+        + usize::from(report.agents_md_check_skipped.is_some())
+        + usize::from(report.agents_md_missing)
+        + report.gitignored_paths.len()
+        + usize::from(report.legacy_issues_agents_md)
+        + report.large_binaries.len()
+        + report.non_avif_images.len()
+        + report.broken_attachment_refs.len()
+}
+
+fn fix_summary(report: &DoctorFindings, oc: &ApplyOutcome) -> String {
+    let counts = format!(
+        "{} legacy dir(s) migrated, {} flat-layout dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} AGENTS.md block(s) regenerated.",
+        oc.legacy_dirs_migrated.len(),
+        oc.flat_layout_migrated.len(),
+        oc.files_rewritten,
+        oc.notes_renamed.len(),
+        if oc.agents_md_regenerated { 1 } else { 0 }
+    );
+    match (oc.stop_phase, oc.apply_error.is_some()) {
+        (StopPhase::Preflight, _) => format!(
+            "Refused — {} preflight blocker(s); no writes applied.",
+            oc.blockers.len()
+        ),
+        (_, true) => format!("Aborted mid-pipeline. {counts}"),
+        (StopPhase::PostApply, _) => format!(
+            "Partial — {} post-apply blocker(s); partial writes retained. {counts}",
+            oc.blockers.len()
+        ),
+        (StopPhase::Ok, _) if !oc.notes_conflicts_at_apply.is_empty() => format!(
+            "Partial — auto-fixes ran where possible. {} issue(s) need manual attention (see above). {counts}",
+            oc.notes_conflicts_at_apply.len()
+        ),
+        (StopPhase::Ok, _) => {
+            if critical_blockers(report).is_empty() {
+                format!("Applied. {counts}")
+            } else {
+                format!(
+                    "Partial — {} unfixable finding(s) remain (see above). {counts}",
+                    remaining_finding_count(report)
+                )
+            }
+        }
+    }
+}
+
 fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: bool, verbose: bool) {
     let outcome_default = ApplyOutcome::default();
     let oc = outcome.unwrap_or(&outcome_default);
@@ -3527,52 +3608,7 @@ fn render_text(report: &DoctorFindings, outcome: Option<&ApplyOutcome>, fix: boo
         // findings remained (issue: @doctor-fix-noop). Prefix
         // follows `stop_phase` first, then falls back to whether the
         // post-apply scan still surfaces critical findings.
-        let counts = format!(
-            "{} legacy dir(s) migrated, {} flat-layout dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} AGENTS.md block(s) regenerated.",
-            oc.legacy_dirs_migrated.len(),
-            oc.flat_layout_migrated.len(),
-            oc.files_rewritten,
-            oc.notes_renamed.len(),
-            if oc.agents_md_regenerated { 1 } else { 0 }
-        );
-        match (oc.stop_phase, oc.apply_error.is_some()) {
-            (StopPhase::Preflight, _) => {
-                println!(
-                    "Refused — {} preflight blocker(s); no writes applied.",
-                    oc.blockers.len()
-                );
-            }
-            (_, true) => {
-                println!("Aborted mid-pipeline. {counts}");
-            }
-            (StopPhase::PostApply, _) => {
-                println!(
-                    "Partial — {} post-apply blocker(s); partial writes retained. {counts}",
-                    oc.blockers.len()
-                );
-            }
-            (StopPhase::Ok, _) if !oc.notes_conflicts_at_apply.is_empty() => {
-                println!(
-                    "Partial — auto-fixes ran where possible. {} issue(s) need manual attention (see above). {counts}",
-                    oc.notes_conflicts_at_apply.len()
-                );
-            }
-            (StopPhase::Ok, _) => {
-                // Even on a clean apply pass, unfixable findings in
-                // the post-apply scan (e.g. schema violations,
-                // broken refs) drive exit-1; the summary must
-                // acknowledge them rather than claim success.
-                let crit = critical_blockers(report);
-                if crit.is_empty() {
-                    println!("Applied. {counts}");
-                } else {
-                    println!(
-                        "Partial — {} unfixable finding(s) remain (see above). {counts}",
-                        crit.len()
-                    );
-                }
-            }
-        }
+        println!("{}", fix_summary(report, oc));
     } else {
         println!("Read-only — re-run with --fix to apply.");
     }
@@ -3784,7 +3820,7 @@ fn render_json(
     });
     // Inserted post-construction rather than inline: the read-only object
     // literal is already at the `serde_json::json!` macro recursion
-    // limit, so three more inline keys overflow it. Map is a sorted
+    // limit, so more inline keys overflow it. Map is a sorted
     // BTreeMap, so insertion order does not affect the rendered output.
     if let serde_json::Value::Object(map) = &mut json_obj {
         map.insert(
@@ -3802,6 +3838,10 @@ fn render_json(
         map.insert(
             "unknown_reviewers".to_string(),
             serde_json::Value::Array(unknown_reviewers),
+        );
+        map.insert(
+            "blocked_by_self".to_string(),
+            serde_json::json!(report.blocked_by_self),
         );
     }
     // `apply_outcome` is the new structured envelope: emitted only on
@@ -6280,6 +6320,7 @@ mod tests {
   "agents_md_regenerated": false,
   "alias_coercions": [],
   "blocked_by_cycles": [],
+  "blocked_by_self": [],
   "both_open_and_closed": [],
   "broken_attachment_refs": [],
   "broken_refs": [
@@ -6693,6 +6734,64 @@ mod tests {
         assert!(
             !buf.contains("re-run with --verbose"),
             "verbose must not show the collapse hint: {buf:?}"
+        );
+    }
+
+    /// Regression for @intake-bug-issuectl-06c42e2d1123: the summary,
+    /// JSON error message, and JSON finding lists must agree on the number
+    /// of unresolved entries. `critical_blockers` intentionally groups the
+    /// eight status violations into one diagnostic, so it is not a count.
+    #[test]
+    fn fix_remaining_summary_counts_every_listed_finding() {
+        let mut findings = DoctorFindings::default();
+        findings.status_consistency = (0..8)
+            .map(|n| {
+                (
+                    format!("issue-{n}"),
+                    "closing status needs closed date".to_string(),
+                )
+            })
+            .collect();
+        findings
+            .unknown_keys
+            .push(("issue-extra".to_string(), "deliverable".to_string()));
+        let outcome = ApplyOutcome::default();
+
+        let json = render_json(&findings, Some(&outcome), true, Path::new("/repo"));
+        let listed = json["status_consistency"].as_array().unwrap().len()
+            + json["unknown_keys"].as_array().unwrap().len();
+        assert_eq!(listed, 9, "fixture must match the reported incident");
+        assert_eq!(remaining_finding_count(&findings), listed);
+
+        let summary = fix_summary(&findings, &outcome);
+        assert!(
+            summary.contains("9 unfixable finding(s) remain"),
+            "summary must count the entries it rendered: {summary}"
+        );
+        let decision = classify_exit(&findings, Some(&outcome), true);
+        assert!(
+            decision.message.contains("9 unfixable finding(s) remain"),
+            "JSON error envelope message must match the human summary: {}",
+            decision.message
+        );
+    }
+
+    #[test]
+    fn json_exposes_self_dependencies_counted_as_remaining_findings() {
+        let findings = DoctorFindings {
+            blocked_by_self: vec!["issue-self".to_string()],
+            ..DoctorFindings::default()
+        };
+        let json = render_json(
+            &findings,
+            Some(&ApplyOutcome::default()),
+            true,
+            Path::new("/repo"),
+        );
+        assert_eq!(
+            json["blocked_by_self"],
+            serde_json::json!(["issue-self"]),
+            "JSON must expose every finding that the summary counts"
         );
     }
 
