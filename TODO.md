@@ -123,3 +123,4 @@ _Kaikki kolme triageed + lanetettu `issuectl`-frontmatteriin (2026-08-15, `needs
 - [ ] 🐛 Piialiisan bugiraportti: doctor --fix miscounts remaining findings (reports 1, lists 9) — jari via Telegram ([`intake-bug-issuectl-06c42e2d1123`](issues/intake-bug-issuectl-06c42e2d1123/item.md))
 - [ ] 🐛 Piialiisan bugiraportti: update --type epic tells you to hand-edit the YAML instead of migrating… — jari via Telegram ([`intake-feature-issuectl-ff7665d266e6`](issues/intake-feature-issuectl-ff7665d266e6/item.md))
 - [ ] 🐛 Piialiisan bugiraportti: issuectl new silently truncates the derived slug — jari via Telegram ([`intake-bug-issuectl-7a79c97d9fa8`](issues/intake-bug-issuectl-7a79c97d9fa8/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: note rejects --comment although its own help says it mirrors close --co… — jari via Telegram ([`intake-bug-issuectl-715670f2607f`](issues/intake-bug-issuectl-715670f2607f/item.md))
