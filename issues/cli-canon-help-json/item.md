@@ -2,7 +2,7 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: improvement
-status: in-progress
+status: done
 priority: normal
 labels: [cli-canon, tooling]
 lane: cli-canon
@@ -10,6 +10,9 @@ lane_seq: 60
 commits:
 - hash: c13c653
   summary: 'feat: add machine-readable help'
+- hash: 7294b97
+  summary: 'fix: validate JSON help through clap'
+closed: 2026-08-16
 ---
 
 # cli-canon: §14 --help --json machine-readable help
