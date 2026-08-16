@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced maintainer-specific metadata, examples, and infrastructure labels with neutral or fictional values.
 
 ### Fixed
+- **Derived `create` slugs** now warn when their 2–3 significant-word, stop-word-filtered form differs from straightforward title slugification, including numeric collision suffixes.
 - **`create --help`** now correctly describes title-derived default slugs, random opt-in and fallback behavior, and numeric collision suffixes.
 - **`doctor --fix` remaining-findings summary** now counts every unresolved finding it lists, rather than grouped critical diagnostic categories.
 

@@ -123,7 +123,10 @@ falls back to a random `intensifier-adjective-noun` slug (e.g.
 `extremely-quiet-otter`) only when the title yields no sensible slug, or
 when you force it with `--slug-random` (for a title that would leak
 sensitive data) — see "Action: Create → step 2" for the operational
-details. Body
+details. When this derived identifier differs from straightforward title
+slugification, creation warns that it retains 2–3 significant words and
+drops stop-words; read that advisory from top-level `warnings` under
+`--json`. Body
 cross-references use `@<slug>` form. The `epic:` and `related:`
 frontmatter fields store bare slugs / `@<slug>` strings (no leading
 `#NN`).
@@ -449,8 +452,8 @@ suggest creating an epic instead.
 redirect loops on safari"` auto-derives `login-redirect-loops` — lowercased,
 stop-words stripped, trimmed to 2-3 words — so you normally don't pass
 `--slug` at all. If the derived slug collides with an existing issue, the
-CLI silently disambiguates with a numeric suffix (`-2`, `-3`, …). Pass an
-explicit `--slug <kebab>` only to override the derived default with a
+CLI disambiguates with a numeric suffix (`-2`, `-3`, …) and reports that
+predictability-affecting result as a warning. Pass an explicit `--slug <kebab>` only to override the derived default with a
 different descriptive slug; an explicit `--slug` that collides errors
 (retry with a different slug). When the title would leak sensitive data
 (customer names, emails, secrets) into the directory name and git history,
@@ -525,7 +528,7 @@ Output shape:
 
 The CLI:
 - Uses `--slug <kebab>` when given (validated: ≥2 lowercase ASCII kebab segments)
-- Otherwise derives a 2-3 word kebab slug from the title (numeric suffix on collision); `--slug-random`, or an unsluggable title, yields a random `intensifier-adjective-noun` slug instead
+- Otherwise derives a 2-3 significant-word kebab slug from the title, dropping stop-words (numeric suffix on collision); if the result differs from straightforward title slugification, top-level `warnings` explains why. `--slug-random`, or an unsluggable title, yields a random `intensifier-adjective-noun` slug instead
 - Writes `issues/open/<slug>/item.md` with the right frontmatter
 - Returns the slug and path in `--json` (parse `.data.slug`)
 

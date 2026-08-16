@@ -128,6 +128,16 @@ pub fn derive_from_title(title: &str) -> Option<String> {
 /// Apostrophes (ASCII `'` and the typographic `’`) are elided rather than
 /// treated as boundaries, so `"can't login"` yields `["cant", "login"]`
 /// instead of a junk `"t"` fragment that would consume the word budget.
+/// Straightforward, lossless-enough title slugification for explaining a
+/// title-derived slug to callers. Unlike [`derive_from_title`], this keeps
+/// stop-words and every usable word, so it is a comparison baseline rather
+/// than an identifier policy. Returns `None` when the title has no usable
+/// ASCII words.
+pub fn straightforward_from_title(title: &str) -> Option<String> {
+    let words = candidate_words(title);
+    (!words.is_empty()).then(|| words.join("-"))
+}
+
 fn candidate_words(title: &str) -> Vec<String> {
     let lowered = title.to_lowercase();
     let mut words: Vec<String> = Vec::new();
@@ -306,6 +316,14 @@ mod tests {
         assert_eq!(
             derive_from_title("Fix: Login, Redirect!"),
             Some("fix-login-redirect".into())
+        );
+    }
+
+    #[test]
+    fn straightforward_slug_keeps_stop_words_and_all_words() {
+        assert_eq!(
+            straightforward_from_title("Fix the login redirect loop on Safari"),
+            Some("fix-the-login-redirect-loop-on-safari".into())
         );
     }
 

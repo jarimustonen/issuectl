@@ -378,7 +378,7 @@ pub(crate) fn do_new_locked(
     // and canonical section stubs). Scanning the raw body avoids
     // splitting frontmatter back off `render`, which a Markdown
     // horizontal rule (`---`) or CRLF in the body would break.
-    let warnings =
+    let mut warnings =
         crate::body_sections::reserved_section_warnings(args.description.as_deref().unwrap_or(""));
 
     let issues_parent = if args.inbox {
@@ -393,7 +393,7 @@ pub(crate) fn do_new_locked(
     // Pick a slug atomically: try `fs::create_dir` (which fails on
     // EEXIST) so two concurrent `issuectl new` invocations cannot race.
     // Post-flat-layout, the canonical home is `issues/<slug>/`.
-    let (slug, dir) = match &args.slug {
+    let (slug, dir, derived_base) = match &args.slug {
         Some(s) => {
             let normalized = write::slugify(s, 10);
             if !slug::is_valid(&normalized) {
@@ -428,7 +428,7 @@ pub(crate) fn do_new_locked(
             }
             let dir = issues_parent.join(&normalized);
             match fs::create_dir(&dir) {
-                Ok(()) => (normalized, dir),
+                Ok(()) => (normalized, dir, None),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     return Err(DoNewError::Conflict(format!(
                         "slug {:?} already exists at {}; retry with a different --slug \
@@ -464,14 +464,37 @@ pub(crate) fn do_new_locked(
                     match claim_derived_slug(root, &issues_parent, &base, args.inbox)
                         .map_err(DoNewError::Io)?
                     {
-                        Some(claimed) => claimed,
-                        None => claim_random_slug(root, &issues_parent).map_err(DoNewError::Io)?,
+                        Some((slug, dir)) => (slug, dir, Some(base)),
+                        None => {
+                            let (slug, dir) =
+                                claim_random_slug(root, &issues_parent).map_err(DoNewError::Io)?;
+                            (slug, dir, None)
+                        }
                     }
                 }
-                None => claim_random_slug(root, &issues_parent).map_err(DoNewError::Io)?,
+                None => {
+                    let (slug, dir) =
+                        claim_random_slug(root, &issues_parent).map_err(DoNewError::Io)?;
+                    (slug, dir, None)
+                }
             }
         }
     };
+
+    if let Some(base) = derived_base {
+        if let Some(straightforward) = slug::straightforward_from_title(&args.title) {
+            if base != straightforward {
+                warnings.push(format!(
+                    "derived base `{base}` differs from title slug `{straightforward}`: derived slugs retain 2–3 significant words after dropping stop-words"
+                ));
+            }
+        }
+        if slug != base {
+            warnings.push(format!(
+                "derived slug `{slug}` adds a numeric suffix because `{base}` already exists"
+            ));
+        }
+    }
 
     let item_path = dir.join("item.md");
     // `create_new(true)` is belt-and-braces here: the directory is
@@ -673,6 +696,28 @@ mod tests {
             .item_path
             .to_string_lossy()
             .contains("/login-redirect-loops/"));
+    }
+
+    #[test]
+    fn derived_slug_warns_when_title_slug_is_shortened() {
+        let tmp = fresh_repo();
+        let out = do_new(tmp.path(), new_args("task", "vat-rs-module-split")).unwrap();
+        assert_eq!(out.slug, "vat-rs-module");
+        assert_eq!(out.warnings.len(), 1, "warnings={:?}", out.warnings);
+        assert!(out.warnings[0].contains("vat-rs-module-split"));
+        assert!(out.warnings[0].contains("2–3 significant words"));
+    }
+
+    #[test]
+    fn derived_slug_collision_warns_about_numeric_disambiguation() {
+        let tmp = fresh_repo();
+        do_new(tmp.path(), new_args("task", "login redirect loops")).unwrap();
+        let out = do_new(tmp.path(), new_args("task", "login redirect loops")).unwrap();
+        assert_eq!(out.slug, "login-redirect-loops-2");
+        assert_eq!(out.warnings.len(), 1, "warnings={:?}", out.warnings);
+        assert!(out.warnings[0].contains("numeric suffix"));
+        assert!(out.warnings[0].contains("already exists"));
+        assert!(!out.warnings[0].contains("stop-words"));
     }
 
     #[test]
