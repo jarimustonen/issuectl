@@ -51,14 +51,34 @@ taaksepäin yhteensopivuutta vielä"*.
   crates.io-nimen kosmetiikan vuoksi. Jos nämä halutaan avata, ne ovat issuessa dokumentoituina.
 - **CHANGELOG-korjaus:** `config`-worker vuoti diff-markkerit (`+`-merkit) CHANGELOGiin; korjattu käsin
   (`docs(changelog): fix leaked diff markers`).
-- **Huomio, ei vielä filattu:** `create --help` -teksti sanoo satunnaisslugin olevan oletus kun `--slug` puuttuu,
-  mutta `CLAUDE.md`:n mukaan oletus on **otsikosta johdettu** slug ja satunnainen on vain fallback. Help-teksti
-  näyttää jääneen jälkeen todellisesta käytöksestä. Kannattaa filata + verifioida kumpi on oikeassa.
+- **Filattu `@create-help-slug-text` (lane `cli-fixes`):** `create --help` väittää satunnaisslugin olevan oletus
+  kun `--slug` puuttuu; **verifioitu tyhjässä repossa että oletus on otsikosta johdettu** (`"Fix broken login
+  redirect loop"` → `fix-broken-login`). AGENTS.md on oikeassa, help-teksti jäljessä. Merkitsevää nyt kun
+  `--help --json` on virallinen tapa agentin opetella pinta — väärä help leviää suoraan kuluttajille.
+- **Wrap-upissa dokumentoitu `AGENTS.md`:ään:** `Clock`-seam-konventio (+ `SystemClock` local vs `FixedClock` UTC
+  -aikavyöhykeasymmetria testejä kirjoittaessa) ja canon-§22:n kaksi hylkäystä perusteluineen.
+- **Filattu homebaseen `intake-bug-homebase-f3c838261c9c`:** stint-skillin jaettu `AGENTS-EXECUTION-DAG.md`
+  neuvoo DAG-drift-checkiin `jq '.lanes[].nodes[].slug'`, mutta `issuectl dag --json` emittoi
+  `.lanes[].issues[]` → tyhjä oikea puoli → **jokainen aktiivinen issue näyttää puuttuvan DAGista**.
 
-**Seuraava askel:** **ei aktiivista työtä.** `cli-canon`-lane tyhjennetty, 0.13.0 ulkona.
-`@ossctl-cut-no-publish` pysyy parkissa kunnes upstream-ossctl korjaa. Uusi rupeama = odota intakea
-(`/issue-intake` / `/stint-start` nostaa jonon), filaa yllä oleva `create --help` -epäjohdonmukaisuus, tai ota
-`deferred`-backlogista jokin takaisin peliin.
+**Seuraava askel:** `cli-canon`-lane tyhjennetty, 0.13.0 ulkona. DAGissa aktiivisena vain `@create-help-slug-text`
+(lane `cli-fixes`) + parkissa `@ossctl-cut-no-publish`.
+
+**⚠️ VIISI UNTRIAGOITUA INTAKE-ITEMIÄ ODOTTAA ACKIA** (saapui 2026-08-16 session aikana sisarrepojen
+wrap-upeista, kaikki `needs-triage`). Esitelty jarille handoffissa, ei vielä dispositioitu:
+- `@intake-bug-issuectl-06c42e2d1123` — `doctor --fix` laskee jäljellä olevat findingit väärin (raportoi 1, listaa 9)
+- `@intake-bug-issuectl-715670f2607f` — `note` hylkää `--comment` vaikka oma help lupaa sen
+- `@intake-bug-issuectl-7a79c97d9fa8` — johdettu slug typistyy hiljaisesti (**liittyy** `@create-help-slug-text`iin,
+  sama slug-logiikka → kannattaa lanettaa samaan `cli-fixes`-laneen peräkkäin, ei rinnakkain)
+- `@intake-feature-issuectl-c633267ba553` — lane-rakenteen suunnittelu pitäisi dokumentoida (lanet ovat sarjallisia
+  jonoja → laneus maksaa rinnakkaisuutta). **Osui tämän rupeaman kipupisteeseen:** 6 unittia yhdessä lanessa = 0
+  rinnakkaisuutta, ~5 h sarjassa.
+- `@intake-feature-issuectl-ff7665d266e6` — `update --type epic` käskee käsin editoimaan YAMLia migraation sijaan
+
+**⚠️ INTAKE-PREDIKAATTI-SUDENKUOPPA:** `/stint-handoff`:n dokumentoitu detect-predikaatti on `open ∧ via:telegram ∧
+needs-triage`, mutta intakea saapuu nyt myös `via:agent-*`-provenanssilla (sisarrepojen wrap-upit `intakectl
+file`n kautta). Pelkkä `via:telegram` **ei löydä niitä** — tässä sessiossa raportoin ensin virheellisesti "ei uutta
+intakea". Käytä `issuectl list --status open --label needs-triage` (provenanssiagnostinen).
 
 **⚠️ Siivousta odottava:** `issuectl__worktrees/wt-01m04ygzhw-canon-review-issuectl` (@286dcb3, **locked**) on
 edellisen session canon-review-ajosta eikä liity tähän rupeamaan. Jätetty koskematta — poista käsin jos on
