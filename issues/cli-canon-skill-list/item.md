@@ -7,6 +7,9 @@ priority: normal
 labels: [cli-canon, tooling]
 lane: cli-canon
 lane_seq: 40
+commits:
+- hash: 26b38e86a3f73d1201904855c53a09136a4c70fb
+  summary: 'feat(skill): list bundled companion skills'
 ---
 
 # cli-canon: §15 skill list subcommand
