@@ -10,6 +10,8 @@ lane_seq: 70
 commits:
 - hash: 225652d
   summary: 'feat(cli): make create the primary issue verb'
+- hash: 99d996b
+  summary: 'test(cli): cover create alias routing'
 ---
 
 # cli-canon: §7 prefer create over new as primary verb
