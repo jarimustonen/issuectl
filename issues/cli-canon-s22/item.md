@@ -2,7 +2,7 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: improvement
-status: in-progress
+status: done
 priority: normal
 labels: [tooling, cli-canon]
 lane: cli-canon
@@ -14,6 +14,9 @@ commits:
   summary: 'chore: record clock injection work'
 - hash: 9a0704b
   summary: 'fix: make fixed clocks deterministic'
+- hash: a9a698531007d748f4279cdf86c7888c58200fab
+  summary: complete clocked mutation seams
+closed: 2026-08-16
 ---
 
 # cli-canon: §22 Internal layout: library-first core/cli split
