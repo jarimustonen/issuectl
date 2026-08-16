@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Lane-structure design guide:** practical guidance for choosing serial
++  conflict boundaries, collision tokens, parked work, and `unlaned` issues.
+
 ## [0.13.0] - 2026-08-16
 
 ### Changed
