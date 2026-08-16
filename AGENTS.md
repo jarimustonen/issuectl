@@ -8,11 +8,10 @@ canonical entry points are below; click through if you need detail.
 `issuectl` — AI-first CLI for managing markdown-based issues with
 frontmatter. See [README.md](README.md) for a user-facing overview.
 
-## Design principles
+## CLI Design Principles
 
-All CLI changes must follow [AGENTS-AI-FIRST-CLI.md](AGENTS-AI-FIRST-CLI.md):
-strict input validation, structured (`--json`) output, no interactive
-prompts, informative errors, composable commands.
+Use the `/ai-first-cli-canon` skill shipped by `project-canon` as the maintained AI-first CLI canon. It is the binding reference for CLI surface work: strict input validation, `--json` output, JSONL logs, no interactive prompts, informative errors and composable commands. Do not keep or edit a repo-local `ai-first-cli-canon` copy; update the canon in `~/Sources/project-canon` and reinstall the skill from the released tool.
+
 
 ## Critical rule: keep the skill in sync with the CLI
 

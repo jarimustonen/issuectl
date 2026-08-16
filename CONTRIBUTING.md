@@ -42,7 +42,7 @@ issues/            # The project's own issue tracker (eats its own dog food)
 ## Design principles
 
 This is an **AI-first CLI**. Every change should be consistent with the
-principles in [AGENTS-AI-FIRST-CLI.md](AGENTS-AI-FIRST-CLI.md):
+principles in `/ai-first-cli-canon`:
 
 - Strict input validation; reject unknown values with the list of valid
   alternatives. No silent fixups, no coercion.

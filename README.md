@@ -855,7 +855,7 @@ The workspace is `crates/issuectl-core` (library) +
 `crates/issuectl` (CLI binary).
 
 See
-[AGENTS-AI-FIRST-CLI.md](AGENTS-AI-FIRST-CLI.md) for the design
+`/ai-first-cli-canon` for the design
 principles every command follows, and
 [docs/](docs/) for additional design notes and per-release digests
 (e.g.
