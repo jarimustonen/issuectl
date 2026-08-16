@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-16
+
 ### Added
 - **`issuectl dag` lane depth and parallelism:** each rendered lane now reports its serial `depth`, while human and JSON output report the current `spawnable_heads` count.
 - **`issuectl update --no-reporter` / `--no-assignee`** clear built-in people fields without hand-editing issue frontmatter.
