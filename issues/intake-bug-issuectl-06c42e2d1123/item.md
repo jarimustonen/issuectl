@@ -3,12 +3,13 @@ created: 2026-08-16
 updated: 2026-08-16
 type: bug
 reporter: jari
-status: open
+status: fixed
 priority: high
 labels:
 - via:agent-homebase-wrapup
 lane: cli-fixes
 lane_seq: 10
+closed: 2026-08-16
 ---
 
 # doctor --fix miscounts remaining findings (reports 1, lists 9)
