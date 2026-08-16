@@ -54,6 +54,7 @@ fn attach_json_success_emits_bare_payload_on_stdout() {
     assert!(out.stderr.is_empty(), "stderr={:?}", out.stderr);
 
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
+    let v = v["data"].clone();
     assert_eq!(v["slug"], "calm-quiet-otter");
     assert_eq!(v["dir"], "issues/calm-quiet-otter");
     let attached = v["attached"].as_array().expect("attached array");

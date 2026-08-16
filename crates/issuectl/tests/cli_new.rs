@@ -113,7 +113,7 @@ fn new_json_success_prints_expected_payload() {
     let dir = tmp.path().join("issues/ab-cd");
     // Unified field vocabulary: `dir` = issue directory, `path` = item.md.
     let expected = format!(
-        "{{\n  \"dir\": \"{}\",\n  \"path\": \"{}\",\n  \"slug\": \"ab-cd\",\n  \"title\": \"Hello\",\n  \"warnings\": []\n}}\n",
+        "{{\n  \"data\": {{\n    \"dir\": \"{}\",\n    \"path\": \"{}\",\n    \"slug\": \"ab-cd\",\n    \"title\": \"Hello\"\n  }},\n  \"schema_version\": 1,\n  \"warnings\": []\n}}\n",
         dir.display(),
         item_path.display(),
     );
@@ -260,7 +260,7 @@ fn show_field(root: &std::path::Path, slug: &str, field: &str) -> String {
     let show = run(root, &["--json", "show", slug]);
     assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
     serde_json::from_slice::<serde_json::Value>(&show.stdout).expect("show stdout should be JSON")
-        [field]
+        ["data"][field]
         .as_str()
         .unwrap_or_else(|| {
             panic!(
@@ -316,6 +316,7 @@ fn priority_low_is_accepted_end_to_end() {
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("ls stdout should be JSON");
+    let v = v["data"].clone();
     let slugs: Vec<&str> = v
         .as_array()
         .expect("ls returns an array")
@@ -573,8 +574,9 @@ fn json_update_without_expected_version_succeeds() {
         &["--json", "update", "op-ti", "--priority", "low"],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("update stdout should be JSON");
+    let v: serde_json::Value = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .expect("update stdout should be JSON")["data"]
+        .clone();
     assert!(
         v["version"].as_str().is_some_and(|s| !s.is_empty()),
         "update result should carry a top-level `version`; {}",
@@ -610,6 +612,7 @@ fn json_close_without_expected_version_succeeds() {
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("close stdout should be JSON");
+    let v = v["data"].clone();
     assert!(
         v["version"].as_str().is_some_and(|s| !s.is_empty()),
         "close result should carry a top-level `version`; {}",
@@ -717,8 +720,10 @@ fn json_remaining_verbs_tokenless_writes_succeed_with_version() {
     for args in writes {
         let out = run(tmp.path(), args);
         assert_eq!(out.status.code(), Some(0), "args {args:?}: {}", dump(&out));
-        let v: serde_json::Value = serde_json::from_slice(&out.stdout)
-            .unwrap_or_else(|_| panic!("stdout should be JSON for {args:?}: {}", dump(&out)));
+        let v: serde_json::Value = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+            .unwrap_or_else(|_| panic!("stdout should be JSON for {args:?}: {}", dump(&out)))
+            ["data"]
+            .clone();
         assert_eq!(
             v["version"].as_str().unwrap_or_default(),
             show_field(tmp.path(), "ve-rb", "version"),
@@ -750,8 +755,9 @@ fn json_remaining_verbs_tokenless_writes_succeed_with_version() {
         })
         .expect("spawn body set");
     assert_eq!(out.status.code(), Some(0), "body set: {}", dump(&out));
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("body set stdout should be JSON");
+    let v: serde_json::Value = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .expect("body set stdout should be JSON")["data"]
+        .clone();
     assert_eq!(
         v["version"].as_str().unwrap_or_default(),
         show_field(tmp.path(), "ve-rb", "version"),
@@ -793,6 +799,7 @@ fn json_remaining_verbs_tokenless_writes_succeed_with_version() {
     assert_eq!(out.status.code(), Some(0), "check: {}", dump(&out));
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("check stdout should be JSON");
+    let v = v["data"].clone();
     assert_eq!(
         v["version"].as_str().unwrap_or_default(),
         show_field(tmp.path(), "ve-rb", "version"),
@@ -822,6 +829,7 @@ fn new_without_slug_derives_from_title() {
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("new stdout should be JSON");
+    let v = v["data"].clone();
     assert_eq!(v["slug"], "login-redirect-loops", "{}", dump(&out));
     assert!(
         tmp.path()
@@ -1041,7 +1049,7 @@ fn show_body(root: &std::path::Path, slug: &str) -> String {
     let show = run(root, &["--json", "show", slug]);
     assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
     serde_json::from_slice::<serde_json::Value>(&show.stdout).expect("show stdout should be JSON")
-        ["body"]
+        ["data"]["body"]
         .as_str()
         .expect("body field")
         .to_string()
@@ -1315,6 +1323,7 @@ fn show_json_exposes_blocked_by_and_derived_blocks() {
     assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
     let v: serde_json::Value =
         serde_json::from_slice(&show.stdout).expect("show stdout should be JSON");
+    let v = v["data"].clone();
     assert!(
         v.get("blocked_by").is_some(),
         "blocked_by key must be present, not absent; {}",
@@ -1334,6 +1343,7 @@ fn show_json_exposes_blocked_by_and_derived_blocks() {
     assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
     let v: serde_json::Value =
         serde_json::from_slice(&show.stdout).expect("show stdout should be JSON");
+    let v = v["data"].clone();
     assert_eq!(v["blocked_by"], serde_json::json!([]), "{}", dump(&show));
     assert_eq!(
         v["blocks"],
@@ -1348,6 +1358,7 @@ fn show_json_exposes_blocked_by_and_derived_blocks() {
     let show = run(tmp.path(), &["--json", "show", "dp-end"]);
     let v: serde_json::Value =
         serde_json::from_slice(&show.stdout).expect("show stdout should be JSON");
+    let v = v["data"].clone();
     assert!(
         v.get("extra").and_then(|e| e.get("blocked_by")).is_none(),
         "extra.blocked_by must be stripped from show output; {}",
@@ -1385,6 +1396,7 @@ fn show_json_canonicalizes_raw_blocked_by_frontmatter() {
     assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
     let v: serde_json::Value =
         serde_json::from_slice(&show.stdout).expect("show stdout should be JSON");
+    let v = v["data"].clone();
     assert_eq!(
         v["blocked_by"],
         serde_json::json!(["@aa-first", "@mm-middle", "@zz-later"]),
@@ -1429,6 +1441,7 @@ fn ls_json_exposes_blocked_by_and_strips_extra_copy() {
     assert_eq!(ls.status.code(), Some(0), "{}", dump(&ls));
     let rows: serde_json::Value =
         serde_json::from_slice(&ls.stdout).expect("ls stdout should be JSON");
+    let rows = rows["data"].clone();
     let rows = rows.as_array().expect("ls output is a JSON array");
 
     // Every row carries a top-level `blocked_by` (present, never `null`)
@@ -1518,6 +1531,7 @@ fn ls_json_canonicalizes_blocked_by_and_preserves_other_extra() {
     assert_eq!(ls.status.code(), Some(0), "{}", dump(&ls));
     let rows: serde_json::Value =
         serde_json::from_slice(&ls.stdout).expect("ls stdout should be JSON");
+    let rows = rows["data"].clone();
     let rows = rows.as_array().expect("ls output is a JSON array");
     let find = |slug: &str| {
         rows.iter()
@@ -1587,6 +1601,7 @@ fn search_json_exposes_blocked_by_and_strips_extra_copy() {
     assert_eq!(search.status.code(), Some(0), "{}", dump(&search));
     let rows: serde_json::Value =
         serde_json::from_slice(&search.stdout).expect("search stdout should be JSON");
+    let rows = rows["data"].clone();
     let rows = rows.as_array().expect("search output is a JSON array");
 
     for row in rows {

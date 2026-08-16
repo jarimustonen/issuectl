@@ -31,6 +31,27 @@ pub struct SkillCatalogEntry {
     pub install_targets: Vec<SkillInstallTarget>,
 }
 
+/// Version metadata for a skill bundled in this binary, used by `version` for
+/// a one-call skill/CLI drift audit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkillVersion {
+    pub name: String,
+    pub cli_version: String,
+    pub schema_version: u32,
+}
+
+/// Return the version pins of all bundled Claude-format skills.
+pub fn skill_versions() -> Vec<SkillVersion> {
+    ["issue", "issue-new", "issue-intake"]
+        .into_iter()
+        .map(|name| SkillVersion {
+            name: name.to_string(),
+            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            schema_version: 1,
+        })
+        .collect()
+}
+
 fn install_target(agent: Agent, label: &str, path: PathBuf) -> SkillInstallTarget {
     SkillInstallTarget {
         agent: agent.argument().to_string(),

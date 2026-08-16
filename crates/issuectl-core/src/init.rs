@@ -335,7 +335,10 @@ pub fn run(root: &Path, opts: InitOptions, json: bool) -> Result<()> {
 
     if json {
         let payload = serde_json::json!({ "steps": reports });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&crate::envelope::success(&payload)?)?
+        );
     } else {
         print_human(&reports);
     }

@@ -32,7 +32,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
 
 fn json(out: &Output) -> serde_json::Value {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
-    serde_json::from_slice(&out.stdout).expect("json stdout")
+    serde_json::from_slice::<serde_json::Value>(&out.stdout).expect("json stdout")["data"].clone()
 }
 
 fn new_issue(root: &Path, slug: &str) {

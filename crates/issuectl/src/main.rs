@@ -9,10 +9,50 @@ use clap::{Command as ClapCommand, CommandFactory, Parser, Subcommand, ValueEnum
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::{
     agents, body_sections, canonical, config, context, cycle as cycle_mod, dag, doctor, duplicates,
-    epic_tree, estimate as estimate_mod, fmt, git_trailers, help, hooks, init as init_cmd,
-    merge_driver, models, mutate, query, recurrence, repo, report as report_mod, schema, skill,
-    slug, sync_commits,
+    envelope, epic_tree, estimate as estimate_mod, fmt, git_trailers, help, hooks,
+    init as init_cmd, merge_driver, models, mutate, query, recurrence, repo, report as report_mod,
+    schema, skill, slug, sync_commits,
 };
+
+static JSON_OUTPUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Emit one canonical JSON success envelope when `--json` is active. Command
+/// handlers still render their domain result normally, keeping dispatch thin;
+/// this final output seam makes the envelope impossible to omit accidentally.
+fn emit_stdout(value: String, newline: bool) {
+    use std::io::Write;
+    if JSON_OUTPUT.load(std::sync::atomic::Ordering::Relaxed) {
+        // Text-mode renderers sometimes add a trailing `println!()` after a
+        // JSON `print!()`. It is formatting only, never a second result.
+        if value.is_empty() {
+            return;
+        }
+        let data = serde_json::from_str(&value).unwrap_or(serde_json::Value::String(value));
+        let rendered = envelope::success(&data)
+            .and_then(|value| serde_json::to_string_pretty(&value))
+            .expect("JSON envelope must serialize");
+        let mut stdout = std::io::stdout().lock();
+        let _ = newline;
+        writeln!(stdout, "{rendered}").expect("stdout must be writable");
+        stdout.flush().expect("stdout must be writable");
+    } else {
+        let mut stdout = std::io::stdout().lock();
+        if newline {
+            writeln!(stdout, "{value}").expect("stdout must be writable");
+        } else {
+            write!(stdout, "{value}").expect("stdout must be writable");
+        }
+        stdout.flush().expect("stdout must be writable");
+    }
+}
+
+macro_rules! println {
+    () => { emit_stdout(String::new(), true) };
+    ($($arg:tt)*) => { emit_stdout(format!($($arg)*), true) };
+}
+macro_rules! print {
+    ($($arg:tt)*) => { emit_stdout(format!($($arg)*), false) };
+}
 
 const TOP_LEVEL_HELP: &str = "\
 Examples:
@@ -279,6 +319,9 @@ fn parse_slug_arg(s: &str) -> std::result::Result<String, String> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Print the running CLI and JSON-contract versions for drift audits.
+    Version,
+
     /// Inspect the effective schema configuration and its sources
     Config {
         #[command(subcommand)]
@@ -1977,6 +2020,7 @@ enum IntakeAction {
 /// `extra` (when an object) is merged into the inner `error` object so a
 /// command can attach structured context (e.g. `matches` for a duplicate
 /// precheck) without inventing a new top-level shape.
+#[allow(dead_code)] // kept for focused legacy error-shape unit tests
 fn json_error_value(code: &str, message: &str, extra: serde_json::Value) -> serde_json::Value {
     let mut err = serde_json::Map::new();
     err.insert("code".into(), serde_json::Value::String(code.to_string()));
@@ -2048,7 +2092,7 @@ fn bubbled_exit_code(e: &anyhow::Error) -> i32 {
 fn emit_json_error(code: &str, message: &str, extra: serde_json::Value) {
     eprintln!(
         "{}",
-        serde_json::to_string_pretty(&json_error_value(code, message, extra)).unwrap_or_default()
+        serde_json::to_string_pretty(&envelope::error(code, message, extra)).unwrap_or_default()
     );
 }
 
@@ -2363,6 +2407,7 @@ fn argv_has_json_flag() -> bool {
 }
 
 fn main() -> Result<()> {
+    JSON_OUTPUT.store(argv_has_json_flag(), std::sync::atomic::Ordering::Relaxed);
     // Parse manually instead of `Cli::parse()` so clap's own usage
     // errors honour the `--json` contract too. By default clap prints
     // free-form text to stderr and exits 2 — an agent that always passes
@@ -2416,6 +2461,7 @@ fn main() -> Result<()> {
         }
     };
     let json_output = cli.json;
+    JSON_OUTPUT.store(json_output, std::sync::atomic::Ordering::Relaxed);
     ROOT_OVERRIDE.set(cli.root).ok();
 
     // Unified `--json` error contract: any error that bubbles up to
@@ -2439,8 +2485,25 @@ fn main() -> Result<()> {
     result
 }
 
+fn cmd_version(json: bool) -> Result<()> {
+    let payload = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": option_env!("ISSUECTL_GIT_COMMIT"),
+        "schema_version": envelope::CLI_SCHEMA_VERSION,
+        "supported_schemas": [schema::SUPPORTED_SCHEMA_VERSION],
+        "skills": skill::skill_versions(),
+    });
+    if json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("issuectl {}", env!("CARGO_PKG_VERSION"));
+    }
+    Ok(())
+}
+
 fn dispatch(command: Command, json_output: bool) -> Result<()> {
     match command {
+        Command::Version => cmd_version(json_output),
         Command::Config { action } => cmd_config(json_output, action),
         Command::List {
             query,

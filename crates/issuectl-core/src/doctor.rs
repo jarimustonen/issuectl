@@ -691,23 +691,21 @@ pub fn run(repo_root: &Path, fix: bool, json: bool, verbose: bool) -> Result<()>
         // work. Issue: @doctor-fix-noop.
         if fix && exit_decision.code != 0 {
             let details = render_json(&findings, outcome.as_ref(), fix, repo_root);
-            let envelope = serde_json::json!({
-                "error": {
-                    "code": exit_decision.error_code,
-                    "message": exit_decision.message,
-                    "details": details,
-                }
-            });
+            let envelope = crate::envelope::error(
+                exit_decision.error_code,
+                &exit_decision.message,
+                serde_json::json!({"details": details}),
+            );
             eprintln!("{}", serde_json::to_string_pretty(&envelope)?);
         } else {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&render_json(
+                serde_json::to_string_pretty(&crate::envelope::success(&render_json(
                     &findings,
                     outcome.as_ref(),
                     fix,
                     repo_root
-                ))?
+                ))?)?
             );
         }
     } else {

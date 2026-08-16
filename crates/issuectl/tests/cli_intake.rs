@@ -40,7 +40,9 @@ fn dump(out: &Output) -> String {
 }
 
 fn json_stdout(out: &Output) -> serde_json::Value {
-    serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("stdout not JSON: {}", dump(out)))
+    serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .unwrap_or_else(|_| panic!("stdout not JSON: {}", dump(out)))["data"]
+        .clone()
 }
 
 fn json_stderr(out: &Output) -> serde_json::Value {

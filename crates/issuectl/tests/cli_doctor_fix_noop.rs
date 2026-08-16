@@ -278,8 +278,9 @@ fn doctor_readonly_json_still_emits_result_on_stdout() {
     );
     let v: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("stdout must be JSON, got: {stdout} ({e})"));
-    // Sanity: the duplicate finding is in the payload, in the
-    // historical (non-envelope) shape.
+    assert_eq!(v["schema_version"], 1);
+    let v = v["data"].clone();
+    // Sanity: the duplicate finding is in the payload.
     assert!(
         !v["both_open_and_closed"].as_array().unwrap().is_empty(),
         "expected duplicate-slug finding in result, got: {v}"
@@ -301,6 +302,8 @@ fn doctor_fix_json_clean_run_stays_on_stdout() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let v: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("stdout must be JSON, got: {stdout} ({e})"));
+    assert_eq!(v["schema_version"], 1);
+    let v = v["data"].clone();
     assert!(v.get("apply_outcome").is_some(), "expected apply_outcome");
     assert!(
         v.get("error").is_none(),

@@ -16,6 +16,8 @@ them.
 
 Arguments: `$ARGUMENTS`
 
+Every `--json` response is the versioned envelope `{ "schema_version": 1, "data": …, "warnings": [] }`; read command fields under `.data`. Errors are `{ "schema_version": 1, "error": {…} }` on stderr.
+
 ## What owns what (convention)
 
 The intake flow's responsibility split (design §5). This skill owns exactly one
@@ -239,7 +241,7 @@ briefing and decides in chat.
 
 ## Install or upgrade `issuectl`
 
-This skill was installed for `issuectl 0.11.0` and drives the
+This skill was installed for `issuectl 0.12.0` and drives the
 `issuectl intake` command group (issuectl ≥ 0.6.6). On first use in a session, run
 `issuectl --version`; if `intake` is missing (`issuectl intake --help` errors), the
 binary is too old — tell the user to upgrade and stop. To refresh this skill after

@@ -50,7 +50,7 @@ fn new_child(root: &Path, slug: &str, epic: &str) {
 
 fn json(out: &Output) -> serde_json::Value {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
-    serde_json::from_slice(&out.stdout).expect("json stdout")
+    serde_json::from_slice::<serde_json::Value>(&out.stdout).expect("json stdout")["data"].clone()
 }
 
 /// One epic with two children plus one unrelated issue.

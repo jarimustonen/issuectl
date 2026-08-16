@@ -51,6 +51,7 @@ fn cycle_current_json_returns_iso_week_shape() {
     let out = run(tmp.path(), &["--json", "cycle", "current"]);
     assert_eq!(out.status.code(), Some(0), "{:?}", out);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let v = v["data"].clone();
     let label = v["cycle"].as_str().expect("cycle string");
     assert!(
         label.len() == 8 && &label[4..6] == "-W",
@@ -69,6 +70,7 @@ fn cycle_plan_lists_only_matching_open_issues() {
     let out = run(tmp.path(), &["--json", "cycle", "plan", "2026-W22"]);
     assert_eq!(out.status.code(), Some(0), "{:?}", out);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let v = v["data"].clone();
     assert_eq!(v["cycle"], "2026-W22");
     let slugs: Vec<&str> = v["issues"]
         .as_array()
@@ -87,6 +89,7 @@ fn cycle_plan_with_all_includes_closed() {
     let out = run(tmp.path(), &["--json", "cycle", "plan", "W1", "--all"]);
     assert_eq!(out.status.code(), Some(0), "{:?}", out);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let v = v["data"].clone();
     let mut slugs: Vec<&str> = v["issues"]
         .as_array()
         .unwrap()
@@ -108,6 +111,7 @@ fn cycle_status_rolls_up_open_and_closed() {
     let out = run(tmp.path(), &["--json", "cycle", "status", "W1"]);
     assert_eq!(out.status.code(), Some(0), "{:?}", out);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let v = v["data"].clone();
     assert_eq!(v["cycle"], "W1");
     assert_eq!(v["open"], 2);
     assert_eq!(v["closed"], 1);
@@ -124,6 +128,7 @@ fn cycle_status_all_lists_every_cycle() {
     let out = run(tmp.path(), &["--json", "cycle", "status", "--all"]);
     assert_eq!(out.status.code(), Some(0), "{:?}", out);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let v = v["data"].clone();
     let arr = v.as_array().expect("array");
     let labels: Vec<&str> = arr.iter().map(|r| r["cycle"].as_str().unwrap()).collect();
     assert_eq!(labels, vec!["W1", "W2"]);
@@ -138,6 +143,7 @@ fn cycle_status_default_uses_current() {
     let out = run(tmp.path(), &["--json", "cycle", "status"]);
     assert_eq!(out.status.code(), Some(0), "{:?}", out);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let v = v["data"].clone();
     assert!(v["cycle"].as_str().is_some_and(|s| s.contains("-W")));
     assert_eq!(v["total"], 0);
 }
@@ -147,14 +153,16 @@ fn cycle_plan_current_alias_resolves_today() {
     let tmp = fresh_repo();
     // Grab today's label first, then store an issue under it.
     let current = run(tmp.path(), &["--json", "cycle", "current"]);
-    let cur_v: serde_json::Value = serde_json::from_slice(&current.stdout).unwrap();
+    let cur_v: serde_json::Value =
+        serde_json::from_slice::<serde_json::Value>(&current.stdout).unwrap()["data"].clone();
     let label = cur_v["cycle"].as_str().unwrap().to_string();
 
     write_issue(tmp.path(), "red-ant", "open", &format!("cycle: {label}\n"));
 
     let out = run(tmp.path(), &["--json", "cycle", "plan", "current"]);
     assert_eq!(out.status.code(), Some(0), "{:?}", out);
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let v: serde_json::Value =
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).expect("json")["data"].clone();
     assert_eq!(v["cycle"], label);
     assert_eq!(v["issues"].as_array().unwrap().len(), 1);
 }

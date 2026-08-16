@@ -65,7 +65,7 @@ fn show_field(root: &std::path::Path, slug: &str, field: &str) -> String {
     let show = run(root, &["--json", "show", slug]);
     assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
     serde_json::from_slice::<serde_json::Value>(&show.stdout).expect("show stdout should be JSON")
-        [field]
+        ["data"][field]
         .as_str()
         .unwrap_or_else(|| {
             panic!(
@@ -446,6 +446,7 @@ fn labels_of(root: &std::path::Path, slug: &str) -> Vec<String> {
     assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
     let v: serde_json::Value =
         serde_json::from_slice(&show.stdout).expect("show stdout should be JSON");
+    let v = v["data"].clone();
     match &v["labels"] {
         serde_json::Value::Array(items) => items
             .iter()
@@ -524,7 +525,10 @@ fn label_flag_remove_json_applies_and_echoes() {
         ],
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json stdout");
+    let v: serde_json::Value = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .expect("json stdout")["data"]
+        .clone();
+    let v = v["data"].clone();
     // Post-mutation the label set is empty (echoed as `null`), and disk agrees.
     assert!(v["labels"].is_null() || v["labels"].as_array().is_some_and(|a| a.is_empty()));
     assert!(labels_of(r, "lbl-jsonflag").is_empty());

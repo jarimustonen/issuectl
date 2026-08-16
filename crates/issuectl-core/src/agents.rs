@@ -529,16 +529,7 @@ pub fn run_init(root: &Path, force: bool, json: bool) -> Result<()> {
 
     let existed = classify_target(&path)?;
     if existed && !force {
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "path": rel(root, &path),
-                    "wrote": false,
-                    "reason": "already exists; pass --force to overwrite",
-                }))?
-            );
-        } else {
+        if !json {
             eprintln!(
                 "{} already exists; pass --force to overwrite.",
                 rel(root, &path)
@@ -558,12 +549,12 @@ pub fn run_init(root: &Path, force: bool, json: bool) -> Result<()> {
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            serde_json::to_string_pretty(&crate::envelope::success(&serde_json::json!({
                 "path": rel(root, &path),
                 "wrote": true,
                 "overwrote_existing": existed,
                 "schema_source": schema_source.as_str(),
-            }))?
+            }))?)?
         );
     } else {
         let verb = if existed { "Overwrote" } else { "Wrote" };

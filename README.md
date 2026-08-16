@@ -244,7 +244,7 @@ Every command speaks `--json`:
 issuectl --json list -t bug --status open
 issuectl --json show login-redirect-loops
 issuectl --json update login-redirect-loops --status testing \
-    --expected-version $(issuectl --json show login-redirect-loops | jq -r .version)
+    --expected-version $(issuectl --json show login-redirect-loops | jq -r .data.version)
 ```
 
 ### Agent-driven example
@@ -276,7 +276,7 @@ issuectl --json context login-redirect-loops > /tmp/issue-context.json
 issuectl --json check login-redirect-loops "Redirect chain unwinds on Safari"
 issuectl --json ready login-redirect-loops      # exits 0 when AC is complete
 issuectl --json close login-redirect-loops \
-    --expected-version $(issuectl --json show login-redirect-loops | jq -r .version)
+    --expected-version $(issuectl --json show login-redirect-loops | jq -r .data.version)
 ```
 
 ## Usage
@@ -833,12 +833,9 @@ Without `--root`, `issuectl` walks up from the cwd looking for
 
 `--json` is the contract surface for agents and CI:
 
-- success (exit 0) → a single JSON value on stdout (object for action
-  commands, array for list commands);
-- error (exit ≠ 0) → an envelope on stderr
-  `{"error":{"code":"<stable-kebab-code>","message":"…"[,...]}}`;
-  stdout is empty. Validation errors, not-found, conflicts, and even
-  bad flags (`code:"usage-error"`) all flow through this contract.
+- success (including partial success) → `{"schema_version":1,"data":…, "warnings":[]}` on stdout. Read all command results from `.data`; non-fatal warnings are top-level `.warnings`.
+- error (exit ≠ 0 with no work landed) → `{"schema_version":1,"error":{"code":"<stable-kebab-code>","message":"…"[,...]}}` on stderr; stdout is empty. Validation errors, not-found, conflicts, and bad flags (`usage-error`) all use this shape.
+- `schema_version` is the CLI output API version, not the issue-file schema. It changes only for breaking output changes. `issuectl version --json` reports supported issue schemas and bundled skill version pins.
 
 ## Development
 

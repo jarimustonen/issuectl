@@ -20,9 +20,9 @@ structured and reliable to parse; the human-readable mode is for
 terminal users only. All examples below already include `--json`.
 
 For an unfamiliar command, discover its exact flags and arguments without
-scraping text help: run `issuectl <command> --help --json`. The response has
-`subcommands`, `flags`, `args`, `examples`, accepted `possible_values`, and
-any `env` mapping. For example, use `issuectl new --help --json` before filing
+scraping text help: run `issuectl <command> --help --json`. Read its `data`
+object, which has `subcommands`, `flags`, `args`, `examples`, accepted
+`possible_values`, and any `env` mapping. For example, use `issuectl new --help --json` before filing
 an issue.
 
 `issuectl` validates inputs strictly (rejects unknown values for `--type`,
@@ -35,18 +35,19 @@ the valid alternatives.
 Every command follows one contract so you can consume any of them the
 same way:
 
-- **Success (exit 0)** → a single JSON value on **stdout**. Read commands
-  (`show`, `ls`, `search`) print the issue (object) or issues (array);
-  action commands (`new`, `update`, `close`, `note`, `apply`, …) print a
-  result object describing what changed.
-- **Error (exit ≠ 0, nothing produced)** → a single object on
-  **stderr**: `{"error":{"code":"<stable-kebab-code>","message":"…"}}`,
-  sometimes with extra keys inside `error` (e.g. `matches` for a
-  duplicate precheck). stdout is empty. This covers validation errors,
-  not-found, conflicts, and even bad flags (`code:"usage-error"`).
-- **Partial success (exit ≠ 0, work landed)** → the command still prints
-  its normal **result object on stdout** (e.g. `import` with
-  `created`/`failed` counts), not the error envelope.
+- **Success (including partial success)** → one object on **stdout**:
+  `{"schema_version":1,"data":…, "warnings":[]}`. Read the command result
+  only from `.data`: it is an issue object, an array, or an action result.
+  Non-fatal warnings are exclusively in the top-level `.warnings` array.
+  A partial `import` still uses this success envelope despite exit 2.
+- **Error (exit ≠ 0, no work landed)** → one object on **stderr**:
+  `{"schema_version":1,"error":{"code":"<stable-kebab-code>","message":"…"}}`,
+  with optional context inside `error`; stdout is empty. This covers
+  validation errors, not-found, conflicts, and bad flags (`usage-error`).
+- **Schema rule**: `schema_version` is the CLI JSON API version, independent
+  of issue-file schemas. It changes only for breaking JSON changes; additive
+  fields do not bump it. Run `issuectl version --json` and inspect `.data` for
+  `supported_schemas` plus every bundled skill's version pin.
 - **Exit codes**: `0` success · `2` refused-but-actionable (duplicate
   precheck strong match → error envelope on stderr; partial import where
   some records landed → result object on stdout) · `1` everything else
@@ -64,8 +65,9 @@ same way:
 Before a write from an unfamiliar directory, inspect the repo schema location and
 its effective policy. `config show` reports every value with `source: "file"`
 when it was declared in `issues/.schema.yaml`, or `source: "default"` when the
-built-in schema supplies it. `config path --json` returns `{ "path": "..." }`;
-`config show --json` returns `{ "path": "...", "exists": true|false, "values":
+built-in schema supplies it. `config path --json` returns its result at
+`.data.path`; `config show --json` returns its result under `.data`, including
+`{ "path": "...", "exists": true|false, "values":
 { "schema.fields.priority": { "value": {…}, "source": "file|default" } } }`.
 
 ```sh
@@ -86,7 +88,7 @@ issuectl --json skill list
 
 ## Install or upgrade `issuectl`
 
-This skill was installed for `issuectl 0.11.0`. On the
+This skill was installed for `issuectl 0.12.0`. On the
 first invocation in a session, run `issuectl --version` and compare:
 
 - **Missing**: install one of:
@@ -94,12 +96,12 @@ first invocation in a session, run `issuectl --version` and compare:
   - **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
   - **Shell installer** (no toolchain):
     `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
-- **Older than `0.11.0`**: tell the user the skill expects
-  `0.11.0` and suggest upgrading via the same channel
+- **Older than `0.12.0`**: tell the user the skill expects
+  `0.12.0` and suggest upgrading via the same channel
   they originally used (`brew upgrade jarimustonen/issuectl/issuectl`,
   `cargo install issuectl --force`, or re-run the shell installer).
   Stop and wait — schema/CLI surface may have changed.
-- **Newer than `0.11.0`**: the installed binary is ahead
+- **Newer than `0.12.0`**: the installed binary is ahead
   of what this skill was written for. Tell the user to refresh the
   skill so the instructions match the CLI surface they actually have:
   `issuectl skill install --force` (Claude Code; add `--agent codex`
@@ -324,7 +326,7 @@ as `update`; body-only mutation.
   compare-and-swap): when passed, the write fails on a version mismatch;
   it is enforced whenever passed. **Pass it** when your flow is
   read-then-write and another writer could interleave (multiple agents,
-  human + agent) — fetch the token from `show --json`
+  human + agent) — fetch the token from `.data` in `show --json`
   and pass it back unchanged. Omit it only when you are the sole writer;
   omitting it is an unguarded write (a concurrent update can be lost —
   `flock` still prevents a corrupt/torn file, but it does not detect a
@@ -525,7 +527,7 @@ The CLI:
 - Uses `--slug <kebab>` when given (validated: ≥2 lowercase ASCII kebab segments)
 - Otherwise derives a 2-3 word kebab slug from the title (numeric suffix on collision); `--slug-random`, or an unsluggable title, yields a random `intensifier-adjective-noun` slug instead
 - Writes `issues/open/<slug>/item.md` with the right frontmatter
-- Returns the slug and path in `--json` (parse `.slug`)
+- Returns the slug and path in `--json` (parse `.data.slug`)
 
 Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slug>"` (repeatable), `--field key=value` (repeatable; for custom frontmatter fields declared in `issues/.schema.yaml`, e.g. `--field team=payments`), `--check-duplicates` (refuse to create and exit 2 — printing the shared error envelope `{"error":{"code":"duplicate-precheck","message":...,"matches":[...]}}` on stderr — when a strong duplicate already exists; re-run without the flag to create anyway).
 
@@ -653,7 +655,7 @@ criteria, recorded commits, and schema rules — use `issuectl context`:
 The bundle is byte-deterministic for a given issue state, which makes it
 safe to cache. It is read-only — `issuectl context` never mutates files
 under `issues/`. The JSON form includes a `version` token matching
-`show --json`, so an agent can pass it straight to `--expected-version`
+`.data` in `show --json`, so an agent can pass it straight to `--expected-version`
 on a subsequent `update`/`close` without a separate `show` call.
 
 ### Action: Render a prompt template

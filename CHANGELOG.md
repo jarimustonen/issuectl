@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING: versioned JSON envelopes.** Every `--json` success now returns
+  `{ "schema_version": 1, "data": …, "warnings": [] }`; consumers must move
+  all prior top-level result lookups to `.data` and read warnings from the
+  envelope. Every JSON error now includes `schema_version` on stderr. Added
+  `issuectl version [--json]` for one-call CLI/schema/skill drift audits.
+
 ## [0.12.0] - 2026-08-16
 
 ### Added

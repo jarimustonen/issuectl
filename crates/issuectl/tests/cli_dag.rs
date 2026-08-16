@@ -62,7 +62,7 @@ fn new_issue(root: &Path, slug: &str) {
 
 fn json(out: &Output) -> serde_json::Value {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
-    serde_json::from_slice(&out.stdout).expect("json stdout")
+    serde_json::from_slice::<serde_json::Value>(&out.stdout).expect("json stdout")["data"].clone()
 }
 
 /// Build a two-lane repo: schema(a→b) + main(x), plus one unscheduled.
@@ -281,6 +281,7 @@ fn dag_fields_ok_on_pre_existing_v1_schema_without_them() {
     // doctor must not flag `lane` as an unknown key.
     let doc = run(r, &["--json", "doctor"]);
     let v: serde_json::Value = serde_json::from_slice(&doc.stdout).expect("doctor json");
+    let v = v["data"].clone();
     let unknown = v["unknown_keys"].as_array().cloned().unwrap_or_default();
     assert!(
         !unknown.iter().any(|u| u.to_string().contains("lane")),

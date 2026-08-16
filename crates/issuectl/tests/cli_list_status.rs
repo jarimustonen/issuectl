@@ -61,6 +61,7 @@ fn list_slugs(root: &std::path::Path, args: &[&str]) -> Vec<String> {
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("list --json stdout should be a JSON array");
+    let v = v["data"].clone();
     v.as_array()
         .expect("list --json emits an array")
         .iter()

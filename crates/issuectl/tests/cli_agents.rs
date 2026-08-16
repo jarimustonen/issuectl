@@ -78,6 +78,7 @@ fn init_json_envelope_reports_wrote_true() {
     let out = run(tmp.path(), &["--json", "agents", "init"]);
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json parse");
+    let v = v["data"].clone();
     assert_eq!(v["wrote"], serde_json::Value::Bool(true));
     assert_eq!(v["overwrote_existing"], serde_json::Value::Bool(false));
     assert_eq!(v["path"], ".issuectl/AGENTS.md");
@@ -118,6 +119,7 @@ fn doctor_fix_regenerates_drifted_managed_block() {
     let out = run(tmp.path(), &["--json", "doctor"]);
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json parse");
+    let v = v["data"].clone();
     assert_eq!(v["agents_md_drift"], serde_json::Value::Bool(false));
     assert!(v["agents_md_malformed"].is_null());
     assert!(v["agents_md_check_skipped"].is_null());

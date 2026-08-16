@@ -20,6 +20,8 @@ that one command.
 
 Arguments: `$ARGUMENTS`
 
+Every `--json` response is the versioned envelope `{ "schema_version": 1, "data": …, "warnings": [] }`; read command fields under `.data`. Errors are `{ "schema_version": 1, "error": {…} }` on stderr.
+
 ## Hard constraints
 
 1. **Capture, do not interpret.** Record the reporter's words verbatim in the
@@ -105,7 +107,7 @@ Output shape (exit 0):
   "already filed" and do **not** re-file. Filing and attaching are two separate,
   non-atomic calls, so on a dedup result do not blindly skip attachments —
   reconcile them (see step 3).
-- Read `.slug` from the JSON for the next step and the return value.
+- Read `.data.slug` from the JSON envelope for the next step and the return value.
 - On error the CLI exits non-zero with `{"error":{"code","message"}}` on stderr
   (empty stdout): empty title/body, unknown provenance, unknown type, or a
   `duplicate-source-ref` conflict. Read stderr and report it; do not retry blind.

@@ -44,8 +44,9 @@ fn dump(out: &Output) -> String {
 }
 
 fn stdout_json(out: &Output) -> serde_json::Value {
-    serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("stdout not JSON: {e}\n{}", dump(out)))
+    serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .unwrap_or_else(|e| panic!("stdout not JSON: {e}\n{}", dump(out)))["data"]
+        .clone()
 }
 
 /// Create an issue and return its slug. Uses a fixed slug for

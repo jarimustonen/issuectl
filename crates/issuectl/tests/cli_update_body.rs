@@ -43,7 +43,9 @@ fn dump(out: &Output) -> String {
 fn show_json(root: &std::path::Path, slug: &str) -> serde_json::Value {
     let show = run(root, &["--json", "show", slug]);
     assert_eq!(show.status.code(), Some(0), "{}", dump(&show));
-    serde_json::from_slice(&show.stdout).expect("show stdout should be JSON")
+    serde_json::from_slice::<serde_json::Value>(&show.stdout).expect("show stdout should be JSON")
+        ["data"]
+        .clone()
 }
 
 fn show_body(root: &std::path::Path, slug: &str) -> String {

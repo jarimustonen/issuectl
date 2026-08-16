@@ -21,6 +21,8 @@ them.
 
 Arguments: `$ARGUMENTS`
 
+Every `--json` response is the versioned envelope `{ "schema_version": 1, "data": …, "warnings": [] }`; read command fields under `.data`. Errors are `{ "schema_version": 1, "error": {…} }` on stderr.
+
 ## What owns what (convention)
 
 The intake flow's responsibility split (design §5). This skill owns exactly one

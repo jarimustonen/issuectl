@@ -28,7 +28,7 @@ fn skill_list_reports_the_bundled_catalog_in_text_and_json() {
     assert_eq!(json.status.code(), Some(0), "{json:?}");
     assert!(json.stderr.is_empty());
     let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    let skills = value.as_array().expect("catalog is a JSON array");
+    let skills = value["data"].as_array().expect("catalog is a JSON array");
     assert_eq!(
         skills
             .iter()

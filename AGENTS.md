@@ -158,47 +158,7 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
 
 - **Always `--json`** when scripting `issuectl` from another tool or
   agent. The human-readable mode is for terminal users.
-- **`--json` output contract (the agent-facing contract).** One shape
-  across every command so consumers parse them uniformly:
-  - **Success (exit 0)** → one JSON value on **stdout**: the resource
-    (`show`), an array of resources (`ls`/`search`), or a result object
-    (action verbs). A mutating action verb's result object **echoes the
-    resulting (post-mutation) value of the core mutable fields** —
-    `status`, `priority`, `labels` (from the updated issue the mutate
-    call returns under its flock, never a second read) — so a caller can
-    confirm the write from that one result without a follow-up `show`.
-    All mutating verbs (`update`/`close`/`label`/`set`/`check`) emit the
-    same three keys; `labels` mirrors `show` (an array, or `null` when the
-    issue carries none) so both shapes parse identically. A `--dry-run`
-    result is a preview (`dry_run: true` + `diff`), not a confirmation,
-    and deliberately does not carry these committed-state fields.
-  - **Error (exit ≠ 0, nothing produced)** → one object on **stderr**:
-    `{"error":{"code":"<kebab>","message":"…"}}`, with optional extra
-    keys inside `error` (e.g. `matches`), and **empty stdout**. The
-    bubble-up path in `fn main` wraps a generic `anyhow` error as
-    `code:"command-failed"`, but downcasts a mutate-layer `NotFound`
-    (raised on a missing slug by the mutate-layer write verbs —
-    `update`/`close`/`set`/`note`/`check`/`label`/`depend`/`body set`) to
-    `code:"not-found"` so those writes classify a missing issue exactly
-    like the read paths (verbs that resolve the slug earlier at the repo
-    layer, e.g. `triage`, still report `command-failed`);
-    explicit `process::exit` sites use the shared `fail()` helper; clap
-    usage errors are caught in `fn main` and re-emitted as
-    `code:"usage-error"` (exit 1) — all so the one error shape holds
-    regardless of where the failure originates.
-  - **Partial success (exit ≠ 0, work landed)** → the command still
-    prints its normal **result object on stdout** (e.g. `import` with
-    `created`/`failed`), not the error envelope. The non-zero exit is
-    the actionable signal; the body carries what happened. Branch on the
-    exit code first, then decide which stream to parse.
-  - **Exit codes**: `0` success · `2` refused-but-actionable (duplicate
-    precheck → error envelope; partial import → result object) · `1`
-    everything else (validation, not-found, usage, conflict).
-  - **Shared field vocabulary**: `slug`, `title`, `version`, `dir` (issue
-    directory), `path` (a file), `dry_run`, `diff`, `warnings`. `open`
-    uses `is_dir` (bool) to avoid colliding with the `dir` string field.
-  New commands MUST reuse these keys rather than invent synonyms
-  (`final_dir`/`issue_dir`/`item_path` were unified to `dir`/`path`).
+- **`--json` output contract (the agent-facing contract).** Every success, including partial success (`import`, exit 2), is `{"schema_version":1,"data":…, "warnings":[]}` on stdout. Read domain fields only from `data`; non-fatal warnings are exclusively top-level `warnings`. Every no-work error is `{"schema_version":1,"error":{"code":"<kebab>","message":"…",…}}` on stderr with empty stdout; this includes bubble-up, not-found, `fail()`, clap usage errors, and doctor `--fix` errors (whose stable `details` remains inside `error`). Read-only doctor remains a stdout result regardless of its exit status, now inside `data`. `schema_version` is the CLI output API version, independent from `SUPPORTED_SCHEMA_VERSION`; bump it only for breaking output changes, never additive fields. `issuectl version --json` reports both `supported_schemas` and bundled `skills[{name,cli_version,schema_version}]`.
 - **Tests live next to the code** in `#[cfg(test)] mod` blocks by
   default. New features add tests; bug fixes add regression tests.
   - **Exception — `tests/` integration tests:** use only for

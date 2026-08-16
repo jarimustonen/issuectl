@@ -42,7 +42,8 @@ fn config_path_reports_the_schema_path_in_text_and_json() {
 
     let json = run(root, &["--json", "config", "path"]);
     assert_eq!(json.status.code(), Some(0), "{json:?}");
-    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice::<serde_json::Value>(&json.stdout).unwrap()["data"].clone();
     assert_eq!(value["path"], expected);
     assert!(json.stderr.is_empty());
 }
@@ -59,7 +60,8 @@ fn config_show_reports_effective_values_and_sources() {
 
     let json = run(root, &["--json", "config", "show"]);
     assert_eq!(json.status.code(), Some(0), "{json:?}");
-    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice::<serde_json::Value>(&json.stdout).unwrap()["data"].clone();
     assert_eq!(
         value["path"],
         root.join("issues/.schema.yaml").to_string_lossy().as_ref()

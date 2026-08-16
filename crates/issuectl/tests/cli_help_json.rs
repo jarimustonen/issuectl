@@ -16,6 +16,8 @@ fn root_help_json_is_a_single_structured_document() {
     assert!(output.stderr.is_empty(), "{output:?}");
 
     let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["schema_version"], 1);
+    let document = document["data"].clone();
     assert_eq!(document["path"], serde_json::json!(["issuectl"]));
     assert!(document["subcommands"]
         .as_array()
@@ -32,6 +34,8 @@ fn subcommand_help_json_includes_values_and_global_json_flag() {
     assert!(output.stderr.is_empty(), "{output:?}");
 
     let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["schema_version"], 1);
+    let document = document["data"].clone();
     assert_eq!(document["path"], serde_json::json!(["issuectl", "new"]));
     let flags = document["flags"].as_array().unwrap();
     let issue_type = flags.iter().find(|flag| flag["long"] == "--type").unwrap();
@@ -50,6 +54,7 @@ fn nested_and_aliased_help_json_follow_claps_resolved_command() {
     let nested = run(&["body", "set", "--help", "--json"]);
     assert_eq!(nested.status.code(), Some(0), "{nested:?}");
     let nested: serde_json::Value = serde_json::from_slice(&nested.stdout).unwrap();
+    let nested = nested["data"].clone();
     assert_eq!(
         nested["path"],
         serde_json::json!(["issuectl", "body", "set"])
@@ -58,6 +63,7 @@ fn nested_and_aliased_help_json_follow_claps_resolved_command() {
     let alias = run(&["ls", "--help", "--json"]);
     assert_eq!(alias.status.code(), Some(0), "{alias:?}");
     let alias: serde_json::Value = serde_json::from_slice(&alias.stdout).unwrap();
+    let alias = alias["data"].clone();
     assert_eq!(alias["path"], serde_json::json!(["issuectl", "list"]));
 }
 
