@@ -5,6 +5,8 @@ type: improvement
 status: open
 priority: normal
 labels: [tooling, cli-canon]
+lane: cli-canon
+lane_seq: 80
 ---
 
 # cli-canon: §22 Internal layout: library-first core/cli split
