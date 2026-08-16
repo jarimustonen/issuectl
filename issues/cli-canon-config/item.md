@@ -2,7 +2,7 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: improvement
-status: in-progress
+status: done
 priority: normal
 labels: [cli-canon, tooling]
 lane: cli-canon
@@ -12,6 +12,9 @@ commits:
   summary: 'chore: start cli config inspection'
 - hash: 53883c6
   summary: 'feat: inspect effective schema configuration'
+- hash: 9c672f6
+  summary: 'fix: clarify config inspection provenance'
+closed: 2026-08-16
 ---
 
 # cli-canon: §8 config path / config show --json
