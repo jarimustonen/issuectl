@@ -124,3 +124,4 @@ _Kaikki kolme triageed + lanetettu `issuectl`-frontmatteriin (2026-08-15, `needs
 - [ ] 🐛 Piialiisan bugiraportti: update --type epic tells you to hand-edit the YAML instead of migrating… — jari via Telegram ([`intake-feature-issuectl-ff7665d266e6`](issues/intake-feature-issuectl-ff7665d266e6/item.md))
 - [ ] 🐛 Piialiisan bugiraportti: issuectl new silently truncates the derived slug — jari via Telegram ([`intake-bug-issuectl-7a79c97d9fa8`](issues/intake-bug-issuectl-7a79c97d9fa8/item.md))
 - [ ] 🐛 Piialiisan bugiraportti: note rejects --comment although its own help says it mirrors close --co… — jari via Telegram ([`intake-bug-issuectl-715670f2607f`](issues/intake-bug-issuectl-715670f2607f/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: Document how to design a lane structure: lanes are serial queues, so la… — jari via Telegram ([`intake-feature-issuectl-c633267ba553`](issues/intake-feature-issuectl-c633267ba553/item.md))
