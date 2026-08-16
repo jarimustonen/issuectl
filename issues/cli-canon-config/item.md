@@ -10,6 +10,8 @@ lane_seq: 10
 commits:
 - hash: f887ad1
   summary: 'chore: start cli config inspection'
+- hash: 53883c6
+  summary: 'feat: inspect effective schema configuration'
 ---
 
 # cli-canon: §8 config path / config show --json
