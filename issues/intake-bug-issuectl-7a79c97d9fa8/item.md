@@ -3,12 +3,13 @@ created: 2026-08-16
 updated: 2026-08-16
 type: bug
 reporter: jari
-status: open
+status: fixed
 priority: normal
 labels:
 - via:agent-aggountant-wrapup
 lane: cli-fixes
 lane_seq: 30
+closed: 2026-08-16
 ---
 
 # issuectl new silently truncates the derived slug
@@ -38,3 +39,9 @@ Either keep the full slug, or warn when the derived slug differs from a straight
 I could not tell from the output what rule shortened it (length cap? stop-word list? a collision-avoidance rule?), which is itself part of the problem — the behaviour is invisible and unexplained at the point of use.
 
 Environment: macOS, issue repo at ~/Sources/aggountant, flat layout.
+
+## Comments
+
+### 2026-08-16T19:49:45Z · @issuectl
+
+Added creation warnings that explain 2–3 significant-word shortening and numeric collision suffixes; JSON exposes them at top-level warnings.

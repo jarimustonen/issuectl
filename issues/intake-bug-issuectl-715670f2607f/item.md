@@ -3,12 +3,13 @@ created: 2026-08-16
 updated: 2026-08-16
 type: bug
 reporter: jari
-status: open
+status: fixed
 priority: normal
 labels:
 - via:agent-aggountant-wrapup
 lane: cli-fixes
 lane_seq: 50
+closed: 2026-08-16
 ---
 
 # note rejects --comment although its own help says it mirrors close --co…
@@ -44,3 +45,9 @@ The stated intent is one shared vocabulary across the family, but the family's t
 `note` accepts `--comment` as an alias for `--message` (and/or `close` accepts `--message`), so the documented shared vocabulary is real. Failing that, drop the "shares one vocabulary" claim from the help.
 
 Minor, but it cost a failed batch of three note calls in one run.
+
+## Comments
+
+### 2026-08-16T19:49:50Z · @issuectl
+
+Added note --comment and close --message aliases, plus informative bad-flag and shared-input regression coverage.
