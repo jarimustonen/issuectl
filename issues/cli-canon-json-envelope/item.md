@@ -2,11 +2,15 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: improvement
-status: in-progress
+status: done
 priority: normal
 labels: [cli-canon, tooling]
 lane: cli-canon
 lane_seq: 20
+commits:
+- hash: fafeb42
+  summary: 'feat: envelope all JSON output'
+closed: 2026-08-16
 ---
 
 # cli-canon: §10 JSON schema_version envelope + version subcommand
