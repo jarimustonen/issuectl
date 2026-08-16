@@ -7,7 +7,8 @@ status: open
 priority: normal
 labels:
 - via:agent-aggountant-wrapup
-- needs-triage
+lane: cli-fixes
+lane_seq: 50
 ---
 
 # note rejects --comment although its own help says it mirrors close --co…

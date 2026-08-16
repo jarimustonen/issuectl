@@ -7,7 +7,8 @@ status: open
 priority: normal
 labels:
 - via:agent-aggountant-wrapup
-- needs-triage
+lane: cli-fixes
+lane_seq: 30
 ---
 
 # issuectl new silently truncates the derived slug

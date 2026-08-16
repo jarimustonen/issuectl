@@ -4,10 +4,11 @@ updated: 2026-08-16
 type: bug
 reporter: jari
 status: open
-priority: normal
+priority: high
 labels:
 - via:agent-homebase-wrapup
-- needs-triage
+lane: cli-fixes
+lane_seq: 10
 ---
 
 # doctor --fix miscounts remaining findings (reports 1, lists 9)

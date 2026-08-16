@@ -5,6 +5,7 @@ type: bug
 status: open
 priority: normal
 lane: cli-fixes
+lane_seq: 20
 ---
 
 # create --help text contradicts actual default slug behaviour

@@ -7,7 +7,8 @@ status: open
 priority: normal
 labels:
 - via:agent-aggountant-wrapup
-- needs-triage
+lane: cli-fixes
+lane_seq: 40
 ---
 
 # update --type epic tells you to hand-edit the YAML instead of migrating…

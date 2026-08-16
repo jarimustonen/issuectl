@@ -4,6 +4,8 @@ updated: 2026-08-16
 type: task
 status: open
 priority: high
+lane: audit
+lane_seq: 10
 ---
 
 # Audit: no user-specific facts in a public artifact

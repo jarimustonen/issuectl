@@ -7,7 +7,8 @@ status: open
 priority: normal
 labels:
 - via:agent-aggountant-wrapup
-- needs-triage
+lane: docs
+lane_seq: 10
 ---
 
 # Document how to design a lane structure: lanes are serial queues, so la…
