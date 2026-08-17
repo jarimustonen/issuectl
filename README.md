@@ -747,8 +747,9 @@ Whenever the Claude layout is installed (`skill install`, `--force`, or
 — so the skills are discoverable under the [pi.dev](https://pi.dev) harness
 (invoked there as `/skill:issue`). The mirror is byte-identical to the
 repo-local Claude copy; only the target differs, so no body/link rewrite is
-needed. **Only `SKILL.md` is mirrored** (matching homebase `dotfiles link`) —
-the Codex prompts are not, and a `--agent codex` install writes no pi copy. The
+needed. **Only `SKILL.md` is mirrored**, matching dotfile linkers that copy
+just the skill body into the pi corpus. The Codex prompts are not mirrored, and
+a `--agent codex` install writes no pi copy. The
 repo-local Claude write is unchanged, and the pi mirror is independent: it never
 blocks a plain install from repairing a deleted Claude skill. The mirror is
 skipped when `$HOME` is unset.

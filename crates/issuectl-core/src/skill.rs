@@ -315,10 +315,9 @@ pub fn install_skill_summary_with_scaffold_force(
     force_scaffold: bool,
     pi_root: Option<&Path>,
 ) -> Result<Vec<InstallResult>> {
-    // The standalone intake skills ship in every selected agent's format —
-    // a Claude skill for `--agent claude`, a Codex prompt for `--agent codex`
-    // — the same way `/issue` does, so the fleet-apply hook distributes them
-    // to both fleets.
+    // The standalone intake skills ship in every selected agent's format,
+    // just like `/issue`, so an installer hook can distribute them to every
+    // configured agent.
     // Capacity: scaffold + per-agent (/issue + intake skills), plus the pi
     // mirrors (/issue + intake skills) when a Claude install has a pi root.
     let per_agent = 1 + IntakeSkill::ALL.len();
@@ -346,9 +345,9 @@ pub fn install_skill_summary_with_scaffold_force(
     // link rewrite is needed — only the target). This is an ADDITIONAL target
     // that never alters the repo-local Claude write.
     //
-    // Vendored filter: mirror ONLY `SKILL.md`, never companion resources —
-    // matching homebase `dotfiles link`, which copies just the skill body into
-    // the pi corpus. The Codex prompts are not mirrored (a Codex-only install
+    // Vendored filter: mirror ONLY `SKILL.md`, never companion resources,
+    // matching dotfile linkers that copy just the skill body into the pi
+    // corpus. The Codex prompts are not mirrored (a Codex-only install
     // has no Claude `SKILL.md` to mirror, and `pi_root` is `None` there
     // regardless). Each pi copy is written independently via
     // [`install_rendered_file`], so it never gates the repo-local install: a
