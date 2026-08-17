@@ -12,6 +12,8 @@ commits:
   summary: Phase A split main.rs into cmd modules
 - hash: 2b3b632ea08b10bdebaec34bad685a86e0db3f8e
   summary: Phase B split doctor.rs into doctor modules
+- hash: 5a12d3da5297ccf562dff9b845c9bb62a2206543
+  summary: Phase C split mutate/mod.rs into sibling verb modules
 ---
 
 # Split the three hot files: main.rs, doctor.rs, mutate/mod.rs
