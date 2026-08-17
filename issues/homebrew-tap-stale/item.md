@@ -72,3 +72,12 @@ The stated blocker does not hold: HOMEBREW_TAP_TOKEN has existed on this reposit
 Worth doing rather than waiting for the upstream engine: this repository's tap formula, when cargo-dist last wrote it, has the CORRECT shape — per-platform urls pointing at the published release binaries with checksums, no toolchain dependency. The upstream engine's own formula writer currently emits a source-build formula that does not install at all (filed upstream as homebrew-formula-uninstallable). So cargo-dist is the better producer here today.
 
 Upstream is separately adding verification so a lagging tap is reported instead of passing silently (upstream release-verify-homebrew-tap) — that will catch a recurrence, but it does not fix this repository's disabled publish. That part is this repository's to do.
+
+### 2026-08-17T04:06:58Z · @claude
+
+CORRECTION to the previous note — the token is far older than stated there. HOMEBREW_TAP_TOKEN was CREATED 2026-05-02 (the 2026-08-05 date in the previous note was its last-updated timestamp, not its creation). So the credential predates the 'needs a tap write token' justification by about three and a half months; it was never a real blocker at any point.
+
+The justification comment in dist-workspace.toml was last touched 2026-08-16 in a cargo-dist workflow standardization commit — i.e. it was read, built around, and preserved yesterday without being checked. That is how the tap came to sit three releases behind: not one wrong decision, but a stale justification that each subsequent pass treated as established fact.
+
+The comment also points at an owning issue that does not exist in this repository's tracker, which would have been the cheapest possible tell.
+
