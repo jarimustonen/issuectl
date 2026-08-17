@@ -127,17 +127,14 @@ issuectl ls --status in-progress
 agentti voi jatkaa `jatketaan @TODO.md`:sta. Pidä `main` puhtaana rinnakkaisten
 worktreiden takia (ks. globaali CLAUDE.md).
 
-## Piialiisan bugiraportit
+## Intake
 
-_Kaikki kolme triageed + lanetettu `issuectl`-frontmatteriin (2026-08-15, `needs-triage` poistettu). Ei enää untriaged-jonossa._
+Saapuneet bugiraportit ja feature-pyynnöt elävät `issuectl`:ssä, eivät tässä tiedostossa.
+Uusi kohde sisään `issuectl intake file`lla; jonon nostaa `/issue-intake` (tai `/stint-start`):
 
-- [x] 🐛 issuectl new: accept --lane → `cli-fixes` ([`intake-feature-issuectl-035722451473`](issues/intake-feature-issuectl-035722451473/item.md))
-- [x] 🐛 issuectl update: add --add-blocked-by → `cli-fixes` ([`intake-feature-issuectl-d93eaa168c66`](issues/intake-feature-issuectl-d93eaa168c66/item.md))
-- [x] 🐛 label: --remove --json silent no-op → landattu 0.11.0:ssa ([`intake-bug-issuectl-d6947128f6c9`](issues/intake-bug-issuectl-d6947128f6c9/item.md))
-- [x] 🐛 label: accept --add/--remove flag aliases → **suljettu `obsolete` (2026-08-16)**, duplikaatti — jo toimitettu 0.11.0:ssa `intake-bug-issuectl-d6947128f6c9`:llä ([`intake-feature-issuectl-986ecd5a58a9`](issues/intake-feature-issuectl-986ecd5a58a9/item.md))
-- [x] 🐛 doctor --fix miscounts remaining findings (reports 1, lists 9) → **korjattu 0.14.0** ([`intake-bug-issuectl-06c42e2d1123`](issues/intake-bug-issuectl-06c42e2d1123/item.md))
-- [x] 🐛 update --type epic tells you to hand-edit the YAML instead of migrating… → **korjattu 0.14.0** ([`intake-feature-issuectl-ff7665d266e6`](issues/intake-feature-issuectl-ff7665d266e6/item.md))
-- [x] 🐛 issuectl new silently truncates the derived slug → **korjattu 0.14.0** ([`intake-bug-issuectl-7a79c97d9fa8`](issues/intake-bug-issuectl-7a79c97d9fa8/item.md))
-- [x] 🐛 note rejects --comment although its own help says it mirrors close --co… → **korjattu 0.14.0** ([`intake-bug-issuectl-715670f2607f`](issues/intake-bug-issuectl-715670f2607f/item.md))
-- [x] 🐛 Document how to design a lane structure: lanes are serial queues, so la… → **korjattu 0.14.0** ([`intake-feature-issuectl-c633267ba553`](issues/intake-feature-issuectl-c633267ba553/item.md))
-- [ ] 🐛 apply --help does not document body_ops operation shapes → triagattu + hyväksytty 2026-08-17, lane `cli-fixes` seq 10 ([`intake-feature-issuectl-77792e73735b`](issues/intake-feature-issuectl-77792e73735b/item.md))
+```bash
+issuectl intake queue
+issuectl ls --status open --label needs-triage
+```
+
+Hyväksytty kohde lanetetaan `issuectl`-frontmatteriin ja näkyy sen jälkeen `issuectl dag`issa.
