@@ -1,13 +1,14 @@
 ---
 created: 2026-08-16
-updated: 2026-08-16
+updated: 2026-08-17
 type: feature
 reporter: jari
 status: open
 priority: normal
 labels:
 - via:agent-homebase-wrapup
-- needs-triage
+lane: cli-fixes
+lane_seq: 10
 ---
 
 # apply --help does not document body_ops operation shapes
