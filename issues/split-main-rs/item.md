@@ -7,6 +7,9 @@ priority: high
 lane: cli-fixes
 lane_seq: 5
 collision: [crates/issuectl-core/src/doctor.rs, crates/issuectl-core/src/mutate/mod.rs, crates/issuectl/src/main.rs]
+commits:
+- hash: b4b8ea1ccad48af0a908d6ba76908d577f40c07e
+  summary: Phase A split main.rs into cmd modules
 ---
 
 # Split the three hot files: main.rs, doctor.rs, mutate/mod.rs
