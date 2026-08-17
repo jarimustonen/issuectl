@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-17
+
+### Changed
+- **`skill install --force` no longer overwrites a repo-authored `issues/AGENTS.md`.** When the
+  existing scaffold differs from the bundled template, `--force` now preserves it and reports it
+  as skipped; the new `--force-scaffold` flag is the explicit opt-in to regenerate it. A missing
+  scaffold is still created, and a byte-identical one is still refreshed silently.
+
+### Fixed
+- **`intake queue` now agrees with the intake transitions.** Legacy label-based items
+  (`status: open` + `needs-triage` label) no longer masquerade as `untriaged` queue rows that
+  every `intake <disposition>` then refuses. The queue is strict on status, as the `/issue-intake`
+  skill documents — and when legacy items exist it emits a warning (human and `--json`
+  `warnings`) naming the count and the remedy: `issuectl intake migrate --apply`, which admits
+  them to the transition set.
+- **`apply --help` documents the `body_ops` operation shapes.** Each operation
+  (`toggle_checkbox`, `append_note`) is shown with its actual fields in a minimal example patch,
+  and a test feeds the help example through the real patch parser so help and code cannot drift.
+- **`dag`'s intra-lane ordering is no longer silent.** The deliberate precedence — `blocked_by`
+  topology, then priority, then `lane_seq`, then stable tie-breaks — is now stated in
+  `dag --help`, the human output, and `docs/design/lane-design.md`.
+- Maintainer-specific infrastructure references were removed from the public source and docs.
+
 ### Internal
 - Split the CLI, doctor, and mutation hot files into family and verb modules to reduce worktree collisions.
 
