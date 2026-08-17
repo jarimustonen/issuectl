@@ -1,13 +1,15 @@
 ---
 created: 2026-08-10
-updated: 2026-08-15
+updated: 2026-08-17
 type: bug
-status: open
+status: fixed
 priority: high
 lane: blocked-upstream
 lane_seq: 90
 labels:
 - blocked:upstream-ossctl
+closed: 2026-08-17
+closed_by: claude-stint
 ---
 
 # ossctl release cut does not actually publish to crates.io (real-cut no-op); use manual cargo publish until fixed
@@ -84,3 +86,29 @@ the manual local publish is the only working route right now.
 ### 2026-08-10T14:42:30Z · @agent-claude
 
 Root-cause fix tracked upstream in the ossctl repo: @release-cut-publish-noop (bug, high). The stale-lock recovery friction hit during the same cut is upstream @release-abandon-break-stale-lock. This issuectl-side issue stays as the release-path blocker: once ossctl ships the fix and a real cut is verified end-to-end, remove the reminder and confirm the ossctl path here.
+
+## Resolution
+
+### 2026-08-17T05:43:22Z · @claude-stint
+
+Fixed upstream in ossctl 0.6.1 (commit 2846d66) and verified on this repo's 0.14.1 cut.
+
+The reported symptom was that 'ossctl release cut' did not actually publish: the publish phase failed with 'core not visible on index within 300s' and nothing was uploaded, forcing the manual 'cargo publish -p issuectl-core' -> wait -> '-p issuectl' -> tag fallback used for 0.12.0, 0.13.0 and 0.14.0.
+
+On 0.14.1 the engine path published for real:
+
+  -> publish
+    published: rust:issuectl-core@0.14.1
+    published: rust:issuectl@0.14.1
+  ✓ publish complete
+  -> tag
+    tag created / pushed: v0.14.1
+
+crates.io now serves both crates at 0.14.1 in the correct core-before-binary order, so the manual publish fallback documented in TODO.md is no longer required.
+
+Two SEPARATE 0.6.1 defects were hit during the same cut and are filed upstream rather than here, since neither is this repo's bug:
+
+- ossctl @release-bump-plan-uncuttable — 'release plan --bump' seals a plan that 'release cut' always rejects as stale, and the rejection suggests a current_plan_id that means 'republish the version already on the registry'. Following that suggestion attempted a republish of 0.14.0; only ossctl's byte-identity guard stopped it. Nothing landed. Workaround: bump by hand, then plan without --bump.
+- ossctl @release-tag-preempts-cargo-dist — the tag phase pre-creates the GitHub Release, so cargo-dist's host job collides and the Homebrew publish is skipped while the cut still reports success.
+
+Neither blocks the publish path this issue was about, but the first means '--bump' must be avoided and the second means a cut must be checked for release assets afterwards. TODO.md's release-lore section should be updated to reflect that the engine path now works, with those two caveats.

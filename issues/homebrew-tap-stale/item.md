@@ -2,10 +2,15 @@
 created: 2026-08-16
 updated: 2026-08-17
 type: bug
-status: open
+status: fixed
 priority: high
 lane: release-infra
 lane_seq: 10
+closed: 2026-08-17
+closed_by: claude-stint
+commits:
+- hash: 068df55
+  summary: 'fix(dist): enable Homebrew formula publishing on tag'
 ---
 
 # Homebrew tap is three releases stale (0.11.0) — cargo-dist homebrew publish is disabled
@@ -81,3 +86,18 @@ The justification comment in dist-workspace.toml was last touched 2026-08-16 in 
 
 The comment also points at an owning issue that does not exist in this repository's tracker, which would have been the cheapest possible tell.
 
+## Resolution
+
+### 2026-08-17T05:43:11Z · @claude-stint
+
+Fixed and verified end-to-end on the 0.14.1 release.
+
+Root cause was dist-workspace.toml: the homebrew installer was disabled with the comment that it 'needs a tap write token'. HOMEBREW_TAP_TOKEN had in fact been configured on the repo long before (created 2026-05-02), so the stated blocker was stale. Added the homebrew installer, tap = jarimustonen/homebrew-issuectl, and publish-jobs = [homebrew], then regenerated release.yml with 'dist generate'.
+
+Deliberately did NOT run 'ossctl dist generate' (the nominal owner via /oss-dist): it would have stripped this repo's self-hosted macOS ARM64 runner override, which is load-bearing (the 'hauis' runner builds macOS in ~67s versus the 45+ min hosted-queue allocation that motivated the override). Edited the config minimally by hand instead; the override survived.
+
+One further blocker surfaced during the cut: ossctl's tag phase pre-created an empty GitHub Release, so cargo-dist's host job failed with 'a release with the same tag name already exists' and publish-homebrew-formula was skipped. Deleted the asset-less release object (git tag untouched) and re-ran; host and publish-homebrew-formula then both succeeded. Filed upstream as ossctl @release-tag-preempts-cargo-dist.
+
+Verified after the fix: tap formula at version 0.14.1 pointing at v0.14.1 assets; GitHub Release v0.14.1 carries 15 assets. The tap had been stranded at 0.11.0 across 0.12.0, 0.13.0 and 0.14.0.
+
+Follow-up left open deliberately: the OSS-RELEASE.md contract still has no distribution block (contract show reports homebrew_tap: null), so ossctl's own homebrew leg is inert and the prose claim that cargo-dist publishes the tap was only made true by this dist-workspace.toml change. Also still to correct: TODO.md's release lore and AGENTS.md's homebrew-leg claim.
