@@ -138,3 +138,7 @@ issuectl ls --status open --label needs-triage
 ```
 
 Hyväksytty kohde lanetetaan `issuectl`-frontmatteriin ja näkyy sen jälkeen `issuectl dag`issa.
+
+## Piialiisan bugiraportit
+
+- [ ] 🐛 Piialiisan bugiraportti: Personal-setup references leak into the public repo (fleet-apply, homeb… — jari via Telegram ([`intake-bug-issuectl-bf2580033c3a`](issues/intake-bug-issuectl-bf2580033c3a/item.md))
