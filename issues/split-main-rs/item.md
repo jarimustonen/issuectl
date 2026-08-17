@@ -2,11 +2,11 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: chore
-status: in-progress
+status: done
 priority: high
 lane: cli-fixes
 lane_seq: 5
-collision: [crates/issuectl-core/src/doctor.rs, crates/issuectl-core/src/mutate/mod.rs, crates/issuectl/src/main.rs]
+collision: [crates/issuectl-core/src/mutate/mod.rs, crates/issuectl/src/cmd/mod.rs, crates/issuectl-core/src/doctor/mod.rs]
 commits:
 - hash: b4b8ea1ccad48af0a908d6ba76908d577f40c07e
   summary: Phase A split main.rs into cmd modules
@@ -14,6 +14,9 @@ commits:
   summary: Phase B split doctor.rs into doctor modules
 - hash: 5a12d3da5297ccf562dff9b845c9bb62a2206543
   summary: Phase C split mutate/mod.rs into sibling verb modules
+- hash: afe73c48cf4cdc108423c97c9ce86ecbc3c0e70c
+  summary: Phase D narrow hot-file guidance and collision tokens
+closed: 2026-08-17
 ---
 
 # Split the three hot files: main.rs, doctor.rs, mutate/mod.rs
