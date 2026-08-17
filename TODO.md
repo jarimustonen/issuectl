@@ -114,3 +114,7 @@ issuectl ls --status open --label needs-triage
 
 Hyväksytty kohde lanetetaan `issuectl`-frontmatteriin ja näkyy sen jälkeen
 `issuectl dag`issa.
+
+## Piialiisan bugiraportit
+
+- [ ] 🐛 Piialiisan bugiraportti: issue skill: document update --lane/--lane-seq flags — jari via Telegram ([`intake-feature-issuectl-42403ae544e3`](issues/intake-feature-issuectl-42403ae544e3/item.md))
