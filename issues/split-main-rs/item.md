@@ -6,7 +6,10 @@ status: open
 priority: high
 lane: cli-fixes
 lane_seq: 5
+collision: [crates/issuectl-core/src/doctor.rs, crates/issuectl-core/src/mutate/mod.rs, crates/issuectl/src/main.rs]
 ---
+
+# Split the three hot files: main.rs, doctor.rs, mutate/mod.rs
 
 ## Why this is a scheduling issue, not a cleanliness one
 
