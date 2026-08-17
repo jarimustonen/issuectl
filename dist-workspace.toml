@@ -16,19 +16,19 @@ cargo-dist-version = "0.28.2"
 # CI backend.
 ci = "github"
 # Installer scripts generated as release assets: curl-to-shell (Unix),
-# iwr-to-powershell (Windows), and the Homebrew formula pushed to the tap below.
+# and the Homebrew formula pushed to the tap below.
 # Homebrew auto-publish was previously disabled here pending a tap write token;
 # `HOMEBREW_TAP_TOKEN` is now configured on this repo, so the formula is published
 # by the tag-triggered workflow. Before that, the tap sat at 0.11.0 while
 # crates.io and the GitHub Releases advanced to 0.14.0 (@homebrew-tap-stale).
-installers = ["shell", "powershell", "homebrew"]
+installers = ["shell", "homebrew"]
 # The external tap repository the formula is written to. Its write token is the
 # `HOMEBREW_TAP_TOKEN` repo secret — never inline a token here.
 tap = "jarimustonen/homebrew-issuectl"
 # Publish the formula from the tag-triggered workflow, after the GitHub Release
 # assets exist.
 publish-jobs = ["homebrew"]
-# Cross-platform binary matrix (Rust target-triple syntax): macOS (arm64), Linux (arm64 + x86_64), and Windows x86_64. The Linux targets use
+# Cross-platform binary matrix (Rust target-triple syntax): macOS (arm64) and Linux (arm64 + x86_64). The Linux targets use
 # `musl`, not `gnu`, so the binaries are statically linked and run on any distro
 # regardless of its glibc vintage — issuectl is pure Rust with no C dependencies,
 # so musl is a clean fit and avoids a `GLIBC_x.y not found` cliff on older LTS
@@ -37,7 +37,6 @@ targets = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-musl",
     "x86_64-unknown-linux-musl",
-    "x86_64-pc-windows-msvc",
 ]
 # NOTE: no `x86_64-apple-darwin`. The macOS build runs on a self-hosted macOS ARM64
 # runner (below), which uses Homebrew Rust (no rustup) and so cannot cross-compile

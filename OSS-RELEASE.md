@@ -6,6 +6,7 @@ ecosystems: [rust]
 targets:
   - {ecosystem: rust, package: issuectl, registry: crates.io, adapter: cargo-publish}
   - {ecosystem: rust, package: issuectl-core, registry: crates.io, adapter: cargo-publish}
+  - {ecosystem: rust, package: issuectl, registry: gh-releases, adapter: cargo-dist}
 versioning: semver
 changelog: {mode: curated, source: manual}
 conventional_commits: true
