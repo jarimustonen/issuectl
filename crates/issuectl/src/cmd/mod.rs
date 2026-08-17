@@ -1047,8 +1047,22 @@ pub(crate) enum Command {
     /// Apply a multi-field YAML patch in a single transaction.
     /// The file declares `slug:` plus any combination of built-in
     /// fields, `custom_fields:`, label/related list ops, commits,
-    /// and `body_ops:` (toggle_checkbox / append_note) — all
-    /// applied under one flock with one schema-validation pass.
+    /// and `body_ops:` (`set_checkbox` / `append_note`), all applied
+    /// under one flock with one schema-validation pass.
+    ///
+    /// Minimal `body_ops` patch covering every operation:
+    ///
+    /// ```yaml
+    /// slug: my-issue
+    /// body_ops:
+    ///   - set_checkbox:
+    ///       match: "tests passing"
+    ///       checked: true
+    ///   - append_note:
+    ///       author: ci-bot
+    ///       message: "all checks green"
+    ///       section: agent_runs # optional; defaults to comments
+    /// ```
     ///
     /// UNLIKE the single-field verbs (`update`/`set`/`note`/…), where
     /// `--expected-version` is optional under `--json`, this
@@ -1056,6 +1070,7 @@ pub(crate) enum Command {
     /// in the patch file when invoked with `--json`: a multi-field
     /// transaction assembled from an earlier `show` is exactly the
     /// read-modify-write shape a stale token protects.
+    #[command(verbatim_doc_comment)]
     Apply {
         /// Path to the YAML patch file
         #[arg(value_name = "PATCH")]

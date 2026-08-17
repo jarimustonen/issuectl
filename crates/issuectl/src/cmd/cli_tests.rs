@@ -1446,6 +1446,42 @@ mod tests {
     // ── parse_apply_patch (round-2 #4) ────────────────────────────
 
     #[test]
+    fn apply_help_body_ops_example_parses_as_a_patch() {
+        let root = Cli::command();
+        let apply = root
+            .get_subcommands()
+            .find(|command| command.get_name() == "apply")
+            .unwrap();
+        let description = apply
+            .get_long_about()
+            .expect("apply must have long help")
+            .to_string();
+        let example = description
+            .split_once("```yaml\n")
+            .expect("apply help must contain a YAML example")
+            .1
+            .split_once("\n```")
+            .expect("apply help YAML example must have a closing fence")
+            .0;
+
+        let (slug, req) = parse_apply_patch(example, false).unwrap();
+        assert_eq!(slug, "my-issue");
+        assert_eq!(req.body_ops.len(), 2);
+        assert!(matches!(
+            &req.body_ops[0],
+            mutate::BodyOp::SetCheckbox(op)
+                if op.match_substring == "tests passing" && op.checked
+        ));
+        assert!(matches!(
+            &req.body_ops[1],
+            mutate::BodyOp::AppendNote(op)
+                if op.author == "ci-bot"
+                    && op.message == "all checks green"
+                    && op.section == mutate::NoteSection::AgentRuns
+        ));
+    }
+
+    #[test]
     fn parse_apply_patch_rejects_null_expected_version_under_json() {
         let yaml = "slug: some-issue\nexpected_version: null\npriority: high\n";
         let err = parse_apply_patch(yaml, true).unwrap_err();
