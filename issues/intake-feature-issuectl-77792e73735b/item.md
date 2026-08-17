@@ -7,8 +7,9 @@ status: open
 priority: normal
 labels:
 - via:agent-homebase-wrapup
-lane: cli-fixes
+lane: help-docs
 lane_seq: 10
+collision: [crates/issuectl/src/cmd/write.rs]
 ---
 
 # apply --help does not document body_ops operation shapes

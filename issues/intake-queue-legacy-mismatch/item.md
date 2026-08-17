@@ -4,8 +4,9 @@ updated: 2026-08-17
 type: bug
 status: open
 priority: normal
-lane: cli-fixes
-lane_seq: 20
+lane: intake
+lane_seq: 10
+collision: [crates/issuectl-core/src/mutate/intake.rs, templates]
 ---
 
 # intake queue lists legacy label-based items that every intake transition then refuses

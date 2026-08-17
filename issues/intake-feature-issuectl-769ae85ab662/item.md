@@ -3,11 +3,12 @@ created: 2026-08-17
 updated: 2026-08-17
 type: feature
 reporter: jari
-status: open
+status: obsolete
 priority: normal
 labels:
 - via:agent-homebase-wrapup
 - needs-triage
+closed: 2026-08-17
 ---
 
 # collision frontmatter field is documented but not implemented in update
@@ -63,3 +64,9 @@ guessing wrong first. Mentioned for context, not worth its own issue.
 ## Environment
 
 issuectl as installed on macOS arm64, 2026-08-17.
+
+## Comments
+
+### 2026-08-17T17:13:03Z · @agent-stint
+
+Triage: obsolete against issuectl 0.14.x — update has had --add-collision / --remove-collision (repeatable, additive+removing list ops) since the lane-fields work; create mirrors them at creation time. The reporter probed --collision and 'set collision', which indeed do not exist; the flag spelling is add/remove. The .issuectl/AGENTS.md in the reporting repo that documents the field is repo-authored, not issuectl's scaffold (issuectl's agents.rs scaffold does not mention collision). No code change needed.
