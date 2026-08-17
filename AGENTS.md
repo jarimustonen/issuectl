@@ -275,13 +275,14 @@ project's operating policy.
     this and it is easy to miss locally: broken intra-doc links fail the
     `docs` job even when tests pass. Run it before landing any unit that
     touches doc comments.
-- **Hot files (sequence, do not parallelise).** `crates/issuectl/src/main.rs`
-  (all `cmd_*` handlers + clap structs), `crates/issuectl-core/src/mutate/`
-  (every write path routes here), `crates/issuectl-core/src/doctor.rs`,
-  `crates/issuectl-core/src/schema.rs`, and the six skill templates under
-  `crates/issuectl-core/templates/` (kept in sync per the rule above). Two
-  worktrees editing any one of these will collide on rebase. (The
-  `@split-main-rs` lane exists to shrink this list.)
+- **Hot files (sequence only when the same file overlaps).** Two worktrees
+  editing the same `crates/issuectl/src/cmd/<family>.rs` collide; different
+  command families are parallel-safe. The same rule applies to
+  `crates/issuectl-core/src/mutate/mod.rs` plus the specific mutation verb
+  file, and `crates/issuectl-core/src/doctor/mod.rs` plus the specific doctor
+  module. `crates/issuectl-core/src/schema.rs` and the six skill templates
+  under `crates/issuectl-core/templates/` remain hot files (the templates are
+  kept in sync per the rule above).
 - **Test-account reset: n/a.** No external services or test accounts; tests
   are hermetic (`cargo test` uses tempdirs). No reset step.
 - **Parallelism preference: launch all disjoint lanes at once.** When the

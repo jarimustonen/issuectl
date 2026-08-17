@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Internal
+- Split the CLI, doctor, and mutation hot files into family and verb modules to reduce worktree collisions.
+
 ## [0.14.1] - 2026-08-17
 
 ### Fixed
