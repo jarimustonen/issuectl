@@ -118,3 +118,4 @@ Hyväksytty kohde lanetetaan `issuectl`-frontmatteriin ja näkyy sen jälkeen
 ## Piialiisan bugiraportit
 
 - [ ] 🐛 Piialiisan bugiraportti: issue skill: document update --lane/--lane-seq flags — jari via Telegram ([`intake-feature-issuectl-42403ae544e3`](issues/intake-feature-issuectl-42403ae544e3/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: Retire the deferred label; doctor must flag residual uses — jari via Telegram ([`intake-feature-issuectl-4f9dbc60a05e`](issues/intake-feature-issuectl-4f9dbc60a05e/item.md))
