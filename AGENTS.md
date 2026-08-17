@@ -217,13 +217,28 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
       published on crates.io under that name; renaming breaks the
       published name for cosmetic conformance.
     What §22 *did* yield is the `Clock` seam (below).
-  - **Verify a canon-audit finding before acting on it.** The
-    `project-canon review --assume-defaults` pass that filed
-    `@cli-canon-s22` reported *"no `crates/` directory — no core/cli
-    split"*, which was simply false — the split predates the audit and
-    core was already clap-free. Audit findings are recommendations
-    produced from a partial read; confirm the "Observed:" claim against
-    the tree before you lane work off it.
+    See the repo-wide *verify-before-acting* rule below — the finding that
+    filed `@cli-canon-s22` was itself wrong.
+- **Verify a reported finding against the tree before you act on it — a
+  scan, audit, or pre-check is a recommendation, not evidence.** Any
+  finding produced from a partial read (a conformance audit, a triage
+  pre-scan, a review pass, another agent's summary) states a claim; confirm
+  the claim yourself before you lane work off it, scope work down because
+  of it, or report its conclusion onward. This has now been wrong in **both
+  directions**, so neither a positive nor a negative finding is
+  self-certifying:
+  - **False positive.** `project-canon review --assume-defaults` filed
+    `@cli-canon-s22` reporting *"no `crates/` directory — no core/cli
+    split"*. Simply false: the split long predates the audit and core was
+    already clap-free. Acting on it would have meant a pointless
+    restructure.
+  - **False negative.** The triage pre-scan for `@audit-no-user-specifics`
+    concluded the public package *"looks clean"*. The audit worker, briefed
+    to redo the sweep itself rather than trust the hint, found real
+    maintainer-specific defaults and examples. Accepting the pre-scan as
+    the result would have shipped them.
+  Practical consequence when briefing a worker: tell it to **redo the
+  check**, and say explicitly that any prior scan is a hint, not a result.
 - **`blocked_by` stays in `extra`; its JSON top-level is a *canonical
   projection*, not a typed field.** Unlike `closed_by` (typed) or
   `related`/`labels` (plain-serialized), `blocked_by` is deliberately
@@ -472,9 +487,12 @@ policy.
     delete vX.Y.Z --yes`; the git tag is untouched), then `gh run rerun <id>
     --failed`. Upstream: ossctl `@release-tag-preempts-cargo-dist`.
   - **Post-cut verification is mandatory**, since the failure above is silent:
-    `gh release view vX.Y.Z --json assets --jq '.assets|length'` (expect ~15,
-    **not 0**) and confirm the Homebrew tap formula advanced to the new version.
-    The tap sat at 0.11.0 through three releases because nobody checked
+    `gh release view vX.Y.Z --json assets --jq '.assets|length'` must be
+    **non-zero** (compare against the previous tag rather than a fixed number —
+    the count tracks `dist-workspace.toml`'s target/installer set, which
+    changes: Windows + the powershell installer were dropped 2026-08-17), and
+    confirm the Homebrew tap formula advanced to the new version. The tap sat
+    at 0.11.0 through three releases because nobody checked
     (`@homebrew-tap-stale`).
 - **Homebrew publishing is cargo-dist's, driven by `dist-workspace.toml`.** The
   `homebrew` installer + `tap` + `publish-jobs = ["homebrew"]` live there, and

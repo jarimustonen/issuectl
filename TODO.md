@@ -18,11 +18,19 @@ clippy + `cargo doc` puhtaat). **`origin/main` == `main` (pushattu, `7f0cc83`).*
 crates.io (core + bin), GitHub Release 15 assetia, **ja Homebrew tap vihdoin ajan tasalla (0.14.1)**.
 `Cargo.toml == 0.14.1`. Ei ajossa olevia workereita.
 
-**DAG (2 spawnable headia, valmis rinnakkaisajoon):**
-- **`cli-fixes`** (syvyys 2, sarjassa — `main.rs`): `@intake-feature-issuectl-77792e73735b` (seq 10) →
-  `@intake-queue-legacy-mismatch` (seq 20)
+**DAG:**
+- **`cli-fixes`** (syvyys 3, sarjassa — `main.rs`): **`@split-main-rs` (seq 5, kärjessä)** →
+  `@intake-feature-issuectl-77792e73735b` (seq 10) → `@intake-queue-legacy-mismatch` (seq 20)
 - **`release-infra`** (syvyys 1): `@ossctl-cut-no-publish` — **uudelleen avattu verifiointiportiksi**, ei työtä
   vaan tarkistuslista seuraavaan cuttiin
+- **Triagaamatta (`needs-triage`, DAGin ulkopuolella):** `@intake-bug-issuectl-bad8e7d6118a` (`skill install
+  --force` ylikirjoittaa repon oman sisällön) ja `@intake-bug-issuectl-bf2580033c3a` (henkilökohtaiset
+  setup-viittaukset vuotavat julkiseen repoon — **jatkoa juuri suljetulle `@audit-no-user-specifics`:lle**)
+
+**⚠️ `@split-main-rs` ajetaan YKSIN.** Se on repon maksimaalisesti törmäävä muutos (9278 riviä, 58 `cmd_*`
+-handleria) ja mitätöi jokaisen `main.rs`:ää koskevan lennossa olevan haaran. Se on tarkoituksella lanen
+kärjessä: kun handlerit ovat omissa moduuleissaan, eri komentoperheitä koskevat issuet lakkaavat törmäämästä
+ja lanen loppu voi ajaa rinnakkain. Pilkkomisen jälkeen kannattaa kapeuttaa `AGENTS.md`:n hot-file-lista.
 
 **Tämä sessio: koko `cli-fixes`-lane (7 issueta) läpi + KAKSI julkaisua + Homebrew-jakelu korjattu.**
 Ensimmäinen aalto ajoi kolme lanea rinnakkain; loput sarjassa `main.rs`-collisionin takia. Jokainen unitti
@@ -59,8 +67,8 @@ reviewattu (`/llm-review` + `/assess-findings`) + täysi green gate.
   tuleva `/issue-intake`-skill väittää nimenomaan päinvastaista → agentti kutsuu `accept`ia ja saa kovan virheen.
   Admitointi vaatii tällä hetkellä `label --remove needs-triage` eli CLI:n intake-pinnan ohituksen.
 
-**Seuraava askel:** `cli-fixes` sarjassa (`@intake-feature-issuectl-77792e73735b` → `@intake-queue-legacy-mismatch`).
-GLOBAL HEAD = `@intake-feature-issuectl-77792e73735b`.
+**Seuraava askel:** `@split-main-rs` yksin (ks. varoitus yllä), sitten loput `cli-fixes`-lanesta.
+GLOBAL HEAD = `@split-main-rs`. Triagaa myös kaksi uutta intake-bugia.
 
 **⚠️ INTAKE-PREDIKAATTI-SUDENKUOPPA:** `/stint-handoff`:n dokumentoitu detect-predikaatti on `open ∧ via:telegram ∧
 needs-triage`, mutta intakea saapuu myös `via:agent-*`-provenanssilla (sisarrepojen wrap-upit). Pelkkä
