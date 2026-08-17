@@ -159,3 +159,4 @@ Hyväksytty kohde lanetetaan `issuectl`-frontmatteriin ja näkyy sen jälkeen `i
 - [ ] 🐛 Piialiisan bugiraportti: Personal-setup references leak into the public repo (fleet-apply, homeb… — jari via Telegram ([`intake-bug-issuectl-bf2580033c3a`](issues/intake-bug-issuectl-bf2580033c3a/item.md))
 - [ ] 🐛 Piialiisan bugiraportti: skill install --force silently overwrites repo-authored content in issu… — jari via Telegram ([`intake-bug-issuectl-bad8e7d6118a`](issues/intake-bug-issuectl-bad8e7d6118a/item.md))
 - [ ] 🐛 Piialiisan bugiraportti: dag lane ordering: priority silently outranks lane_seq within a lane — jari via Telegram ([`intake-bug-issuectl-fab0edad2e42`](issues/intake-bug-issuectl-fab0edad2e42/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: collision frontmatter field is documented but not implemented in update — jari via Telegram ([`intake-feature-issuectl-769ae85ab662`](issues/intake-feature-issuectl-769ae85ab662/item.md))
