@@ -242,7 +242,10 @@ pub fn run(root: &Path, opts: InitOptions, json: bool) -> Result<()> {
             status: match r.outcome {
                 skill::InstallOutcome::Created => ArtifactStatus::Created,
                 skill::InstallOutcome::Overwritten => ArtifactStatus::Overwritten,
-                skill::InstallOutcome::AlreadyExists => ArtifactStatus::AlreadyExists,
+                skill::InstallOutcome::AlreadyExists
+                | skill::InstallOutcome::RepoAuthoredContentPreserved => {
+                    ArtifactStatus::AlreadyExists
+                }
             },
         })
         .collect();

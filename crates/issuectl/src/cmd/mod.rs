@@ -1867,9 +1867,13 @@ pub(crate) enum SkillAction {
         #[arg(short = 'a', long, default_value = "claude", value_parser = PossibleValuesParser::new(["claude", "codex", "all"]))]
         agent: String,
 
-        /// Overwrite existing files
+        /// Overwrite existing skill bodies. A diverged issues/AGENTS.md is preserved.
         #[arg(long)]
         force: bool,
+
+        /// Regenerate issues/AGENTS.md even when it contains repo-authored content.
+        #[arg(long = "force-scaffold")]
+        force_scaffold: bool,
     },
     /// Print the skill template to stdout (preview before installing)
     Print {

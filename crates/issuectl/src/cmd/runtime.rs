@@ -856,7 +856,11 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
         },
         Command::Skill { action } => match action {
             SkillAction::List => cmd_skill_list(json_output),
-            SkillAction::Install { agent, force } => cmd_skill_install(&agent, force),
+            SkillAction::Install {
+                agent,
+                force,
+                force_scaffold,
+            } => cmd_skill_install(json_output, &agent, force, force_scaffold),
             SkillAction::Print { agent } => cmd_skill_print(&agent),
             SkillAction::PiStatus => cmd_skill_pi_status(json_output),
             SkillAction::PiPrune { force } => cmd_skill_pi_prune(json_output, force),

@@ -263,17 +263,20 @@ impl IntakeSkill {
 /// Outcome of installing a single skill-related file. `init` and other
 /// orchestrators consume this to report per-file status without
 /// re-running file-existence checks of their own.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InstallOutcome {
     /// File did not exist; we wrote it.
     Created,
-    /// File existed and `--force` was supplied; we overwrote it.
+    /// File existed and the applicable force flag was supplied; we overwrote it.
     Overwritten,
     /// File already existed and `--force` was not supplied.
     AlreadyExists,
+    /// The existing scaffold differs from the bundled scaffold and was preserved.
+    RepoAuthoredContentPreserved,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct InstallResult {
     pub path: PathBuf,
     pub label: String,
@@ -300,6 +303,18 @@ pub fn install_skill_summary(
     force: bool,
     pi_root: Option<&Path>,
 ) -> Result<Vec<InstallResult>> {
+    install_skill_summary_with_scaffold_force(repo_root, agents, force, false, pi_root)
+}
+
+/// Like [`install_skill_summary`], with an explicit override for regenerating
+/// a diverged, repo-authored `issues/AGENTS.md` scaffold.
+pub fn install_skill_summary_with_scaffold_force(
+    repo_root: &Path,
+    agents: &[Agent],
+    force: bool,
+    force_scaffold: bool,
+    pi_root: Option<&Path>,
+) -> Result<Vec<InstallResult>> {
     // The standalone intake skills ship in every selected agent's format —
     // a Claude skill for `--agent claude`, a Codex prompt for `--agent codex`
     // — the same way `/issue` does, so the fleet-apply hook distributes them
@@ -313,7 +328,7 @@ pub fn install_skill_summary(
         0
     };
     let mut results = Vec::with_capacity(agents.len() * per_agent + 1 + pi_slots);
-    results.push(install_issues_scaffold(repo_root, force)?);
+    results.push(install_issues_scaffold(repo_root, force, force_scaffold)?);
     for agent in agents {
         results.push(install_agent_template(repo_root, *agent, force)?);
     }
@@ -416,7 +431,13 @@ pub fn install_skill(
     pi_root: Option<&Path>,
 ) -> Result<()> {
     let results = install_skill_summary(repo_root, agents, force, pi_root)?;
-    for r in &results {
+    print_skill_install_summary(repo_root, agents, &results);
+    Ok(())
+}
+
+/// Print a human-readable summary for completed skill installation results.
+pub fn print_skill_install_summary(repo_root: &Path, agents: &[Agent], results: &[InstallResult]) {
+    for r in results {
         print_install_result(repo_root, r);
     }
 
@@ -438,13 +459,12 @@ pub fn install_skill(
     // on the `pi_root.is_some() && claude` preconditions (see
     // [`pi_hint_should_print`]): the block can be skipped or partial after
     // those hold, and the hint copy claims "the same skills are mirrored".
-    if pi_hint_should_print(&results) {
+    if pi_hint_should_print(results) {
         println!(
             "  The same skills are mirrored into ~/.pi/agent/skills for pi.dev (/skill:issue)."
         );
     }
     println!("  Or use `issuectl list` to browse issues from the command line.");
-    Ok(())
 }
 
 /// Whether [`install_skill`] should print the pi.dev "skills mirrored" hint.
@@ -494,6 +514,12 @@ pub fn print_install_result(repo_root: &Path, r: &InstallResult) {
             println!("  ~ {display} already exists (use --force to overwrite)");
             return;
         }
+        InstallOutcome::RepoAuthoredContentPreserved => {
+            println!(
+                "  ~ {display} skipped (repo-authored content preserved; use --force-scaffold to regenerate)"
+            );
+            return;
+        }
     };
     if r.label.is_empty() {
         println!("  ✓ {verb} {display}");
@@ -502,7 +528,11 @@ pub fn print_install_result(repo_root: &Path, r: &InstallResult) {
     }
 }
 
-fn install_issues_scaffold(repo_root: &Path, force: bool) -> Result<InstallResult> {
+fn install_issues_scaffold(
+    repo_root: &Path,
+    force: bool,
+    force_scaffold: bool,
+) -> Result<InstallResult> {
     let issues_dir = repo_root.join("issues");
     let agents_md = issues_dir.join("AGENTS.md");
 
@@ -511,17 +541,31 @@ fn install_issues_scaffold(repo_root: &Path, force: bool) -> Result<InstallResul
             .with_context(|| format!("cannot create {}", issues_dir.display()))?;
     }
 
-    let existed = agents_md.exists();
-    let outcome = if force || !existed {
-        std::fs::write(&agents_md, ISSUES_AGENTS_TEMPLATE)
-            .with_context(|| format!("cannot write {}", agents_md.display()))?;
-        if existed {
-            InstallOutcome::Overwritten
-        } else {
+    let existing = if agents_md.exists() {
+        Some(
+            std::fs::read(&agents_md)
+                .with_context(|| format!("cannot read {}", agents_md.display()))?,
+        )
+    } else {
+        None
+    };
+    let outcome = match existing.as_deref() {
+        None => {
+            std::fs::write(&agents_md, ISSUES_AGENTS_TEMPLATE)
+                .with_context(|| format!("cannot write {}", agents_md.display()))?;
             InstallOutcome::Created
         }
-    } else {
-        InstallOutcome::AlreadyExists
+        Some(content)
+            if force_scaffold || (force && content == ISSUES_AGENTS_TEMPLATE.as_bytes()) =>
+        {
+            std::fs::write(&agents_md, ISSUES_AGENTS_TEMPLATE)
+                .with_context(|| format!("cannot write {}", agents_md.display()))?;
+            InstallOutcome::Overwritten
+        }
+        Some(content) if force && content != ISSUES_AGENTS_TEMPLATE.as_bytes() => {
+            InstallOutcome::RepoAuthoredContentPreserved
+        }
+        Some(_) => InstallOutcome::AlreadyExists,
     };
     Ok(InstallResult {
         path: agents_md,
@@ -1753,6 +1797,81 @@ mod tests {
         assert!(tmp.path().join(".claude/skills/issue/SKILL.md").exists());
         assert!(!tmp.path().join(".codex/prompts/issue.md").exists());
         assert!(tmp.path().join("issues/AGENTS.md").exists());
+    }
+
+    #[test]
+    fn force_preserves_diverged_issues_scaffold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let scaffold = tmp.path().join("issues/AGENTS.md");
+        std::fs::create_dir_all(scaffold.parent().unwrap()).unwrap();
+        std::fs::write(&scaffold, "# Repo policy\n").unwrap();
+
+        let results = install_skill_summary(tmp.path(), &[Agent::Claude], true, None).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&scaffold).unwrap(),
+            "# Repo policy\n"
+        );
+        assert_eq!(
+            results[0].outcome,
+            InstallOutcome::RepoAuthoredContentPreserved
+        );
+        assert_eq!(
+            serde_json::to_value(&results).unwrap()[0]["outcome"],
+            "repo_authored_content_preserved"
+        );
+    }
+
+    #[test]
+    fn force_refreshes_identical_issues_scaffold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let scaffold = tmp.path().join("issues/AGENTS.md");
+        std::fs::create_dir_all(scaffold.parent().unwrap()).unwrap();
+        std::fs::write(&scaffold, ISSUES_AGENTS_TEMPLATE).unwrap();
+
+        let results = install_skill_summary(tmp.path(), &[Agent::Claude], true, None).unwrap();
+
+        assert_eq!(
+            std::fs::read(&scaffold).unwrap(),
+            ISSUES_AGENTS_TEMPLATE.as_bytes()
+        );
+        assert_eq!(results[0].outcome, InstallOutcome::Overwritten);
+    }
+
+    #[test]
+    fn install_creates_missing_issues_scaffold() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let results = install_skill_summary(tmp.path(), &[Agent::Claude], true, None).unwrap();
+
+        assert_eq!(
+            std::fs::read(tmp.path().join("issues/AGENTS.md")).unwrap(),
+            ISSUES_AGENTS_TEMPLATE.as_bytes()
+        );
+        assert_eq!(results[0].outcome, InstallOutcome::Created);
+    }
+
+    #[test]
+    fn force_scaffold_regenerates_diverged_issues_scaffold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let scaffold = tmp.path().join("issues/AGENTS.md");
+        std::fs::create_dir_all(scaffold.parent().unwrap()).unwrap();
+        std::fs::write(&scaffold, "# Repo policy\n").unwrap();
+
+        let results = install_skill_summary_with_scaffold_force(
+            tmp.path(),
+            &[Agent::Claude],
+            false,
+            true,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(&scaffold).unwrap(),
+            ISSUES_AGENTS_TEMPLATE.as_bytes()
+        );
+        assert_eq!(results[0].outcome, InstallOutcome::Overwritten);
     }
 
     #[test]

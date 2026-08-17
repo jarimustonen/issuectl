@@ -66,7 +66,12 @@ pub(crate) fn cmd_skill_list(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn cmd_skill_install(agent: &str, force: bool) -> Result<()> {
+pub(crate) fn cmd_skill_install(
+    json: bool,
+    agent: &str,
+    force: bool,
+    force_scaffold: bool,
+) -> Result<()> {
     let agents = match agent {
         "claude" => vec![skill::Agent::Claude],
         "codex" => vec![skill::Agent::Codex],
@@ -77,7 +82,19 @@ pub(crate) fn cmd_skill_install(agent: &str, force: bool) -> Result<()> {
     // Dual-home Claude skills into pi.dev's skill dir (~/.pi/agent/skills).
     // Resolved from $HOME; `None` (HOME unset) simply skips the pi mirror.
     let pi_root = skill::pi_skills_root();
-    skill::install_skill(&root, &agents, force, pi_root.as_deref())
+    let results = skill::install_skill_summary_with_scaffold_force(
+        &root,
+        &agents,
+        force,
+        force_scaffold,
+        pi_root.as_deref(),
+    )?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        skill::print_skill_install_summary(&root, &agents, &results);
+    }
+    Ok(())
 }
 
 pub(crate) fn cmd_skill_print(agent: &str) -> Result<()> {
