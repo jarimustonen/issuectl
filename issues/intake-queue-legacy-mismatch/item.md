@@ -2,11 +2,15 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 lane: intake
 lane_seq: 10
 collision: [crates/issuectl-core/src/mutate/intake.rs, templates]
+commits:
+- hash: d14e275
+  summary: queue filters on status and warns about legacy migration
+closed: 2026-08-17
 ---
 
 # intake queue lists legacy label-based items that every intake transition then refuses
