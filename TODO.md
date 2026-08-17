@@ -13,103 +13,85 @@ Operating-faktat (deploy, green gate, hot files) ovat
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-16, cli-canon-rupeama + 0.12.0 & 0.13.0 julkaistu):** `main` **vihreä** (1070 testiä, fmt+clippy
-puhtaat — 0 uutta clippy-varoitusta, 52 pre-existing). **`origin/main` == `main` (pushattu).** **Live-release nyt
-`v0.13.0`** (crates.io + binäärit + Homebrew + tag kaikki ulkona, 14 assetia). `Cargo.toml == 0.13.0`.
-**Aktiivinen työ tyhjä** — DAG:ssa vain parkissa oleva `@ossctl-cut-no-publish` (upstream-blocked). Ei ajossa
-olevia workereita.
+**Tila (2026-08-17, cli-fixes-rupeama + 0.14.0 & 0.14.1 julkaistu):** `main` **vihreä** (1078 testiä, fmt +
+clippy + `cargo doc` puhtaat). **`origin/main` == `main` (pushattu, `7f0cc83`).** **Live-release `v0.14.1`** —
+crates.io (core + bin), GitHub Release 15 assetia, **ja Homebrew tap vihdoin ajan tasalla (0.14.1)**.
+`Cargo.toml == 0.14.1`. Ei ajossa olevia workereita.
 
-**Tämä sessio: koko `cli-canon`-lane (6 unittia) läpi + KAKSI julkaisua.** Kaikki sarjassa `main.rs`-collisionin
-takia; jokainen reviewattu (`/llm-review` + `/assess-findings`) + täysi green gate + `close --stamp`.
+**DAG (2 spawnable headia, valmis rinnakkaisajoon):**
+- **`cli-fixes`** (syvyys 2, sarjassa — `main.rs`): `@intake-feature-issuectl-77792e73735b` (seq 10) →
+  `@intake-queue-legacy-mismatch` (seq 20)
+- **`release-infra`** (syvyys 1): `@ossctl-cut-no-publish` — **uudelleen avattu verifiointiportiksi**, ei työtä
+  vaan tarkistuslista seuraavaan cuttiin
 
-**0.12.0 (additiiviset):**
-1. `@cli-canon-config` — §8 `config path` / `config show`, per-arvo provenienssi (`source: "file"|"default"`).
-2. `@cli-canon-skill-list` — §15 `skill list`, täydentää `list/install/print`-triadin.
-3. `@cli-canon-help-json` — §14 `--help --json` juurelle + alikomennoille; tekstihelp ennallaan.
+**Tämä sessio: koko `cli-fixes`-lane (7 issueta) läpi + KAKSI julkaisua + Homebrew-jakelu korjattu.**
+Ensimmäinen aalto ajoi kolme lanea rinnakkain; loput sarjassa `main.rs`-collisionin takia. Jokainen unitti
+reviewattu (`/llm-review` + `/assess-findings`) + täysi green gate.
 
-**0.13.0 (BREAKING):**
-4. `@cli-canon-json-envelope` — §10 **koko `--json`-pinta enveloppiin**: `{"schema_version":1,"data":…,
-   "warnings":[]}` stdoutiin, virheet `{"schema_version":1,"error":{…}}` stderriin. Lisäksi `version [--json]`
-   (`supported_schemas[]` + `skills[{name,cli_version,schema_version}]`) §17-driftauditia varten.
-5. `@cli-canon-create-verb` — §7 `create` on nyt primääri luontiverbi, `new` jää aliakseksi.
-6. `@cli-canon-s22-clock` — §22:n **Clock-osuus**: injektoitava `Clock` (`crates/issuectl-core/src/clock.rs`,
-   sama seam-idiomi kuin `ConfigSource`). Kaikki 14 suoraa `now()`-kutsua coresta pois; ainoa jäljellä oleva on
-   Clockin oma real-toteutus. Deterministiset testit arkistobucketoinnille + kuunvaihdoksen rajatapaukselle.
+**0.14.0 — 7 issueta viidessä aallossa:**
+1. `@intake-bug-issuectl-06c42e2d1123` — `doctor --fix` laskee jäljellä olevat findingit oikein (raportoi 1,
+   listasi 9). Tiivistysrivi on se, jonka agentti/CI lukee päättääkseen onko repo puhdas.
+2. `@audit-no-user-specifics` — julkisen paketin sweep. **Paketti EI ollut puhdas**: maintainer-spesifisiä
+   defaultteja ja esimerkkejä löytyi ja poistettiin.
+3. `@intake-feature-issuectl-c633267ba553` — `docs/design/lane-design.md`, lane-rakenteen suunnitteluopas.
+4. `@neutralize-main-author-example` + `@create-help-slug-text` — `main.rs`:n esimerkki neutraloitu; `create
+   --help` kertoo vihdoin oikean, otsikosta johdetun oletusslugin.
+5. `@intake-bug-issuectl-7a79c97d9fa8` + `@intake-bug-issuectl-715670f2607f` — slugin lyhentyminen ja
+   törmäyssuffiksit näkyvät ylätason `warnings`issa; `note`/`close` jakavat `--comment`/`--message`-sanaston.
+6. `@intake-feature-issuectl-ff7665d266e6` — `update --type epic` migroi `reporter` → `owner` itse; uudet
+   `--no-reporter` / `--no-assignee`; monitulkintaisissa virhe nimeää ajettavan komennon.
+7. `@surface-lane-design` — `dag --help` selittää lane-designin, ja `dag` näyttää per-lane-syvyyden +
+   spawnable-headien määrän.
 
-**⚠️ BREAKING-MUUTOKSEN SEURAUS (0.13.0):** kaikki `issuectl --json` -kuluttajat rikkoutuivat. Mukana tulevat
-skill-templatet + `CLAUDE.md`:n sopimuskuvaus päivitettiin samassa committissa, MUTTA sisarrepojen omat skriptit
-eivät — ne pitää siirtää lukemaan `.data`-kentän alta. @jarin päätös 2026-08-16: *"ei haittaa, emme tue
-taaksepäin yhteensopivuutta vielä"*.
+**0.14.1 — Homebrew-jakelu.** Ks. RELEASE-OPPI alla.
 
-**Sivutuotteet:**
-- **`@cli-canon-s22`:n premissi oli VIRHEELLINEN ja korjattiin issueen.** Audit (`project-canon review
-  --assume-defaults`) väitti *"no `crates/` directory — no core/cli split"*; todellisuudessa split on ollut
-  olemassa pitkään ja core on jo clap-vapaa. §22:sta tehtiin siis vain Clock-osuus. Kaksi tietoista **hylkäystä**
-  kirjattu issueen perusteluineen: (a) **I/O:n poisto coresta** — issuectl on tiedostojärjestelmäpohjainen
-  tracker, markdown-tiedostot *ovat* domain; abstrahointi olisi coren uudelleenkirjoitus ilman testattavuushyötyä
-  (testit jo hermeettisiä tempdireillä). (b) **crate-nimen vaihto `issuectl-cli`:ksi** — rikkoisi julkaistun
-  crates.io-nimen kosmetiikan vuoksi. Jos nämä halutaan avata, ne ovat issuessa dokumentoituina.
-- **CHANGELOG-korjaus:** `config`-worker vuoti diff-markkerit (`+`-merkit) CHANGELOGiin; korjattu käsin
-  (`docs(changelog): fix leaked diff markers`).
-- **Filattu `@create-help-slug-text` (lane `cli-fixes`):** `create --help` väittää satunnaisslugin olevan oletus
-  kun `--slug` puuttuu; **verifioitu tyhjässä repossa että oletus on otsikosta johdettu** (`"Fix broken login
-  redirect loop"` → `fix-broken-login`). AGENTS.md on oikeassa, help-teksti jäljessä. Merkitsevää nyt kun
-  `--help --json` on virallinen tapa agentin opetella pinta — väärä help leviää suoraan kuluttajille.
-- **Wrap-upissa dokumentoitu `AGENTS.md`:ään:** `Clock`-seam-konventio (+ `SystemClock` local vs `FixedClock` UTC
-  -aikavyöhykeasymmetria testejä kirjoittaessa) ja canon-§22:n kaksi hylkäystä perusteluineen.
-- **Filattu homebaseen `intake-bug-homebase-f3c838261c9c`:** stint-skillin jaettu `AGENTS-EXECUTION-DAG.md`
-  neuvoo DAG-drift-checkiin `jq '.lanes[].nodes[].slug'`, mutta `issuectl dag --json` emittoi
-  `.lanes[].issues[]` → tyhjä oikea puoli → **jokainen aktiivinen issue näyttää puuttuvan DAGista**.
+**Sivutuotteet ja opit:**
+- **Auditin esiskannaus oli VÄÄRÄSSÄ.** Edellinen triage merkitsi paketin "näyttää puhtaalta". Worker käskettiin
+  tekemään sweep itse eikä luottamaan vihjeeseen — ja se löysi oikeita osumia. **Älä hyväksy esiskannausta
+  lopputuloksena.**
+- **`main.rs` on tämän repon pullonkaula.** 7 issueta osui siihen → koko rupeama sarjassa. Kaksi kertaa
+  niputettiin kaksi pientä unittia samaan workeriin (säästi 2 slottia), mutta se on kiertotie. **`main.rs`:n
+  pilkkominen on nyt konkreettinen skedulointi-investointi** — ja `issuectl dag` osaa itse näyttää sen luvun.
+- **Filattu ossctl:ään kaksi bugia** (ks. RELEASE-OPPI): `@release-bump-plan-uncuttable`,
+  `@release-tag-preempts-cargo-dist`.
+- **Filattu tänne `@intake-queue-legacy-mismatch`:** `intake queue` listaa legacy-label-pohjaisia kohteita
+  (`status: open` + `needs-triage`), mutta jokainen `intake`-transitio hylkää ne (validoi statuksesta). Mukana
+  tuleva `/issue-intake`-skill väittää nimenomaan päinvastaista → agentti kutsuu `accept`ia ja saa kovan virheen.
+  Admitointi vaatii tällä hetkellä `label --remove needs-triage` eli CLI:n intake-pinnan ohituksen.
 
-**Seuraava askel:** `cli-canon`-lane tyhjennetty, 0.13.0 ulkona. **Seuraava rupeama voi käynnistää kolme lanea
-rinnakkain** (`cli-fixes` sarjassa + `docs` + `audit`); GLOBAL HEAD = `@intake-bug-issuectl-06c42e2d1123`.
-Parkissa edelleen `@ossctl-cut-no-publish`.
-
-**Triage tehty (`/triage-unlaned-issues`, jari ackasi kaikki 2026-08-16):** kuusi DAGin ulkopuolista issueta
-triagattu, `needs-triage` poistettu viideltä intake-itemiltä ja kaikki lanetettu. **Kolme lanea = kolme
-rinnakkaista työtä** (ensi rupeaman lähtöasetelma):
-
-- **`cli-fixes` (sarjassa, sama keskeinen tiedosto — 5 unittia):**
-  1. `@intake-bug-issuectl-06c42e2d1123` (seq 10, **priority high**) — `doctor --fix` laskee jäljellä olevat
-     findingit väärin (raportoi 1, listaa 9). **Nostettu kärkeen:** tiivistysrivi on se, jonka agentti/CI lukee
-     päättääkseen onko repo puhdas → väärä yhteenveto ohjaa koneellista päätöksentekoa harhaan.
-  2. `@create-help-slug-text` (seq 20) — `create --help` väittää väärää oletusslug-käytöstä
-  3. `@intake-bug-issuectl-7a79c97d9fa8` (seq 30) — johdettu slug typistyy hiljaisesti. **Vieretysten edellisen
-     kanssa tarkoituksella:** sama slug-alue, yksi siivous. Huom: typistys *on* tarkoitettua (2–3 sanaa) —
-     vika on näkymättömyydessä, ei säännössä.
-  4. `@intake-feature-issuectl-ff7665d266e6` (seq 40) — `update --type epic` käskee käsin editoimaan YAMLia
-  5. `@intake-bug-issuectl-715670f2607f` (seq 50) — `note` hylkää `--comment` vaikka oma help lupaa sen
-- **`docs` (rinnakkainen):** `@intake-feature-issuectl-c633267ba553` — lane-rakenteen suunnitteluohje (lanet ovat
-  sarjallisia jonoja → laneus maksaa rinnakkaisuutta). **Osui tämän rupeaman kipupisteeseen:** 6 unittia yhdessä
-  lanessa = 0 rinnakkaisuutta, ~5 h sarjassa.
-- **`audit` (rinnakkainen):** `@audit-no-user-specifics` — julkisen paketin tarkistus henkilökohtaisten tietojen
-  varalta. **Esiskannaus tehty triagessa: paketti näyttää puhtaalta** (ainoat tilitunnusosumat ovat aidot
-  Homebrew/GitHub-asennuskanavat, yksityisten repojen nimiä ei lainkaan). Yksi osuma: tämän repon `AGENTS.md`
-  viittaa henkilökohtaiseen hakemistopolkuun `~/Sources/project-canon`. Issue vaatii kirjatun tuloksen myös
-  silloin kun tulos on "puhdas".
+**Seuraava askel:** `cli-fixes` sarjassa (`@intake-feature-issuectl-77792e73735b` → `@intake-queue-legacy-mismatch`).
+GLOBAL HEAD = `@intake-feature-issuectl-77792e73735b`.
 
 **⚠️ INTAKE-PREDIKAATTI-SUDENKUOPPA:** `/stint-handoff`:n dokumentoitu detect-predikaatti on `open ∧ via:telegram ∧
-needs-triage`, mutta intakea saapuu nyt myös `via:agent-*`-provenanssilla (sisarrepojen wrap-upit `intakectl
-file`n kautta). Pelkkä `via:telegram` **ei löydä niitä** — tässä sessiossa raportoin ensin virheellisesti "ei uutta
-intakea". Käytä `issuectl list --status open --label needs-triage` (provenanssiagnostinen).
+needs-triage`, mutta intakea saapuu myös `via:agent-*`-provenanssilla (sisarrepojen wrap-upit). Pelkkä
+`via:telegram` **ei löydä niitä**. Käytä `issuectl list --status open --label needs-triage` (provenanssiagnostinen)
+TAI `issuectl intake queue` — mutta huomaa `@intake-queue-legacy-mismatch`: jono listaa legacy-kohteita joita
+`intake accept` ei suostu käsittelemään.
 
 **⚠️ Siivousta odottava:** `issuectl__worktrees/wt-01m04ygzhw-canon-review-issuectl` (@286dcb3, **locked**) on
-edellisen session canon-review-ajosta eikä liity tähän rupeamaan. Jätetty koskematta — poista käsin jos on
-turha (`git worktree remove --force` + `git branch -D`).
+edellisen session canon-review-ajosta. Jätetty koskematta — poista käsin jos on turha
+(`git worktree remove --force` + `git branch -D`).
 
-**⚠️ RELEASE-OPPI (0.12.0 ja 0.13.0 ajettiin suoraan manuaalireitillä — ossctl:ää ei edes yritetty, koska
-`@ossctl-cut-no-publish` on yhä auki; molemmat menivät läpi puhtaasti):** ossctl `release cut` EI julkaise oikeasti
-(`@ossctl-cut-no-publish`, upstream-blocked) — publish-phase failaa ("core not visible on index within 300s"),
-MITÄÄN ei uploadata. → release vaatii manuaalisen `cargo publish -p issuectl-core` → (odota indeksi) →
-`-p issuectl` → `git tag vX.Y.Z <release-commit>` → `git push origin vX.Y.Z` -fallbackin. Tag laukaisee
-`release.yml`:n (cargo-dist) → binäärit + Homebrew (EI double-publishaa crates.io:ta). Ennen fallbackia: bump +
-CHANGELOG-finalisointi + `release:`-commit + push main. **Varmista aina crates.io-indeksistä ETTEI core jo
-uploadattu** ennen manuaalista publishia (double-publish failaa). ossctl-run jää `in_progress`-tilaan sen omaan
-journaliin (`release verify <run-id>` näyttää unreconciled — vaaraton, ei estä mitään).
+**⚠️ RELEASE-OPPI (0.14.1 ajettiin ossctl 0.6.1:n engine-reitillä ja se JULKAISI oikeasti — vanha manuaalinen
+fallback ei ole enää tarpeen, mutta cut EI ole valmis kun se tulostaa `release complete`):**
+- **Älä käytä `ossctl release plan --bump`.** Se sinetöi suunnitelman jonka cut hylkää aina `plan_stale`:na, ja
+  ehdottaa tilalle id:tä joka tarkoittaa *"julkaise uudelleen jo julkaistu versio"*. Tee bumppi käsin, sitten
+  `plan` ilman lippuja. (`@release-bump-plan-uncuttable`)
+- **`tag`-vaihe luo GitHub Releasen** → cargo-distin `host` kaatuu (`a release with the same tag name already
+  exists`) → **`publish-homebrew-formula` skipataan** vaikka cut näyttää vihreältä. Korjaus: poista assetiton
+  Release (`gh release delete vX.Y.Z --yes`, git-tagi säilyy) → `gh run rerun <id> --failed`.
+  (`@release-tag-preempts-cargo-dist`)
+- **Verifioi aina cutin jälkeen:** `gh release view vX.Y.Z --json assets --jq '.assets|length'` (odota ~15, **ei
+  0**) ja että tap-formula nousi uuteen versioon. Tap seisoi 0.11.0:ssa kolmen julkaisun ajan koska kukaan ei
+  tarkistanut (`@homebrew-tap-stale`).
+- **Homebrew tulee cargo-distiltä**, `dist-workspace.toml`:n `installers`/`tap`/`publish-jobs`-riveiltä.
+  ossctl:n oma homebrew-leg on inertti (`OSS-RELEASE.md`:ssä ei ole `distribution`-blokkia →
+  `homebrew_tap: null`). **Älä aja `ossctl dist generate`ia** korjataksesi sen ilman erillistä päätöstä: se
+  pyyhkisi self-hosted macOS-runner-overriden (`hauis`, ~67 s macOS-buildi vs 45+ min hostattu jono).
 
 **⚠️ Minor-bump-gotcha:** `crates/issuectl/Cargo.toml`:n sisäinen `issuectl-core = { …, version = "X" }`
-on caret-vaatimus → bumppaa se vastaamaan uutta minoria samassa release-commitissa (0.12.0 → 0.13.0).
-Vain minor/major-raja vaatii tämän, ei patch.
+on caret-vaatimus → bumppaa se vastaamaan uutta minoria samassa release-commitissa. Vain minor/major-raja
+vaatii tämän, ei patch (0.14.0 → 0.14.1 ei vaatinut).
 
 **⚠️ Autonomy:** deployt/releaset TÄYSIN autonomisia (ei go/no-go, ei output-reviewia) — @jarin ohje 2026-08-10.
 
@@ -153,9 +135,9 @@ _Kaikki kolme triageed + lanetettu `issuectl`-frontmatteriin (2026-08-15, `needs
 - [x] 🐛 issuectl update: add --add-blocked-by → `cli-fixes` ([`intake-feature-issuectl-d93eaa168c66`](issues/intake-feature-issuectl-d93eaa168c66/item.md))
 - [x] 🐛 label: --remove --json silent no-op → landattu 0.11.0:ssa ([`intake-bug-issuectl-d6947128f6c9`](issues/intake-bug-issuectl-d6947128f6c9/item.md))
 - [x] 🐛 label: accept --add/--remove flag aliases → **suljettu `obsolete` (2026-08-16)**, duplikaatti — jo toimitettu 0.11.0:ssa `intake-bug-issuectl-d6947128f6c9`:llä ([`intake-feature-issuectl-986ecd5a58a9`](issues/intake-feature-issuectl-986ecd5a58a9/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: doctor --fix miscounts remaining findings (reports 1, lists 9) — jari via Telegram ([`intake-bug-issuectl-06c42e2d1123`](issues/intake-bug-issuectl-06c42e2d1123/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: update --type epic tells you to hand-edit the YAML instead of migrating… — jari via Telegram ([`intake-feature-issuectl-ff7665d266e6`](issues/intake-feature-issuectl-ff7665d266e6/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: issuectl new silently truncates the derived slug — jari via Telegram ([`intake-bug-issuectl-7a79c97d9fa8`](issues/intake-bug-issuectl-7a79c97d9fa8/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: note rejects --comment although its own help says it mirrors close --co… — jari via Telegram ([`intake-bug-issuectl-715670f2607f`](issues/intake-bug-issuectl-715670f2607f/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: Document how to design a lane structure: lanes are serial queues, so la… — jari via Telegram ([`intake-feature-issuectl-c633267ba553`](issues/intake-feature-issuectl-c633267ba553/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: apply --help does not document body_ops operation shapes — jari via Telegram ([`intake-feature-issuectl-77792e73735b`](issues/intake-feature-issuectl-77792e73735b/item.md))
+- [x] 🐛 doctor --fix miscounts remaining findings (reports 1, lists 9) → **korjattu 0.14.0** ([`intake-bug-issuectl-06c42e2d1123`](issues/intake-bug-issuectl-06c42e2d1123/item.md))
+- [x] 🐛 update --type epic tells you to hand-edit the YAML instead of migrating… → **korjattu 0.14.0** ([`intake-feature-issuectl-ff7665d266e6`](issues/intake-feature-issuectl-ff7665d266e6/item.md))
+- [x] 🐛 issuectl new silently truncates the derived slug → **korjattu 0.14.0** ([`intake-bug-issuectl-7a79c97d9fa8`](issues/intake-bug-issuectl-7a79c97d9fa8/item.md))
+- [x] 🐛 note rejects --comment although its own help says it mirrors close --co… → **korjattu 0.14.0** ([`intake-bug-issuectl-715670f2607f`](issues/intake-bug-issuectl-715670f2607f/item.md))
+- [x] 🐛 Document how to design a lane structure: lanes are serial queues, so la… → **korjattu 0.14.0** ([`intake-feature-issuectl-c633267ba553`](issues/intake-feature-issuectl-c633267ba553/item.md))
+- [ ] 🐛 apply --help does not document body_ops operation shapes → triagattu + hyväksytty 2026-08-17, lane `cli-fixes` seq 10 ([`intake-feature-issuectl-77792e73735b`](issues/intake-feature-issuectl-77792e73735b/item.md))
