@@ -14,17 +14,23 @@ säännöt → `AGENTS.md`.
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-17, arkkitehtuurikatselmus-rupeama):** `main` vihreä, live-release `v0.14.1`
-kaikissa kanavissa. **Kaksi worktreetä ajossa** (ks. alla) — älä spawnaa mitään mikä koskee
-`main.rs` / `doctor.rs` / `mutate/` ennen kuin split-run on mergannut.
+**Tila (2026-08-17, arkkitehtuurikatselmus-rupeama valmis):** `main` **vihreä** (1078 testiä,
+fmt + clippy + doc puhtaat, orkestroija verifioi itse mergen jälkeen), pushattu. Live-release
+`v0.14.1` kaikissa kanavissa. Ei ajossa olevia workereita. **Molemmat rupeaman worktreet
+valmistuivat ja mergasivat itsensä:**
 
-**Ajossa olevat runit:**
-- `01m07e2m4nxsmm6wqqtcdsybh5` (spinoff, `wt/01m07e2m4n-split-hot-files`) — @split-main-rs:
-  kolmen hot-tiedoston pilkkominen (main.rs → `cmd/`-perheet, doctor.rs → `doctor/`,
-  mutate/mod.rs → verbitiedostot) puhtaana siirtona, green gate per vaihe. Mergaa itsensä.
-- `01m07e44ygjgf7vmdvjkbmfacm` (technical-decision, `wt/01m07e44yg-cli-verb-surface`) —
-  @cli-verb-surface: verbipinnan konsolidointi-ADR (`docs/decisions/0004`). Ehdottaa
-  toteutusissuet raportissaan; ne lanetetaan kun ADR on mergattu.
+- **@split-main-rs TEHTY:** kaikki kolme hot-tiedostoa pilkottu puhtaana siirtona —
+  `main.rs` (9278 → 5 riviä) → `cmd/`-perhemoduulit, `doctor.rs` → `doctor/`
+  (checks/apply/core/render + testit), `mutate/mod.rs` (7319 → 906) → verbitiedostot.
+  Help-output byte-identtinen, green gate per vaihe. AGENTS.md:n hot-file-sääntö on nyt
+  per-perhemoduuli: eri komentoperheet ovat rinnakkais-turvallisia.
+- **@cli-verb-surface TEHTY:** `docs/decisions/0004-cli-verb-surface.md` — `update` on ainoa
+  valikoiva mutaatioverbi (`set`/`assign`/`label`/`apply`/`bulk`/`close`/`depend` foldataan
+  siihen), `note` kanoninen (`comment` alias), `stats`+`workload` → `metrics`, `burndown` →
+  `cycle burndown`, `hooks`+`install-merge-driver` → `fmt`, `pick`/`new`/`ls` alias-then-remove,
+  export JSON-only, intake ainoa vastaanotto. Deprekointi-ikkuna: 0.15.0 valmistelu → 0.16.0
+  piilotetut aliakset + varoitukset → 0.17.0 poisto. Uusi ylätason verbi vaatii ADR-amendmentin.
+  @deprecate-triage-inbox ratifioitu, gatettu @intake-queue-legacy-mismatch:n taakse.
 
 **Tässä rupeamassa tehty (2026-08-17):**
 1. `issuectl archive` otettu käyttöön omassa repossa: 60 suljettua issueta (>90 pv) siirretty
@@ -42,16 +48,16 @@ kaikissa kanavissa. **Kaksi worktreetä ajossa** (ks. alla) — älä spawnaa mi
    nimi pois tuotepinnoista).
 5. Vanha canon-review-worktree poistettu.
 
-**Seuraava askel kun runit valmistuvat:**
-- Split mergattu → kapea hot-file-lista on voimassa; `cli-fixes`-lanen loput
-  (@intake-feature-issuectl-77792e73735b, @intake-queue-legacy-mismatch,
-  @purge-telegram-surfaces) voidaan ajaa, osin rinnakkain perhemoduulien mukaan.
-- ADR mergattu → lanetä sen ehdottamat toteutusissuet `verb-surface`-laneen;
-  @deprecate-triage-inbox vapautuu blockeristaan.
+**Seuraava askel:**
+- `cli-fixes`-lanen loput (@intake-feature-issuectl-77792e73735b, @intake-queue-legacy-mismatch,
+  @purge-telegram-surfaces) ovat nyt ajettavissa — split on landattu, joten eri perhemoduuleihin
+  osuvat voivat kulkea rinnakkain.
 - `skills`-lane (@intake-bug-issuectl-bad8e7d6118a → @intake-bug-issuectl-bf2580033c3a,
-  priority high) on splitistä disjoint — spawnattavissa milloin vain.
-- Kun `main` saa käyttäjälle näkyviä muutoksia: release 0.7.0-enginellä (resepti AGENTS.md);
-  verify-barrieri hoitaa tarkistuksen, backstop-check silti kerran.
+  priority high) — spawnattavissa milloin vain, disjoint muista.
+- ADR 0004:n toteutus: filaa fold-issuet (per fold, post-split `cmd/`-tiedostoihin) 0.15.0/0.16.0
+  -aikataululla; @deprecate-triage-inbox odottaa @intake-queue-legacy-mismatch:ia.
+- Splitti + ADR ovat sisäisiä — **ei release-tarvetta vielä**; seuraava cut 0.7.0-enginellä kun
+  käyttäjälle näkyvää kertyy (resepti AGENTS.md; verify-barrieri tarkistaa, backstop kerran).
 
 **Uutta intakea, triage tekemättä:** @intake-bug-issuectl-fab0edad2e42 (dag: priority ohittaa
 lane_seq:n lanen sisällä hiljaisesti) ja @intake-feature-issuectl-769ae85ab662 (`collision`
