@@ -4,10 +4,11 @@ updated: 2026-08-17
 type: bug
 reporter: jari
 status: open
-priority: normal
+priority: high
 labels:
 - via:agent-homebase-wrapup
-- needs-triage
+lane: skills
+lane_seq: 10
 ---
 
 # skill install --force silently overwrites repo-authored content in issu…

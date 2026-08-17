@@ -7,7 +7,8 @@ status: open
 priority: normal
 labels:
 - via:agent-homebase-wrapup
-- needs-triage
+lane: skills
+lane_seq: 20
 ---
 
 # Personal-setup references leak into the public repo (fleet-apply, homeb…
