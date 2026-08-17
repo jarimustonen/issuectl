@@ -3,12 +3,16 @@ created: 2026-08-17
 updated: 2026-08-17
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 labels:
 - via:agent-homebase-wrapup
 lane: skills
 lane_seq: 20
+commits:
+- hash: a50b169
+  summary: remove private setup references from source and public docs
+closed: 2026-08-17
 ---
 
 # Personal-setup references leak into the public repo (fleet-apply, homeb…
