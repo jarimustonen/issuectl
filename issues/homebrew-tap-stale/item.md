@@ -1,6 +1,6 @@
 ---
 created: 2026-08-16
-updated: 2026-08-16
+updated: 2026-08-17
 type: bug
 status: open
 priority: high
@@ -62,3 +62,13 @@ working process.
 
 Either way, **fix the two false statements** in `TODO.md` and `AGENTS.md`, and bring the tap up
 to the current release.
+
+## Comments
+
+### 2026-08-17T04:05:42Z · @claude
+
+The stated blocker does not hold: HOMEBREW_TAP_TOKEN has existed on this repository since 2026-08-05, i.e. before dist-workspace.toml recorded the disable as 'needs a tap write token, owned by a separate issue'. Verified 2026-08-17. Re-enabling cargo-dist's homebrew publish is therefore unblocked on credentials.
+
+Worth doing rather than waiting for the upstream engine: this repository's tap formula, when cargo-dist last wrote it, has the CORRECT shape — per-platform urls pointing at the published release binaries with checksums, no toolchain dependency. The upstream engine's own formula writer currently emits a source-build formula that does not install at all (filed upstream as homebrew-formula-uninstallable). So cargo-dist is the better producer here today.
+
+Upstream is separately adding verification so a lagging tap is reported instead of passing silently (upstream release-verify-homebrew-tap) — that will catch a recurrence, but it does not fix this repository's disabled publish. That part is this repository's to do.
