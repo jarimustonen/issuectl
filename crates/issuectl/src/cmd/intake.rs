@@ -175,26 +175,14 @@ pub(crate) fn has_label(issue: &models::Issue, label: &str) -> bool {
         .is_some_and(|ls| ls.iter().any(|l| l == label))
 }
 
-/// A legacy reception form the migration (§6) has not yet converted, for the
-/// queue `target` being viewed. `open + needs-triage` is the legacy
-/// `untriaged`; `open + deferred` is the legacy `deferred`. Surfacing these
-/// keeps the pre-migration population from being silently abandoned — in
-/// whichever queue view the item *would* land after migration. Other targets
-/// (e.g. `needs-info`) have no legacy label form.
-pub(crate) fn is_legacy_for(issue: &models::Issue, target: &str) -> bool {
-    issue.status == "open"
-        && match target {
-            "untriaged" => has_label(issue, "needs-triage"),
-            "deferred" => has_label(issue, "deferred"),
-            _ => false,
-        }
+/// A legacy reception form the migration (§6) has not yet converted.
+/// These items are deliberately excluded from queue rows because intake
+/// transitions validate first-class status, but their count drives the
+/// migration warning so they are not hidden silently.
+pub(crate) fn is_legacy_intake_item(issue: &models::Issue) -> bool {
+    issue.status == "open" && (has_label(issue, "needs-triage") || has_label(issue, "deferred"))
 }
 
-/// Effective provenance for queue filtering: the first-class `provenance`
-/// field, or — for an as-yet-unmigrated legacy item — `telegram` derived
-/// from the `via:telegram` label. Without this, `queue --provenance
-/// telegram` would drop exactly the legacy Telegram items the transition is
-/// meant to surface (they carry the label, not the field yet).
 pub(crate) fn queue_provenance(issue: &models::Issue) -> Option<&str> {
     intake_provenance(issue).or_else(|| has_label(issue, "via:telegram").then_some("telegram"))
 }
@@ -210,42 +198,40 @@ pub(crate) fn cmd_intake_queue(
     // `needs-info` are excluded unless explicitly requested via --state.
     let target = state.as_deref().unwrap_or("untriaged");
     let issues = load();
-    // A row is either a real item in `target` (`legacy = false`) or a
-    // recognised legacy form that migrates INTO `target` (`legacy = true`).
-    // Keying off `target` (not the raw flag) keeps this correct if the CLI
-    // later accepts `--state untriaged` explicitly, and surfaces legacy
-    // `deferred` under `--state deferred`.
-    let mut rows: Vec<(&models::Issue, bool)> = issues
+    let legacy_count = issues
         .iter()
-        .filter_map(|i| {
-            let legacy = is_legacy_for(i, target);
-            if i.status == target || legacy {
-                Some((i, legacy))
-            } else {
-                None
-            }
-        })
-        .filter(|(i, _)| issue_type.as_deref().is_none_or(|t| i.issue_type == t))
-        .filter(|(i, _)| {
+        .filter(|issue| is_legacy_intake_item(issue))
+        .count();
+    let legacy_warning = (legacy_count > 0).then(|| {
+        format!(
+            "{legacy_count} legacy label-based intake item(s) hidden from the status-based queue; run `issuectl intake migrate --apply` to admit them"
+        )
+    });
+    // Queue rows are strict on first-class status so every listed item is
+    // accepted by the corresponding intake transition.
+    let mut rows: Vec<&models::Issue> = issues
+        .iter()
+        .filter(|i| i.status == target)
+        .filter(|i| issue_type.as_deref().is_none_or(|t| i.issue_type == t))
+        .filter(|i| {
             provenance
                 .as_deref()
                 .is_none_or(|p| queue_provenance(i) == Some(p))
         })
-        .filter(|(i, _)| !needs_analysis || !has_triage_analysis(&i.body))
+        .filter(|i| !needs_analysis || !has_triage_analysis(&i.body))
         .collect();
     // Stable order: oldest `created` first (items lacking a date sort
     // last), slug as the deterministic tiebreak.
-    rows.sort_by(|(a, _), (b, _)| {
+    rows.sort_by(|a, b| {
         let ka = (a.created.is_none(), a.created.clone(), a.slug.clone());
         let kb = (b.created.is_none(), b.created.clone(), b.slug.clone());
         ka.cmp(&kb)
     });
-    let legacy_count = rows.iter().filter(|(_, legacy)| *legacy).count();
 
     if json {
         let arr: Vec<serde_json::Value> = rows
             .iter()
-            .map(|(i, legacy)| {
+            .map(|i| {
                 serde_json::json!({
                     "slug": i.slug,
                     "type": i.issue_type,
@@ -256,58 +242,47 @@ pub(crate) fn cmd_intake_queue(
                     "reporter": i.reporter,
                     "title": i.title,
                     "needs_analysis": !has_triage_analysis(&i.body),
-                    "legacy": legacy,
+                    "legacy": false,
                     "version": canonical::canonical_hash(i),
                 })
             })
             .collect();
-        let mut obj = serde_json::json!({ "state": target, "items": arr });
-        if legacy_count > 0 {
-            obj["legacy_pending"] = serde_json::json!(legacy_count);
-            obj["migration_hint"] =
-                serde_json::json!("run `issuectl intake migrate` to migrate legacy items");
-        }
+        let obj = serde_json::json!({
+            "state": target,
+            "items": arr,
+            "warnings": legacy_warning.into_iter().collect::<Vec<_>>(),
+        });
         println!("{}", serde_json::to_string_pretty(&obj)?);
         return Ok(());
     }
 
     if rows.is_empty() {
         println!("No items in the {target} queue.");
-        return Ok(());
-    }
-    println!(
-        "Intake queue ({target}) — {} item(s), oldest first:",
-        rows.len()
-    );
-    // The legacy label that surfaces this target (for the nudge wording).
-    let legacy_label = if target == "deferred" {
-        "deferred"
     } else {
-        "needs-triage"
-    };
-    for (i, legacy) in &rows {
-        let prov = queue_provenance(i).unwrap_or("-");
-        let mut flag = String::new();
-        if !has_triage_analysis(&i.body) {
-            flag.push_str("  [needs-analysis]");
-        }
-        if *legacy {
-            flag.push_str("  [legacy]");
-        }
         println!(
-            "  {}  {}  {}  ({})  {}{}",
-            i.created.as_deref().unwrap_or("????-??-??"),
-            i.issue_type,
-            i.slug,
-            prov,
-            i.title,
-            flag
+            "Intake queue ({target}) — {} item(s), oldest first:",
+            rows.len()
         );
+        for i in &rows {
+            let prov = queue_provenance(i).unwrap_or("-");
+            let flag = if !has_triage_analysis(&i.body) {
+                "  [needs-analysis]"
+            } else {
+                ""
+            };
+            println!(
+                "  {}  {}  {}  ({})  {}{}",
+                i.created.as_deref().unwrap_or("????-??-??"),
+                i.issue_type,
+                i.slug,
+                prov,
+                i.title,
+                flag
+            );
+        }
     }
-    if legacy_count > 0 {
-        println!(
-            "\nNote: {legacy_count} legacy item(s) shown [legacy] (open + {legacy_label}) — run `issuectl intake migrate` to migrate them."
-        );
+    if let Some(warning) = legacy_warning {
+        eprintln!("warning: {warning}");
     }
     Ok(())
 }

@@ -306,9 +306,12 @@ fn migrate_dry_run_then_apply_is_idempotent() {
     assert_eq!(dv["actions"][0]["action"], "migrate");
     assert_eq!(dv["actions"][0]["status_change"]["to"], "untriaged");
     assert_eq!(dv["actions"][0]["applied"], false);
-    // The queue still shows it as a legacy form (nothing migrated yet).
-    let q = json_stdout(&run(tmp.path(), &["--json", "intake", "queue"]));
-    assert_eq!(q["legacy_pending"], 1, "still legacy pre-apply");
+    // The queue hides the non-actionable legacy row but warns while the
+    // dry-run has left it unmigrated.
+    let queue_before = run(tmp.path(), &["--json", "intake", "queue"]);
+    let q: serde_json::Value = serde_json::from_slice(&queue_before.stdout).unwrap();
+    assert!(q["data"]["items"].as_array().unwrap().is_empty());
+    assert_eq!(q["warnings"].as_array().unwrap().len(), 1);
 
     // Apply: writes the change.
     let apply = run(tmp.path(), &["--json", "intake", "migrate", "--apply"]);
@@ -317,9 +320,11 @@ fn migrate_dry_run_then_apply_is_idempotent() {
     assert_eq!(av["applied"], true);
     assert_eq!(av["actions"][0]["applied"], true);
 
-    // Now a first-class untriaged item with provenance set, no legacy flag.
-    let q2 = json_stdout(&run(tmp.path(), &["--json", "intake", "queue"]));
-    assert!(q2.get("legacy_pending").is_none(), "no legacy left: {q2}");
+    // Now a first-class untriaged item with provenance set and no warning.
+    let queue_after = run(tmp.path(), &["--json", "intake", "queue"]);
+    let q2_envelope: serde_json::Value = serde_json::from_slice(&queue_after.stdout).unwrap();
+    assert_eq!(q2_envelope["warnings"], serde_json::json!([]));
+    let q2 = &q2_envelope["data"];
     let items = q2["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["slug"], "legacy-bug-one");
@@ -390,133 +395,88 @@ fn migrate_reports_write_failure_and_exits_nonzero_but_migrates_the_rest() {
 }
 
 #[test]
-fn queue_surfaces_legacy_form_with_flag_and_nudge() {
+fn queue_hides_legacy_form_warns_then_migration_admits_it() {
     let tmp = fresh_repo();
-    // A first-class untriaged item and a legacy open+needs-triage item.
     file_bug(tmp.path(), "modern-one");
-    write_legacy(tmp.path(), "legacy-one", "labels: [needs-triage]\n");
+    // This is the observed historical shape: needs-triage accompanied by
+    // an agent provenance label that the migration must preserve.
+    write_legacy(
+        tmp.path(),
+        "legacy-one",
+        "labels: [needs-triage, via:agent-homebase-wrapup]\n",
+    );
 
     let out = run(tmp.path(), &["--json", "intake", "queue"]);
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
-    let v = json_stdout(&out);
-    assert_eq!(v["legacy_pending"], 1);
-    assert!(v["migration_hint"].as_str().unwrap().contains("migrate"));
-    let items = v["items"].as_array().unwrap();
-    assert_eq!(items.len(), 2, "both surfaced: {}", dump(&out));
-    let legacy: Vec<_> = items.iter().filter(|i| i["legacy"] == true).collect();
-    assert_eq!(legacy.len(), 1);
-    assert_eq!(legacy[0]["slug"], "legacy-one");
-    assert_eq!(legacy[0]["status"], "open");
-
-    // The --state deferred view folds only legacy *deferred* forms; there
-    // are none here (this legacy item is a needs-triage form), so it stays
-    // empty.
-    let deferred = run(
-        tmp.path(),
-        &["--json", "intake", "queue", "--state", "deferred"],
-    );
-    let dv = json_stdout(&deferred);
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let items = envelope["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "only first-class rows: {}", dump(&out));
+    assert_eq!(items[0]["slug"], "modern-one");
+    let warnings = envelope["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "one migration warning: {}", dump(&out));
+    assert!(warnings[0].as_str().unwrap().contains("1 legacy"));
+    assert!(warnings[0]
+        .as_str()
+        .unwrap()
+        .contains("issuectl intake migrate --apply"));
     assert!(
-        dv.get("legacy_pending").is_none(),
-        "no legacy deferred here"
+        out.stderr.is_empty(),
+        "JSON warning stays on stdout: {}",
+        dump(&out)
     );
-    assert!(dv["items"].as_array().unwrap().is_empty());
+
+    let migrated = run(tmp.path(), &["--json", "intake", "migrate", "--apply"]);
+    assert_eq!(migrated.status.code(), Some(0), "{}", dump(&migrated));
+    let admitted = json_stdout(&run(
+        tmp.path(),
+        &["--json", "intake", "show", "legacy-one"],
+    ));
+    assert_eq!(admitted["status"], "untriaged");
+    assert_eq!(
+        admitted["labels"],
+        serde_json::json!(["via:agent-homebase-wrapup"]),
+        "agent provenance label is preserved"
+    );
+
+    let accepted = run(tmp.path(), &["--json", "intake", "accept", "legacy-one"]);
+    assert_eq!(accepted.status.code(), Some(0), "{}", dump(&accepted));
+    let after = json_stdout(&run(
+        tmp.path(),
+        &["--json", "intake", "show", "legacy-one"],
+    ));
+    assert_eq!(after["status"], "open");
 }
 
 #[test]
-fn queue_human_mode_flags_legacy_row_and_prints_nudge() {
-    // §6 requires the legacy surfacing in the HUMAN output path too, not
-    // just `--json`: the legacy row carries a `[legacy]` flag and a trailing
-    // `Note:` line nudges the reader to run the migration. The JSON tests
-    // above pin the machine contract; this pins the text a developer reads.
+fn queue_human_mode_hides_legacy_row_and_warns_on_stderr() {
     let tmp = fresh_repo();
-    file_bug(tmp.path(), "modern-one");
     write_legacy(tmp.path(), "legacy-one", "labels: [needs-triage]\n");
 
     let out = run(tmp.path(), &["intake", "queue"]);
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // The legacy row is flagged inline...
-    let legacy_row = stdout
-        .lines()
-        .find(|l| l.contains("legacy-one"))
-        .unwrap_or_else(|| panic!("legacy row missing: {}", dump(&out)));
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        legacy_row.contains("[legacy]"),
-        "legacy row not flagged: {}",
+        !stdout.contains("legacy-one"),
+        "legacy row hidden: {}",
         dump(&out)
     );
-    // ...and the modern row is NOT.
-    let modern_row = stdout
-        .lines()
-        .find(|l| l.contains("modern-one"))
-        .unwrap_or_else(|| panic!("modern row missing: {}", dump(&out)));
-    assert!(
-        !modern_row.contains("[legacy]"),
-        "modern row wrongly flagged: {}",
-        dump(&out)
-    );
-    // The migration nudge names the count, the legacy label, and the command.
-    assert!(
-        stdout.contains("Note: 1 legacy item(s)"),
-        "no nudge line: {}",
-        dump(&out)
-    );
-    assert!(stdout.contains("needs-triage"), "{}", dump(&out));
-    assert!(stdout.contains("issuectl intake migrate"), "{}", dump(&out));
+    assert!(stdout.contains("No items in the untriaged queue."));
+    assert!(stderr.contains("warning: 1 legacy label-based intake item(s)"));
+    assert!(stderr.contains("issuectl intake migrate --apply"));
 }
 
 #[test]
-fn queue_state_deferred_surfaces_legacy_deferred_form() {
-    // §6 also migrates `open + deferred` → `deferred`. Those items must be
-    // visible in the deferred view before migration, else they are silently
-    // abandoned (invisible in both the default and the deferred queue).
+fn queue_without_legacy_items_emits_no_warning() {
     let tmp = fresh_repo();
-    write_legacy(tmp.path(), "parked-legacy", "labels: [deferred]\n");
+    file_bug(tmp.path(), "modern-one");
 
-    // The default (untriaged) queue does NOT surface a deferred-only form.
-    let def_default = json_stdout(&run(tmp.path(), &["--json", "intake", "queue"]));
-    assert!(def_default.get("legacy_pending").is_none());
-    assert!(def_default["items"].as_array().unwrap().is_empty());
-
-    // The deferred view does.
-    let out = run(
-        tmp.path(),
-        &["--json", "intake", "queue", "--state", "deferred"],
-    );
-    let v = json_stdout(&out);
-    assert_eq!(v["legacy_pending"], 1, "{}", dump(&out));
-    let items = v["items"].as_array().unwrap();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["slug"], "parked-legacy");
-    assert_eq!(items[0]["legacy"], true);
-    assert_eq!(items[0]["status"], "open");
-}
-
-#[test]
-fn queue_provenance_filter_surfaces_unmigrated_telegram_items() {
-    // `--provenance telegram` must still find a legacy item that encodes
-    // provenance via the `via:telegram` label (no `provenance` field yet),
-    // otherwise the transition filter hides exactly the population being
-    // migrated.
-    let tmp = fresh_repo();
-    write_legacy(
-        tmp.path(),
-        "tg-legacy",
-        "labels: [needs-triage, via:telegram]\n",
-    );
-    // A non-telegram legacy item that must be filtered OUT.
-    write_legacy(tmp.path(), "other-legacy", "labels: [needs-triage]\n");
-
-    let out = run(
-        tmp.path(),
-        &["--json", "intake", "queue", "--provenance", "telegram"],
-    );
-    let v = json_stdout(&out);
-    let items = v["items"].as_array().unwrap();
-    assert_eq!(items.len(), 1, "only the telegram item: {}", dump(&out));
-    assert_eq!(items[0]["slug"], "tg-legacy");
-    assert_eq!(items[0]["legacy"], true);
+    let out = run(tmp.path(), &["--json", "intake", "queue"]);
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["warnings"], serde_json::json!([]));
+    assert_eq!(envelope["data"]["items"].as_array().unwrap().len(), 1);
+    assert!(out.stderr.is_empty(), "{}", dump(&out));
 }
 
 #[test]
