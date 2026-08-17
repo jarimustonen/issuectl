@@ -59,11 +59,12 @@ valmistuivat ja mergasivat itsensä:**
 - Splitti + ADR ovat sisäisiä — **ei release-tarvetta vielä**; seuraava cut 0.7.0-enginellä kun
   käyttäjälle näkyvää kertyy (resepti AGENTS.md; verify-barrieri tarkistaa, backstop kerran).
 
-**Uutta intakea, triage tekemättä:** @intake-bug-issuectl-fab0edad2e42 (dag: priority ohittaa
-lane_seq:n lanen sisällä hiljaisesti) ja @intake-feature-issuectl-769ae85ab662 (`collision`
-dokumentoitu mutta `update` ei toteuta sitä — huom. tarkista, voi olla jo vanhentunut:
-`update --add-collision` on olemassa). Aja `/issue-intake` tai lanetä suoraan; molemmat
-osunevat `dag.rs`/`main.rs`-alueelle eli splitin jälkeen.
+**Intake triagoitu (2026-08-17, 4 kohdetta):** @intake-bug-issuectl-fab0edad2e42 hyväksytty
+(dag-järjestyspolitiikka näkyviin, lane help-docs) · @intake-feature-issuectl-769ae85ab662
+suljettu obsoletena (`update --add-collision/--remove-collision` on jo olemassa) ·
+@intake-feature-issuectl-42403ae544e3 hyväksytty (skill dokumentoi lane-liput, lane skills) ·
+@intake-feature-issuectl-4f9dbc60a05e hyväksytty (deferred-labelin eläköinti + doctor-check,
+lane intake).
 
 **⚠️ Intake-detektio:** käytä provenanssi-agnostista hakua — `issuectl intake queue` TAI
 `issuectl list --status open --label needs-triage`. Huomaa @intake-queue-legacy-mismatch:
@@ -115,7 +116,6 @@ issuectl ls --status open --label needs-triage
 Hyväksytty kohde lanetetaan `issuectl`-frontmatteriin ja näkyy sen jälkeen
 `issuectl dag`issa.
 
-## Piialiisan bugiraportit
-
-- [ ] 🐛 Piialiisan bugiraportti: issue skill: document update --lane/--lane-seq flags — jari via Telegram ([`intake-feature-issuectl-42403ae544e3`](issues/intake-feature-issuectl-42403ae544e3/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: Retire the deferred label; doctor must flag residual uses — jari via Telegram ([`intake-feature-issuectl-4f9dbc60a05e`](issues/intake-feature-issuectl-4f9dbc60a05e/item.md))
+Huom: raportoivan pään filaus-flow (sisarrepon wrapper) appendaa tänne oman
+checklist-osionsa joka kerta. Se ei tule issuectl:n binääristä eikä templateista;
+poista osio triagen yhteydessä kunnes lähdepää on korjattu.

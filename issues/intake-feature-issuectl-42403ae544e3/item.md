@@ -7,7 +7,9 @@ status: open
 priority: normal
 labels:
 - via:agent-homebase-wrapup
-- needs-triage
+lane: skills
+lane_seq: 30
+collision: [templates]
 ---
 
 # issue skill: document update --lane/--lane-seq flags
@@ -21,3 +23,9 @@ Observed: the bundled `issue` skill (SKILL.md, installed by issuectl 0.6.3) docu
 Expected: the Update action's "Common flags" list includes `--lane` / `--lane-seq` (and their `--no-*` clearing forms), and ideally a one-line pointer that lane membership drives `issuectl dag`.
 
 Exact failing command: `issuectl --json set cut-plan-module lane core --expected-version sha256:...` → exit 1, code command-failed.
+
+## Comments
+
+### 2026-08-17T17:16:21Z · @agent-stint
+
+Triage: accepted. Skill-template docs gap — /issue skill's Update flags list must include --lane/--lane-seq/--no-lane/--no-lane-seq and note that set rejects built-in lane fields. Laned to skills (seq 30, after the two running skills fixes; collision: templates).

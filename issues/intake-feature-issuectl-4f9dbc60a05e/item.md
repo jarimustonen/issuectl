@@ -7,7 +7,9 @@ status: open
 priority: normal
 labels:
 - via:agent-homebase-wrapup
-- needs-triage
+lane: intake
+lane_seq: 20
+collision: [crates/issuectl-core/src/doctor, crates/issuectl-core/src/agents.rs]
 ---
 
 # Retire the deferred label; doctor must flag residual uses
@@ -26,3 +28,9 @@ Expected:
 - `dag`/`ls` need no new logic; the label simply stops existing.
 
 Observed today: `issuectl dag` (issuectl current as of 2026-08-17) ranked the deferred-labelled issue as head-of-line with no indication of the label.
+
+## Comments
+
+### 2026-08-17T17:16:21Z · @agent-stint
+
+Triage: accepted (maintainer decision recorded in the report). Retire the deferred label: doctor warning (+ --fix removal), scaffold prose update; check interaction with intake_migrate's deferred-label handling. Laned to intake (seq 20) because it touches the same legacy-label vocabulary the queue fix is reworking.
