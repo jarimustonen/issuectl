@@ -119,3 +119,7 @@ Hyväksytty kohde lanetetaan `issuectl`-frontmatteriin ja näkyy sen jälkeen
 Huom: raportoivan pään filaus-flow (sisarrepon wrapper) appendaa tänne oman
 checklist-osionsa joka kerta. Se ei tule issuectl:n binääristä eikä templateista;
 poista osio triagen yhteydessä kunnes lähdepää on korjattu.
+
+## Piialiisan bugiraportit
+
+- [ ] 🐛 Piialiisan bugiraportti: update response envelope echoes null for fields it just set (lane_seq) — jari via Telegram ([`intake-bug-issuectl-d5b6669a98fe`](issues/intake-bug-issuectl-d5b6669a98fe/item.md))
