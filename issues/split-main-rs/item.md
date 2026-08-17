@@ -2,7 +2,7 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: chore
-status: open
+status: in-progress
 priority: high
 lane: cli-fixes
 lane_seq: 5
