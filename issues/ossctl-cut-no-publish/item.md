@@ -2,14 +2,12 @@
 created: 2026-08-10
 updated: 2026-08-17
 type: bug
-status: fixed
+status: open
 priority: high
-lane: blocked-upstream
-lane_seq: 90
+lane: release-infra
+lane_seq: 10
 labels:
 - blocked:upstream-ossctl
-closed: 2026-08-17
-closed_by: claude-stint
 ---
 
 # ossctl release cut does not actually publish to crates.io (real-cut no-op); use manual cargo publish until fixed
@@ -87,6 +85,26 @@ the manual local publish is the only working route right now.
 
 Root-cause fix tracked upstream in the ossctl repo: @release-cut-publish-noop (bug, high). The stale-lock recovery friction hit during the same cut is upstream @release-abandon-break-stale-lock. This issuectl-side issue stays as the release-path blocker: once ossctl ships the fix and a real cut is verified end-to-end, remove the reminder and confirm the ossctl path here.
 
+### 2026-08-17T05:48:42Z · @claude-stint
+
+REOPENED as a verification gate for the next release (maintainer decision, 2026-08-17).
+
+Scope note, because the title is now narrower than the issue: the ORIGINAL symptom — 'release cut does not actually publish' — is genuinely fixed and was verified on 0.14.1 (both crates published by the engine, correct core-before-binary order). What keeps this open is that the engine path as a whole is not yet trustworthy end-to-end: two other 0.6.1 defects were hit on the same cut, and both were worked around by hand rather than by a working engine.
+
+Do NOT close this on the basis of a green 'release complete' line. That line was printed on 0.14.1 while the entire binary + Homebrew half had silently failed.
+
+#### Verify on the next cut, then close if all clean
+
+1. Publish phase (the original symptom): the engine publishes issuectl-core then issuectl to crates.io, no 'not visible on index' failure, no manual 'cargo publish' fallback needed.
+2. ossctl @release-bump-plan-uncuttable: run 'ossctl release plan --bump patch' and cut the plan_id it returns. If the cut still answers plan_stale, the bug is unfixed — fall back to bumping by hand and planning without --bump. Never follow the suggested current_plan_id; on 0.14.1 it meant 'republish the already-published version'.
+3. ossctl @release-tag-preempts-cargo-dist: after the cut, check the GitHub Release actually has assets (expect ~15, not 0) and that publish-homebrew-formula ran rather than being skipped. If host failed with 'a release with the same tag name already exists', delete the asset-less release object (leave the git tag) and re-run the failed jobs.
+4. Homebrew tap actually advanced to the new version — this is the leg that was silently dropped for three releases.
+
+Close only when 1-4 all pass with no manual intervention. If any step still needs a hand-fix, record which one here and leave it open: a partially-working release engine that reports success is the exact failure mode this issue exists to catch.
+
+Upstream issues to check for fixes before the next cut: ossctl @release-bump-plan-uncuttable, @release-tag-preempts-cargo-dist.
+
+
 ## Resolution
 
 ### 2026-08-17T05:43:22Z · @claude-stint
@@ -112,3 +130,7 @@ Two SEPARATE 0.6.1 defects were hit during the same cut and are filed upstream r
 - ossctl @release-tag-preempts-cargo-dist — the tag phase pre-creates the GitHub Release, so cargo-dist's host job collides and the Homebrew publish is skipped while the cut still reports success.
 
 Neither blocks the publish path this issue was about, but the first means '--bump' must be avoided and the second means a cut must be checked for release assets afterwards. TODO.md's release-lore section should be updated to reflect that the engine path now works, with those two caveats.
+
+## Reopen Notes — 2026-08-17
+
+_Add rationale for reopening here._
