@@ -2,12 +2,13 @@
 created: 2026-08-10
 updated: 2026-08-17
 type: bug
-status: open
+status: fixed
 priority: high
 lane: release-infra
 lane_seq: 10
 labels:
 - blocked:upstream-ossctl
+closed: 2026-08-17
 ---
 
 # ossctl release cut does not actually publish to crates.io (real-cut no-op); use manual cargo publish until fixed
@@ -107,6 +108,11 @@ Upstream issues to check for fixes before the next cut: ossctl @release-bump-pla
 ### 2026-08-17T08:31:59Z · @agent-stint
 
 ossctl upgraded to 0.7.0 and both cut gotchas are fixed upstream (release-bump-plan-uncuttable, release-tag-preempts-cargo-dist closed). OSS-RELEASE.md now declares the distribution block (adapter cargo-dist, gh_releases, homebrew_tap jarimustonen/homebrew-issuectl, 3 platforms) plus a registry:homebrew target, so 0.7.0 plans AND verifies the delegated legs — the mandatory verify barrier checks crates.io receipts, GitHub Release assets, and the tap formula before a cut reports complete. Gate for the next cut: run it on ossctl >=0.7.0, confirm the verify phase passes; the manual gh-release-view checklist remains as a backstop only.
+
+### 2026-08-17T17:55:40Z · @agent-stint
+
+0.15.0 cut executed through ossctl 0.7.0: both crates published to crates.io by the engine (receipts in run 01M08CFSBMDSKEQV9FPR7FXF7C journal), tag pushed, GitHub Release correctly delegated to cargo-dist (no pre-create). The gate's original claim is disproven — the engine publishes. Residual engine issue moved upstream: the cut still exit-2'd because ossctl's own homebrew leg (redundant with cargo-dist publish-jobs) hit a transient 503, so the verify phase never ran; all three destinations were independently backstop-verified delivered (crates.io 0.15.0 x2, 12 GH assets, tap 0.15.0). Filed in ossctl as @cut-runs-own.
+
 
 
 

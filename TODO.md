@@ -14,61 +14,52 @@ säännöt → `AGENTS.md`.
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-17, arkkitehtuurikatselmus-rupeama valmis):** `main` **vihreä** (1078 testiä,
-fmt + clippy + doc puhtaat, orkestroija verifioi itse mergen jälkeen), pushattu. Live-release
-`v0.14.1` kaikissa kanavissa. Ei ajossa olevia workereita. **Molemmat rupeaman worktreet
-valmistuivat ja mergasivat itsensä:**
+**Tila (2026-08-17, ilta — kaksi rupeamaa samana päivänä valmiina):** `main` **vihreä**
+(1082 testiä + integraatiot, fmt/clippy/doc puhtaat, orkestroija verifioi mergien jälkeen),
+pushattu. **Live-release `v0.15.0` kaikissa kanavissa** (crates.io ×2, GitHub Release 12
+assetia — pudotus 15:stä on Windows-drop, tap 0.15.0; kaikki backstop-verifioitu). Paikallinen
+binääri päivitetty (`cargo install --path`). Ei ajossa olevia workereita eikä worktreitä.
 
-- **@split-main-rs TEHTY:** kaikki kolme hot-tiedostoa pilkottu puhtaana siirtona —
-  `main.rs` (9278 → 5 riviä) → `cmd/`-perhemoduulit, `doctor.rs` → `doctor/`
-  (checks/apply/core/render + testit), `mutate/mod.rs` (7319 → 906) → verbitiedostot.
-  Help-output byte-identtinen, green gate per vaihe. AGENTS.md:n hot-file-sääntö on nyt
-  per-perhemoduuli: eri komentoperheet ovat rinnakkais-turvallisia.
-- **@cli-verb-surface TEHTY:** `docs/decisions/0004-cli-verb-surface.md` — `update` on ainoa
-  valikoiva mutaatioverbi (`set`/`assign`/`label`/`apply`/`bulk`/`close`/`depend` foldataan
-  siihen), `note` kanoninen (`comment` alias), `stats`+`workload` → `metrics`, `burndown` →
-  `cycle burndown`, `hooks`+`install-merge-driver` → `fmt`, `pick`/`new`/`ls` alias-then-remove,
-  export JSON-only, intake ainoa vastaanotto. Deprekointi-ikkuna: 0.15.0 valmistelu → 0.16.0
-  piilotetut aliakset + varoitukset → 0.17.0 poisto. Uusi ylätason verbi vaatii ADR-amendmentin.
-  @deprecate-triage-inbox ratifioitu, gatettu @intake-queue-legacy-mismatch:n taakse.
+**Rupeama 1 (arkkitehtuurikatselmus):** @split-main-rs (kolme hot-tiedostoa pilkottu puhtaana
+siirtona: `main.rs` 9278→5 riviä → `cmd/`-perheet, `doctor.rs` → `doctor/`, `mutate/mod.rs`
+7319→906 → verbitiedostot; hot-file-sääntö nyt per-perhemoduuli) + @cli-verb-surface
+(ADR `docs/decisions/0004`: `update` ainoa valikoiva mutaatioverbi, foldit + deprekointi-ikkuna
+valmistelu → piilotetut aliakset + varoitukset → poisto; uusi ylätason verbi vaatii
+ADR-amendmentin). Lisäksi: `issuectl archive` käyttöön (60 issueta arkistoon), AGENTS.md
+sääntökirjaksi (perustelut `docs/decisions/0002–0003` + `docs/design/`), ossctl 0.7.0 +
+`distribution:`-blokki OSS-RELEASE.md:hen.
 
-**Tässä rupeamassa tehty (2026-08-17):**
-1. `issuectl archive` otettu käyttöön omassa repossa: 60 suljettua issueta (>90 pv) siirretty
-   `issues/archive/`-puuhun. Aja handoffissa jatkossa kun aktiivipuu kasvaa.
-2. ossctl päivitetty 0.7.0:aan — molemmat 0.14.1-cutin sudenkuopat korjattu upstreamissa, ja
-   `OSS-RELEASE.md` deklaroi nyt `distribution:`-blokin (cargo-dist-delegaatio + tap), joten
-   engine **verifioi** GitHub Release -assetit ja tap-formulan ennen kuin cut on "complete".
-   `@ossctl-cut-no-publish` pysyy auki seuraavan cutin verifiointiporttina.
-3. AGENTS.md siivottu sääntökirjaksi (570 → ~300 riviä): perustelut siirretty
-   `docs/decisions/0002` (canon-§22-hylkäykset), `0003` (frontmatter-kenttien tyypitys + DAG),
-   `docs/design/pi-skill-mirror.md`, `docs/design/doctor-fix.md`. Release-osio kirjoitettu
-   0.7.0:lle; henkilökohtaiset infra-nimet poistettu.
-4. Filattu: @cli-verb-surface (ADR, ajossa), @deprecate-triage-inbox (blocked_by ADR),
-   @purge-telegram-surfaces (cli-fixes, splitin jälkeen — henkilökohtaisen intake-kanavan
-   nimi pois tuotepinnoista).
-5. Vanha canon-review-worktree poistettu.
+**Rupeama 2 (0.15.0):** kolme workeria rinnakkain, kaikki landattu —
+1. @intake-bug-issuectl-bad8e7d6118a: `skill install --force` säilyttää repo-kirjoitetun
+   `issues/AGENTS.md`:n; uusi `--force-scaffold` regeneroi eksplisiittisesti.
+2. @intake-bug-issuectl-bf2580033c3a: henkilökohtaiset infra-viittaukset pois lähteestä.
+3. @intake-queue-legacy-mismatch: jono status-strict + legacy-varoitus + `intake migrate
+   --apply` -polku. → @deprecate-triage-inbox vapautui blockeristaan.
+4. @intake-feature-issuectl-77792e73735b: `apply --help` näyttää `body_ops`-shapet
+   (parser-pinnattu esimerkki). 5. @intake-bug-issuectl-fab0edad2e42: dag-järjestyspolitiikka
+   näkyviin. Intake-triage: 5 kohdetta (1 suljettu obsoletena, loput lanetettu).
+
+**RELEASE-HAVAINTO (0.15.0 cut, ossctl 0.7.0):** engine julkaisi cratet ja delegoi GitHub
+Releasen oikein (0.6.1-bugit todistetusti korjattu; @ossctl-cut-no-publish suljettu). MUTTA
+cut päättyi exit-2:een: ossctl ajaa **oman** homebrew-leginsä vaikka cargo-distin
+`publish-jobs=["homebrew"]` omistaa tapin — legi kaatui transienttiin GitHub 503:een, verify-
+vaihe jäi ajamatta ja run kirjautui failed-tilaan vaikka kaikki kohteet toimitettiin
+(false-red). Filattu ossctl:ään: `@cut-runs-own`. Kunnes se on korjattu: **failed-cutin
+jälkeen aja backstop-tarkistukset ennen johtopäätöksiä** (crates.io API, `gh release view`,
+tap-formula) — dist-vaiheen kaatuminen ei tarkoita että julkaisu epäonnistui.
 
 **Seuraava askel:**
-- `cli-fixes`-lanen loput (@intake-feature-issuectl-77792e73735b, @intake-queue-legacy-mismatch,
-  @purge-telegram-surfaces) ovat nyt ajettavissa — split on landattu, joten eri perhemoduuleihin
-  osuvat voivat kulkea rinnakkain.
-- `skills`-lane (@intake-bug-issuectl-bad8e7d6118a → @intake-bug-issuectl-bf2580033c3a,
-  priority high) — spawnattavissa milloin vain, disjoint muista.
-- ADR 0004:n toteutus: filaa fold-issuet (per fold, post-split `cmd/`-tiedostoihin) 0.15.0/0.16.0
-  -aikataululla; @deprecate-triage-inbox odottaa @intake-queue-legacy-mismatch:ia.
-- Splitti + ADR ovat sisäisiä — **ei release-tarvetta vielä**; seuraava cut 0.7.0-enginellä kun
-  käyttäjälle näkyvää kertyy (resepti AGENTS.md; verify-barrieri tarkistaa, backstop kerran).
-
-**Intake triagoitu (2026-08-17, 4 kohdetta):** @intake-bug-issuectl-fab0edad2e42 hyväksytty
-(dag-järjestyspolitiikka näkyviin, lane help-docs) · @intake-feature-issuectl-769ae85ab662
-suljettu obsoletena (`update --add-collision/--remove-collision` on jo olemassa) ·
-@intake-feature-issuectl-42403ae544e3 hyväksytty (skill dokumentoi lane-liput, lane skills) ·
-@intake-feature-issuectl-4f9dbc60a05e hyväksytty (deferred-labelin eläköinti + doctor-check,
-lane intake).
-
-**⚠️ Intake-detektio:** käytä provenanssi-agnostista hakua — `issuectl intake queue` TAI
-`issuectl list --status open --label needs-triage`. Huomaa @intake-queue-legacy-mismatch:
-jono voi listata legacy-kohteita joita `intake accept` ei käsittele.
+- `verb-surface`-lane: @intake-bug-issuectl-d5b6669a98fe (update:n `--json`-echo ei raportoi
+  juuri asetettuja lane-kenttiä; vahvistettu koodista) → @update-canonical-forms (ADR:n
+  valmisteluslice: `update --patch-file`, `--query`, parity-testit) → @deprecate-triage-inbox.
+  Sarjassa (sama echo/write-pinta).
+- `skills`-lane: @intake-feature-issuectl-42403ae544e3 (skill dokumentoi lane-liput).
+- `intake`-lane: @intake-feature-issuectl-4f9dbc60a05e (deferred-labelin eläköinti +
+  doctor-check).
+- @purge-telegram-surfaces — nyt vapaana ajettavaksi (skills- ja intake-laneissa ei ajossa
+  mitään; törmää templateihin, joten älä rinnakkain 42403:n kanssa).
+- ADR:n deprekointi-release (piilotetut aliakset + varoitukset + canonical-only skillit)
+  filataan kun @update-canonical-forms on landannut.
 
 **Dogfood:** `cargo install issuectl` / `brew upgrade jarimustonen/issuectl/issuectl` /
 `cargo install --path crates/issuectl`. Skillit `/issue`, `/issue-new`, `/issue-intake`
