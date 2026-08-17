@@ -104,6 +104,11 @@ Close only when 1-4 all pass with no manual intervention. If any step still need
 
 Upstream issues to check for fixes before the next cut: ossctl @release-bump-plan-uncuttable, @release-tag-preempts-cargo-dist.
 
+### 2026-08-17T08:31:59Z · @agent-stint
+
+ossctl upgraded to 0.7.0 and both cut gotchas are fixed upstream (release-bump-plan-uncuttable, release-tag-preempts-cargo-dist closed). OSS-RELEASE.md now declares the distribution block (adapter cargo-dist, gh_releases, homebrew_tap jarimustonen/homebrew-issuectl, 3 platforms) plus a registry:homebrew target, so 0.7.0 plans AND verifies the delegated legs — the mandatory verify barrier checks crates.io receipts, GitHub Release assets, and the tap formula before a cut reports complete. Gate for the next cut: run it on ossctl >=0.7.0, confirm the verify phase passes; the manual gh-release-view checklist remains as a backstop only.
+
+
 
 ## Resolution
 

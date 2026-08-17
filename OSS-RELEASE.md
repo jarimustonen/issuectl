@@ -7,6 +7,16 @@ targets:
   - {ecosystem: rust, package: issuectl, registry: crates.io, adapter: cargo-publish}
   - {ecosystem: rust, package: issuectl-core, registry: crates.io, adapter: cargo-publish}
   - {ecosystem: rust, package: issuectl, registry: gh-releases, adapter: cargo-dist}
+  - {ecosystem: rust, package: issuectl, registry: homebrew, adapter: homebrew-tap}
+distribution:
+  adapter: cargo-dist
+  gh_releases: true
+  installers: [shell]
+  homebrew_tap: jarimustonen/homebrew-issuectl
+  platforms:
+    - aarch64-apple-darwin
+    - aarch64-unknown-linux-musl
+    - x86_64-unknown-linux-musl
 versioning: semver
 changelog: {mode: curated, source: manual}
 conventional_commits: true
@@ -25,6 +35,10 @@ docs_site: none
 > finalize, crates.io publish, and the `vX.Y.Z` tag. cargo-dist `release.yml` is **kept** as a
 > pure binary-distribution backend — GitHub-Release binaries + shell installer + Homebrew tap —
 > fired by the tag ossctl pushes; ossctl does **not** regenerate `release.yml`. See Release notes.
+> **Updated 2026-08-17 (ossctl 0.7.0):** the `distribution:` block + `registry: homebrew` target
+> are now declared so the engine plans and **verifies** the delegated cargo-dist legs (GitHub
+> Release assets + Homebrew tap) instead of silently skipping them. The delegation itself is
+> unchanged: cargo-dist builds, hosts, and pushes the tap formula.
 
 ## Rationale
 - **maturity: mvp** — inferred by `ossctl facts` (mvp because there is **no ≥1.0 release** yet;
