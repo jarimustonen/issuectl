@@ -15,11 +15,19 @@ members = ["cargo:."]
 cargo-dist-version = "0.28.2"
 # CI backend.
 ci = "github"
-# Installer scripts generated as release assets: curl-to-shell (Unix) and
-# iwr-to-powershell (Windows). Homebrew auto-publish is deliberately NOT enabled
-# here — that needs a tap write token and is owned by the separate
-# `homebrew-adapter-first-formula` issue.
-installers = ["shell", "powershell"]
+# Installer scripts generated as release assets: curl-to-shell (Unix),
+# iwr-to-powershell (Windows), and the Homebrew formula pushed to the tap below.
+# Homebrew auto-publish was previously disabled here pending a tap write token;
+# `HOMEBREW_TAP_TOKEN` is now configured on this repo, so the formula is published
+# by the tag-triggered workflow. Before that, the tap sat at 0.11.0 while
+# crates.io and the GitHub Releases advanced to 0.14.0 (@homebrew-tap-stale).
+installers = ["shell", "powershell", "homebrew"]
+# The external tap repository the formula is written to. Its write token is the
+# `HOMEBREW_TAP_TOKEN` repo secret — never inline a token here.
+tap = "jarimustonen/homebrew-issuectl"
+# Publish the formula from the tag-triggered workflow, after the GitHub Release
+# assets exist.
+publish-jobs = ["homebrew"]
 # Cross-platform binary matrix (Rust target-triple syntax): macOS (arm64), Linux (arm64 + x86_64), and Windows x86_64. The Linux targets use
 # `musl`, not `gnu`, so the binaries are statically linked and run on any distro
 # regardless of its glibc vintage — issuectl is pure Rust with no C dependencies,

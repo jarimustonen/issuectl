@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Homebrew tap publishing is enabled again.** cargo-dist's `homebrew` installer and the
+  `jarimustonen/homebrew-issuectl` tap are now declared in `dist-workspace.toml`, so the
+  tag-triggered release workflow publishes the formula. The tap had been stuck at 0.11.0
+  while crates.io and the GitHub Releases advanced through 0.12.0, 0.13.0 and 0.14.0, so
+  `brew` users were three releases behind — including the breaking 0.13.0 JSON envelope.
+
 ## [0.14.0] - 2026-08-16
 
 ### Added
