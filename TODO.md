@@ -142,3 +142,4 @@ Hyväksytty kohde lanetetaan `issuectl`-frontmatteriin ja näkyy sen jälkeen `i
 ## Piialiisan bugiraportit
 
 - [ ] 🐛 Piialiisan bugiraportti: Personal-setup references leak into the public repo (fleet-apply, homeb… — jari via Telegram ([`intake-bug-issuectl-bf2580033c3a`](issues/intake-bug-issuectl-bf2580033c3a/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: skill install --force silently overwrites repo-authored content in issu… — jari via Telegram ([`intake-bug-issuectl-bad8e7d6118a`](issues/intake-bug-issuectl-bad8e7d6118a/item.md))
