@@ -7,7 +7,7 @@ priority: normal
 related: ['@cli-verb-surface']
 lane: verb-surface
 lane_seq: 10
-blocked_by: ['@cli-verb-surface']
+blocked_by: ['@cli-verb-surface', '@intake-queue-legacy-mismatch']
 ---
 
 # Deprecate issuectl triage and the inbox landing zone
