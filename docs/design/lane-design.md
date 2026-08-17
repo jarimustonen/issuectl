@@ -15,9 +15,16 @@ to group work: a `reporting` lane with nine unrelated changes still permits
 only one of them at a time.
 
 Use `blocked_by` for a real prerequisite. It orders same-lane dependencies and
-also prevents an unsatisfied cross-lane dependency from being spawnable. Use
-`lane_seq` only for a coarse preference after dependencies and priority, not to
-invent a dependency.
+also prevents an unsatisfied cross-lane dependency from being spawnable.
+
+## Intra-lane ordering
+
+The order is deterministic: `blocked_by` topology first, then priority (high,
+normal, low), `lane_seq`, creation time, and finally slug. Priority deliberately
+outranks `lane_seq`. Within one priority band, lower `lane_seq` values come
+first, and issues with a value come before issues without one. Use `lane_seq`
+only for a coarse preference after dependencies and priority, not to invent a
+dependency.
 
 Use `collision:` for a shared cross-lane hotspot. Two otherwise independent
 lanes may both touch `crates/issuectl/src/main.rs`; give both issues the same

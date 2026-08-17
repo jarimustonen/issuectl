@@ -141,6 +141,10 @@ fn dag_human_output_includes_depth_and_spawnable_heads() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("spawnable heads: 3"), "got: {stdout}");
     assert!(
+        stdout.contains("intra-lane order: blocked_by topology, priority, lane_seq, created, slug"),
+        "got: {stdout}"
+    );
+    assert!(
         stdout.contains("lane schema (depth: 2, head-of-line: schema-a)"),
         "got: {stdout}"
     );

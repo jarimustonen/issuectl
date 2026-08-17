@@ -53,6 +53,7 @@ pub(crate) fn print_dag_human(view: &dag::DagView) {
         return;
     }
     println!("spawnable heads: {}", view.spawnable_heads);
+    println!("intra-lane order: blocked_by topology, priority, lane_seq, created, slug");
     for lane in &view.lanes {
         let head = lane.head_of_line.as_deref().unwrap_or("—");
         println!(

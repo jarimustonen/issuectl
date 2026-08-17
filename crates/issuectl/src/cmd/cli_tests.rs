@@ -62,6 +62,24 @@ mod tests {
             .any(|arg| arg.get_long() == Some("slug-random")));
     }
 
+    #[test]
+    fn dag_help_describes_intra_lane_order() {
+        let root = Cli::command();
+        let dag = root
+            .get_subcommands()
+            .find(|command| command.get_name() == "dag")
+            .unwrap();
+        let description = dag
+            .get_long_about()
+            .expect("dag must have long help")
+            .to_string();
+
+        assert!(description.contains("`blocked_by` topology first"));
+        assert!(description.contains("priority (high, normal, low)"));
+        assert!(description.contains("`lane_seq` (ascending, with set values before unset)"));
+        assert!(description.contains("Priority deliberately outranks `lane_seq`"));
+    }
+
     fn fresh_repo() -> TempDir {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("issues")).unwrap();

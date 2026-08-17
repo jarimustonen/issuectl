@@ -1478,6 +1478,11 @@ pub(crate) enum Command {
     /// cross-lane file belongs in `collision:`, not by merging whole lanes;
     /// a hot file attracting many issues is a scheduling problem.
     ///
+    /// Within each lane, ordering is `blocked_by` topology first, then
+    /// priority (high, normal, low), `lane_seq` (ascending, with set values
+    /// before unset), creation time, and finally slug. Priority deliberately
+    /// outranks `lane_seq`.
+    ///
     /// `lane: unlaned` means confirmed parallel-safe work: every member is
     /// independently headed and spawnable. It differs from an absent lane,
     /// which means unclassified work. See `docs/design/lane-design.md` for
