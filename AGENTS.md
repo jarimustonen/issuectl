@@ -434,9 +434,11 @@ policy.
   `crates/issuectl/Cargo.toml`), `cargo update --workspace` to sync
   `Cargo.lock`; **(2)** finalize `CHANGELOG.md` `[Unreleased] → [X.Y.Z] -
   <date>`; **(3)** `git commit -am "release: X.Y.Z"`; **(4)** `ossctl release
-  plan --version X.Y.Z` (seals a content-addressed plan; phases `dry-run-all →
-  build-all → publish-all → tag → dist`), then `ossctl release cut --plan <id>
-  --version X.Y.Z`. `ossctl release cut` publishes the version already in
+  plan` (seals a content-addressed plan; phases `dry-run-all →
+  build-all → publish-all → tag → dist`), then `ossctl release cut --plan <id>`.
+  Neither takes a `--version` flag (0.6.1); **do the bump by hand in steps 1–3
+  and never pass `plan --bump`** — see the gotcha bullet below.
+  `ossctl release cut` publishes the version already in
   `Cargo.toml` (that is why the bump + CHANGELOG finalize are the `release:`
   commit in steps 1–3, before the cut); it owns the **crates.io publish** of
   both crates (`issuectl-core` before `issuectl`, adapter `cargo-publish`) and
@@ -451,6 +453,39 @@ policy.
   publish to crates.io, so there is no double-publish inside cargo-dist; the
   separate crates workflow tolerates versions that the engine already
   published. Full steps: [CONTRIBUTING.md](CONTRIBUTING.md) "Per-release steps".
+- **Two ossctl 0.6.1 release gotchas, both verified on the 0.14.1 cut. A cut is
+  NOT done when the engine prints `release complete` — verify the targets.**
+  - **Never use `ossctl release plan --bump <level>`.** It seals a plan that
+    `release cut` always rejects as `plan_stale`, because the staleness check
+    recomputes the hash *without* the bump. Worse, the rejection names a
+    `current_plan_id` that is the **no-bump** plan — following it attempts to
+    **republish the version already on the registry**. On 0.14.1 that attempt
+    only failed safely because ossctl compares the registry artifact's sha256
+    against the one it would upload and refuses to skip. Bump by hand (steps
+    1–3), then `plan` with no flags. Upstream: ossctl
+    `@release-bump-plan-uncuttable`.
+  - **The `tag` phase pre-creates the GitHub Release, which breaks cargo-dist.**
+    cargo-dist's `host` job then fails with `a release with the same tag name
+    already exists`, and everything downstream — **including
+    `publish-homebrew-formula`** — is skipped, while the cut still reports every
+    phase green. Recovery: delete the asset-less release object (`gh release
+    delete vX.Y.Z --yes`; the git tag is untouched), then `gh run rerun <id>
+    --failed`. Upstream: ossctl `@release-tag-preempts-cargo-dist`.
+  - **Post-cut verification is mandatory**, since the failure above is silent:
+    `gh release view vX.Y.Z --json assets --jq '.assets|length'` (expect ~15,
+    **not 0**) and confirm the Homebrew tap formula advanced to the new version.
+    The tap sat at 0.11.0 through three releases because nobody checked
+    (`@homebrew-tap-stale`).
+- **Homebrew publishing is cargo-dist's, driven by `dist-workspace.toml`.** The
+  `homebrew` installer + `tap` + `publish-jobs = ["homebrew"]` live there, and
+  `HOMEBREW_TAP_TOKEN` is configured on the repo. ossctl's own homebrew leg is
+  **inert**: `OSS-RELEASE.md` has no `distribution` block, so `ossctl contract
+  show` reports `homebrew_tap: null`. **Do not run `ossctl dist generate`** to
+  "fix" that without a deliberate decision — it would strip this repo's
+  self-hosted macOS ARM64 runner override (`[dist.github-custom-runners]`,
+  the `hauis` runner: ~67 s macOS builds versus the 45+ min hosted-queue
+  allocation that motivated it), and `/oss-dist` additionally refuses to emit a
+  runner override at all.
 - **Releases MAY be cut automatically whenever there is something to release** (maintainer
   decision, 2026-08-05). Publishing `issuectl` itself (crates.io / GitHub Release / Homebrew)
   no longer requires an explicit per-release go: when `main` carries unreleased user-facing
