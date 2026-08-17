@@ -3,12 +3,16 @@ created: 2026-08-17
 updated: 2026-08-17
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: high
 labels:
 - via:agent-homebase-wrapup
 lane: skills
 lane_seq: 10
+commits:
+- hash: f2279c8
+  summary: preserve repo-authored issue scaffold and add explicit regeneration
+closed: 2026-08-17
 ---
 
 # skill install --force silently overwrites repo-authored content in issu…
