@@ -2,11 +2,15 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: task
-status: open
+status: done
 priority: normal
 labels: [architecture, decision]
 lane: verb-surface
 lane_seq: 5
+commits:
+- hash: 334dca279e1b02b0f4de27521a5f064bc0b8f8e0
+  summary: ADR 0004
+closed: 2026-08-17
 ---
 
 # Consolidate the CLI verb surface

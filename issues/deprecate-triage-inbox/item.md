@@ -61,3 +61,9 @@ surface decision — this issue is the worked example and first implementation s
   the doctor migration covering stranded drafts.
 - Skill templates untouched or updated in the same commit if any documented surface
   changes (AGENTS.md critical rule).
+
+## Comments
+
+### 2026-08-17T08:49:04Z · @agent-decision
+
+ADR 0004 ratified this deprecation direction. Scope is clarified: deprecation waits for @intake-queue-legacy-mismatch, scan-todos receives an explicit intake-filing flag rather than ambiguous --file, and doctor --fix migrates stranded inbox drafts throughout the transition.
