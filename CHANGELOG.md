@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The bundled `/issue` skill now documents scheduling updates directly.** Its `update`
+  guidance lists the lane setters and clearing flags that drive `issuectl dag`, and its
+  `set` guidance directs built-in `lane` / `lane_seq` fields to those typed flags.
+
 ## [0.15.0] - 2026-08-17
 
 ### Changed
