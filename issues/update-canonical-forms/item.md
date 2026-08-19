@@ -8,6 +8,9 @@ labels: [architecture]
 lane: verb-surface
 lane_seq: 5
 collision: [crates/issuectl/src/cmd/write.rs, crates/issuectl-core/src/mutate/update.rs]
+commits:
+- hash: fc2d44c
+  summary: add canonical update patch and query forms
 ---
 
 # Add canonical update forms per ADR 0004 (0.15.0 prep)
