@@ -7,11 +7,11 @@ targets:
   - {ecosystem: rust, package: issuectl, registry: crates.io, adapter: cargo-publish}
   - {ecosystem: rust, package: issuectl-core, registry: crates.io, adapter: cargo-publish}
   - {ecosystem: rust, package: issuectl, registry: gh-releases, adapter: cargo-dist}
-  - {ecosystem: rust, package: issuectl, registry: homebrew, adapter: homebrew-tap}
+  - {ecosystem: rust, package: issuectl, registry: homebrew, adapter: cargo-dist}
 distribution:
   adapter: cargo-dist
   gh_releases: true
-  installers: [shell]
+  installers: [shell, homebrew]
   homebrew_tap: jarimustonen/homebrew-issuectl
   platforms:
     - aarch64-apple-darwin
@@ -37,8 +37,10 @@ docs_site: none
 > fired by the tag ossctl pushes; ossctl does **not** regenerate `release.yml`. See Release notes.
 > **Updated 2026-08-17 (ossctl 0.7.0):** the `distribution:` block + `registry: homebrew` target
 > are now declared so the engine plans and **verifies** the delegated cargo-dist legs (GitHub
-> Release assets + Homebrew tap) instead of silently skipping them. The delegation itself is
-> unchanged: cargo-dist builds, hosts, and pushes the tap formula.
+> Release assets + Homebrew tap) instead of silently skipping them.
+> **Updated 2026-08-19 (`@homebrew-double-writer-contract`):** the Homebrew target now uses
+> `adapter: cargo-dist`, matching `dist-workspace.toml`'s Homebrew installer and publish job.
+> cargo-dist is the single tap writer; the engine plans and verifies this delegated target.
 
 ## Rationale
 - **maturity: mvp** — inferred by `ossctl facts` (mvp because there is **no ≥1.0 release** yet;
@@ -51,14 +53,13 @@ docs_site: none
 - **ecosystems: [rust]** — two Rust crates in a Cargo workspace (`crates/issuectl`,
   `crates/issuectl-core`); no other package manifests. Not `binary`: `binary` is only used
   when no package ecosystem exists.
-- **targets: two crates.io publishes** — the workspace publishes BOTH `issuectl` and
-  `issuectl-core` (the latter is an internal, explicitly-unstable crate that `issuectl` depends
-  on). Adapter `cargo-publish` describes the crates.io mechanism, now executed by
-  `ossctl release cut`'s `publish-all` phase (was `.github/workflows/publish-crates.yml`,
-  retired 2026-08-10). ⚠️ The registry `targets` model does NOT capture this repo's
-  **binary-distribution** layer — `cargo-dist` (`.github/workflows/release.yml`, tag-triggered)
-  produces GitHub-Release binaries + a shell installer + a Homebrew formula pushed to
-  `jarimustonen/homebrew-issuectl`. See Release notes; cargo-dist is kept as the binary backend.
+- **targets: two crates.io publishes plus delegated binary distribution** — the workspace
+  publishes BOTH `issuectl` and `issuectl-core` (the latter is an internal, explicitly-unstable
+  crate that `issuectl` depends on). Adapter `cargo-publish` describes the crates.io mechanism,
+  now executed by `ossctl release cut`'s `publish-all` phase (was
+  `.github/workflows/publish-crates.yml`, retired 2026-08-10). The `cargo-dist` targets describe
+  the tag-triggered binary-distribution layer: GitHub-Release binaries, a shell installer, and a
+  Homebrew formula pushed to `jarimustonen/homebrew-issuectl`. See Release notes.
 - **versioning: semver** — CHANGELOG.md declares "adheres to Semantic Versioning"; tags are
   `vMAJOR.MINOR.PATCH`. Currently pre-1.0 (0.6.x).
 - **changelog: curated / manual** — CHANGELOG.md is a hand-curated Keep-a-Changelog file; the

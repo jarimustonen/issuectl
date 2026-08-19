@@ -3,7 +3,7 @@ created: 2026-08-19
 updated: 2026-08-19
 type: bug
 reporter: agent-ossctl-stint-23
-status: open
+status: in-progress
 priority: high
 lane: release-contract
 lane_seq: 10
