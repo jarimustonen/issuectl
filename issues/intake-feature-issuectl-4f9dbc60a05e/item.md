@@ -10,6 +10,13 @@ labels:
 lane: intake
 lane_seq: 20
 collision: [crates/issuectl-core/src/doctor, crates/issuectl-core/src/agents.rs]
+commits:
+- hash: dd06403
+  summary: start deferred label retirement
+- hash: b6bd6ee
+  summary: add doctor cleanup and agent guidance
+- hash: 05cf99a
+  summary: preserve intake migration semantics and structured partial errors
 ---
 
 # Retire the deferred label; doctor must flag residual uses
