@@ -2,7 +2,7 @@
 created: 2026-08-17
 updated: 2026-08-19
 type: feature
-status: in-progress
+status: done
 priority: normal
 labels: [architecture]
 lane: verb-surface
@@ -13,6 +13,7 @@ commits:
   summary: add canonical update patch and query forms
 - hash: 1b95604
   summary: preserve update compatibility and complete parity tests
+closed: 2026-08-19
 ---
 
 # Add canonical update forms per ADR 0004 (0.15.0 prep)
