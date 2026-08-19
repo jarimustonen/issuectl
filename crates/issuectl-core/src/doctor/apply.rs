@@ -71,7 +71,10 @@ pub(crate) fn apply_via(
     // still gets the built-in alias table.
     let apply_schema = schema::load(repo_root)?;
     apply_alias_coercions(&mut actions, &mut outcome, &apply_schema, clock)?;
-    apply_deferred_label_removal(&mut actions, &mut outcome)?;
+    apply_deferred_label_removal(&mut actions, &mut outcome);
+    if outcome.apply_error.is_some() {
+        return Ok(outcome);
+    }
 
     // Status/folder reconciliation runs BEFORE the flat-layout
     // migration so the rewrites land at the legacy path that scan()
@@ -349,30 +352,41 @@ pub(crate) fn rename_notes_to_comments(
 pub(crate) fn apply_deferred_label_removal(
     actions: &mut DoctorActions,
     outcome: &mut ApplyOutcome,
-) -> Result<()> {
+) {
     for (slug, item_path) in std::mem::take(&mut actions.deferred_labels) {
-        if !item_path.is_file() {
-            continue;
+        let result = (|| -> Result<bool> {
+            if !item_path.is_file() {
+                return Ok(false);
+            }
+            let mut item = write::read_item(&item_path)?;
+            let labels_key = serde_yaml::Value::String("labels".into());
+            let still_present = item
+                .frontmatter
+                .get(&labels_key)
+                .and_then(|value| value.as_sequence())
+                .is_some_and(|labels| {
+                    labels
+                        .iter()
+                        .any(|label| label.as_str() == Some("deferred"))
+                });
+            if !still_present {
+                return Ok(false);
+            }
+            write::remove_from_string_list(&mut item.frontmatter, "labels", "deferred")?;
+            write::write_item(&item_path, &item)?;
+            Ok(true)
+        })();
+        match result {
+            Ok(true) => outcome.deferred_labels_removed.push(slug),
+            Ok(false) => {}
+            Err(error) => {
+                outcome.apply_error = Some(format!(
+                    "failed to remove retired `deferred` label from {slug}: {error:#}"
+                ));
+                return;
+            }
         }
-        let mut item = write::read_item(&item_path)?;
-        let labels_key = serde_yaml::Value::String("labels".into());
-        let still_present = item
-            .frontmatter
-            .get(&labels_key)
-            .and_then(|value| value.as_sequence())
-            .is_some_and(|labels| {
-                labels
-                    .iter()
-                    .any(|label| label.as_str() == Some("deferred"))
-            });
-        if !still_present {
-            continue;
-        }
-        write::remove_from_string_list(&mut item.frontmatter, "labels", "deferred")?;
-        write::write_item(&item_path, &item)?;
-        outcome.deferred_labels_removed.push(slug);
     }
-    Ok(())
 }
 
 pub(crate) fn apply_orphan_tempfiles(

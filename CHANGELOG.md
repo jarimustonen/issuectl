@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **The `deferred` lifecycle label is retired.** Open work is scheduled with lanes and
   `blocked_by`; `issuectl doctor` now reports residual labels and `doctor --fix` removes them.
+  The distinct `deferred` intake status remains valid, and labels that still encode a pending
+  legacy intake migration are preserved with guidance to run `intake migrate --apply` first.
+  Existing `.issuectl/AGENTS.md` files report managed-block drift until `doctor --fix`
+  regenerates the new label and scheduling guidance.
 
 ### Fixed
 - **The bundled `/issue` skill no longer treats scheduling fields as generic `set`

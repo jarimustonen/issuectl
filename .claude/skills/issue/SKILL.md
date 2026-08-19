@@ -716,7 +716,10 @@ also flags invalid slugs, duplicates, missing item.md files, orphan
 epic refs, self-dependencies in `blocked_by:`, and residual uses of the retired
 `deferred` lifecycle label. The JSON report exposes those as `blocked_by_self`
 and `deferred_labels`; `--fix` removes the retired label without changing the
-valid intake status of the same name.
+valid intake status of the same name. When a label still encodes a pending
+legacy intake migration, `deferred_labels_require_intake_migrate` explains why
+doctor preserved it; run `issuectl intake migrate --apply` before re-running
+`doctor --fix`.
 
 On `--fix`, the JSON envelope carries an `apply_outcome` object with a
 `stop_phase` discriminator that you should branch on:

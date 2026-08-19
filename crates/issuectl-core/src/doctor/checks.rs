@@ -128,7 +128,7 @@ pub(crate) fn scan_via(
 
     populate_extended_validation(&scan, schema_value.as_ref(), &mut report, clock);
 
-    populate_deferred_labels(&scan, &mut report);
+    populate_deferred_labels(&scan, schema_value.as_ref(), &mut report);
     populate_attachment_health(&scan, repo_root, &mut report);
 
     Ok(report)
@@ -241,7 +241,11 @@ pub(crate) fn populate_orphan_epic_refs(scan: &ScanResult, report: &mut DoctorFi
 
 /// Find exact uses of the retired `deferred` label. The intake status with
 /// the same spelling remains valid, so this reads only the `labels` list.
-pub(crate) fn populate_deferred_labels(scan: &ScanResult, report: &mut DoctorFindings) {
+pub(crate) fn populate_deferred_labels(
+    scan: &ScanResult,
+    schema: Option<&schema::Schema>,
+    report: &mut DoctorFindings,
+) {
     for issue in &scan.issues {
         if !issue.item_present {
             continue;
@@ -249,18 +253,45 @@ pub(crate) fn populate_deferred_labels(scan: &ScanResult, report: &mut DoctorFin
         let Some(parsed) = &issue.parsed else {
             continue;
         };
-        if parsed
+        if !parsed
             .issue
             .labels
             .as_ref()
             .is_some_and(|labels| labels.iter().any(|label| label == "deferred"))
         {
+            continue;
+        }
+        report
+            .deferred_labels
+            .push((issue.dir_name.clone(), issue.item_path.clone()));
+
+        // `intake migrate` still owns the legacy cross-field meaning of this
+        // label. Preserve any issue for which that planner would change status
+        // or refuse an ambiguity; deleting the label first would destroy its
+        // migration evidence. Schema load failures are already hard findings,
+        // so no cleanup action is planned until a trustworthy schema exists.
+        let reason = schema.and_then(|schema| {
+            crate::mutate::intake_migrate::plan_issue(&parsed.issue, schema).and_then(|plan| {
+                if let Some(conflict) = plan.conflict {
+                    Some(format!("run `issuectl intake migrate --apply` first: {conflict}"))
+                } else if plan.status_change.is_some() {
+                    Some(
+                        "run `issuectl intake migrate --apply` first to preserve the legacy status transition"
+                            .to_string(),
+                    )
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(reason) = reason {
             report
-                .deferred_labels
-                .push((issue.dir_name.clone(), issue.item_path.clone()));
+                .deferred_labels_require_intake_migrate
+                .push((issue.dir_name.clone(), reason));
         }
     }
     report.deferred_labels.sort();
+    report.deferred_labels_require_intake_migrate.sort();
 }
 
 /// Attachment / fixture health: large binaries, non-AVIF images, and

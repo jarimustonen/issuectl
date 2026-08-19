@@ -425,10 +425,19 @@ pub(crate) fn render_text(
             println!("  {slug}");
         }
         println!();
-    } else if !report.deferred_labels.is_empty() {
+    }
+    if !report.deferred_labels.is_empty() {
         println!("Retired `deferred` labels (remove them; re-run with --fix):");
         for (slug, _) in &report.deferred_labels {
-            println!("  {slug}");
+            if let Some((_, reason)) = report
+                .deferred_labels_require_intake_migrate
+                .iter()
+                .find(|(pending, _)| pending == slug)
+            {
+                println!("  {slug}: {reason}");
+            } else {
+                println!("  {slug}");
+            }
         }
         println!();
     }
@@ -602,6 +611,11 @@ pub(crate) fn render_json(
         .iter()
         .map(|(slug, _)| slug.clone())
         .collect();
+    let deferred_labels_require_intake_migrate: Vec<serde_json::Value> = report
+        .deferred_labels_require_intake_migrate
+        .iter()
+        .map(|(slug, reason)| serde_json::json!({"slug": slug, "reason": reason}))
+        .collect();
 
     let mut json_obj = serde_json::json!({
         "fix_applied": fix && oc.fix_applied(),
@@ -686,6 +700,10 @@ pub(crate) fn render_json(
         map.insert(
             "deferred_labels_removed".to_string(),
             serde_json::json!(oc.deferred_labels_removed),
+        );
+        map.insert(
+            "deferred_labels_require_intake_migrate".to_string(),
+            serde_json::json!(deferred_labels_require_intake_migrate),
         );
     }
     // `apply_outcome` is the new structured envelope: emitted only on

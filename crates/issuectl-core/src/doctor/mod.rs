@@ -422,6 +422,11 @@ struct DoctorFindings {
     /// valid; this check is deliberately scoped to the label.
     /// `(slug, item_path)`.
     deferred_labels: Vec<(String, PathBuf)>,
+    /// Deferred labels whose issue still needs the conflict-aware legacy
+    /// intake migration. Doctor reports these but leaves them untouched so
+    /// it cannot erase the state that `intake migrate` must interpret.
+    /// `(slug, reason)`.
+    deferred_labels_require_intake_migrate: Vec<(String, String)>,
 }
 
 /// Stage 2: planned writes derived from `DoctorFindings`. Built by
@@ -490,7 +495,17 @@ impl DoctorActions {
                 && findings.agents_md_malformed.is_none()
                 && findings.agents_md_check_skipped.is_none(),
             rewrite_issues_agents_md: findings.legacy_issues_agents_md,
-            deferred_labels: std::mem::take(&mut findings.deferred_labels),
+            deferred_labels: findings
+                .deferred_labels
+                .iter()
+                .filter(|(slug, _)| {
+                    !findings
+                        .deferred_labels_require_intake_migrate
+                        .iter()
+                        .any(|(pending, _)| pending == slug)
+                })
+                .cloned()
+                .collect(),
             preflight_blockers,
         }
     }

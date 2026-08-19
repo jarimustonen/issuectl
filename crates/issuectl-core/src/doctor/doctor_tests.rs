@@ -815,7 +815,7 @@ mod tests {
         put_flat(
             &tmp,
             "deferred-labelled-issue",
-            "---\ncreated: 2020-01-01\nupdated: 2020-01-01\ntype: feature\nreporter: test\nstatus: open\npriority: normal\nlabels: [deferred, ui]\n---\n# Labelled\n",
+            "---\ncreated: 2020-01-01\nupdated: 2020-01-01\ntype: feature\nreporter: test\nstatus: in-progress\npriority: normal\nlabels: [deferred, ui]\n---\n# Labelled\n",
         );
         put_flat(
             &tmp,
@@ -845,12 +845,45 @@ mod tests {
     }
 
     #[test]
+    fn deferred_label_preserves_legacy_intake_migration_evidence() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "pending-intake-migrate",
+            "---\ncreated: 2020-01-01\nupdated: 2020-01-01\ntype: feature\nreporter: test\nstatus: open\npriority: normal\nlabels: [deferred]\n---\n# Pending\n",
+        );
+
+        let mut report = scan(tmp.path()).unwrap();
+        assert_eq!(report.deferred_labels.len(), 1);
+        assert_eq!(report.deferred_labels_require_intake_migrate.len(), 1);
+        let actions = DoctorActions::from_findings(&mut report);
+        assert!(actions.deferred_labels.is_empty());
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        assert!(outcome.deferred_labels_removed.is_empty());
+        let text =
+            fs::read_to_string(tmp.path().join("issues/pending-intake-migrate/item.md")).unwrap();
+        assert!(text.contains("status: open"), "{text}");
+        assert!(text.contains("labels: [deferred]"), "{text}");
+
+        let rescanned = scan_issues(tmp.path()).unwrap();
+        let issue = &rescanned.issues[0].parsed.as_ref().unwrap().issue;
+        let plan = crate::mutate::intake_migrate::plan_issue(issue, &schema::default_schema())
+            .expect("legacy migration must remain actionable");
+        assert_eq!(plan.status_change, Some(("open".into(), "deferred".into())));
+    }
+
+    #[test]
     fn deferred_label_fix_removes_only_that_label() {
         let tmp = fresh_repo();
         put_flat(
             &tmp,
             "deferred-labelled-issue",
-            "---\ncreated: 2020-01-01\nupdated: 2020-01-01\ntype: feature\nreporter: test\nstatus: open\npriority: normal\nlabels: [deferred, ui]\n---\n# Labelled\n",
+            "---\ncreated: 2020-01-01\nupdated: 2020-01-01\ntype: feature\nreporter: test\nstatus: in-progress\npriority: normal\nlabels: [deferred, ui]\n---\n# Labelled\n",
         );
 
         let mut report = scan(tmp.path()).unwrap();
@@ -875,6 +908,48 @@ mod tests {
             "unrelated label must remain: {text}"
         );
         assert!(scan(tmp.path()).unwrap().deferred_labels.is_empty());
+    }
+
+    #[test]
+    fn deferred_label_failure_retains_partial_progress_in_outcome() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "first-valid-label",
+            "---\ntype: feature\nstatus: in-progress\npriority: normal\nlabels: [deferred]\n---\n# First\n",
+        );
+        put_flat(
+            &tmp,
+            "second-broken-label",
+            "---\nlabels: [deferred\n---\n# Broken\n",
+        );
+        let mut actions = DoctorActions {
+            deferred_labels: vec![
+                (
+                    "first-valid-label".into(),
+                    tmp.path().join("issues/first-valid-label/item.md"),
+                ),
+                (
+                    "second-broken-label".into(),
+                    tmp.path().join("issues/second-broken-label/item.md"),
+                ),
+            ],
+            ..Default::default()
+        };
+        let mut outcome = ApplyOutcome::default();
+
+        apply_deferred_label_removal(&mut actions, &mut outcome);
+
+        assert_eq!(outcome.deferred_labels_removed, vec!["first-valid-label"]);
+        assert!(outcome
+            .apply_error
+            .as_deref()
+            .is_some_and(|error| error.contains("second-broken-label")));
+        assert!(
+            !fs::read_to_string(tmp.path().join("issues/first-valid-label/item.md"))
+                .unwrap()
+                .contains("deferred")
+        );
     }
 
     #[test]
@@ -2525,6 +2600,7 @@ mod tests {
   "conflict_markers": [],
   "deferred_labels": [],
   "deferred_labels_removed": [],
+  "deferred_labels_require_intake_migrate": [],
   "duplicate_slugs": [],
   "files_rewritten": 0,
   "fix_applied": false,
