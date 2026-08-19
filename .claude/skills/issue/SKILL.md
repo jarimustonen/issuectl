@@ -283,7 +283,9 @@ Example flows:
 Supply exactly one target: a positional `<slug>`, `--query <q>`, or
 `--patch-file <path>`. Patch files cannot be combined with field flags. Under
 `--json`, a patch file must contain a non-empty `expected_version:` just as it
-does with `apply`.
+does with `apply`. `--dry-run` is available for query and patch-file targets,
+not the positional-slug form. Query results use bulk's `{dry_run, count,
+results[]}` data shape; patch-file results use apply's single-mutation shape.
 
 For whole-document replacement, `issuectl body set <slug> --from-file <path>` and `issuectl update <slug> --body-file <path>` preserve the existing title H1 when the incoming body has no H1 and report that preservation in top-level `warnings[]`. An incoming different H1 is accepted but also warns; use `update --title` when the title change is intentional.
 

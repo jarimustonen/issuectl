@@ -691,7 +691,6 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             };
             match query {
                 Some(query) => cmd_update_query(json_output, &query, args, dry_run),
-                None if dry_run => bail!("--dry-run requires --query or --patch-file"),
                 None => cmd_update(json_output, args),
             }
         }

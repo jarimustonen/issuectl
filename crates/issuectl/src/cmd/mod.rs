@@ -621,7 +621,7 @@ pub(crate) enum Command {
         query: Option<String>,
 
         /// Plan a `--patch-file` or `--query` update without writing.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "slug")]
         dry_run: bool,
 
         /// Rewrite the issue title stored in the markdown body's H1

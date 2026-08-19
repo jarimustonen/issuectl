@@ -388,13 +388,6 @@ pub(crate) fn update_json_report(
     if echoes.collision {
         report["collision"] = serde_json::json!(out.collision);
     }
-    // `close --json` predates the general reopen marker and omits it.
-    // Closing through the canonical update form mirrors that folded
-    // command's result shape exactly; active/same-class updates retain the
-    // established update envelope.
-    if out.moved_to_closed {
-        report.as_object_mut().unwrap().remove("moved_to_open");
-    }
     report["warnings"] = serde_json::json!(out.warnings);
     report
 }

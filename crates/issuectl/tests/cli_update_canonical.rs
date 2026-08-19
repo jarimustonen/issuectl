@@ -71,6 +71,29 @@ fn assert_same_success(a_root: &Path, a_args: &[&str], b_root: &Path, b_args: &[
     );
 }
 
+fn assert_close_success(
+    close_root: &Path,
+    close_args: &[&str],
+    update_root: &Path,
+    update_args: &[&str],
+) {
+    let close = run(close_root, close_args);
+    let update = run(update_root, update_args);
+    let close_json = normalized_json(&close, close_root);
+    let mut update_json = normalized_json(&update, update_root);
+    // `close --json` historically omits this update-only reopen marker.
+    // The 0.15 preparation slice preserves both existing envelopes; the
+    // 0.16 alias adapter owns their eventual convergence.
+    update_json["data"]
+        .as_object_mut()
+        .unwrap()
+        .remove("moved_to_open");
+    assert_eq!(
+        close_json, update_json,
+        "close={close:?}\nupdate={update:?}"
+    );
+}
+
 fn assert_same_failure(a_root: &Path, a_args: &[&str], b_root: &Path, b_args: &[&str]) {
     let a = run(a_root, a_args);
     let b = run(b_root, b_args);
@@ -106,6 +129,16 @@ fn patch_file_matches_apply_for_mutation_output_and_conflict() {
     )
     .unwrap();
     let patch_s = patch.to_string_lossy();
+
+    let before = item(&apply_root, "patch-target");
+    assert_same_success(
+        &apply_root,
+        &["apply", &patch_s, "--dry-run"],
+        &update_root,
+        &["update", "--patch-file", &patch_s, "--dry-run"],
+    );
+    assert_eq!(item(&apply_root, "patch-target"), before);
+    assert_eq!(item(&update_root, "patch-target"), before);
 
     assert_same_success(
         &apply_root,
@@ -217,13 +250,87 @@ fn existing_update_flags_match_the_folded_commands() {
             create(&folded_root, slug);
             create(&update_root, slug);
         }
-        assert_same_success(&folded_root, folded, &update_root, canonical);
+        if folded[0] == "close" {
+            assert_close_success(&folded_root, folded, &update_root, canonical);
+            let closed = item(&folded_root, "subject-task");
+            assert!(closed.contains("closed:"), "{closed}");
+        } else {
+            assert_same_success(&folded_root, folded, &update_root, canonical);
+        }
         assert_eq!(
             item(&folded_root, "subject-task"),
             item(&update_root, "subject-task"),
             "folded={folded:?} canonical={canonical:?}"
         );
     }
+
+    let removal_cases: &[(&[&str], &[&str], &[&str])] = &[
+        (
+            &["update", "subject-task", "--add-label", "triaged"],
+            &["label", "subject-task", "remove", "triaged"],
+            &["update", "subject-task", "--remove-label", "triaged"],
+        ),
+        (
+            &["assign", "subject-task", "alice"],
+            &["assign", "subject-task", "--clear"],
+            &["update", "subject-task", "--no-assignee"],
+        ),
+        (
+            &[
+                "depend",
+                "add",
+                "subject-task",
+                "--blocked-by",
+                "blocker-task",
+            ],
+            &[
+                "depend",
+                "remove",
+                "subject-task",
+                "--blocked-by",
+                "blocker-task",
+            ],
+            &[
+                "update",
+                "subject-task",
+                "--remove-blocked-by",
+                "blocker-task",
+            ],
+        ),
+        (
+            &["set", "subject-task", "team", "payments"],
+            &["set", "subject-task", "team", "--clear"],
+            &["update", "subject-task", "--clear-field", "team"],
+        ),
+    ];
+    for (prepare, folded, canonical) in removal_cases {
+        let (_tmp, folded_root, update_root) = pair();
+        for slug in ["subject-task", "blocker-task"] {
+            create(&folded_root, slug);
+            create(&update_root, slug);
+        }
+        assert!(run(&folded_root, prepare).status.success());
+        assert!(run(&update_root, prepare).status.success());
+        assert_same_success(&folded_root, folded, &update_root, canonical);
+        assert_eq!(
+            item(&folded_root, "subject-task"),
+            item(&update_root, "subject-task")
+        );
+    }
+
+    let (_tmp, set_root, update_root) = pair();
+    create(&set_root, "subject-task");
+    create(&update_root, "subject-task");
+    assert_same_success(
+        &set_root,
+        &["set", "subject-task", "team", "payments"],
+        &update_root,
+        &["update", "subject-task", "--field", "team=payments"],
+    );
+    assert_eq!(
+        item(&set_root, "subject-task"),
+        item(&update_root, "subject-task")
+    );
 }
 
 #[test]
@@ -342,6 +449,25 @@ fn folded_forms_and_query_surface_the_same_invalid_input_errors() {
 }
 
 #[test]
+fn update_status_reopens_and_unarchives_an_archived_issue() {
+    let (_tmp, root, _) = pair();
+    create(&root, "archived-task");
+    assert!(run(&root, &["close", "archived-task", "--status", "done"])
+        .status
+        .success());
+    assert!(run(&root, &["archive", "--older-than", "0d"])
+        .status
+        .success());
+    assert!(!root.join("issues/archived-task").exists());
+
+    let reopened = run(&root, &["update", "archived-task", "--status", "open"]);
+    let data = normalized_json(&reopened, &root);
+    assert_eq!(data["data"]["moved_to_open"], true);
+    assert!(root.join("issues/archived-task/item.md").is_file());
+    assert!(item(&root, "archived-task").contains("status: open"));
+}
+
+#[test]
 fn canonical_targets_and_patch_fields_are_mutually_exclusive() {
     let (_tmp, root, _) = pair();
     create(&root, "subject-task");
@@ -357,7 +483,13 @@ fn canonical_targets_and_patch_fields_are_mutually_exclusive() {
         ],
     );
     assert_eq!(both_targets.status.code(), Some(1), "{both_targets:?}");
-    assert!(String::from_utf8_lossy(&both_targets.stderr).contains("cannot be used with '--query"));
+    assert!(both_targets.stdout.is_empty(), "{both_targets:?}");
+    let error: Value = serde_json::from_slice(&both_targets.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "usage-error");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("cannot be used with '--query"));
 
     let patch = root.join("patch.yaml");
     std::fs::write(&patch, "slug: subject-task\npriority: high\n").unwrap();
@@ -372,4 +504,17 @@ fn canonical_targets_and_patch_fields_are_mutually_exclusive() {
         stderr.contains("--patch-file") && stderr.contains("--priority"),
         "{stderr}"
     );
+
+    let slug_dry_run = run(
+        &root,
+        &["update", "subject-task", "--priority", "high", "--dry-run"],
+    );
+    assert_eq!(slug_dry_run.status.code(), Some(1), "{slug_dry_run:?}");
+    assert!(slug_dry_run.stdout.is_empty(), "{slug_dry_run:?}");
+    let error: Value = serde_json::from_slice(&slug_dry_run.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "usage-error");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--dry-run"));
 }
