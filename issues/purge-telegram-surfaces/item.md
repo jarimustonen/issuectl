@@ -2,7 +2,7 @@
 created: 2026-08-17
 updated: 2026-08-19
 type: chore
-status: open
+status: in-progress
 priority: normal
 related: ['@intake-bug-issuectl-bf2580033c3a']
 lane: cli-fixes
