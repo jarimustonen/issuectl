@@ -13,6 +13,8 @@ collision: [templates]
 commits:
 - hash: c083209
   summary: document issue lane updates
+- hash: b8e614f
+  summary: refine scheduling field guidance after review
 ---
 
 # issue skill: document update --lane/--lane-seq flags
