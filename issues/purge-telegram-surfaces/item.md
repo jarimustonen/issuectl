@@ -1,12 +1,13 @@
 ---
 created: 2026-08-17
-updated: 2026-08-17
+updated: 2026-08-19
 type: chore
 status: open
 priority: normal
 related: ['@intake-bug-issuectl-bf2580033c3a']
 lane: cli-fixes
 lane_seq: 30
+collision: [templates, crates/issuectl-core/src/schema.rs]
 ---
 
 # Purge the personal intake-channel name from product surfaces

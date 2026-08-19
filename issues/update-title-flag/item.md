@@ -1,12 +1,12 @@
 ---
 created: 2026-08-18
-updated: 2026-08-18
+updated: 2026-08-19
 type: feature
 status: open
 priority: normal
 lane: verb-surface
 lane_seq: 4
-collision: [crates/issuectl/src/cmd/write.rs]
+collision: [crates/issuectl/src/cmd/write.rs, templates]
 ---
 
 # No CLI way to retitle an issue; body set silently replaces the title H1
