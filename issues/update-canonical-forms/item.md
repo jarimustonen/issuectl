@@ -1,8 +1,8 @@
 ---
 created: 2026-08-17
-updated: 2026-08-17
+updated: 2026-08-19
 type: feature
-status: open
+status: in-progress
 priority: normal
 labels: [architecture]
 lane: verb-surface
