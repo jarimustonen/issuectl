@@ -2,12 +2,18 @@
 created: 2026-08-17
 updated: 2026-08-19
 type: chore
-status: in-progress
+status: done
 priority: normal
 related: ['@intake-bug-issuectl-bf2580033c3a']
 lane: cli-fixes
 lane_seq: 30
 collision: [templates, crates/issuectl-core/src/schema.rs]
+commits:
+- hash: '8014721'
+  summary: remove service-specific intake provenance
+- hash: 1dad94e
+  summary: harden generic intake migration after review
+closed: 2026-08-19
 ---
 
 # Purge the personal intake-channel name from product surfaces
