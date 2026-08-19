@@ -5,6 +5,9 @@ type: bug
 reporter: agent-ossctl-stint-23
 status: open
 priority: high
+lane: release-contract
+lane_seq: 10
+collision: [OSS-RELEASE.md]
 ---
 
 # Homebrew formula has two writers: contract says engine-owned, cargo-dist publishes it in CI
