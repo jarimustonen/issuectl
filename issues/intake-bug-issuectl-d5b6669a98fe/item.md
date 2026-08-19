@@ -3,7 +3,7 @@ created: 2026-08-17
 updated: 2026-08-19
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 labels:
 - via:agent-homebase-wrapup
@@ -17,6 +17,7 @@ commits:
   summary: echo updated scheduling fields in JSON
 - hash: 12a1f57
   summary: strengthen scheduling echo regression coverage
+closed: 2026-08-19
 ---
 
 # update response envelope echoes null for fields it just set (lane_seq)
