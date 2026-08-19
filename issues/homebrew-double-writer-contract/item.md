@@ -3,11 +3,15 @@ created: 2026-08-19
 updated: 2026-08-19
 type: bug
 reporter: agent-ossctl-stint-23
-status: in-progress
+status: fixed
 priority: high
 lane: release-contract
 lane_seq: 10
 collision: [OSS-RELEASE.md]
+commits:
+- hash: 819e88b
+  summary: delegate Homebrew publishing to cargo-dist
+closed: 2026-08-19
 ---
 
 # Homebrew formula has two writers: contract says engine-owned, cargo-dist publishes it in CI
