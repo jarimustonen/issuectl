@@ -14,9 +14,9 @@
 //!   reports exactly what it *would* do and writes nothing; the caller
 //!   re-runs with `apply: true` to commit.
 //! - **Refuses ambiguity.** An issue whose legacy labels disagree
-//!   (`needs-triage` *and* `deferred`, multiple `via:<channel>` labels, or a
-//!   `via:<channel>` label against a different already-set `provenance`) is
-//!   **skipped whole** and reported
+//!   (`needs-triage` *and* `deferred`, multiple distinct `via:<channel>`
+//!   channels, a malformed `via:` label, or a channel that conflicts with
+//!   already-set `provenance`) is **skipped whole** and reported
 //!   for manual review — never guessed at.
 //! - **No status regression, ever.** A status change is emitted *only* from
 //!   `open`. An in-flight (`in-progress`/`testing`) or already-closed item
@@ -144,23 +144,61 @@ fn has_label(issue: &Issue, label: &str) -> bool {
         .is_some_and(|ls| ls.iter().any(|l| l == label))
 }
 
-/// Return legacy `via:<channel>` labels and their non-empty channel tokens.
+/// Classification of legacy `via:` labels shared by migration and read-side
+/// queue projection.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LegacyVia<'a> {
+    None,
+    Unique {
+        channel: &'a str,
+        labels: Vec<&'a str>,
+    },
+    Ambiguous {
+        labels: Vec<&'a str>,
+    },
+    Malformed {
+        labels: Vec<&'a str>,
+    },
+}
+
+/// Classify the service-neutral legacy `via:<channel>` label convention.
 ///
-/// This deliberately generalizes the old service-specific migration rule:
-/// every historical channel (including `agent-*` channels) follows the same
-/// label-to-field conversion without making any one service product vocabulary.
-fn legacy_via_labels(issue: &Issue) -> Vec<(&str, &str)> {
-    issue
-        .labels
-        .iter()
-        .flatten()
-        .filter_map(|label| {
-            label
-                .strip_prefix(VIA_PREFIX)
-                .filter(|channel| !channel.is_empty())
-                .map(|channel| (label.as_str(), channel))
-        })
-        .collect()
+/// Every historical channel, including `agent-*`, follows the same conversion.
+/// Exact duplicate labels collapse into one removal operation. Empty or padded
+/// suffixes are malformed rather than normalized: migration never guesses at
+/// provenance, and a recognized legacy-shaped label is never silently stranded.
+pub fn classify_legacy_via(issue: &Issue) -> LegacyVia<'_> {
+    let mut labels = Vec::new();
+    let mut channels = Vec::new();
+    let mut malformed = Vec::new();
+
+    for label in issue.labels.iter().flatten() {
+        let Some(channel) = label.strip_prefix(VIA_PREFIX) else {
+            continue;
+        };
+        if channel.is_empty() || channel.trim() != channel {
+            if !malformed.contains(&label.as_str()) {
+                malformed.push(label.as_str());
+            }
+            continue;
+        }
+        if !labels.contains(&label.as_str()) {
+            labels.push(label.as_str());
+        }
+        if !channels.contains(&channel) {
+            channels.push(channel);
+        }
+    }
+
+    if !malformed.is_empty() {
+        LegacyVia::Malformed { labels: malformed }
+    } else if channels.len() > 1 {
+        LegacyVia::Ambiguous { labels }
+    } else if let Some(channel) = channels.first() {
+        LegacyVia::Unique { channel, labels }
+    } else {
+        LegacyVia::None
+    }
 }
 
 /// How an existing `provenance` frontmatter value classifies. Distinguishes
@@ -184,8 +222,8 @@ fn provenance_of(issue: &Issue) -> ExistingProvenance<'_> {
 /// Compute the migration plan for one issue against `schema` (needed to
 /// classify custom closing statuses correctly). Returns `None` when there
 /// is nothing to do — the issue carries no recognised legacy label, so it
-/// is left byte-for-byte untouched (this is what leaves `tg-bug-*` slugs
-/// and already-migrated items alone).
+/// is left byte-for-byte untouched (this is what leaves legacy deterministic
+/// slugs and already-migrated items alone).
 ///
 /// Pure and side-effect-free so every row of the §6 table is unit-testable
 /// without touching disk.
@@ -193,10 +231,9 @@ pub(crate) fn plan_issue(issue: &Issue, schema: &Schema) -> Option<MigrateAction
     let needs_triage = has_label(issue, L_NEEDS_TRIAGE);
     let deferred_label = has_label(issue, L_DEFERRED);
     let triaged = has_label(issue, L_TRIAGED);
-    let via_labels = legacy_via_labels(issue);
-    let via_channel = via_labels.first().map(|(_, channel)| *channel);
+    let legacy_via = classify_legacy_via(issue);
 
-    if !(needs_triage || deferred_label || triaged || via_channel.is_some()) {
+    if !(needs_triage || deferred_label || triaged || !matches!(&legacy_via, LegacyVia::None)) {
         return None;
     }
 
@@ -211,40 +248,50 @@ pub(crate) fn plan_issue(issue: &Issue, schema: &Schema) -> Option<MigrateAction
             "carries both `needs-triage` and `deferred` labels — ambiguous target status; migrate by hand",
         ));
     }
-    // Multiple distinct legacy channels are ambiguous even if provenance is
-    // absent. Duplicate copies of the same label remain safe and are removed.
-    if let Some(channel) = via_channel {
-        if via_labels
-            .iter()
-            .any(|(_, candidate)| *candidate != channel)
-        {
+    // Distinct or malformed legacy channels are ambiguous even if provenance
+    // is absent. Duplicate copies of one exact label remain safe and collapse
+    // into one removal operation.
+    match &legacy_via {
+        LegacyVia::Malformed { labels } => {
             return Some(MigrateAction::conflict(
                 &issue.slug,
-                "carries multiple `via:<channel>` labels — ambiguous source; migrate by hand",
+                format!(
+                    "carries malformed legacy `via:` label(s) {labels:?} — no usable channel token; migrate by hand"
+                ),
             ));
         }
-
-        // A via label against an already-set provenance that is not a matching
-        // string is a conflict. Structured values must never be overwritten.
-        match provenance {
-            ExistingProvenance::Str(p) if p != channel => {
-                return Some(MigrateAction::conflict(
-                    &issue.slug,
-                    format!(
-                        "`via:{channel}` label but provenance is already {p:?} — conflicting source; migrate by hand"
-                    ),
-                ));
-            }
-            ExistingProvenance::NonString => {
-                return Some(MigrateAction::conflict(
-                    &issue.slug,
-                    format!(
-                        "`via:{channel}` label but provenance is already set to a non-string value — migrate by hand"
-                    ),
-                ));
-            }
-            _ => {}
+        LegacyVia::Ambiguous { labels } => {
+            return Some(MigrateAction::conflict(
+                &issue.slug,
+                format!(
+                    "carries multiple distinct `via:<channel>` labels {labels:?} — ambiguous source; migrate by hand"
+                ),
+            ));
         }
+        LegacyVia::Unique { channel, .. } => {
+            // A via label against an already-set provenance that is not a matching
+            // string is a conflict. Structured values must never be overwritten.
+            match provenance {
+                ExistingProvenance::Str(p) if p != *channel => {
+                    return Some(MigrateAction::conflict(
+                        &issue.slug,
+                        format!(
+                            "`via:{channel}` label but provenance is already {p:?} — conflicting source; migrate by hand"
+                        ),
+                    ));
+                }
+                ExistingProvenance::NonString => {
+                    return Some(MigrateAction::conflict(
+                        &issue.slug,
+                        format!(
+                            "`via:{channel}` label but provenance is already set to a non-string value — migrate by hand"
+                        ),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        LegacyVia::None => {}
     }
 
     let mut action = MigrateAction {
@@ -304,12 +351,12 @@ pub(crate) fn plan_issue(issue: &Issue, schema: &Schema) -> Option<MigrateAction
     // ── via:<channel> → provenance:<channel> (drop label) ────────────────
     // A conflicting/non-string provenance already returned a conflict above,
     // so here provenance is either absent or already the matching string.
-    if let Some(channel) = via_channel {
+    if let LegacyVia::Unique { channel, labels } = &legacy_via {
         action
             .dropped_labels
-            .extend(via_labels.iter().map(|(label, _)| (*label).to_string()));
+            .extend(labels.iter().map(|label| (*label).to_string()));
         if matches!(provenance, ExistingProvenance::Absent) {
-            action.set_provenance = Some(channel.to_string());
+            action.set_provenance = Some((*channel).to_string());
         }
         // Matching provenance means each legacy label is redundant and dropped.
     }
@@ -559,10 +606,10 @@ mod tests {
         let tmp = fresh_repo();
         write_issue(
             tmp.path(),
-            "tg-item",
-            "slug: tg-item\ntype: bug\nstatus: open\nlabels: [via:chat]\n",
+            "via-item",
+            "slug: via-item\ntype: bug\nstatus: open\nlabels: [via:chat]\n",
         );
-        let a = plan_issue(&load(tmp.path(), "tg-item"), &schema()).unwrap();
+        let a = plan_issue(&load(tmp.path(), "via-item"), &schema()).unwrap();
         assert_eq!(a.set_provenance.as_deref(), Some("chat"));
         assert_eq!(a.dropped_labels, vec!["via:chat"]);
     }
@@ -585,10 +632,10 @@ mod tests {
         let tmp = fresh_repo();
         write_issue(
             tmp.path(),
-            "tg-dup",
-            "slug: tg-dup\ntype: bug\nstatus: open\nprovenance: chat\nlabels: [via:chat]\n",
+            "via-duplicate",
+            "slug: via-duplicate\ntype: bug\nstatus: open\nprovenance: chat\nlabels: [via:chat]\n",
         );
-        let a = plan_issue(&load(tmp.path(), "tg-dup"), &schema()).unwrap();
+        let a = plan_issue(&load(tmp.path(), "via-duplicate"), &schema()).unwrap();
         assert!(a.set_provenance.is_none(), "already set, no rewrite");
         assert_eq!(a.dropped_labels, vec!["via:chat"]);
     }
@@ -598,10 +645,10 @@ mod tests {
         let tmp = fresh_repo();
         write_issue(
             tmp.path(),
-            "tg-conflict",
-            "slug: tg-conflict\ntype: bug\nstatus: open\nprovenance: email\nlabels: [via:chat]\n",
+            "via-conflict",
+            "slug: via-conflict\ntype: bug\nstatus: open\nprovenance: email\nlabels: [via:chat]\n",
         );
-        let a = plan_issue(&load(tmp.path(), "tg-conflict"), &schema()).unwrap();
+        let a = plan_issue(&load(tmp.path(), "via-conflict"), &schema()).unwrap();
         assert!(a.conflict.is_some());
         assert!(a.dropped_labels.is_empty());
     }
@@ -621,15 +668,33 @@ mod tests {
     }
 
     #[test]
+    fn malformed_via_labels_are_whole_issue_conflicts() {
+        for (slug, label) in [("bare-via", "via:"), ("padded-via", "via: chat")] {
+            let tmp = fresh_repo();
+            write_issue(
+                tmp.path(),
+                slug,
+                &format!(
+                    "slug: {slug}\ntype: bug\nstatus: open\nlabels: [needs-triage, {label:?}]\n"
+                ),
+            );
+            let a = plan_issue(&load(tmp.path(), slug), &schema()).unwrap();
+            assert!(a.conflict.is_some(), "{label:?} must be reported");
+            assert!(a.status_change.is_none(), "conflict touches nothing");
+            assert!(a.dropped_labels.is_empty(), "conflict touches nothing");
+        }
+    }
+
+    #[test]
     fn channel_shaped_slug_without_legacy_labels_is_untouched() {
         let tmp = fresh_repo();
         write_issue(
             tmp.path(),
-            "chat-bug-alice-1-2",
-            "slug: chat-bug-alice-1-2\ntype: bug\nstatus: open\nprovenance: chat\n",
+            "legacy-shaped-alice-1-2",
+            "slug: legacy-shaped-alice-1-2\ntype: bug\nstatus: open\nprovenance: chat\n",
         );
         assert!(
-            plan_issue(&load(tmp.path(), "chat-bug-alice-1-2"), &schema()).is_none(),
+            plan_issue(&load(tmp.path(), "legacy-shaped-alice-1-2"), &schema()).is_none(),
             "no legacy label ⇒ no action, slug never rewritten"
         );
     }
@@ -678,6 +743,34 @@ mod tests {
         // Second run: nothing left to do.
         let r2 = migrate(tmp.path(), true).unwrap();
         assert!(r2.actions.is_empty(), "idempotent — no-op on re-run");
+    }
+
+    #[test]
+    fn duplicate_via_labels_apply_once_and_are_idempotent() {
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "duplicate-via",
+            "slug: duplicate-via\ntype: bug\nstatus: open\nlabels: [via:chat, via:chat]\n",
+        );
+
+        let r1 = migrate(tmp.path(), true).unwrap();
+        assert_eq!(r1.failed_count(), 0);
+        assert_eq!(r1.actions[0].dropped_labels, vec!["via:chat"]);
+        let after = load(tmp.path(), "duplicate-via");
+        assert!(
+            after
+                .labels
+                .iter()
+                .flatten()
+                .all(|label| label != "via:chat"),
+            "all duplicate legacy labels are removed in one pass"
+        );
+        assert!(matches!(
+            provenance_of(&after),
+            ExistingProvenance::Str("chat")
+        ));
+        assert!(migrate(tmp.path(), true).unwrap().actions.is_empty());
     }
 
     #[test]
@@ -736,10 +829,10 @@ mod tests {
         let tmp = fresh_repo();
         write_issue(
             tmp.path(),
-            "tg-structured",
+            "via-structured",
             "type: bug\nstatus: open\nprovenance:\n  system: chat\n  account: foo\nlabels: [via:chat]\n",
         );
-        let a = plan_issue(&load(tmp.path(), "tg-structured"), &schema()).unwrap();
+        let a = plan_issue(&load(tmp.path(), "via-structured"), &schema()).unwrap();
         assert!(a.conflict.is_some(), "non-string provenance → conflict");
         assert!(a.set_provenance.is_none(), "never overwrites");
         assert!(a.dropped_labels.is_empty(), "conflict touches nothing");

@@ -184,17 +184,12 @@ pub(crate) fn is_legacy_intake_item(issue: &models::Issue) -> bool {
 }
 
 pub(crate) fn queue_provenance(issue: &models::Issue) -> Option<&str> {
-    intake_provenance(issue).or_else(|| {
-        let mut channels = issue.labels.iter().flatten().filter_map(|label| {
-            label
-                .strip_prefix("via:")
-                .filter(|channel| !channel.is_empty())
-        });
-        let channel = channels.next()?;
-        channels
-            .all(|candidate| candidate == channel)
-            .then_some(channel)
-    })
+    intake_provenance(issue).or_else(
+        || match mutate::intake_migrate::classify_legacy_via(issue) {
+            mutate::intake_migrate::LegacyVia::Unique { channel, .. } => Some(channel),
+            _ => None,
+        },
+    )
 }
 
 pub(crate) fn cmd_intake_queue(
@@ -248,7 +243,7 @@ pub(crate) fn cmd_intake_queue(
                     "status": i.status,
                     "priority": i.priority,
                     "created": i.created,
-                    "provenance": intake_provenance(i),
+                    "provenance": queue_provenance(i),
                     "reporter": i.reporter,
                     "title": i.title,
                     "needs_analysis": !has_triage_analysis(&i.body),

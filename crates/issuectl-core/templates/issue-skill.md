@@ -640,7 +640,10 @@ issuectl intake show <slug> --json               # item + attachments + analysis
 feature requests, every provenance). `deferred`/`needs-info` are excluded from
 the default view. Each row carries `needs_analysis` (derived from the presence of
 a `## Triage analysis` body section — there is no stored analysis state). `show`
-adds `attachments` (names) and `analysis` (the section text, or `null`).
+adds `attachments` (names) and `analysis` (the section text, or `null`). For a
+legacy row with no first-class provenance, one exact `via:<channel>` label is
+projected as provenance; malformed or multiple distinct channels remain `null`
+and `intake migrate` reports them for manual review.
 
 #### Dispositions (developer / PM — each a first-class transition)
 

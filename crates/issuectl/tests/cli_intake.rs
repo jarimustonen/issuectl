@@ -248,6 +248,40 @@ fn queue_lists_untriaged_oldest_first_and_excludes_deferred() {
 }
 
 #[test]
+fn queue_projects_generic_legacy_provenance_without_guessing() {
+    let tmp = fresh_repo();
+    for (slug, labels) in [
+        ("legacy-agent", "[via:agent-support]"),
+        ("legacy-ambiguous", "[via:chat, via:webform]"),
+    ] {
+        let dir = tmp.path().join("issues").join(slug);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("item.md"),
+            format!(
+                "---\ncreated: 2026-01-01\npriority: normal\ntype: bug\nstatus: untriaged\nlabels: {labels}\n---\n\n# {slug}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let all = json_stdout(&run(tmp.path(), &["--json", "intake", "queue"]));
+    assert_eq!(all["items"].as_array().unwrap().len(), 2);
+    assert_eq!(all["items"][0]["provenance"], "agent-support");
+    assert!(
+        all["items"][1]["provenance"].is_null(),
+        "ambiguous channels must not choose the first"
+    );
+
+    let filtered = json_stdout(&run(
+        tmp.path(),
+        &["--json", "intake", "queue", "--provenance", "agent-support"],
+    ));
+    assert_eq!(filtered["items"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["items"][0]["slug"], "legacy-agent");
+}
+
+#[test]
 fn show_reports_analysis_and_attachments_keys() {
     let tmp = fresh_repo();
     file_bug(tmp.path(), "show-me");

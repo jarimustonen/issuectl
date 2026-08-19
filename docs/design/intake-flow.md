@@ -44,8 +44,8 @@ The user's calls, authoritative over any differing in-body recommendation:
 `issuectl` should own **one** first-class intake flow that handles both **bug
 reports** and **feature requests**, filed by a **reporting agent** (or human)
 and processed by a **developer / product-manager**. Historically intake was ad-hoc:
-a chat-bot bug path invented its own slug scheme
-(`chat-bug-<user>-<chat>-<msg-id>`), lifecycle label (`needs-triage`), and
+a chat-bot bug path invented a deterministic slug containing user,
+conversation, and message identifiers, plus a lifecycle label (`needs-triage`) and
 channel-shaped provenance label (`via:<channel>`), and lived entirely in two
 Claude skills (`/triage-bugs`,
 `/worktree-bug-analysis`) rather than in the tool. This design folds all of that
@@ -346,7 +346,7 @@ issuectl intake file \
 - **Idempotent on `--source-ref`.** A repeat file with the same
   `(provenance, source_ref)` returns the existing item (exit 0, a `deduplicated:
   true` flag) rather than creating a second issue — this replaces the
-  retry-idempotency the deterministic `chat-bug-*` slug gave for free. See
+  retry-idempotency the deterministic integration slug gave for free. See
   [OD-10](#od-10-external-identity--idempotent-filing).
 - **Priority at filing.** A reporter *can* pass a severity hint; the Dev/PM may
   override at accept-time. ("site is down" vs "tooltip typo" is a filing-time
@@ -435,7 +435,7 @@ today:
 
 Because filing is now one validated, idempotent CLI call, the deterministic-filer
 machinery (ADR 0004/0005) calls the same CLI instead of hand-rolling the
-`chat-bug-*` slug + labels.
+deterministic integration slug + labels.
 
 ### Processing-side skill — `/intake` (new) — **replaces `/triage-bugs`, drives `/worktree-bug-analysis`**
 
@@ -514,8 +514,8 @@ otherwise.
 ## 6. Migration
 
 Must not lose in-flight items: open issues with `label: via:<channel>` carrying
-`label: needs-triage` or `label: deferred`, slug `chat-bug-<user>-<chat>-<msg-id>`,
-plus users/skills that invoke `/triage-bugs`.
+`label: needs-triage` or `label: deferred`, historical deterministic slugs that
+may contain external identifiers, plus users/skills that invoke `/triage-bugs`.
 
 ### Data migration — a purpose-built, dry-run-first pass (NOT a `status_alias`)
 
@@ -533,7 +533,8 @@ rewrite can **regress live or closed issues**. So this is a dedicated migration
 | `needs-triage` + `deferred` labels together | **conflict — skip, report for manual review** |
 | `deferred` label + `status: open` | → `status: deferred`, drop label ([OD-4](#od-4-deferred--parked-lifecycle)) |
 | `triaged` label (old "presented" marker) | drop; if the item is otherwise `open` leave it `open` (do **not** silently invent state) |
-| One `via:<channel>` label, no provenance set | → `provenance: <channel>` ([OD-3](#od-3-provenance)) |
+| One unambiguous channel in `via:<channel>` label(s), no provenance set | → `provenance: <channel>` ([OD-3](#od-3-provenance)); applies regardless of issue status |
+| Bare or whitespace-padded `via:` channel | **conflict — skip, report; never normalize by guessing** |
 | Multiple distinct `via:<channel>` labels, or one that conflicts with existing provenance | **conflict — skip, report** |
 | Legacy channel-shaped slugs | **left untouched** — slug format is not part of the model; rewriting churns every `related:`/`@mention`. (Privacy note: these slugs can embed user/chat IDs; remediation via a rename is possible but out of scope — flagged, not silently done.) |
 
@@ -714,7 +715,7 @@ The most important decision the first draft hid.
 
 ### OD-10: External identity & idempotent filing
 
-Abandoning the deterministic `chat-bug-*` slug (§3) removes the retry-idempotency
+Abandoning the deterministic integration slug (§3) removes the retry-idempotency
 it gave for free.
 
 - **A (recommended):** `intake file` takes **`--source-ref`**; uniqueness is

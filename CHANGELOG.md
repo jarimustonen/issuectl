@@ -13,8 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Intake provenance examples are now service-neutral.** Shipped help, skills,
-  schema samples, and docs use generic channels, while legacy migration now
-  converts any `via:<channel>` label to matching `provenance` metadata.
+  schema samples, and docs use generic channels.
+- **Legacy intake migration now understands every `via:<channel>` label.** An
+  unambiguous exact channel, including historical `agent-*` channels, becomes
+  matching `provenance` metadata and the label is removed. Malformed channels,
+  multiple distinct channels, and conflicting existing provenance are left
+  untouched for manual review.
 - **Issue title detection now ignores fenced and indented code.** The parser and
   title mutator share one CommonMark-aligned H1 locator, so `#` lines in code
   samples cannot be mistaken for or overwritten as issue titles.
