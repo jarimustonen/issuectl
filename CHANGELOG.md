@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-19
+
 ### Added
 - **`issuectl update` now has canonical patch-file and query-selected forms.**
   `update --patch-file <path>` reuses `apply`'s transactional YAML parser,
