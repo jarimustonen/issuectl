@@ -2,11 +2,15 @@
 created: 2026-08-18
 updated: 2026-08-19
 type: feature
-status: in-progress
+status: done
 priority: normal
 lane: verb-surface
 lane_seq: 4
 collision: [crates/issuectl/src/cmd/write.rs, templates]
+commits:
+- hash: 759640ad78cc2b62d4187d931b06eed7dea36f6e
+  summary: 'feat: add explicit issue retitling'
+closed: 2026-08-19
 ---
 
 # No CLI way to retitle an issue; body set silently replaces the title H1
