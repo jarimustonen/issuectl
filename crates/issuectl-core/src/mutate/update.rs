@@ -243,12 +243,29 @@ pub(crate) fn update_issue_under_lock(
     let mut body_warnings: Vec<String> = Vec::new();
     let mut type_warnings: Vec<String> = Vec::new();
     if let Some(body) = &req.set_body {
-        body_warnings = crate::body_sections::reserved_section_warnings(body);
-        item.body = if body.starts_with('\n') {
-            body.clone()
-        } else {
-            format!("\n{body}")
-        };
+        let explicit_title = matches!(req.title, Patch::Set(_));
+        let (body, mut title_warnings) = super::body::reconcile_replacement_title(
+            slug,
+            body.clone(),
+            &current_issue.title,
+            explicit_title,
+        );
+        body_warnings.append(&mut title_warnings);
+        body_warnings.extend(crate::body_sections::reserved_section_warnings(&body));
+        item.body = body;
+    }
+
+    // Title is body-backed, not frontmatter-backed. Apply it after a
+    // whole-body replacement so an explicit `--title` remains authoritative
+    // when both flags are supplied in one selective update. Strip the
+    // ItemFile framing newline before a headingless repair, then restore the
+    // canonical framing after all body/title edits.
+    if let Patch::Set(title) = &req.title {
+        item.body =
+            crate::body_sections::set_title_heading(item.body.trim_start_matches('\n'), title);
+    }
+    if req.set_body.is_some() || matches!(req.title, Patch::Set(_)) {
+        item.body = crate::body_sections::canonicalise_body_leading(&item.body);
     }
 
     // Frontmatter keys this mutation actually writes. Threaded into

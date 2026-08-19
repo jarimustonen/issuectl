@@ -10,7 +10,7 @@
 //! snippet with a `## comment` line would have subsequent appends
 //! spliced into their code block — silent on-disk corruption.
 
-use std::sync::OnceLock;
+use std::{ops::Range, sync::OnceLock};
 
 use anyhow::{bail, Result};
 use chrono::SecondsFormat;
@@ -40,6 +40,65 @@ pub const RESOLUTION: &str = "Resolution";
 /// new alias added here warns at authoring time but is NOT auto-migrated
 /// until doctor is wired to consume this list (tracked as a spinoff).
 pub const LEGACY_SECTION_ALIASES: &[(&str, &str)] = &[("Notes", COMMENTS)];
+
+/// Locate the first issue-title H1 outside fenced and indented code.
+/// Returns the complete heading-line byte range plus its untrimmed title
+/// content. The parser and title mutator both consume this primitive, keeping
+/// read and write semantics identical.
+pub(crate) fn title_heading(body: &str) -> Option<(Range<usize>, &str)> {
+    let mut offset = 0;
+    let mut fence: Option<(char, usize)> = None;
+    for line in body.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\r', '\n']);
+        let trimmed = content.trim_start_matches(' ');
+        let indent = content.len() - trimmed.len();
+
+        if indent <= 3 {
+            let marker_char = trimmed.chars().next();
+            let marker_len = marker_char
+                .filter(|ch| matches!(ch, '`' | '~'))
+                .map_or(0, |ch| trimmed.chars().take_while(|c| *c == ch).count());
+            if let Some((open_char, open_len)) = fence {
+                let suffix = &trimmed[marker_len..];
+                if marker_char == Some(open_char)
+                    && marker_len >= open_len
+                    && suffix.trim_matches([' ', '\t']).is_empty()
+                {
+                    fence = None;
+                }
+            } else if marker_len >= 3 {
+                fence = Some((
+                    marker_char.expect("marker length implies a char"),
+                    marker_len,
+                ));
+            } else if let Some(title) = trimmed.strip_prefix("# ") {
+                return Some((offset..offset + content.len(), title));
+            }
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// Rewrite the parser-owned title H1, or prepend one when the body is
+/// headingless. All bytes outside the title line are preserved, including
+/// leading blank lines and the document's existing line-ending style.
+pub(crate) fn set_title_heading(body: &str, title: &str) -> String {
+    if let Some((range, _)) = title_heading(body) {
+        let mut rewritten = String::with_capacity(body.len() + title.len());
+        rewritten.push_str(&body[..range.start]);
+        rewritten.push_str("# ");
+        rewritten.push_str(title);
+        rewritten.push_str(&body[range.end..]);
+        return rewritten;
+    }
+
+    if body.is_empty() {
+        return format!("# {title}");
+    }
+    let eol = if body.contains("\r\n") { "\r\n" } else { "\n" };
+    format!("# {title}{eol}{eol}{body}")
+}
 
 /// Format the timestamp half of a block heading. UTC, second-precision.
 pub fn now_iso() -> String {
@@ -985,6 +1044,33 @@ fn trim_blank_borders(lines: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_heading_skips_fenced_and_indented_code() {
+        let body = "```sh\n# fenced comment\n```\n\n    # indented comment\n\n# Real title\n";
+        let (_, title) = title_heading(body).expect("real title heading");
+        assert_eq!(title, "Real title");
+        let rewritten = set_title_heading(body, "Retitled");
+        assert!(rewritten.contains("# fenced comment"), "{rewritten}");
+        assert!(rewritten.contains("    # indented comment"), "{rewritten}");
+        assert!(rewritten.ends_with("# Retitled\n"), "{rewritten}");
+    }
+
+    #[test]
+    fn title_heading_does_not_close_fence_with_info_text() {
+        let body = "```text\n```not-a-close\n# Still code\n```\n# Real title\n";
+        let (_, title) = title_heading(body).expect("real title heading");
+        assert_eq!(title, "Real title");
+    }
+
+    #[test]
+    fn title_prepend_preserves_leading_blanks_and_crlf() {
+        let body = "\r\n\r\nParagraph\r\n";
+        assert_eq!(
+            set_title_heading(body, "Title"),
+            "# Title\r\n\r\n\r\n\r\nParagraph\r\n"
+        );
+    }
 
     #[test]
     fn merge_h2_folds_source_into_target_document_order() {

@@ -615,6 +615,7 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
         }
         Command::Update {
             slug,
+            title,
             status,
             issue_type,
             assignee,
@@ -658,6 +659,7 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 json_output,
                 UpdateArgs {
                     slug,
+                    title,
                     status,
                     issue_type,
                     assignee,

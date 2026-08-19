@@ -85,6 +85,13 @@ pub struct UpdateIssueRequest {
     pub expected_version: Option<String>,
     #[serde(default)]
     pub status: Patch<String>,
+    /// Issue title stored in the markdown body's first `# ` heading.
+    /// `Set` rewrites that heading, or prepends one when repairing a
+    /// headingless body. Clearing is rejected because every issue needs a
+    /// title. The title remains body-backed and therefore participates in
+    /// the canonical hash without a schema field.
+    #[serde(default)]
+    pub title: Patch<String>,
     /// Issue type (`bug`, `feature`, `task`, ...). `Set` only — clearing
     /// is rejected (every issue must have a type). When the new value
     /// actually differs from the current type, three additional
@@ -473,6 +480,7 @@ impl UpdateIssueRequest {
     /// version token is still a no-op (M13).
     pub fn is_noop(&self) -> bool {
         matches!(self.status, Patch::Unspecified)
+            && matches!(self.title, Patch::Unspecified)
             && matches!(self.issue_type, Patch::Unspecified)
             && matches!(self.priority, Patch::Unspecified)
             && matches!(self.reporter, Patch::Unspecified)
@@ -514,12 +522,25 @@ impl UpdateIssueRequest {
                 "status cannot be cleared (issues always have a status)".into(),
             ));
         }
+        if matches!(self.title, Patch::Clear) {
+            return Err(MutateError::Validation(
+                "title cannot be cleared (issues always have a title)".into(),
+            ));
+        }
         if matches!(self.issue_type, Patch::Clear) {
             return Err(MutateError::Validation(
                 "type cannot be cleared (issues always have a type)".into(),
             ));
         }
         check_set_nonempty("status", &self.status)?;
+        check_set_nonempty("title", &self.title)?;
+        if let Patch::Set(title) = &self.title {
+            if title.trim() != title || title.contains(['\r', '\n']) {
+                return Err(MutateError::Validation(
+                    "title must be a single line without leading or trailing whitespace".into(),
+                ));
+            }
+        }
         check_set_nonempty("type", &self.issue_type)?;
         // No `crate::issue_fields::ISSUE_TYPES` membership check here: the schema
         // (`fields.type.enum`) is the source of truth for allowed

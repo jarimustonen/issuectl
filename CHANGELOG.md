@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Issues can be retitled explicitly with `issuectl update <slug> --title "..."`.**
+  The locked update rewrites the body-backed H1 and echoes the persisted title in JSON.
+
 ### Changed
+- **Issue title detection now ignores fenced and indented code.** The parser and
+  title mutator share one CommonMark-aligned H1 locator, so `#` lines in code
+  samples cannot be mistaken for or overwritten as issue titles.
 - **The `deferred` lifecycle label is retired.** Open work is scheduled with lanes and
   `blocked_by`; `issuectl doctor` now reports residual labels and `doctor --fix` removes them.
   The distinct `deferred` intake status remains valid, and labels that still encode a pending
@@ -16,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regenerates the new label and scheduling guidance.
 
 ### Fixed
+- **Whole-body replacement no longer silently removes an issue title.** Headingless
+  replacements through `body set` or `update --body-file` preserve the existing H1
+  and warn; replacements with a different H1 remain allowed but now surface a
+  warning directing callers to `update --title`.
 - **The bundled `/issue` skill no longer treats scheduling fields as generic `set`
   fields.** It directs `lane` / `lane_seq` changes to `update`'s setter and clearing
   flags, directs list-valued `collision` changes to its add/remove flags, and clarifies

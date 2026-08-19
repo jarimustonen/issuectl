@@ -476,18 +476,13 @@ pub(crate) fn split_frontmatter(text: &str) -> (Option<&str>, Option<&str>) {
     (split.frontmatter, Some(split.body))
 }
 
-fn extract_title(body: Option<&str>) -> String {
-    let body = match body {
-        Some(b) => b,
-        None => return String::new(),
+pub(crate) fn extract_title(body: Option<&str>) -> String {
+    let Some(body) = body else {
+        return String::new();
     };
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("# ") {
-            return strip_legacy_title_number(rest).trim().to_string();
-        }
-    }
-    String::new()
+    crate::body_sections::title_heading(body)
+        .map(|(_, title)| strip_legacy_title_number(title).trim().to_string())
+        .unwrap_or_default()
 }
 
 fn strip_legacy_title_number(title: &str) -> &str {

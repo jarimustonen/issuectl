@@ -81,6 +81,127 @@ fn new_issue_with_starter_body(root: &std::path::Path, slug: &str) {
 }
 
 #[test]
+fn update_title_echoes_persisted_title_in_json() {
+    let tmp = fresh_repo();
+    new_issue_with_starter_body(tmp.path(), "retitle-echo");
+
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "update",
+            "retitle-echo",
+            "--title",
+            "Retitled issue",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("update stdout should be JSON");
+    assert_eq!(envelope["data"]["title"], "Retitled issue", "{envelope}");
+    assert_eq!(
+        show_json(tmp.path(), "retitle-echo")["title"],
+        "Retitled issue"
+    );
+}
+
+#[test]
+fn body_set_headingless_preserves_title_and_returns_warning() {
+    let tmp = fresh_repo();
+    new_issue_with_starter_body(tmp.path(), "body-set-preserve");
+    let replacement = tmp.path().join("headingless.md");
+    std::fs::write(&replacement, "Headingless replacement body\n").expect("write body");
+
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "body",
+            "set",
+            "body-set-preserve",
+            "--from-file",
+            replacement.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("body set stdout should be JSON");
+    assert_eq!(
+        show_json(tmp.path(), "body-set-preserve")["title"],
+        "Body target"
+    );
+    assert!(
+        envelope["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|w| w
+                .as_str()
+                .is_some_and(|w| w.contains("preserved existing title")))),
+        "{envelope}"
+    );
+}
+
+#[test]
+fn body_set_headingless_warns_on_stderr_in_text_mode() {
+    let tmp = fresh_repo();
+    new_issue_with_starter_body(tmp.path(), "body-set-text-warning");
+    let replacement = tmp.path().join("headingless-text.md");
+    std::fs::write(&replacement, "Headingless replacement body\n").expect("write body");
+
+    let out = run(
+        tmp.path(),
+        &[
+            "body",
+            "set",
+            "body-set-text-warning",
+            "--from-file",
+            replacement.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("warning: replacement body"),
+        "{}",
+        dump(&out)
+    );
+}
+
+#[test]
+fn body_set_different_h1_changes_title_and_returns_warning() {
+    let tmp = fresh_repo();
+    new_issue_with_starter_body(tmp.path(), "body-set-retitle");
+    let replacement = tmp.path().join("retitled.md");
+    std::fs::write(&replacement, "# Body supplied title\n\nReplacement body\n")
+        .expect("write body");
+
+    let out = run(
+        tmp.path(),
+        &[
+            "--json",
+            "body",
+            "set",
+            "body-set-retitle",
+            "--from-file",
+            replacement.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("body set stdout should be JSON");
+    assert_eq!(
+        show_json(tmp.path(), "body-set-retitle")["title"],
+        "Body supplied title"
+    );
+    assert!(
+        envelope["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings
+                .iter()
+                .any(|w| w.as_str().is_some_and(|w| w.contains("changed the title")))),
+        "{envelope}"
+    );
+}
+
+#[test]
 fn update_body_file_replaces_existing_body() {
     let tmp = fresh_repo();
     new_issue_with_starter_body(tmp.path(), "ub-file");

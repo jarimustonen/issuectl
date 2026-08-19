@@ -1496,6 +1496,82 @@ mod tests {
     }
 
     #[test]
+    fn update_issue_title_rewrites_body_h1_and_advances_version() {
+        let tmp = fresh_repo();
+        let v0 = seed_issue(tmp.path(), "open", "retitle-happy-x", "open");
+        let req = UpdateIssueRequest {
+            title: Patch::Set("A clearer title".into()),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "retitle-happy-x", req).unwrap();
+        assert_ne!(out.version, v0, "retitle must advance the version");
+        assert_eq!(out.issue.title, "A clearer title");
+        let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
+        assert!(on_disk.contains("\n# A clearer title\n"), "{on_disk}");
+        assert!(!on_disk.contains("\n# Title\n"), "{on_disk}");
+    }
+
+    #[test]
+    fn update_body_headingless_preserves_existing_title_and_warns() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "body-preserve-title-x", "open");
+        let out = update_body(
+            tmp.path(),
+            "body-preserve-title-x",
+            None,
+            "Replacement without a heading".into(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(out.issue.title, "Title");
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("no non-empty title H1") && w.contains("preserved")),
+            "warnings: {:?}",
+            out.warnings
+        );
+        assert!(out.issue.body.contains("Replacement without a heading"));
+    }
+
+    #[test]
+    fn update_body_same_h1_has_no_title_warning() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "body-same-title-x", "open");
+        let out = update_body(
+            tmp.path(),
+            "body-same-title-x",
+            None,
+            "# Title\n\nReplacement body".into(),
+            false,
+        )
+        .unwrap();
+        assert!(out.warnings.is_empty(), "warnings: {:?}", out.warnings);
+    }
+
+    #[test]
+    fn update_body_different_h1_changes_title_and_warns() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "body-change-title-x", "open");
+        let out = update_body(
+            tmp.path(),
+            "body-change-title-x",
+            None,
+            "# Replacement title\n\nReplacement body".into(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(out.issue.title, "Replacement title");
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("changed the title") && w.contains("Replacement title")),
+            "warnings: {:?}",
+            out.warnings
+        );
+    }
+
+    #[test]
     fn update_issue_set_body_replaces_body_and_advances_version() {
         let tmp = fresh_repo();
         let v0 = seed_issue(tmp.path(), "open", "set-body-replace-x", "open");
@@ -1512,6 +1588,49 @@ mod tests {
         assert!(
             on_disk.contains("status: open"),
             "frontmatter lost: {on_disk}"
+        );
+    }
+
+    #[test]
+    fn update_issue_set_body_headingless_preserves_title_and_warns() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "set-body-preserve-title-x", "open");
+        let req = UpdateIssueRequest {
+            set_body: Some("Replacement body".into()),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "set-body-preserve-title-x", req).unwrap();
+        assert_eq!(out.issue.title, "Title");
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("preserved existing title")),
+            "warnings: {:?}",
+            out.warnings
+        );
+    }
+
+    #[test]
+    fn update_issue_explicit_title_wins_over_set_body_without_title_warning() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "set-body-explicit-title-x", "open");
+        let req = UpdateIssueRequest {
+            set_body: Some("# Intermediate title\n\nReplacement body".into()),
+            title: Patch::Set("Explicit title".into()),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "set-body-explicit-title-x", req).unwrap();
+        assert_eq!(out.issue.title, "Explicit title");
+        assert!(
+            !out.warnings.iter().any(|w| w.contains("title")),
+            "explicit retitle should not warn about title intent: {:?}",
+            out.warnings
+        );
+        assert!(out.issue.body.contains("Replacement body"));
+        let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
+        assert!(
+            on_disk.contains("\n# Explicit title\n\nReplacement body\n"),
+            "title/body spacing or framing is non-canonical: {on_disk}"
         );
     }
 
@@ -1550,6 +1669,21 @@ mod tests {
         // Non-fatal: the write still lands.
         let on_disk = fs::read_to_string(out.issue_dir.join("item.md")).unwrap();
         assert!(on_disk.contains("legacy heading"), "{on_disk}");
+    }
+
+    #[test]
+    fn update_issue_title_rejects_multiline_input() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "title-multiline-x", "open");
+        let req = UpdateIssueRequest {
+            title: Patch::Set("First line\nSecond line".into()),
+            ..Default::default()
+        };
+        let err = update_issue(tmp.path(), "title-multiline-x", req).unwrap_err();
+        assert!(
+            matches!(err, MutateError::Validation(ref msg) if msg.contains("single line")),
+            "got: {err:?}"
+        );
     }
 
     #[test]

@@ -255,6 +255,7 @@ closing status, the issue is also moved to `closed/` (same as `close`).
 
 Common flags:
 
+- `--title "New title"` rewrites the body-backed `# <title>` H1. The JSON response echoes the persisted `title` when this flag is requested.
 - `--status STATUS` (active or closing)
 - `-t/--type TYPE` (bug, task, feature, improvement, chore, epic, or any value the repo's `.schema.yaml` adds to `fields.type.enum`; rejected with `SchemaViolation` if the new type's required body sections are missing, with a list of `## <Section>` headings to add first; rejected if combined with a close→open reopen on the same call. Changing to `epic` automatically migrates a lone `reporter:` to `owner:` and reports a warning; an assignee or a conflicting owner remains an actionable error.)
 - `--assignee USER` / `--no-assignee`, `--owner USER` / `--no-owner` (epics), and `--no-reporter`
@@ -268,6 +269,7 @@ Common flags:
 
 Example flows:
 
+- `issuectl --json update extremely-quiet-otter --title "Clarify retry behavior"`
 - `issuectl --json update extremely-quiet-otter --status in-progress`
 - `issuectl --json update extremely-quiet-otter --assignee alice --status testing`
 - `issuectl --json update extremely-quiet-otter --add-commit "abc123:fix login state"`
@@ -275,6 +277,8 @@ Example flows:
 - `issuectl --json update extremely-quiet-otter --add-blocked-by "@other-slug"` (gate this issue behind `@other-slug`)
 - `issuectl --json update extremely-quiet-otter --no-assignee --type epic` (clear an assignee before converting to an epic)
 - `issuectl --json update extremely-quiet-otter --no-owner --type task` (clear an epic owner before converting to a non-epic)
+
+For whole-document replacement, `issuectl body set <slug> --from-file <path>` and `issuectl update <slug> --body-file <path>` preserve the existing title H1 when the incoming body has no H1 and report that preservation in top-level `warnings[]`. An incoming different H1 is accepted but also warns; use `update --title` when the title change is intentional.
 
 When an update invocation requests a scheduling-field operation, its `.data`
 echoes that field's persisted post-update value, even when the operation was a

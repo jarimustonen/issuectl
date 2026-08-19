@@ -1,5 +1,40 @@
 use super::*;
 
+/// Apply the title-protection policy shared by both whole-body replacement
+/// surfaces. An explicit title patch makes the caller's retitle intent clear,
+/// so its later rewrite is authoritative and no accidental-retitle warning is
+/// emitted here.
+pub(crate) fn reconcile_replacement_title(
+    slug: &str,
+    body: String,
+    current_title: &str,
+    explicit_title: bool,
+) -> (String, Vec<String>) {
+    if explicit_title {
+        return (body, Vec::new());
+    }
+
+    let incoming_title = crate::parser::extract_title(Some(&body));
+    let mut warnings = Vec::new();
+    if incoming_title.is_empty() && !current_title.is_empty() {
+        let body = crate::body_sections::set_title_heading(&body, current_title);
+        warnings.push(format!(
+            "replacement body had no non-empty title H1; preserved existing title {current_title:?}; use `update {slug} --title <TITLE>` to retitle"
+        ));
+        return (body, warnings);
+    }
+    if incoming_title.is_empty() {
+        warnings.push(format!(
+            "replacement body has no non-empty title H1 and the issue remains titleless; repair it with `update {slug} --title <TITLE>`"
+        ));
+    } else if incoming_title != current_title {
+        warnings.push(format!(
+            "replacement body changed the title from {current_title:?} to {incoming_title:?}; prefer `update {slug} --title <TITLE>` for an explicit retitle"
+        ));
+    }
+    (body, warnings)
+}
+
 /// PUT-style replacement of an issue's body markdown. Same lock and
 /// optimistic-concurrency contract as `update_issue`, but only the body
 /// (and `updated:`) change. Status/folder are untouched, so this never
@@ -56,12 +91,10 @@ pub fn update_body_via(
         }
     }
 
-    // Authoring-time advisory: warn when the replacement body carries a
-    // reserved-legacy section heading (`## Notes`) so the collision
-    // surfaces now rather than at commit time via the doctor pre-commit
-    // hook. Non-fatal — the write still proceeds (the author may be
-    // migrating). Computed before `body` is moved into `item.body`.
-    let warnings = crate::body_sections::reserved_section_warnings(&body);
+    let (body, mut warnings) = reconcile_replacement_title(slug, body, &prev_issue.title, false);
+
+    // Also warn when the replacement carries a reserved legacy section.
+    warnings.extend(crate::body_sections::reserved_section_warnings(&body));
 
     let mut item = write::read_item(&item_path).map_err(MutateError::Io)?;
     let before_serialized =

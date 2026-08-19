@@ -740,14 +740,18 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(outcome.warnings.len(), 1, "warnings={:?}", outcome.warnings);
-        assert!(outcome.warnings[0].contains("## Notes"));
+        assert_eq!(outcome.warnings.len(), 2, "warnings={:?}", outcome.warnings);
+        assert!(outcome
+            .warnings
+            .iter()
+            .any(|w| w.contains("preserved existing title")));
+        assert!(outcome.warnings.iter().any(|w| w.contains("## Notes")));
         // The body was written despite the warning.
         assert!(read(&n.item_path).contains("## Notes"));
     }
 
     #[test]
-    fn body_set_with_clean_body_has_no_warnings() {
+    fn body_set_with_headingless_clean_body_warns_only_about_title() {
         let tmp = fresh_repo();
         let mut a = new_args("task", "Body clean");
         a.slug = Some("body-clean".into());
@@ -760,11 +764,8 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(
-            outcome.warnings.is_empty(),
-            "warnings={:?}",
-            outcome.warnings
-        );
+        assert_eq!(outcome.warnings.len(), 1, "warnings={:?}", outcome.warnings);
+        assert!(outcome.warnings[0].contains("preserved existing title"));
     }
 
     #[test]
@@ -845,7 +846,7 @@ mod tests {
             lane_seq: Some(20),
             ..Default::default()
         };
-        let requested = SchedulingEcho::requested_by(&args);
+        let requested = UpdateEchoes::requested_by(&args);
         let out = do_update(tmp.path(), args).unwrap();
         let report = update_json_report(&n.slug, &out, requested);
 
@@ -884,7 +885,7 @@ mod tests {
             no_lane_seq: true,
             ..Default::default()
         };
-        let requested = SchedulingEcho::requested_by(&args);
+        let requested = UpdateEchoes::requested_by(&args);
         let out = do_update(tmp.path(), args).unwrap();
         let report = update_json_report(&n.slug, &out, requested);
 
@@ -913,7 +914,7 @@ mod tests {
             add_collision: vec!["src/a.rs".into(), "src/b.rs".into()],
             ..Default::default()
         };
-        let requested = SchedulingEcho::requested_by(&add);
+        let requested = UpdateEchoes::requested_by(&add);
         let out = do_update(tmp.path(), add).unwrap();
         let report = update_json_report(&n.slug, &out, requested);
         assert_eq!(
@@ -928,7 +929,7 @@ mod tests {
             remove_collision: vec!["src/a.rs".into()],
             ..Default::default()
         };
-        let requested = SchedulingEcho::requested_by(&remove_one);
+        let requested = UpdateEchoes::requested_by(&remove_one);
         let out = do_update(tmp.path(), remove_one).unwrap();
         let report = update_json_report(&n.slug, &out, requested);
         assert_eq!(report["collision"], serde_json::json!(["src/b.rs"]));
@@ -938,7 +939,7 @@ mod tests {
             remove_collision: vec!["src/b.rs".into()],
             ..Default::default()
         };
-        let requested = SchedulingEcho::requested_by(&remove_last);
+        let requested = UpdateEchoes::requested_by(&remove_last);
         let out = do_update(tmp.path(), remove_last).unwrap();
         let report = update_json_report(&n.slug, &out, requested);
         assert_eq!(report.get("collision"), Some(&serde_json::Value::Null));
@@ -958,7 +959,7 @@ mod tests {
             lane: Some("new".into()),
             ..Default::default()
         };
-        let requested = SchedulingEcho::requested_by(&args);
+        let requested = UpdateEchoes::requested_by(&args);
         let out = do_update(tmp.path(), args).unwrap();
         let report = update_json_report(&n.slug, &out, requested);
 
@@ -981,7 +982,7 @@ mod tests {
             priority: Some("high".into()),
             ..Default::default()
         };
-        let requested = SchedulingEcho::requested_by(&args);
+        let requested = UpdateEchoes::requested_by(&args);
         let out = do_update(tmp.path(), args).unwrap();
         let report = update_json_report(&n.slug, &out, requested);
 

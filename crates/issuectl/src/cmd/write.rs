@@ -264,6 +264,7 @@ pub(crate) fn cmd_import_github(
 #[derive(Default)]
 pub(crate) struct UpdateArgs {
     pub slug: String,
+    pub title: Option<String>,
     pub status: Option<String>,
     pub issue_type: Option<String>,
     pub assignee: Option<String>,
@@ -309,6 +310,7 @@ pub(crate) struct UpdateOutcome {
     // flock — never re-read from disk, which would race a concurrent
     // writer.
     pub status: String,
+    pub title: String,
     pub priority: String,
     pub labels: Option<Vec<String>>,
     pub lane: Option<String>,
@@ -343,15 +345,17 @@ pub(crate) fn echo_mutated_fields(
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct SchedulingEcho {
+pub(crate) struct UpdateEchoes {
+    title: bool,
     lane: bool,
     lane_seq: bool,
     collision: bool,
 }
 
-impl SchedulingEcho {
+impl UpdateEchoes {
     pub(crate) fn requested_by(args: &UpdateArgs) -> Self {
         Self {
+            title: args.title.is_some(),
             lane: args.lane.is_some() || args.no_lane,
             lane_seq: args.lane_seq.is_some() || args.no_lane_seq,
             collision: !args.add_collision.is_empty() || !args.remove_collision.is_empty(),
@@ -362,7 +366,7 @@ impl SchedulingEcho {
 pub(crate) fn update_json_report(
     slug: &str,
     out: &UpdateOutcome,
-    scheduling: SchedulingEcho,
+    echoes: UpdateEchoes,
 ) -> serde_json::Value {
     let mut report = serde_json::json!({
         "slug": slug,
@@ -372,13 +376,16 @@ pub(crate) fn update_json_report(
         "version": out.version,
     });
     echo_mutated_fields(&mut report, &out.status, &out.priority, &out.labels);
-    if scheduling.lane {
+    if echoes.title {
+        report["title"] = serde_json::json!(out.title);
+    }
+    if echoes.lane {
         report["lane"] = serde_json::json!(out.lane);
     }
-    if scheduling.lane_seq {
+    if echoes.lane_seq {
         report["lane_seq"] = serde_json::json!(out.lane_seq);
     }
-    if scheduling.collision {
+    if echoes.collision {
         report["collision"] = serde_json::json!(out.collision);
     }
     report["warnings"] = serde_json::json!(out.warnings);
@@ -388,12 +395,12 @@ pub(crate) fn update_json_report(
 pub(crate) fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
     let root = find_root();
     let slug = args.slug.clone();
-    let scheduling = SchedulingEcho::requested_by(&args);
+    let echoes = UpdateEchoes::requested_by(&args);
     let out = do_update(&root, args)?;
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&update_json_report(&slug, &out, scheduling))?
+            serde_json::to_string_pretty(&update_json_report(&slug, &out, echoes))?
         );
         return Ok(());
     }
@@ -418,6 +425,9 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
         set_body: args.set_body,
         ..Default::default()
     };
+    if let Some(title) = args.title {
+        req.title = Patch::Set(title);
+    }
     if let Some(s) = args.status {
         req.status = Patch::Set(s);
     }
@@ -506,6 +516,7 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
         moved_to_open: outcome.moved_to_open,
         version: outcome.version,
         status: outcome.issue.status,
+        title: outcome.issue.title,
         priority: outcome.issue.priority,
         labels: outcome.issue.labels,
         lane: outcome.issue.lane,
@@ -724,6 +735,7 @@ pub(crate) fn do_close(
         moved_to_open: outcome.moved_to_open,
         version: outcome.version,
         status: outcome.issue.status,
+        title: outcome.issue.title,
         priority: outcome.issue.priority,
         labels: outcome.issue.labels,
         lane: outcome.issue.lane,

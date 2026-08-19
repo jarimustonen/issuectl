@@ -251,8 +251,13 @@ fn body_set_with_reserved_section_warns_on_stderr_and_json() {
     let v: serde_json::Value =
         serde_json::from_slice(&json.stdout).expect("body set --json stdout should be JSON");
     let warnings = v["warnings"].as_array().expect("warnings array");
-    assert_eq!(warnings.len(), 1, "{}", dump(&json));
-    assert!(warnings[0].as_str().unwrap().contains("## Notes"));
+    assert_eq!(warnings.len(), 2, "{}", dump(&json));
+    assert!(warnings.iter().any(|w| w
+        .as_str()
+        .is_some_and(|w| w.contains("preserved existing title"))));
+    assert!(warnings
+        .iter()
+        .any(|w| w.as_str().is_some_and(|w| w.contains("## Notes"))));
 }
 
 /// Reads `field` from an `issuectl --json show <slug>` payload.

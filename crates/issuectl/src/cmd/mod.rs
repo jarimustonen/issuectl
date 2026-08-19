@@ -589,6 +589,10 @@ pub(crate) enum Command {
         #[arg(value_parser = parse_slug_arg)]
         slug: String,
 
+        /// Rewrite the issue title stored in the markdown body's H1
+        #[arg(long, value_parser = parse_non_empty)]
+        title: Option<String>,
+
         /// New status (active or closing — frontmatter only, no directory move).
         /// Schema-aware: any status in `issues/.schema.yaml`'s `status` enum
         /// is accepted; final validation happens under-lock against the
@@ -1798,7 +1802,10 @@ pub(crate) enum BodyAction {
     /// is optional in both modes: pass it only when you want a
     /// compare-and-swap (it is enforced when passed). `flock` prevents
     /// corruption regardless; without a token, blind clobber is allowed.
-    /// A body using a reserved legacy section heading (`## Notes` — use
+    /// If the replacement has no H1, the existing title H1 is preserved
+    /// and a warning is emitted. A different H1 is accepted but warns;
+    /// prefer `update <slug> --title ...` for explicit retitling. A body
+    /// using a reserved legacy section heading (`## Notes` — use
     /// `## Comments`) is accepted but warns; `issuectl doctor --fix`
     /// migrates it later.
     Set {
