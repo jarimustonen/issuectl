@@ -10,6 +10,11 @@ labels:
 lane: verb-surface
 lane_seq: 3
 collision: [crates/issuectl/src/cmd/write.rs]
+commits:
+- hash: b2c4878
+  summary: mark update JSON echo fix in progress
+- hash: 782e1cc
+  summary: echo updated scheduling fields in JSON
 ---
 
 # update response envelope echoes null for fields it just set (lane_seq)
