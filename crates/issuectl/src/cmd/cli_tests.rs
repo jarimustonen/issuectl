@@ -856,6 +856,18 @@ mod tests {
             content.contains("lane_seq: 20") && !content.contains("lane_seq: '20'"),
             "lane_seq must be an unquoted integer; got: {content}"
         );
+        let parsed = issuectl_core::parser::parse_item_md_text_with_warnings(
+            &content,
+            &n.slug,
+            "open",
+            &n.item_path,
+        );
+        assert_eq!(parsed.issue.lane.as_deref(), Some("cli"));
+        assert_eq!(
+            parsed.issue.lane_seq,
+            Some(20),
+            "written lane_seq must lift back into the typed field"
+        );
     }
 
     #[test]
@@ -876,10 +888,17 @@ mod tests {
         let out = do_update(tmp.path(), args).unwrap();
         let report = update_json_report(&n.slug, &out, requested);
 
-        assert!(report["lane"].is_null());
-        assert!(report["lane_seq"].is_null());
+        assert_eq!(report.get("lane"), Some(&serde_json::Value::Null));
+        assert_eq!(report.get("lane_seq"), Some(&serde_json::Value::Null));
         let content = read(&n.item_path);
-        assert!(!content.contains("lane:") && !content.contains("lane_seq:"));
+        let parsed = issuectl_core::parser::parse_item_md_text_with_warnings(
+            &content,
+            &n.slug,
+            "open",
+            &n.item_path,
+        );
+        assert_eq!(parsed.issue.lane, None);
+        assert_eq!(parsed.issue.lane_seq, None);
     }
 
     #[test]
@@ -901,16 +920,51 @@ mod tests {
             report["collision"],
             serde_json::json!(["src/a.rs", "src/b.rs"])
         );
+        assert!(report.get("lane").is_none());
+        assert!(report.get("lane_seq").is_none());
 
-        let remove = UpdateArgs {
+        let remove_one = UpdateArgs {
             slug: n.slug.clone(),
-            remove_collision: vec!["src/a.rs".into(), "src/b.rs".into()],
+            remove_collision: vec!["src/a.rs".into()],
             ..Default::default()
         };
-        let requested = SchedulingEcho::requested_by(&remove);
-        let out = do_update(tmp.path(), remove).unwrap();
+        let requested = SchedulingEcho::requested_by(&remove_one);
+        let out = do_update(tmp.path(), remove_one).unwrap();
         let report = update_json_report(&n.slug, &out, requested);
-        assert!(report["collision"].is_null());
+        assert_eq!(report["collision"], serde_json::json!(["src/b.rs"]));
+
+        let remove_last = UpdateArgs {
+            slug: n.slug.clone(),
+            remove_collision: vec!["src/b.rs".into()],
+            ..Default::default()
+        };
+        let requested = SchedulingEcho::requested_by(&remove_last);
+        let out = do_update(tmp.path(), remove_last).unwrap();
+        let report = update_json_report(&n.slug, &out, requested);
+        assert_eq!(report.get("collision"), Some(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn update_json_echoes_only_the_requested_scheduling_field() {
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "T");
+        a.slug = Some("schedule-one-field".into());
+        a.lane = Some("old".into());
+        a.lane_seq = Some(3);
+        a.collision = vec!["src/existing.rs".into()];
+        let n = do_new(tmp.path(), a).unwrap();
+        let args = UpdateArgs {
+            slug: n.slug.clone(),
+            lane: Some("new".into()),
+            ..Default::default()
+        };
+        let requested = SchedulingEcho::requested_by(&args);
+        let out = do_update(tmp.path(), args).unwrap();
+        let report = update_json_report(&n.slug, &out, requested);
+
+        assert_eq!(report.get("lane"), Some(&serde_json::json!("new")));
+        assert!(report.get("lane_seq").is_none());
+        assert!(report.get("collision").is_none());
     }
 
     #[test]

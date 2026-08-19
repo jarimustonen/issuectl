@@ -276,14 +276,21 @@ Example flows:
 - `issuectl --json update extremely-quiet-otter --no-assignee --type epic` (clear an assignee before converting to an epic)
 - `issuectl --json update extremely-quiet-otter --no-owner --type task` (clear an epic owner before converting to a non-epic)
 
-When an update invocation touches scheduling fields, its `.data` echoes their
-persisted post-update values. Set values are returned directly, cleared
-`lane`/`lane_seq` are `null`, and `collision` is the resulting list or `null`
-when empty. Scheduling keys not touched by that invocation remain absent:
+When an update invocation requests a scheduling-field operation, its `.data`
+echoes that field's persisted post-update value, even when the operation was a
+no-op. Set values are returned directly, cleared `lane`/`lane_seq` are `null`,
+and `collision` is the resulting list or `null` when empty. Presence matters: a
+missing key means this invocation did not request that field, so its stored
+value is unknown from this response; a present `null` means the field is now
+unset or empty. Use `has("lane")` (and the corresponding key name) before
+reading it.
+
+For example, the scheduling-field excerpt of `.data` for a call that requests
+all three fields is:
 
 ```json
-{ "slug": "extremely-quiet-otter", "lane": "cli-fixes", "lane_seq": 40,
-  "collision": ["crates/issuectl/src/main.rs"], "version": "sha256:..." }
+{ "lane": "cli-fixes", "lane_seq": 40,
+  "collision": ["crates/issuectl/src/main.rs"] }
 ```
 
 Prefer commit trailers over manual `--add-commit`. Add
