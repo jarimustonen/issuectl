@@ -10,6 +10,9 @@ labels:
 lane: skills
 lane_seq: 30
 collision: [templates]
+commits:
+- hash: c083209
+  summary: document issue lane updates
 ---
 
 # issue skill: document update --lane/--lane-seq flags
