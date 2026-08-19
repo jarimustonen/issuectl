@@ -94,6 +94,12 @@ unrelated to this file.
 - Agent run logs go in `## Agent Runs` (use
   `issuectl note --agent-run`).
 
+## Labels and scheduling
+
+- Labels classify issue content; they are not lifecycle or backlog states.
+- Do not add a `deferred` label. Under the no-backlog model, schedule open
+  work with `lane` / `lane_seq` and express dependencies with `blocked_by`.
+
 ## Status transitions
 
 - Declarative preconditions (assignee required, commits required,
@@ -628,6 +634,7 @@ mod tests {
         assert!(out.contains("issuectl-managed:format=1"));
         assert!(out.contains("Never edit frontmatter manually"));
         assert!(out.contains("Refs-Issue: @<slug>"));
+        assert!(out.contains("Do not add a `deferred` label"));
         // Default schema declares status enum — must surface.
         assert!(out.contains("`status`"));
         assert!(out.contains("in-progress"));

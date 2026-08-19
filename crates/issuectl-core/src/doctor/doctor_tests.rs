@@ -810,6 +810,96 @@ mod tests {
     }
 
     #[test]
+    fn deferred_label_is_detected_without_confusing_deferred_status() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "deferred-labelled-issue",
+            "---\ncreated: 2020-01-01\nupdated: 2020-01-01\ntype: feature\nreporter: test\nstatus: open\npriority: normal\nlabels: [deferred, ui]\n---\n# Labelled\n",
+        );
+        put_flat(
+            &tmp,
+            "status-only-issue",
+            "---\ncreated: 2020-01-01\nupdated: 2020-01-01\ntype: feature\nreporter: test\nstatus: deferred\npriority: normal\n---\n# Status only\n",
+        );
+
+        let report = scan(tmp.path()).unwrap();
+        assert_eq!(
+            report
+                .deferred_labels
+                .iter()
+                .map(|(slug, _)| slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["deferred-labelled-issue"]
+        );
+        assert!(
+            critical_blockers(&report).is_empty(),
+            "retired labels are warning-only: {:?}",
+            critical_blockers(&report)
+        );
+        let json = render_json(&report, None, false, tmp.path());
+        assert_eq!(
+            json["deferred_labels"],
+            serde_json::json!(["deferred-labelled-issue"])
+        );
+    }
+
+    #[test]
+    fn deferred_label_fix_removes_only_that_label() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "deferred-labelled-issue",
+            "---\ncreated: 2020-01-01\nupdated: 2020-01-01\ntype: feature\nreporter: test\nstatus: open\npriority: normal\nlabels: [deferred, ui]\n---\n# Labelled\n",
+        );
+
+        let mut report = scan(tmp.path()).unwrap();
+        let actions = DoctorActions::from_findings(&mut report);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.deferred_labels_removed,
+            vec!["deferred-labelled-issue"]
+        );
+        assert!(outcome.fix_applied());
+        let text =
+            fs::read_to_string(tmp.path().join("issues/deferred-labelled-issue/item.md")).unwrap();
+        assert!(!text.contains("deferred"), "{text}");
+        assert!(
+            text.contains("labels: [ui]"),
+            "unrelated label must remain: {text}"
+        );
+        assert!(scan(tmp.path()).unwrap().deferred_labels.is_empty());
+    }
+
+    #[test]
+    fn deferred_label_fix_is_a_noop_when_no_issue_uses_it() {
+        let tmp = fresh_repo();
+        put_flat(
+            &tmp,
+            "plain-other-label",
+            "---\ncreated: 2020-01-01\nupdated: 2020-01-01\ntype: feature\nreporter: test\nstatus: open\npriority: normal\nlabels: [ui]\n---\n# Plain\n",
+        );
+
+        let mut report = scan(tmp.path()).unwrap();
+        assert!(report.deferred_labels.is_empty());
+        let actions = DoctorActions::from_findings(&mut report);
+        let outcome = apply(
+            tmp.path(),
+            actions,
+            &crate::mutate::WriteLock::acquire(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        assert!(outcome.deferred_labels_removed.is_empty());
+        assert!(scan(tmp.path()).unwrap().deferred_labels.is_empty());
+    }
+
+    #[test]
     fn unknown_reviewer_is_flagged_unless_a_known_user_elsewhere() {
         // alice is the assignee of issue-one → known user.
         // bob is only ever referenced as a reviewer → flagged.
@@ -2433,6 +2523,8 @@ mod tests {
   ],
   "closed_with_active_status": [],
   "conflict_markers": [],
+  "deferred_labels": [],
+  "deferred_labels_removed": [],
   "duplicate_slugs": [],
   "files_rewritten": 0,
   "fix_applied": false,

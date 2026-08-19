@@ -71,6 +71,7 @@ pub(crate) fn apply_via(
     // still gets the built-in alias table.
     let apply_schema = schema::load(repo_root)?;
     apply_alias_coercions(&mut actions, &mut outcome, &apply_schema, clock)?;
+    apply_deferred_label_removal(&mut actions, &mut outcome)?;
 
     // Status/folder reconciliation runs BEFORE the flat-layout
     // migration so the rewrites land at the legacy path that scan()
@@ -338,6 +339,38 @@ pub(crate) fn rename_notes_to_comments(
                 .with_context(|| format!("cannot write {}", item_path.display()))?;
             outcome.notes_renamed.push(slug);
         }
+    }
+    Ok(())
+}
+
+/// Remove the retired lifecycle label without touching the identically named
+/// intake status. Re-check the on-disk list through the canonical write helper
+/// so a stale scan cannot remove any unrelated label.
+pub(crate) fn apply_deferred_label_removal(
+    actions: &mut DoctorActions,
+    outcome: &mut ApplyOutcome,
+) -> Result<()> {
+    for (slug, item_path) in std::mem::take(&mut actions.deferred_labels) {
+        if !item_path.is_file() {
+            continue;
+        }
+        let mut item = write::read_item(&item_path)?;
+        let labels_key = serde_yaml::Value::String("labels".into());
+        let still_present = item
+            .frontmatter
+            .get(&labels_key)
+            .and_then(|value| value.as_sequence())
+            .is_some_and(|labels| {
+                labels
+                    .iter()
+                    .any(|label| label.as_str() == Some("deferred"))
+            });
+        if !still_present {
+            continue;
+        }
+        write::remove_from_string_list(&mut item.frontmatter, "labels", "deferred")?;
+        write::write_item(&item_path, &item)?;
+        outcome.deferred_labels_removed.push(slug);
     }
     Ok(())
 }
@@ -980,15 +1013,17 @@ pub(crate) fn remaining_finding_count(report: &DoctorFindings) -> usize {
         + report.large_binaries.len()
         + report.non_avif_images.len()
         + report.broken_attachment_refs.len()
+        + report.deferred_labels.len()
 }
 
 pub(crate) fn fix_summary(report: &DoctorFindings, oc: &ApplyOutcome) -> String {
     let counts = format!(
-        "{} legacy dir(s) migrated, {} flat-layout dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} AGENTS.md block(s) regenerated.",
+        "{} legacy dir(s) migrated, {} flat-layout dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} retired label(s) removed, {} AGENTS.md block(s) regenerated.",
         oc.legacy_dirs_migrated.len(),
         oc.flat_layout_migrated.len(),
         oc.files_rewritten,
         oc.notes_renamed.len(),
+        oc.deferred_labels_removed.len(),
         if oc.agents_md_regenerated { 1 } else { 0 }
     );
     match (oc.stop_phase, oc.apply_error.is_some()) {

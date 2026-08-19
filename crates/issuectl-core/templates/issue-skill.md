@@ -713,8 +713,10 @@ Doctor migrates legacy `<NN>-<slug>/` directories to slug-only layout,
 rewrites `number:` → `slug:` in frontmatter, migrates `epic:` and
 `related:` references, and rewrites `#NN` body refs to `@<slug>`. It
 also flags invalid slugs, duplicates, missing item.md files, orphan
-epic refs, and self-dependencies in `blocked_by:`. The JSON report exposes
-those self-dependencies as `blocked_by_self`.
+epic refs, self-dependencies in `blocked_by:`, and residual uses of the retired
+`deferred` lifecycle label. The JSON report exposes those as `blocked_by_self`
+and `deferred_labels`; `--fix` removes the retired label without changing the
+valid intake status of the same name.
 
 On `--fix`, the JSON envelope carries an `apply_outcome` object with a
 `stop_phase` discriminator that you should branch on:

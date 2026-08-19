@@ -128,6 +128,7 @@ pub(crate) fn scan_via(
 
     populate_extended_validation(&scan, schema_value.as_ref(), &mut report, clock);
 
+    populate_deferred_labels(&scan, &mut report);
     populate_attachment_health(&scan, repo_root, &mut report);
 
     Ok(report)
@@ -236,6 +237,30 @@ pub(crate) fn populate_orphan_epic_refs(scan: &ScanResult, report: &mut DoctorFi
             }
         }
     }
+}
+
+/// Find exact uses of the retired `deferred` label. The intake status with
+/// the same spelling remains valid, so this reads only the `labels` list.
+pub(crate) fn populate_deferred_labels(scan: &ScanResult, report: &mut DoctorFindings) {
+    for issue in &scan.issues {
+        if !issue.item_present {
+            continue;
+        }
+        let Some(parsed) = &issue.parsed else {
+            continue;
+        };
+        if parsed
+            .issue
+            .labels
+            .as_ref()
+            .is_some_and(|labels| labels.iter().any(|label| label == "deferred"))
+        {
+            report
+                .deferred_labels
+                .push((issue.dir_name.clone(), issue.item_path.clone()));
+        }
+    }
+    report.deferred_labels.sort();
 }
 
 /// Attachment / fixture health: large binaries, non-AVIF images, and

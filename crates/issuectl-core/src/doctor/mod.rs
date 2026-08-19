@@ -417,6 +417,11 @@ struct DoctorFindings {
     /// a file inside that issue's directory (moved/renamed attachment or
     /// a typo). Warning-only. `(slug, reference)`.
     broken_attachment_refs: Vec<(String, String)>,
+    /// Issues still carrying the retired `deferred` lifecycle label.
+    /// Warning-only and auto-fixable. The intake `deferred` status remains
+    /// valid; this check is deliberately scoped to the label.
+    /// `(slug, item_path)`.
+    deferred_labels: Vec<(String, PathBuf)>,
 }
 
 /// Stage 2: planned writes derived from `DoctorFindings`. Built by
@@ -449,6 +454,8 @@ struct DoctorActions {
     /// True when scan flagged a legacy `issues/AGENTS.md` (pre-v0.5.0
     /// scaffold). `--fix` overwrites with the current template.
     rewrite_issues_agents_md: bool,
+    /// Retired `deferred` labels to remove. `(slug, item_path)`.
+    deferred_labels: Vec<(String, PathBuf)>,
     /// Critical findings that block `--fix`. Computed via
     /// `apply_blockers` — the layout-fatal subset of
     /// `critical_blockers`. Schema-shape findings (schema violations,
@@ -483,6 +490,7 @@ impl DoctorActions {
                 && findings.agents_md_malformed.is_none()
                 && findings.agents_md_check_skipped.is_none(),
             rewrite_issues_agents_md: findings.legacy_issues_agents_md,
+            deferred_labels: std::mem::take(&mut findings.deferred_labels),
             preflight_blockers,
         }
     }
@@ -549,6 +557,8 @@ struct ApplyOutcome {
     files_rewritten: usize,
     agents_md_regenerated: bool,
     issues_agents_md_rewritten: bool,
+    /// Slugs from which the retired `deferred` label was removed.
+    deferred_labels_removed: Vec<String>,
     schema_bootstrapped: bool,
     /// Slugs whose `## Notes` rename was planned by scan but skipped
     /// at apply time because a concurrent edit introduced a
@@ -584,6 +594,7 @@ impl ApplyOutcome {
             || self.files_rewritten > 0
             || self.agents_md_regenerated
             || self.issues_agents_md_rewritten
+            || !self.deferred_labels_removed.is_empty()
             || self.schema_bootstrapped
     }
 
@@ -642,6 +653,7 @@ impl ApplyOutcome {
             || self.files_rewritten > 0
             || self.agents_md_regenerated
             || self.issues_agents_md_rewritten
+            || !self.deferred_labels_removed.is_empty()
     }
 }
 

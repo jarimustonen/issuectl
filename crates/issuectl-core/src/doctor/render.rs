@@ -52,6 +52,8 @@ pub(crate) fn render_text(
         || !report.large_binaries.is_empty()
         || !report.non_avif_images.is_empty()
         || !report.broken_attachment_refs.is_empty()
+        || !report.deferred_labels.is_empty()
+        || !oc.deferred_labels_removed.is_empty()
         || !oc.blockers.is_empty()
         || oc.apply_error.is_some();
     if !oc.blockers.is_empty() {
@@ -417,6 +419,19 @@ pub(crate) fn render_text(
         }
         println!();
     }
+    if !oc.deferred_labels_removed.is_empty() {
+        println!("Removed retired `deferred` labels:");
+        for slug in &oc.deferred_labels_removed {
+            println!("  {slug}");
+        }
+        println!();
+    } else if !report.deferred_labels.is_empty() {
+        println!("Retired `deferred` labels (remove them; re-run with --fix):");
+        for (slug, _) in &report.deferred_labels {
+            println!("  {slug}");
+        }
+        println!();
+    }
     if fix {
         // Coherent end-of-run summary. Previously every `--fix` run
         // printed an `Applied. …` count line even when the pipeline
@@ -582,6 +597,11 @@ pub(crate) fn render_json(
         .iter()
         .map(|(slug, r)| serde_json::json!({"slug": slug, "ref": r}))
         .collect();
+    let deferred_labels: Vec<String> = report
+        .deferred_labels
+        .iter()
+        .map(|(slug, _)| slug.clone())
+        .collect();
 
     let mut json_obj = serde_json::json!({
         "fix_applied": fix && oc.fix_applied(),
@@ -659,6 +679,14 @@ pub(crate) fn render_json(
             "blocked_by_self".to_string(),
             serde_json::json!(report.blocked_by_self),
         );
+        map.insert(
+            "deferred_labels".to_string(),
+            serde_json::json!(deferred_labels),
+        );
+        map.insert(
+            "deferred_labels_removed".to_string(),
+            serde_json::json!(oc.deferred_labels_removed),
+        );
     }
     // `apply_outcome` is the new structured envelope: emitted only on
     // `--fix` runs so the read-only JSON shape (golden snapshot) stays
@@ -679,6 +707,7 @@ pub(crate) fn render_json(
                     "schema_bootstrapped": oc.schema_bootstrapped,
                     "agents_md_regenerated": oc.agents_md_regenerated,
                     "issues_agents_md_rewritten": oc.issues_agents_md_rewritten,
+                    "deferred_labels_removed": oc.deferred_labels_removed,
                     "files_rewritten": oc.files_rewritten,
                     "legacy_dirs_migrated": migrated_legacy,
                     "flat_layout_migrated": oc
