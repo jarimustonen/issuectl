@@ -19,6 +19,14 @@ commits:
   summary: preserve intake migration semantics and structured partial errors
 - hash: f59d0dc
   summary: record implementation commits
+- hash: 25ca28d
+  summary: add doctor cleanup and agent guidance (rebased)
+- hash: 1dd3a76
+  summary: preserve intake migration semantics and structured partial errors (rebased)
+- hash: edb3a86
+  summary: record implementation commits (rebased)
+- hash: 644e91b
+  summary: close deferred label retirement (rebased)
 closed: 2026-08-19
 ---
 
