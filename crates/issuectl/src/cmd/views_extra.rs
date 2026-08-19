@@ -341,39 +341,7 @@ pub(crate) fn bulk_apply(
     spec: &BulkSpec,
     dry_run: bool,
 ) -> Result<Vec<BulkResult>> {
-    let issues = repo::load_issues(root);
-    let graph = query::build_blocked_by_graph(&issues);
-    let ctx = query::MatchCtx::today(&graph);
-    let slugs: Vec<String> = issues
-        .into_iter()
-        .filter(|i| query::matches_with(q, i, &ctx))
-        .map(|i| i.slug)
-        .collect();
-    if slugs.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let outcomes = mutate::bulk_update(root, &slugs, |dr| build_bulk_request(spec, dr), dry_run)
-        .map_err(anyhow::Error::new)?;
-
-    let results = slugs
-        .into_iter()
-        .zip(outcomes)
-        .map(|(slug, outcome)| {
-            let diff = dry_run.then(|| {
-                let before = outcome.before_serialized.as_deref().unwrap_or("");
-                let after = outcome.pending_serialized.as_deref().unwrap_or(before);
-                render_unified_diff(before, after, &outcome.issue_dir)
-            });
-            BulkResult {
-                slug,
-                version: outcome.version,
-                final_dir: outcome.issue_dir,
-                diff,
-            }
-        })
-        .collect();
-    Ok(results)
+    bulk_apply_request(root, q, build_bulk_request(spec, dry_run), dry_run)
 }
 
 pub(crate) fn cmd_bulk(json: bool, query_str: &str, spec: BulkSpec, dry_run: bool) -> Result<()> {
@@ -383,7 +351,29 @@ pub(crate) fn cmd_bulk(json: bool, query_str: &str, spec: BulkSpec, dry_run: boo
     query::resolve_me(&mut q, me.as_deref()).context("resolving `:me` in query")?;
     let root = find_root();
     let results = bulk_apply(&root, &q, &spec, dry_run)?;
+    report_bulk_results(json, &results, dry_run)
+}
 
+/// Canonical `update --query` entry point. It shares bulk's query parser,
+/// all-target lock, dry-run diffs, and output renderer while constructing
+/// each target's request from the ordinary update flags.
+pub(crate) fn cmd_update_query(
+    json: bool,
+    query_str: &str,
+    args: UpdateArgs,
+    dry_run: bool,
+) -> Result<()> {
+    let request = build_update_request(args, dry_run)?;
+    request.validate().map_err(anyhow::Error::new)?;
+    let mut q = query::parse(query_str).context("parsing bulk query")?;
+    let me = whoami();
+    query::resolve_me(&mut q, me.as_deref()).context("resolving `:me` in query")?;
+    let root = find_root();
+    let results = bulk_apply_request(&root, &q, request, dry_run)?;
+    report_bulk_results(json, &results, dry_run)
+}
+
+fn report_bulk_results(json: bool, results: &[BulkResult], dry_run: bool) -> Result<()> {
     if json {
         let arr: Vec<_> = results
             .iter()
@@ -414,11 +404,11 @@ pub(crate) fn cmd_bulk(json: bool, query_str: &str, spec: BulkSpec, dry_run: boo
     }
     if dry_run {
         println!("{} issue(s) would be updated:", results.len());
-        for r in &results {
+        for r in results {
             println!("  {}", r.slug);
         }
         println!();
-        for r in &results {
+        for r in results {
             if let Some(d) = &r.diff {
                 if !d.is_empty() {
                     print!("{d}");
@@ -427,11 +417,59 @@ pub(crate) fn cmd_bulk(json: bool, query_str: &str, spec: BulkSpec, dry_run: boo
         }
     } else {
         println!("Updated {} issue(s):", results.len());
-        for r in &results {
+        for r in results {
             println!("  {}", r.slug);
         }
     }
     Ok(())
+}
+
+/// Apply one pre-built canonical update request to every query match.
+fn bulk_apply_request(
+    root: &Path,
+    q: &query::Query,
+    request: mutate::UpdateIssueRequest,
+    dry_run: bool,
+) -> Result<Vec<BulkResult>> {
+    let issues = repo::load_issues(root);
+    let graph = query::build_blocked_by_graph(&issues);
+    let ctx = query::MatchCtx::today(&graph);
+    let slugs: Vec<String> = issues
+        .into_iter()
+        .filter(|issue| query::matches_with(q, issue, &ctx))
+        .map(|issue| issue.slug)
+        .collect();
+    if slugs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let outcomes = mutate::bulk_update(
+        root,
+        &slugs,
+        |dr| {
+            let mut request = request.clone();
+            request.dry_run = dr;
+            request
+        },
+        dry_run,
+    )
+    .map_err(anyhow::Error::new)?;
+    Ok(slugs
+        .into_iter()
+        .zip(outcomes)
+        .map(|(slug, outcome)| {
+            let diff = dry_run.then(|| {
+                let before = outcome.before_serialized.as_deref().unwrap_or("");
+                let after = outcome.pending_serialized.as_deref().unwrap_or(before);
+                render_unified_diff(before, after, &outcome.issue_dir)
+            });
+            BulkResult {
+                slug,
+                version: outcome.version,
+                final_dir: outcome.issue_dir,
+                diff,
+            }
+        })
+        .collect())
 }
 
 /// Parse the YAML patch text into `(slug, UpdateIssueRequest)`,

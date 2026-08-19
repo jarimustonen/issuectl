@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::builder::PossibleValuesParser;
-use clap::{Command as ClapCommand, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Command as ClapCommand, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::{
@@ -583,11 +583,46 @@ pub(crate) enum Command {
         inbox: bool,
     },
 
-    /// Update fields of an existing issue or epic
+    /// Selectively update one issue, a query result, or a YAML patch
+    #[command(group(ArgGroup::new("update_target")
+        .required(true)
+        .multiple(false)
+        .args(["slug", "patch_file", "query"])))]
+    #[command(group(ArgGroup::new("update_fields")
+        .required(false)
+        .multiple(true)
+        .args([
+            "title", "status", "issue_type", "assignee", "no_reporter",
+            "no_assignee", "owner", "no_owner", "priority", "epic", "no_epic",
+            "lane", "no_lane", "lane_seq", "no_lane_seq", "add_collision",
+            "remove_collision", "add_labels", "remove_labels", "add_related",
+            "remove_related", "add_blocked_by", "remove_blocked_by", "add_commits",
+            "custom_fields", "clear_fields", "description", "body_file",
+            "expected_version"
+        ])))]
     Update {
-        /// Issue slug
+        /// Issue slug. Mutually exclusive with `--query` and `--patch-file`.
         #[arg(value_parser = parse_slug_arg)]
-        slug: String,
+        slug: Option<String>,
+
+        /// Apply an `apply`-compatible YAML patch in one transaction.
+        /// The parser, expected-version contract, body_ops, output, and
+        /// errors are identical to `apply <path>`.
+        #[arg(
+            long = "patch-file",
+            value_name = "PATH",
+            conflicts_with = "update_fields"
+        )]
+        patch_file: Option<PathBuf>,
+
+        /// Select every issue matching this `bulk`-compatible query and
+        /// apply the named update flags as one locked batch.
+        #[arg(long, value_parser = parse_non_empty, allow_hyphen_values = true)]
+        query: Option<String>,
+
+        /// Plan a `--patch-file` or `--query` update without writing.
+        #[arg(long)]
+        dry_run: bool,
 
         /// Rewrite the issue title stored in the markdown body's H1
         #[arg(long, value_parser = parse_non_empty)]

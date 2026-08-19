@@ -273,6 +273,13 @@ Example flows:
 - `issuectl --json update extremely-quiet-otter --add-blocked-by "@other-slug"` (gate this issue behind `@other-slug`)
 - `issuectl --json update extremely-quiet-otter --no-assignee --type epic` (clear an assignee before converting to an epic)
 - `issuectl --json update extremely-quiet-otter --no-owner --type task` (clear an epic owner before converting to a non-epic)
+- `issuectl --json update --query "status:open label:stale" --priority high --add-label triaged` applies the same update flags to every query match under one repo lock. Add `--dry-run` for bulk-compatible per-issue diffs without writes.
+- `issuectl --json update --patch-file patch.yaml` applies the same one-transaction YAML format as `apply`, including `expected_version:` compare-and-swap and ordered `body_ops:`. Add `--dry-run` to preview it.
+
+Supply exactly one target: a positional `<slug>`, `--query <q>`, or
+`--patch-file <path>`. Patch files cannot be combined with field flags. Under
+`--json`, a patch file must contain a non-empty `expected_version:` just as it
+does with `apply`.
 
 For whole-document replacement, `issuectl body set <slug> --from-file <path>` and `issuectl update <slug> --body-file <path>` preserve the existing title H1 when the incoming body has no H1 and report that preservation in top-level `warnings[]`. An incoming different H1 is accepted but also warns; use `update --title` when the title change is intentional.
 

@@ -388,6 +388,13 @@ pub(crate) fn update_json_report(
     if echoes.collision {
         report["collision"] = serde_json::json!(out.collision);
     }
+    // `close --json` predates the general reopen marker and omits it.
+    // Closing through the canonical update form mirrors that folded
+    // command's result shape exactly; active/same-class updates retain the
+    // established update envelope.
+    if out.moved_to_closed {
+        report.as_object_mut().unwrap().remove("moved_to_open");
+    }
     report["warnings"] = serde_json::json!(out.warnings);
     report
 }
@@ -419,10 +426,23 @@ pub(crate) fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
 }
 
 pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> {
+    let slug = args.slug.clone();
+    let req = build_update_request(args, false)?;
+    let outcome = mutate::update_issue(root, &slug, req).map_err(anyhow::Error::new)?;
+    Ok(update_outcome(outcome))
+}
+
+/// Convert canonical update flags into the one core request used by both
+/// single-target and query-selected writes.
+pub(crate) fn build_update_request(
+    args: UpdateArgs,
+    dry_run: bool,
+) -> Result<mutate::UpdateIssueRequest> {
     use mutate::Patch;
     let mut req = mutate::UpdateIssueRequest {
         expected_version: args.expected_version,
         set_body: args.set_body,
+        dry_run,
         ..Default::default()
     };
     if let Some(title) = args.title {
@@ -508,9 +528,11 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
     for k in args.clear_fields {
         req.custom_fields.insert(k, mutate::Patch::Clear);
     }
+    Ok(req)
+}
 
-    let outcome = mutate::update_issue(root, &args.slug, req).map_err(anyhow::Error::new)?;
-    Ok(UpdateOutcome {
+fn update_outcome(outcome: mutate::UpdateOutcome) -> UpdateOutcome {
+    UpdateOutcome {
         final_dir: outcome.issue_dir,
         moved_to_closed: outcome.moved_to_closed,
         moved_to_open: outcome.moved_to_open,
@@ -524,7 +546,7 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
         collision: outcome.issue.collision,
         closed_by: outcome.issue.closed_by,
         warnings: outcome.warnings,
-    })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

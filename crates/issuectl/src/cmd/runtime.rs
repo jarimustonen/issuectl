@@ -615,6 +615,9 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
         }
         Command::Update {
             slug,
+            patch_file,
+            query,
+            dry_run,
             title,
             status,
             issue_type,
@@ -645,50 +648,52 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             body_file,
             expected_version,
         } => {
-            // `--body-file` conflicts with `--description`/`--body` at the
-            // clap layer, so at most one is set. Resolve the file (or stdin
-            // for `-`) here — before `cmd_update` — so all body I/O + the
-            // input cap stay in the CLI layer and the resolved markdown
-            // flows through the same flock/schema write path as an inline
-            // `--description`. Mirrors the `create` command's body handling.
+            if let Some(path) = patch_file {
+                return cmd_apply(json_output, &path, dry_run);
+            }
+            // Body I/O remains in the CLI layer; the resolved markdown then
+            // flows through the same locked request builder for one target or
+            // every query match.
             let set_body = match body_file {
                 Some(path) => Some(read_body_file_arg(&path)?),
                 None => description,
             };
-            cmd_update(
-                json_output,
-                UpdateArgs {
-                    slug,
-                    title,
-                    status,
-                    issue_type,
-                    assignee,
-                    no_reporter,
-                    no_assignee,
-                    owner,
-                    no_owner,
-                    priority,
-                    epic,
-                    no_epic,
-                    lane,
-                    no_lane,
-                    lane_seq,
-                    no_lane_seq,
-                    add_collision,
-                    remove_collision,
-                    add_labels,
-                    remove_labels,
-                    add_related,
-                    remove_related,
-                    add_blocked_by,
-                    remove_blocked_by,
-                    add_commits,
-                    custom_fields,
-                    clear_fields,
-                    set_body,
-                    expected_version,
-                },
-            )
+            let args = UpdateArgs {
+                slug: slug.unwrap_or_default(),
+                title,
+                status,
+                issue_type,
+                assignee,
+                no_reporter,
+                no_assignee,
+                owner,
+                no_owner,
+                priority,
+                epic,
+                no_epic,
+                lane,
+                no_lane,
+                lane_seq,
+                no_lane_seq,
+                add_collision,
+                remove_collision,
+                add_labels,
+                remove_labels,
+                add_related,
+                remove_related,
+                add_blocked_by,
+                remove_blocked_by,
+                add_commits,
+                custom_fields,
+                clear_fields,
+                set_body,
+                expected_version,
+            };
+            match query {
+                Some(query) => cmd_update_query(json_output, &query, args, dry_run),
+                None if dry_run => bail!("--dry-run requires --query or --patch-file"),
+                None => cmd_update(json_output, args),
+            }
         }
         Command::Close {
             slug,

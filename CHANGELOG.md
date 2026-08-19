@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`issuectl update` now has canonical patch-file and query-selected forms.**
+  `update --patch-file <path>` reuses `apply`'s transactional YAML parser,
+  compare-and-swap, and body operations; `update --query <q>` applies ordinary
+  update flags as one locked batch with `bulk`-compatible JSON and dry-run diffs.
 - **Issues can be retitled explicitly with `issuectl update <slug> --title "..."`.**
   The locked update rewrites the body-backed H1 and echoes the persisted title in JSON.
 

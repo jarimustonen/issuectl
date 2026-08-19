@@ -182,10 +182,8 @@ pub fn close_issue_via(
 /// flock. Powers `issuectl bulk`.
 ///
 /// `make_req(dry_run)` must return a fresh, content-identical request
-/// each time it is called. The mutation is the same for every target,
-/// but [`UpdateIssueRequest`] is not `Clone` (it owns `Vec`s and a map)
-/// and each write consumes its own request — hence the factory rather
-/// than one shared value.
+/// each time it is called. Each write consumes its request, so callers
+/// commonly clone one validated request and set its per-phase dry-run bit.
 ///
 /// Semantics, in order:
 /// 1. Acquire the repo-wide write lock **once** for the whole batch.

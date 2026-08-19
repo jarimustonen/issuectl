@@ -78,7 +78,7 @@ where
 
 /// Per-field PATCH request. Mirrors `clap`'s `Update` flags 1:1 so
 /// `cmd_update` can produce the same shape from the command line.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateIssueRequest {
     #[serde(default)]
