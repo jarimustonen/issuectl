@@ -3,7 +3,7 @@ created: 2026-08-17
 updated: 2026-08-19
 type: feature
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 labels:
 - via:agent-homebase-wrapup
@@ -17,6 +17,9 @@ commits:
   summary: add doctor cleanup and agent guidance
 - hash: 05cf99a
   summary: preserve intake migration semantics and structured partial errors
+- hash: f59d0dc
+  summary: record implementation commits
+closed: 2026-08-19
 ---
 
 # Retire the deferred label; doctor must flag residual uses
