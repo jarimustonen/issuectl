@@ -3,7 +3,7 @@ created: 2026-08-17
 updated: 2026-08-19
 type: feature
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 labels:
 - via:agent-homebase-wrapup
@@ -15,6 +15,7 @@ commits:
   summary: document issue lane updates
 - hash: b8e614f
   summary: refine scheduling field guidance after review
+closed: 2026-08-19
 ---
 
 # issue skill: document update --lane/--lane-seq flags
