@@ -7,10 +7,12 @@ priority: normal
 labels: [architecture]
 lane: verb-surface
 lane_seq: 5
-collision: [crates/issuectl/src/cmd/write.rs, crates/issuectl-core/src/mutate/update.rs]
+collision: [crates/issuectl/src/cmd/write.rs, crates/issuectl-core/src/mutate/update.rs, crates/issuectl/src/cmd/mod.rs, crates/issuectl/src/cmd/runtime.rs, crates/issuectl/src/cmd/views_extra.rs]
 commits:
 - hash: fc2d44c
   summary: add canonical update patch and query forms
+- hash: 1b95604
+  summary: preserve update compatibility and complete parity tests
 ---
 
 # Add canonical update forms per ADR 0004 (0.15.0 prep)
