@@ -2,7 +2,7 @@
 created: 2026-08-18
 updated: 2026-08-19
 type: feature
-status: open
+status: in-progress
 priority: normal
 lane: verb-surface
 lane_seq: 4
