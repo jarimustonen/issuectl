@@ -272,6 +272,16 @@ Example flows:
 - `issuectl --json update extremely-quiet-otter --no-assignee --type epic` (clear an assignee before converting to an epic)
 - `issuectl --json update extremely-quiet-otter --no-owner --type task` (clear an epic owner before converting to a non-epic)
 
+When an update invocation touches scheduling fields, its `.data` echoes their
+persisted post-update values. Set values are returned directly, cleared
+`lane`/`lane_seq` are `null`, and `collision` is the resulting list or `null`
+when empty. Scheduling keys not touched by that invocation remain absent:
+
+```json
+{ "slug": "extremely-quiet-otter", "lane": "cli-fixes", "lane_seq": 40,
+  "collision": ["crates/issuectl/src/main.rs"], "version": "sha256:..." }
+```
+
 Prefer commit trailers over manual `--add-commit`. Add
 `Refs-Issue: @<slug>` (or `Fixes-Issue: @<slug>` to also signal
 "close when verified") as the last paragraph of the commit

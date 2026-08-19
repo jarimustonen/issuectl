@@ -311,6 +311,9 @@ pub(crate) struct UpdateOutcome {
     pub status: String,
     pub priority: String,
     pub labels: Option<Vec<String>>,
+    pub lane: Option<String>,
+    pub lane_seq: Option<i64>,
+    pub collision: Option<Vec<String>>,
     // The `closed_by:` the write actually recorded, read off the updated
     // `Issue`. `close` normalizes the `--as` author in the core (a single
     // leading `@` stripped), so echoing this — not the raw CLI input —
@@ -339,21 +342,59 @@ pub(crate) fn echo_mutated_fields(
     report["labels"] = serde_json::json!(labels);
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SchedulingEcho {
+    lane: bool,
+    lane_seq: bool,
+    collision: bool,
+}
+
+impl SchedulingEcho {
+    pub(crate) fn requested_by(args: &UpdateArgs) -> Self {
+        Self {
+            lane: args.lane.is_some() || args.no_lane,
+            lane_seq: args.lane_seq.is_some() || args.no_lane_seq,
+            collision: !args.add_collision.is_empty() || !args.remove_collision.is_empty(),
+        }
+    }
+}
+
+pub(crate) fn update_json_report(
+    slug: &str,
+    out: &UpdateOutcome,
+    scheduling: SchedulingEcho,
+) -> serde_json::Value {
+    let mut report = serde_json::json!({
+        "slug": slug,
+        "dir": out.final_dir.to_string_lossy(),
+        "moved_to_closed": out.moved_to_closed,
+        "moved_to_open": out.moved_to_open,
+        "version": out.version,
+    });
+    echo_mutated_fields(&mut report, &out.status, &out.priority, &out.labels);
+    if scheduling.lane {
+        report["lane"] = serde_json::json!(out.lane);
+    }
+    if scheduling.lane_seq {
+        report["lane_seq"] = serde_json::json!(out.lane_seq);
+    }
+    if scheduling.collision {
+        report["collision"] = serde_json::json!(out.collision);
+    }
+    report["warnings"] = serde_json::json!(out.warnings);
+    report
+}
+
 pub(crate) fn cmd_update(json: bool, args: UpdateArgs) -> Result<()> {
     let root = find_root();
     let slug = args.slug.clone();
+    let scheduling = SchedulingEcho::requested_by(&args);
     let out = do_update(&root, args)?;
     if json {
-        let mut report = serde_json::json!({
-            "slug": slug,
-            "dir": out.final_dir.to_string_lossy(),
-            "moved_to_closed": out.moved_to_closed,
-            "moved_to_open": out.moved_to_open,
-            "version": out.version,
-        });
-        echo_mutated_fields(&mut report, &out.status, &out.priority, &out.labels);
-        report["warnings"] = serde_json::json!(out.warnings);
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&update_json_report(&slug, &out, scheduling))?
+        );
         return Ok(());
     }
     if out.moved_to_closed {
@@ -467,6 +508,9 @@ pub(crate) fn do_update(root: &Path, args: UpdateArgs) -> Result<UpdateOutcome> 
         status: outcome.issue.status,
         priority: outcome.issue.priority,
         labels: outcome.issue.labels,
+        lane: outcome.issue.lane,
+        lane_seq: outcome.issue.lane_seq,
+        collision: outcome.issue.collision,
         closed_by: outcome.issue.closed_by,
         warnings: outcome.warnings,
     })
@@ -682,6 +726,9 @@ pub(crate) fn do_close(
         status: outcome.issue.status,
         priority: outcome.issue.priority,
         labels: outcome.issue.labels,
+        lane: outcome.issue.lane,
+        lane_seq: outcome.issue.lane_seq,
+        collision: outcome.issue.collision,
         closed_by: outcome.issue.closed_by,
         warnings: outcome.warnings,
     })

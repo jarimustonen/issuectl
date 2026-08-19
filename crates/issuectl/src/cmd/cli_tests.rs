@@ -834,55 +834,106 @@ mod tests {
     }
 
     #[test]
-    fn update_lane_seq_sets_and_clears() {
-        // End-to-end mutate/CLI path: `--lane-seq` writes an *unquoted*
-        // YAML integer (so the parser lifts it back into the typed slot),
-        // and `--no-lane-seq` removes it.
+    fn update_json_echoes_set_lane_and_lane_seq() {
         let tmp = fresh_repo();
         let mut a = new_args("task", "T");
-        a.slug = Some("seq-x".into());
+        a.slug = Some("schedule-set".into());
         let n = do_new(tmp.path(), a).unwrap();
+        let args = UpdateArgs {
+            slug: n.slug.clone(),
+            lane: Some("cli".into()),
+            lane_seq: Some(20),
+            ..Default::default()
+        };
+        let requested = SchedulingEcho::requested_by(&args);
+        let out = do_update(tmp.path(), args).unwrap();
+        let report = update_json_report(&n.slug, &out, requested);
 
-        do_update(
-            tmp.path(),
-            UpdateArgs {
-                slug: n.slug.clone(),
-                lane_seq: Some(20),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        assert_eq!(report["lane"], "cli");
+        assert_eq!(report["lane_seq"], 20);
         let content = read(&n.item_path);
         assert!(
-            content.contains("lane_seq: 20"),
+            content.contains("lane_seq: 20") && !content.contains("lane_seq: '20'"),
             "lane_seq must be an unquoted integer; got: {content}"
         );
-        let parsed = issuectl_core::parser::parse_item_md_text_with_warnings(
-            &content,
-            &n.slug,
-            "open",
-            Path::new("x"),
-        );
+    }
+
+    #[test]
+    fn update_json_echoes_cleared_lane_and_lane_seq_as_null() {
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "T");
+        a.slug = Some("schedule-clear".into());
+        a.lane = Some("cli".into());
+        a.lane_seq = Some(20);
+        let n = do_new(tmp.path(), a).unwrap();
+        let args = UpdateArgs {
+            slug: n.slug.clone(),
+            no_lane: true,
+            no_lane_seq: true,
+            ..Default::default()
+        };
+        let requested = SchedulingEcho::requested_by(&args);
+        let out = do_update(tmp.path(), args).unwrap();
+        let report = update_json_report(&n.slug, &out, requested);
+
+        assert!(report["lane"].is_null());
+        assert!(report["lane_seq"].is_null());
+        let content = read(&n.item_path);
+        assert!(!content.contains("lane:") && !content.contains("lane_seq:"));
+    }
+
+    #[test]
+    fn update_json_echoes_post_write_collision_on_add_and_remove() {
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "T");
+        a.slug = Some("collision-echo".into());
+        let n = do_new(tmp.path(), a).unwrap();
+
+        let add = UpdateArgs {
+            slug: n.slug.clone(),
+            add_collision: vec!["src/a.rs".into(), "src/b.rs".into()],
+            ..Default::default()
+        };
+        let requested = SchedulingEcho::requested_by(&add);
+        let out = do_update(tmp.path(), add).unwrap();
+        let report = update_json_report(&n.slug, &out, requested);
         assert_eq!(
-            parsed.issue.lane_seq,
-            Some(20),
-            "written lane_seq must lift back into the typed field"
+            report["collision"],
+            serde_json::json!(["src/a.rs", "src/b.rs"])
         );
 
-        do_update(
-            tmp.path(),
-            UpdateArgs {
-                slug: n.slug.clone(),
-                no_lane_seq: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let content = read(&n.item_path);
-        assert!(
-            !content.contains("lane_seq"),
-            "--no-lane-seq must remove the key; got: {content}"
-        );
+        let remove = UpdateArgs {
+            slug: n.slug.clone(),
+            remove_collision: vec!["src/a.rs".into(), "src/b.rs".into()],
+            ..Default::default()
+        };
+        let requested = SchedulingEcho::requested_by(&remove);
+        let out = do_update(tmp.path(), remove).unwrap();
+        let report = update_json_report(&n.slug, &out, requested);
+        assert!(report["collision"].is_null());
+    }
+
+    #[test]
+    fn update_json_omits_scheduling_fields_when_untouched() {
+        let tmp = fresh_repo();
+        let mut a = new_args("task", "T");
+        a.slug = Some("schedule-untouched".into());
+        a.lane = Some("existing".into());
+        a.lane_seq = Some(3);
+        a.collision = vec!["src/existing.rs".into()];
+        let n = do_new(tmp.path(), a).unwrap();
+        let args = UpdateArgs {
+            slug: n.slug.clone(),
+            priority: Some("high".into()),
+            ..Default::default()
+        };
+        let requested = SchedulingEcho::requested_by(&args);
+        let out = do_update(tmp.path(), args).unwrap();
+        let report = update_json_report(&n.slug, &out, requested);
+
+        assert!(report.get("lane").is_none());
+        assert!(report.get("lane_seq").is_none());
+        assert!(report.get("collision").is_none());
     }
 
     #[test]
