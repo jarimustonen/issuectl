@@ -15,6 +15,8 @@ commits:
   summary: mark update JSON echo fix in progress
 - hash: 782e1cc
   summary: echo updated scheduling fields in JSON
+- hash: 12a1f57
+  summary: strengthen scheduling echo regression coverage
 ---
 
 # update response envelope echoes null for fields it just set (lane_seq)
