@@ -89,7 +89,7 @@ issuectl ls --status in-progress
 `/stint-handoff` päivittää yllä olevan **🔄 Continue here** -blockin ja tarkistaa
 `issuectl dag` -näkymän rupeaman lopussa. Committoi vain muuttuneet polut täsmällisesti
 (`TODO.md` ja issue-tiedostot, jos niitä muutettiin) ennen `/wrap-up`:ia, jotta tuore
-agentti voi jatkaa `jatketaan @TODO.md`:sta. Pidä `main` puhtaana rinnakkaisten
+agentti voi jatkaa komennolla `/skill:stint-start`. Pidä `main` puhtaana rinnakkaisten
 worktreiden takia (ks. globaali CLAUDE.md). Aja samalla `issuectl archive --dry-run` ja
 arkistoi jos kertymää on.
 
