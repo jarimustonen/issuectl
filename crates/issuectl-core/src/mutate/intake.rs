@@ -306,8 +306,8 @@ pub fn file(root: &Path, req: FileRequest) -> Result<FileOutcome, IntakeError> {
     let new_args = NewArgs {
         issue_type: req.issue_type,
         title: req.title,
-        // Intake titles come from untrusted external reporters (Telegram
-        // bug filings, etc.) and may carry customer names / secrets that
+        // Intake titles come from untrusted external reporters (chat or
+        // webform filings, etc.) and may carry customer names / secrets that
         // must not land in a directory or branch name. Default to a random
         // slug unless the filer supplied an explicit one.
         slug: req.slug,
@@ -871,7 +871,7 @@ mod tests {
                 title: title.into(),
                 body: Some("something is broken".into()),
                 reporter: Some("alice".into()),
-                provenance: "telegram".into(),
+                provenance: "chat".into(),
                 provenance_detail: None,
                 source_ref: None,
                 priority: None,
@@ -904,7 +904,7 @@ mod tests {
         assert_eq!(status_of(tmp.path(), "login-loops"), "untriaged");
         let body = read_body(tmp.path(), "login-loops");
         assert!(body.contains("status: untriaged"), "{body}");
-        assert!(body.contains("provenance: telegram"), "{body}");
+        assert!(body.contains("provenance: chat"), "{body}");
         assert!(body.contains("reporter: alice"), "{body}");
     }
 
@@ -916,7 +916,7 @@ mod tests {
             title: "Crash".into(),
             body: Some("boom".into()),
             reporter: Some("bot".into()),
-            provenance: "telegram".into(),
+            provenance: "chat".into(),
             provenance_detail: None,
             source_ref: Some("chat:1/msg:2".into()),
             priority: None,
@@ -943,7 +943,7 @@ mod tests {
                 title: "Spoof".into(),
                 body: Some("x".into()),
                 reporter: None,
-                provenance: "telegram".into(),
+                provenance: "chat".into(),
                 provenance_detail: None,
                 source_ref: None,
                 priority: None,
@@ -962,7 +962,7 @@ mod tests {
         let tmp = fresh_repo();
         fs::write(
             tmp.path().join("issues/.schema.yaml"),
-            "version: 1\nfields:\n  provenance:\n    enum: [telegram, email]\n",
+            "version: 1\nfields:\n  provenance:\n    enum: [chat, email]\n",
         )
         .unwrap();
         let err = file(
@@ -984,7 +984,7 @@ mod tests {
         .unwrap_err();
         match err {
             IntakeError::UnknownProvenance { accepted, .. } => {
-                assert_eq!(accepted, vec!["telegram", "email"]);
+                assert_eq!(accepted, vec!["chat", "email"]);
             }
             other => panic!("expected UnknownProvenance, got {other:?}"),
         }
@@ -1150,7 +1150,7 @@ mod tests {
                 title: "Sneaky".into(),
                 body: Some("x".into()),
                 reporter: None,
-                provenance: "telegram".into(),
+                provenance: "chat".into(),
                 provenance_detail: None,
                 source_ref: Some("A".into()),
                 priority: None,

@@ -299,7 +299,7 @@ fields:
   # body `--source` line). The accepted value set is CONFIGURABLE PER
   # REPO: no `enum:` ships by default, so any source string is accepted
   # until a repo narrows it — declare an `enum:` here (e.g.
-  # `[telegram, email, github, other]`) to constrain and validate it.
+  # `[chat, email, github, other]`) to constrain and validate it.
   # Pair with `provenance_detail` free text for the open-ended `other`
   # case.
   provenance:
@@ -1119,7 +1119,7 @@ mod tests {
 
         // Reception item with provenance + free-text detail.
         let untriaged = "type: bug\nstatus: untriaged\npriority: normal\n\
-             provenance: telegram\nprovenance_detail: \"chat #ops\"\n\
+             provenance: chat\nprovenance_detail: \"chat #ops\"\n\
              source_ref: \"chat:123/message:456\"\n";
         // Parked item with a wake-up date.
         let deferred =
@@ -1206,7 +1206,7 @@ mod tests {
         fs::create_dir_all(tmp.path().join("issues")).unwrap();
         fs::write(
             tmp.path().join("issues/.schema.yaml"),
-            "version: 1\nfields:\n  provenance:\n    enum: [telegram, email, other]\n",
+            "version: 1\nfields:\n  provenance:\n    enum: [chat, email, other]\n",
         )
         .unwrap();
         let schema = load(tmp.path()).unwrap();
@@ -1219,12 +1219,12 @@ mod tests {
                 .fields
                 .get("provenance")
                 .and_then(|s| s.allowed.as_deref()),
-            Some(["telegram", "email", "other"].map(String::from).as_slice()),
+            Some(["chat", "email", "other"].map(String::from).as_slice()),
             "repo-declared provenance enum must override the open default"
         );
 
         let ok: Mapping = serde_yaml::from_str(
-            "type: bug\nstatus: untriaged\npriority: normal\nprovenance: telegram\n",
+            "type: bug\nstatus: untriaged\npriority: normal\nprovenance: chat\n",
         )
         .unwrap();
         assert!(
@@ -1243,9 +1243,7 @@ mod tests {
         let hit = hit.expect("undeclared provenance value must be rejected");
         let msg = hit.message();
         assert!(
-            msg.contains("provenance")
-                && msg.contains("telegram")
-                && msg.contains("carrier-pigeon"),
+            msg.contains("provenance") && msg.contains("chat") && msg.contains("carrier-pigeon"),
             "error must name the field, the bad value, and the accepted set; got {msg:?}"
         );
     }

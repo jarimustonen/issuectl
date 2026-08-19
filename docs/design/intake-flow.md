@@ -43,10 +43,11 @@ The user's calls, authoritative over any differing in-body recommendation:
 
 `issuectl` should own **one** first-class intake flow that handles both **bug
 reports** and **feature requests**, filed by a **reporting agent** (or human)
-and processed by a **developer / product-manager**. Today intake is ad-hoc: the
-Telegram bug path invents its own slug scheme (`tg-bug-<user>-<chat>-<msg-id>`),
-its own lifecycle label (`needs-triage`), its own provenance label
-(`via:telegram`), and lives entirely in two Claude skills (`/triage-bugs`,
+and processed by a **developer / product-manager**. Historically intake was ad-hoc:
+a chat-bot bug path invented its own slug scheme
+(`chat-bug-<user>-<chat>-<msg-id>`), lifecycle label (`needs-triage`), and
+channel-shaped provenance label (`via:<channel>`), and lived entirely in two
+Claude skills (`/triage-bugs`,
 `/worktree-bug-analysis`) rather than in the tool. This design folds all of that
 into a single model.
 
@@ -110,7 +111,7 @@ assumed existed do **not**, and are corrected here.
   (§6).
 
 The gap is not primitives — it is that **no single, named, validated flow ties
-them together**, and that the intake *states* the Telegram path needs
+them together**, and that the intake *states* the legacy chat-bot path needs
 (`needs-triage`, `deferred`) are label-encoded instead of being real statuses.
 
 ---
@@ -147,7 +148,8 @@ reclassification is a real triage action, not an edge case — see
 ### Provenance and reporter are metadata, not the model
 
 - **Who reported it** → the existing `reporter:` field (`--reporter`).
-- **Where it came from** → provenance. Today this is the `via:telegram` label. See
+- **Where it came from** → provenance. Legacy integrations encoded this as a
+  `via:<channel>` label. See
   [OD-3](#od-3-provenance) for the field-vs-label choice, the extensibility of the
   value set, and the separate **external reference** (`source_ref`) that carries
   retry idempotency ([OD-10](#od-10-external-identity--idempotent-filing)).
@@ -327,7 +329,7 @@ issuectl intake file \
   --title "<one line>" \
   --body @<report-file> \          # or --body "<text>"
   --reporter <who> \
-  --provenance <telegram|email|…> \ # NOT --source (that is the body source-line)
+  --provenance <chat|email|…> \ # NOT --source (that is the body source-line)
   [--source-ref "<external id>"] \  # e.g. chat:123/message:456 — idempotency key
   [--priority low|normal|high] \    # filing-time severity hint (OD-M / below)
   [--slug <descriptive-kebab>] \
@@ -344,7 +346,7 @@ issuectl intake file \
 - **Idempotent on `--source-ref`.** A repeat file with the same
   `(provenance, source_ref)` returns the existing item (exit 0, a `deduplicated:
   true` flag) rather than creating a second issue — this replaces the
-  retry-idempotency the deterministic `tg-bug-*` slug gave for free. See
+  retry-idempotency the deterministic `chat-bug-*` slug gave for free. See
   [OD-10](#od-10-external-identity--idempotent-filing).
 - **Priority at filing.** A reporter *can* pass a severity hint; the Dev/PM may
   override at accept-time. ("site is down" vs "tooltip typo" is a filing-time
@@ -364,7 +366,7 @@ Inspect the queue:
 
 ```
 issuectl intake queue --json          # default: status:untriaged, stable sort (oldest first)
-   [--type bug] [--provenance telegram]
+   [--type bug] [--provenance chat]
    [--needs-analysis]                 # only items without a completed analysis lease
    [--state deferred|needs-info]      # explicit view of a non-default intake state
 issuectl intake show <slug> --json    # item + attachments + analysis section
@@ -422,7 +424,7 @@ skill install`, enforced by `skill::tests::dogfooded_copies_match_templates`).
 
 ### Filing-side skill — `/file-intake` (new, thin)
 
-Replaces the *filing* half the Telegram bot / `file-bug` deterministic filer does
+Replaces the *filing* half the chat-bot / `file-bug` deterministic filer does
 today:
 
 1. Capture the report faithfully (verbatim message + attachments), pick `type`
@@ -433,14 +435,14 @@ today:
 
 Because filing is now one validated, idempotent CLI call, the deterministic-filer
 machinery (ADR 0004/0005) calls the same CLI instead of hand-rolling the
-`tg-bug-*` slug + labels.
+`chat-bug-*` slug + labels.
 
 ### Processing-side skill — `/intake` (new) — **replaces `/triage-bugs`, drives `/worktree-bug-analysis`**
 
 One skill the Dev/PM invokes ("check the intake queue", "katso tuliko uusia"):
 
-1. `issuectl intake queue --json` → the untriaged set (bugs **and** features, not
-   just `via:telegram`).
+1. `issuectl intake queue --json` → the untriaged set (bugs **and** features,
+   regardless of provenance).
 2. For each unclear item, drive a **read-only analysis worker**. To resolve the
    first draft's contradiction: `/worktree-bug-analysis` is **kept** as the
    analysis engine (still individually invokable), and `/intake` *drives* it —
@@ -511,8 +513,8 @@ otherwise.
 
 ## 6. Migration
 
-Must not lose in-flight items: open issues with `label: via:telegram` carrying
-`label: needs-triage` or `label: deferred`, slug `tg-bug-<user>-<chat>-<msg-id>`,
+Must not lose in-flight items: open issues with `label: via:<channel>` carrying
+`label: needs-triage` or `label: deferred`, slug `chat-bug-<user>-<chat>-<msg-id>`,
 plus users/skills that invoke `/triage-bugs`.
 
 ### Data migration — a purpose-built, dry-run-first pass (NOT a `status_alias`)
@@ -531,9 +533,9 @@ rewrite can **regress live or closed issues**. So this is a dedicated migration
 | `needs-triage` + `deferred` labels together | **conflict — skip, report for manual review** |
 | `deferred` label + `status: open` | → `status: deferred`, drop label ([OD-4](#od-4-deferred--parked-lifecycle)) |
 | `triaged` label (old "presented" marker) | drop; if the item is otherwise `open` leave it `open` (do **not** silently invent state) |
-| `via:telegram` label, no provenance set | → `provenance: telegram` (or keep as label — [OD-3](#od-3-provenance)) |
-| `via:telegram` label + provenance already set & conflicting | **conflict — skip, report** |
-| `tg-bug-*` slugs | **left untouched** — slug format is not part of the model; rewriting churns every `related:`/`@mention`. (Privacy note: these slugs embed user/chat IDs; remediation via a rename is possible but out of scope — flagged, not silently done.) |
+| One `via:<channel>` label, no provenance set | → `provenance: <channel>` ([OD-3](#od-3-provenance)) |
+| Multiple distinct `via:<channel>` labels, or one that conflicts with existing provenance | **conflict — skip, report** |
+| Legacy channel-shaped slugs | **left untouched** — slug format is not part of the model; rewriting churns every `related:`/`@mention`. (Privacy note: these slugs can embed user/chat IDs; remediation via a rename is possible but out of scope — flagged, not silently done.) |
 
 The pass reports what it *would* do, the user runs it for real, and it is
 idempotent and per-issue atomic. It never performs a status **regression**
@@ -555,7 +557,7 @@ rely on the user remembering a one-shot command.
   keep working; removed after the window.
 - **`/worktree-bug-analysis`** unchanged in contract; now driven by `/intake`.
 - **Deterministic filer (ADR 0004/0005)** switches to `issuectl intake file
-  --provenance telegram --source-ref …`.
+  --provenance chat --source-ref …`.
 
 ### Compatibility caveats (the first draft was too glib)
 
@@ -616,7 +618,7 @@ needs a new name (`--provenance`).
   **configurable per repo** (schema-declared), not a hard-coded closed enum —
   because sources (Slack, GitHub webhook, phone notes) expand and the tool is
   repo-driven. Optionally an `other` value + `provenance_detail:` free text.
-- **B:** Keep it a **label** (`provenance:telegram`, replacing `via:telegram`).
+- **B:** Keep it a **label** (`provenance:<channel>`, replacing `via:<channel>`).
   Zero schema change; weaker structure.
 - **Separate but linked:** the *external reference* (`source_ref`, e.g.
   `chat:123/message:456`) is not the same as provenance and carries idempotency —
@@ -712,7 +714,7 @@ The most important decision the first draft hid.
 
 ### OD-10: External identity & idempotent filing
 
-Abandoning the deterministic `tg-bug-*` slug (§3) removes the retry-idempotency
+Abandoning the deterministic `chat-bug-*` slug (§3) removes the retry-idempotency
 it gave for free.
 
 - **A (recommended):** `intake file` takes **`--source-ref`**; uniqueness is

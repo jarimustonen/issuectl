@@ -580,7 +580,7 @@ Show the created issue/epic path and a brief summary.
 
 `issuectl intake` is the first-class flow for **filing and triaging** incoming
 bug reports and feature requests, replacing the old ad-hoc label scheme
-(`via:telegram` + `needs-triage`). Intake *state* lives in `status`, not in
+(`via:<channel>` + `needs-triage`). Intake *state* lives in `status`, not in
 labels. See `docs/design/intake-flow.md`. Two audiences share one namespace: a
 **reporting agent** files; a **developer / product-manager** dispositions.
 
@@ -590,7 +590,7 @@ The flow adds three **active** statuses and a set of intake fields:
   state), `needs-info` (filed but un-actionable pending reporter input),
   `deferred` (worthwhile but intentionally not scheduled now). All three are
   *active* (not closing); they show up in `ls`/queries like any active issue.
-- **Fields**: `provenance` (where it came from — telegram/email/github/…; a
+- **Fields**: `provenance` (where it came from — chat/email/github/…; a
   first-class field distinct from the body `--source` line, open-valued unless a
   repo declares an `enum:`), `provenance_detail` (free text for the `other`
   case), `source_ref` (external message id, the idempotency key),
@@ -604,7 +604,7 @@ The flow adds three **active** statuses and a set of intake fields:
 ```
 issuectl intake file --type bug --title "Login loops on Safari" \
   --body-file report.md --reporter alice \
-  --provenance telegram --source-ref "chat:123/message:456" \
+  --provenance chat --source-ref "chat:123/message:456" \
   [--provenance-detail "…"] [--priority high] [--slug login-loops] [--label …] --json
 ```
 
@@ -628,7 +628,7 @@ The `/issue-new` skill wraps this filing path faithfully (verbatim capture +
 issuectl intake queue --json                     # default: untriaged, oldest first
 issuectl intake queue --json --needs-analysis    # only items lacking a ## Triage analysis section
 issuectl intake queue --json --state deferred    # a non-default view (deferred|needs-info)
-issuectl intake queue --json --type bug --provenance telegram
+issuectl intake queue --json --type bug --provenance chat
 issuectl intake show <slug> --json               # item + attachments + analysis section
 ```
 

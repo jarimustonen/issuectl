@@ -14,8 +14,9 @@
 //!   reports exactly what it *would* do and writes nothing; the caller
 //!   re-runs with `apply: true` to commit.
 //! - **Refuses ambiguity.** An issue whose legacy labels disagree
-//!   (`needs-triage` *and* `deferred`, or `via:telegram` against a
-//!   different already-set `provenance`) is **skipped whole** and reported
+//!   (`needs-triage` *and* `deferred`, multiple `via:<channel>` labels, or a
+//!   `via:<channel>` label against a different already-set `provenance`) is
+//!   **skipped whole** and reported
 //!   for manual review — never guessed at.
 //! - **No status regression, ever.** A status change is emitted *only* from
 //!   `open`. An in-flight (`in-progress`/`testing`) or already-closed item
@@ -57,14 +58,11 @@ use crate::transitions::TransitionRules;
 use super::intake::IntakeError;
 use super::{MutateError, Patch, UpdateIssueRequest, WriteLock};
 
-// ── Legacy label vocabulary (the ad-hoc Telegram-path encoding) ──────────
+// ── Legacy label vocabulary ──────────────────────────────────────────────
 const L_NEEDS_TRIAGE: &str = "needs-triage";
 const L_DEFERRED: &str = "deferred";
 const L_TRIAGED: &str = "triaged";
-const L_VIA_TELEGRAM: &str = "via:telegram";
-
-/// Provenance value the `via:telegram` label maps onto.
-const PROV_TELEGRAM: &str = "telegram";
+const VIA_PREFIX: &str = "via:";
 const F_PROVENANCE: &str = "provenance";
 
 /// One issue's planned (or performed) migration. Either a `conflict`
@@ -146,8 +144,27 @@ fn has_label(issue: &Issue, label: &str) -> bool {
         .is_some_and(|ls| ls.iter().any(|l| l == label))
 }
 
+/// Return legacy `via:<channel>` labels and their non-empty channel tokens.
+///
+/// This deliberately generalizes the old service-specific migration rule:
+/// every historical channel (including `agent-*` channels) follows the same
+/// label-to-field conversion without making any one service product vocabulary.
+fn legacy_via_labels(issue: &Issue) -> Vec<(&str, &str)> {
+    issue
+        .labels
+        .iter()
+        .flatten()
+        .filter_map(|label| {
+            label
+                .strip_prefix(VIA_PREFIX)
+                .filter(|channel| !channel.is_empty())
+                .map(|channel| (label.as_str(), channel))
+        })
+        .collect()
+}
+
 /// How an existing `provenance` frontmatter value classifies. Distinguishes
-/// "absent" (safe to set from `via:telegram`) from "present but not a
+/// "absent" (safe to set from `via:<channel>`) from "present but not a
 /// string" (an object/number/etc. a later tool or schema wrote) — the
 /// latter must never be silently overwritten.
 enum ExistingProvenance<'a> {
@@ -176,9 +193,10 @@ pub(crate) fn plan_issue(issue: &Issue, schema: &Schema) -> Option<MigrateAction
     let needs_triage = has_label(issue, L_NEEDS_TRIAGE);
     let deferred_label = has_label(issue, L_DEFERRED);
     let triaged = has_label(issue, L_TRIAGED);
-    let via_telegram = has_label(issue, L_VIA_TELEGRAM);
+    let via_labels = legacy_via_labels(issue);
+    let via_channel = via_labels.first().map(|(_, channel)| *channel);
 
-    if !(needs_triage || deferred_label || triaged || via_telegram) {
+    if !(needs_triage || deferred_label || triaged || via_channel.is_some()) {
         return None;
     }
 
@@ -193,24 +211,36 @@ pub(crate) fn plan_issue(issue: &Issue, schema: &Schema) -> Option<MigrateAction
             "carries both `needs-triage` and `deferred` labels — ambiguous target status; migrate by hand",
         ));
     }
-    // via:telegram against an already-set provenance that is not a matching
-    // string. A *different* string is a conflicting source; a *non-string*
-    // value (object/number/…) some other tool wrote must never be silently
-    // overwritten with `"telegram"` — both are skipped for manual review.
-    if via_telegram {
+    // Multiple distinct legacy channels are ambiguous even if provenance is
+    // absent. Duplicate copies of the same label remain safe and are removed.
+    if let Some(channel) = via_channel {
+        if via_labels
+            .iter()
+            .any(|(_, candidate)| *candidate != channel)
+        {
+            return Some(MigrateAction::conflict(
+                &issue.slug,
+                "carries multiple `via:<channel>` labels — ambiguous source; migrate by hand",
+            ));
+        }
+
+        // A via label against an already-set provenance that is not a matching
+        // string is a conflict. Structured values must never be overwritten.
         match provenance {
-            ExistingProvenance::Str(p) if p != PROV_TELEGRAM => {
+            ExistingProvenance::Str(p) if p != channel => {
                 return Some(MigrateAction::conflict(
                     &issue.slug,
                     format!(
-                        "`via:telegram` label but provenance is already {p:?} — conflicting source; migrate by hand"
+                        "`via:{channel}` label but provenance is already {p:?} — conflicting source; migrate by hand"
                     ),
                 ));
             }
             ExistingProvenance::NonString => {
                 return Some(MigrateAction::conflict(
                     &issue.slug,
-                    "`via:telegram` label but provenance is already set to a non-string value — migrate by hand",
+                    format!(
+                        "`via:{channel}` label but provenance is already set to a non-string value — migrate by hand"
+                    ),
                 ));
             }
             _ => {}
@@ -271,15 +301,17 @@ pub(crate) fn plan_issue(issue: &Issue, schema: &Schema) -> Option<MigrateAction
         action.dropped_labels.push(L_TRIAGED.to_string());
     }
 
-    // ── via:telegram → provenance:telegram (drop label) ──────────────────
+    // ── via:<channel> → provenance:<channel> (drop label) ────────────────
     // A conflicting/non-string provenance already returned a conflict above,
     // so here provenance is either absent or already the matching string.
-    if via_telegram {
-        action.dropped_labels.push(L_VIA_TELEGRAM.to_string());
+    if let Some(channel) = via_channel {
+        action
+            .dropped_labels
+            .extend(via_labels.iter().map(|(label, _)| (*label).to_string()));
         if matches!(provenance, ExistingProvenance::Absent) {
-            action.set_provenance = Some(PROV_TELEGRAM.to_string());
+            action.set_provenance = Some(channel.to_string());
         }
-        // provenance already == telegram: label is redundant, just dropped.
+        // Matching provenance means each legacy label is redundant and dropped.
     }
 
     if action.is_empty() {
@@ -523,38 +555,51 @@ mod tests {
     }
 
     #[test]
-    fn via_telegram_no_provenance_sets_provenance() {
+    fn via_chat_no_provenance_sets_provenance() {
         let tmp = fresh_repo();
         write_issue(
             tmp.path(),
             "tg-item",
-            "slug: tg-item\ntype: bug\nstatus: open\nlabels: [via:telegram]\n",
+            "slug: tg-item\ntype: bug\nstatus: open\nlabels: [via:chat]\n",
         );
         let a = plan_issue(&load(tmp.path(), "tg-item"), &schema()).unwrap();
-        assert_eq!(a.set_provenance.as_deref(), Some("telegram"));
-        assert_eq!(a.dropped_labels, vec![L_VIA_TELEGRAM]);
+        assert_eq!(a.set_provenance.as_deref(), Some("chat"));
+        assert_eq!(a.dropped_labels, vec!["via:chat"]);
     }
 
     #[test]
-    fn via_telegram_matching_provenance_just_drops_label() {
+    fn via_agent_channel_is_generalized_to_provenance() {
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "agent-item",
+            "slug: agent-item\ntype: bug\nstatus: open\nlabels: [via:agent-support]\n",
+        );
+        let a = plan_issue(&load(tmp.path(), "agent-item"), &schema()).unwrap();
+        assert_eq!(a.set_provenance.as_deref(), Some("agent-support"));
+        assert_eq!(a.dropped_labels, vec!["via:agent-support"]);
+    }
+
+    #[test]
+    fn via_chat_matching_provenance_just_drops_label() {
         let tmp = fresh_repo();
         write_issue(
             tmp.path(),
             "tg-dup",
-            "slug: tg-dup\ntype: bug\nstatus: open\nprovenance: telegram\nlabels: [via:telegram]\n",
+            "slug: tg-dup\ntype: bug\nstatus: open\nprovenance: chat\nlabels: [via:chat]\n",
         );
         let a = plan_issue(&load(tmp.path(), "tg-dup"), &schema()).unwrap();
         assert!(a.set_provenance.is_none(), "already set, no rewrite");
-        assert_eq!(a.dropped_labels, vec![L_VIA_TELEGRAM]);
+        assert_eq!(a.dropped_labels, vec!["via:chat"]);
     }
 
     #[test]
-    fn via_telegram_conflicting_provenance_is_conflict() {
+    fn via_chat_conflicting_provenance_is_conflict() {
         let tmp = fresh_repo();
         write_issue(
             tmp.path(),
             "tg-conflict",
-            "slug: tg-conflict\ntype: bug\nstatus: open\nprovenance: email\nlabels: [via:telegram]\n",
+            "slug: tg-conflict\ntype: bug\nstatus: open\nprovenance: email\nlabels: [via:chat]\n",
         );
         let a = plan_issue(&load(tmp.path(), "tg-conflict"), &schema()).unwrap();
         assert!(a.conflict.is_some());
@@ -562,15 +607,29 @@ mod tests {
     }
 
     #[test]
-    fn tg_bug_slug_without_legacy_labels_is_untouched() {
+    fn multiple_via_channels_are_a_conflict() {
         let tmp = fresh_repo();
         write_issue(
             tmp.path(),
-            "tg-bug-alice-1-2",
-            "slug: tg-bug-alice-1-2\ntype: bug\nstatus: open\nprovenance: telegram\n",
+            "ambiguous-source",
+            "slug: ambiguous-source\ntype: bug\nstatus: open\nlabels: [via:chat, via:webform]\n",
+        );
+        let a = plan_issue(&load(tmp.path(), "ambiguous-source"), &schema()).unwrap();
+        assert!(a.conflict.is_some());
+        assert!(a.dropped_labels.is_empty());
+        assert!(a.set_provenance.is_none());
+    }
+
+    #[test]
+    fn channel_shaped_slug_without_legacy_labels_is_untouched() {
+        let tmp = fresh_repo();
+        write_issue(
+            tmp.path(),
+            "chat-bug-alice-1-2",
+            "slug: chat-bug-alice-1-2\ntype: bug\nstatus: open\nprovenance: chat\n",
         );
         assert!(
-            plan_issue(&load(tmp.path(), "tg-bug-alice-1-2"), &schema()).is_none(),
+            plan_issue(&load(tmp.path(), "chat-bug-alice-1-2"), &schema()).is_none(),
             "no legacy label ⇒ no action, slug never rewritten"
         );
     }
@@ -583,7 +642,7 @@ mod tests {
         write_issue(
             tmp.path(),
             "dr-item",
-            "slug: dr-item\ntype: bug\nstatus: open\nlabels: [needs-triage, via:telegram]\n",
+            "slug: dr-item\ntype: bug\nstatus: open\nlabels: [needs-triage, via:chat]\n",
         );
         let report = migrate(tmp.path(), false).unwrap();
         assert!(!report.applied);
@@ -600,7 +659,7 @@ mod tests {
         write_issue(
             tmp.path(),
             "ap-item",
-            "slug: ap-item\ntype: bug\nstatus: open\nlabels: [needs-triage, via:telegram]\n",
+            "slug: ap-item\ntype: bug\nstatus: open\nlabels: [needs-triage, via:chat]\n",
         );
         let r1 = migrate(tmp.path(), true).unwrap();
         assert!(r1.applied);
@@ -610,9 +669,9 @@ mod tests {
         let after = load(tmp.path(), "ap-item");
         assert_eq!(after.status, "untriaged", "open → untriaged");
         assert!(!has_label(&after, L_NEEDS_TRIAGE), "label dropped");
-        assert!(!has_label(&after, L_VIA_TELEGRAM), "label dropped");
+        assert!(!has_label(&after, "via:chat"), "label dropped");
         assert!(
-            matches!(provenance_of(&after), ExistingProvenance::Str("telegram")),
+            matches!(provenance_of(&after), ExistingProvenance::Str("chat")),
             "provenance set"
         );
 
@@ -671,14 +730,14 @@ mod tests {
     }
 
     #[test]
-    fn via_telegram_non_string_provenance_is_conflict() {
+    fn via_chat_non_string_provenance_is_conflict() {
         // A structured/non-string provenance must never be silently
-        // overwritten with "telegram" — it is a whole-issue conflict.
+        // overwritten with "chat" — it is a whole-issue conflict.
         let tmp = fresh_repo();
         write_issue(
             tmp.path(),
             "tg-structured",
-            "type: bug\nstatus: open\nprovenance:\n  system: telegram\n  account: foo\nlabels: [via:telegram]\n",
+            "type: bug\nstatus: open\nprovenance:\n  system: chat\n  account: foo\nlabels: [via:chat]\n",
         );
         let a = plan_issue(&load(tmp.path(), "tg-structured"), &schema()).unwrap();
         assert!(a.conflict.is_some(), "non-string provenance → conflict");
@@ -733,7 +792,7 @@ mod tests {
     #[test]
     fn apply_isolates_a_failing_write_and_migrates_the_rest() {
         // A repo whose schema constrains `provenance` to an enum excluding
-        // `telegram`: the via:telegram write fails schema validation, but a
+        // `chat`: the via:chat write fails schema validation, but a
         // sibling needs-triage item still migrates. The failure is reported
         // on its own action, not raised as a whole-batch abort.
         let tmp = fresh_repo();
@@ -750,16 +809,16 @@ mod tests {
         write_issue(
             tmp.path(),
             "bad-item",
-            "type: bug\nstatus: open\nlabels: [via:telegram]\n",
+            "type: bug\nstatus: open\nlabels: [via:chat]\n",
         );
         let r = migrate(tmp.path(), true).unwrap();
-        assert_eq!(r.failed_count(), 1, "the telegram write failed");
+        assert_eq!(r.failed_count(), 1, "the chat write failed");
         assert_eq!(r.migrated_count(), 1, "the other item still migrated");
         // The good one is committed; the bad one is untouched (still open,
         // label intact) so a re-run retries it.
         assert_eq!(load(tmp.path(), "good-item").status, "untriaged");
         let bad = load(tmp.path(), "bad-item");
         assert_eq!(bad.status, "open");
-        assert!(has_label(&bad, L_VIA_TELEGRAM), "failed write left intact");
+        assert!(has_label(&bad, "via:chat"), "failed write left intact");
     }
 }

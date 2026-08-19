@@ -184,7 +184,17 @@ pub(crate) fn is_legacy_intake_item(issue: &models::Issue) -> bool {
 }
 
 pub(crate) fn queue_provenance(issue: &models::Issue) -> Option<&str> {
-    intake_provenance(issue).or_else(|| has_label(issue, "via:telegram").then_some("telegram"))
+    intake_provenance(issue).or_else(|| {
+        let mut channels = issue.labels.iter().flatten().filter_map(|label| {
+            label
+                .strip_prefix("via:")
+                .filter(|channel| !channel.is_empty())
+        });
+        let channel = channels.next()?;
+        channels
+            .all(|candidate| candidate == channel)
+            .then_some(channel)
+    })
 }
 
 pub(crate) fn cmd_intake_queue(

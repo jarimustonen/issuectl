@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The locked update rewrites the body-backed H1 and echoes the persisted title in JSON.
 
 ### Changed
+- **Intake provenance examples are now service-neutral.** Shipped help, skills,
+  schema samples, and docs use generic channels, while legacy migration now
+  converts any `via:<channel>` label to matching `provenance` metadata.
 - **Issue title detection now ignores fenced and indented code.** The parser and
   title mutator share one CommonMark-aligned H1 locator, so `#` lines in code
   samples cannot be mistaken for or overwritten as issue titles.

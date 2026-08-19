@@ -66,7 +66,7 @@ fn file_bug(root: &std::path::Path, slug: &str) -> Output {
             "--reporter",
             "alice",
             "--provenance",
-            "telegram",
+            "chat",
             "--slug",
             slug,
         ],
@@ -87,7 +87,7 @@ fn file_creates_untriaged_and_dedups_on_source_ref() {
         "--body",
         "boom",
         "--provenance",
-        "telegram",
+        "chat",
         "--source-ref",
         "chat:1/msg:2",
     ];
@@ -122,7 +122,7 @@ fn file_rejects_protected_field() {
             "--body",
             "x",
             "--provenance",
-            "telegram",
+            "chat",
             "--slug",
             "spoof-attempt",
             // `provenance` has a dedicated flag and is protected against
@@ -276,7 +276,7 @@ fn generic_set_status_cannot_bypass_intrinsic_invariant() {
     assert_eq!(json_stderr(&out)["error"]["code"], "transition-illegal");
 }
 
-/// Hand-write a legacy label-encoded issue (the ad-hoc Telegram path's
+/// Hand-write a legacy label-encoded issue (the ad-hoc chat-bot path's
 /// on-disk shape) that the intake filer would refuse to produce. Injects
 /// the schema-required `priority`/`created` fields.
 fn write_legacy(root: &std::path::Path, slug: &str, frontmatter: &str) {
@@ -294,7 +294,7 @@ fn migrate_dry_run_then_apply_is_idempotent() {
     write_legacy(
         tmp.path(),
         "legacy-bug-one",
-        "labels: [needs-triage, via:telegram]\n",
+        "labels: [needs-triage, via:chat]\n",
     );
 
     // Dry-run: reports the plan, writes nothing.
@@ -329,7 +329,7 @@ fn migrate_dry_run_then_apply_is_idempotent() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["slug"], "legacy-bug-one");
     assert_eq!(items[0]["status"], "untriaged");
-    assert_eq!(items[0]["provenance"], "telegram");
+    assert_eq!(items[0]["provenance"], "chat");
     assert_eq!(items[0]["legacy"], false);
 
     // Second apply is a no-op.
@@ -366,7 +366,7 @@ fn migrate_reports_conflict_as_skip_without_writing() {
 #[test]
 fn migrate_reports_write_failure_and_exits_nonzero_but_migrates_the_rest() {
     // A repo whose schema constrains `provenance` to an enum excluding
-    // `telegram`: the via:telegram write fails, but a sibling needs-triage
+    // `chat`: the via:chat write fails, but a sibling needs-triage
     // item still migrates. The command exits 1 (failed write ≠ conflict).
     let tmp = fresh_repo();
     std::fs::write(
@@ -375,7 +375,7 @@ fn migrate_reports_write_failure_and_exits_nonzero_but_migrates_the_rest() {
     )
     .unwrap();
     write_legacy(tmp.path(), "good-legacy", "labels: [needs-triage]\n");
-    write_legacy(tmp.path(), "bad-legacy", "labels: [via:telegram]\n");
+    write_legacy(tmp.path(), "bad-legacy", "labels: [via:chat]\n");
 
     let out = run(tmp.path(), &["--json", "intake", "migrate", "--apply"]);
     assert_eq!(
@@ -398,8 +398,8 @@ fn migrate_reports_write_failure_and_exits_nonzero_but_migrates_the_rest() {
 fn queue_hides_legacy_form_warns_then_migration_admits_it() {
     let tmp = fresh_repo();
     file_bug(tmp.path(), "modern-one");
-    // This is the observed historical shape: needs-triage accompanied by
-    // an agent provenance label that the migration must preserve.
+    // This is an observed historical shape: needs-triage accompanied by
+    // an agent provenance label that the generic migration must convert.
     write_legacy(
         tmp.path(),
         "legacy-one",
@@ -433,10 +433,10 @@ fn queue_hides_legacy_form_warns_then_migration_admits_it() {
     ));
     assert_eq!(admitted["status"], "untriaged");
     assert_eq!(
-        admitted["labels"],
-        serde_json::json!(["via:agent-homebase-wrapup"]),
-        "agent provenance label is preserved"
+        admitted["extra"]["provenance"], "agent-homebase-wrapup",
+        "agent channel becomes first-class provenance"
     );
+    assert!(admitted["labels"].is_null(), "legacy label is removed");
 
     let accepted = run(tmp.path(), &["--json", "intake", "accept", "legacy-one"]);
     assert_eq!(accepted.status.code(), Some(0), "{}", dump(&accepted));
@@ -495,7 +495,7 @@ fn intake_file_rejects_epic() {
             "--body",
             "x",
             "--provenance",
-            "telegram",
+            "chat",
             "--slug",
             "epic-attempt",
         ],

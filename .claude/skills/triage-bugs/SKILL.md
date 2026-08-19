@@ -6,13 +6,12 @@ argument-hint: (deprecated — passes through to /issue-intake)
 
 # triage-bugs — DEPRECATED, renamed → /issue-intake
 
-This skill was **renamed to `/issue-intake`** when the ad-hoc `via:telegram` bug
+This skill was **renamed to `/issue-intake`** when ad-hoc channel-labelled bug
 triage folded into the standard intake flow (`docs/design/intake-flow.md`).
 `/issue-intake` does the same job — read the intake queue, drive
 `/worktree-bug-analysis` on unclear items, brief the user in product-owner
 language, and stop — but against the first-class `untriaged` intake state and
-across **both** bug reports and feature requests (any provenance), not just
-`via:telegram`.
+across **both** bug reports and feature requests, regardless of provenance.
 
 This alias exists only for the deprecation window so old habits and `/stint` call
 sites don't break. It will be removed.

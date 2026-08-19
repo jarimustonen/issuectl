@@ -57,7 +57,7 @@ From `$ARGUMENTS` and the surrounding context, assemble:
   reported it (the human or bot handle). An interactive filer should ask when the
   handle isn't obvious; a deterministic / non-interactive filer may omit it
   rather than block. Do not invent a name.
-- **`--provenance <source>`** *(required)* — where it came from: `telegram`,
+- **`--provenance <source>`** *(required)* — where it came from: `chat`,
   `email`, `slack`,
   `github`, `phone`, … This is a real field, **not** the body source-line
   (`--source` on plain `create` is unrelated). The repo may constrain the accepted
@@ -84,7 +84,7 @@ issuectl intake file \
   --title "Login redirect loops on Safari" \
   --body-file report.md \
   --reporter alice \
-  --provenance telegram \
+  --provenance chat \
   --source-ref "chat:123/message:456" \
   --priority high \
   --json

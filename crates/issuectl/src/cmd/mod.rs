@@ -1948,7 +1948,7 @@ pub(crate) enum IntakeAction {
         /// Who reported it
         #[arg(long, value_parser = parse_non_empty)]
         reporter: Option<String>,
-        /// Where the report came from (e.g. telegram, email). Must be an
+        /// Where the report came from (e.g. chat, email). Must be an
         /// accepted value when the repo constrains `provenance`.
         #[arg(long, value_parser = parse_non_empty)]
         provenance: String,
