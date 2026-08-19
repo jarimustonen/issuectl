@@ -264,7 +264,7 @@ Common flags:
 - `--add-related "@<slug>"` / `--remove-related "@<slug>"` (repeatable; bare slug also accepted)
 - `--add-blocked-by "@<slug>"` / `--remove-blocked-by "@<slug>"` (repeatable; bare slug also accepted) — set/clear DAG dependency edges (this issue is blocked by `<slug>`). Same shape as `--add-related`; equivalent to `issuectl depend add/remove`.
 - `--add-commit HASH:summary` (repeatable)
-- `--lane NAME` / `--no-lane`, `--lane-seq <int>` / `--no-lane-seq`, and `--add-collision TOKEN` / `--remove-collision TOKEN` — scheduling fields that drive `issuectl dag`. A lane is a serial queue, so only its head can spawn: choose lanes as independently mergeable conflict boundaries, not themes. The number of ordinary lanes is the parallelism budget; use shared `collision:` tokens for cross-lane hot files rather than merging whole lanes. `lane_seq` is a coarse intra-lane precedence key consulted after `blocked_by` and priority but before the slug tie-break, so you can pin "do this member before that one" without a fake dependency. The reserved lane value `--lane unlaned` marks an issue *confirmed parallel-safe*: `dag` treats every member as independently headed and spawnable, never serializing siblings. It differs from an absent lane, which means "unclassified". `issuectl dag [--json]` renders lanes, their serial `depth`, head-of-line, and total `spawnable_heads` so callers can see current parallelism. An `in-progress` head remains spawnable: it is resumable work, and callers prevent duplicate runs with reservations. See `docs/design/lane-design.md` for the full guidance. Pass `dag --reservations <file|-|json>` to have spawnability account for lane/collision tokens in-flight runs hold.
+- `--lane NAME` / `--no-lane`, `--lane-seq <int>` / `--no-lane-seq`, and `--add-collision TOKEN` / `--remove-collision TOKEN` — optional scheduling fields that drive `issuectl dag`. A lane is a serial queue, so only its head can spawn: choose lanes as independently mergeable conflict boundaries, not themes. The number of ordinary lanes is the parallelism budget; use shared `collision:` tokens for cross-lane hot files rather than merging whole lanes. `lane_seq` is a coarse intra-lane precedence key consulted after `blocked_by` and priority but before the slug tie-break, so you can pin "do this member before that one" without a fake dependency. The reserved lane value `--lane unlaned` marks an issue *confirmed parallel-safe*: `dag` treats every member as independently headed and spawnable, never serializing siblings. It differs from an absent lane, which means "unclassified". `issuectl dag [--json]` renders lanes, their serial `depth`, head-of-line, and total `spawnable_heads` so callers can see current parallelism. An `in-progress` head remains spawnable: it is resumable work, and callers prevent duplicate runs with reservations. See `docs/design/lane-design.md` for the full guidance. Pass `dag --reservations <file|-|json>` to have spawnability account for lane/collision tokens in-flight runs hold.
 
 Example flows:
 
@@ -367,14 +367,16 @@ exception is `apply`: its patch file must still declare a non-empty
 multi-field patch keeps its own concurrency contract).
 
 - **`issuectl set <slug> <field> <value>`** — set a single
-  frontmatter field. Built-in keys (`status`, `priority`,
-  `assignee`, `owner`, `epic`) take the typed path; other keys go
-  through the schema-validated `custom_fields` slot. Use
-  `--clear` to remove a (non-status) field. Built-in scheduling fields
-  `lane` and `lane_seq` are rejected here: use `update --lane NAME` /
-  `--no-lane` and `update --lane-seq <int>` / `--no-lane-seq` instead.
-  Reserved keys like `labels` / `related` / `type` / `title` error with
-  a hint pointing at the right flag.
+  frontmatter field. Supported scalar built-ins (`status`, `priority`,
+  `assignee`, `owner`, `epic`) take the typed path; schema-declared custom
+  keys that are not reserved go through the validated `custom_fields` slot.
+  Other built-in or reserved keys error with a hint to their dedicated
+  mutation surface. Use `--clear` to remove a supported non-status field.
+  For the scalar scheduling fields, use `update --lane NAME` / `--no-lane`
+  and `update --lane-seq <int>` / `--no-lane-seq`. `collision` is list-valued;
+  use repeatable `update --add-collision TOKEN` / `--remove-collision TOKEN`.
+  Reserved keys such as `labels`, `related`, `type`, and `title` likewise
+  require their dedicated flags or commands.
 - **`issuectl assign <slug> <user>`** — convenience wrapper for
   `set <slug> assignee <user>`; routes through the identical typed
   path, so validation, idempotency, and the
