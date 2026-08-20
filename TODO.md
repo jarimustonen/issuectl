@@ -14,7 +14,11 @@ säännöt → `AGENTS.md`.
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-19/20, rupeama 3 valmis):** `main` **vihreä** (24 testibinääriä,
+**Tila (2026-08-20, rupeama 3 valmis + triage-pass):** rupeaman jälkeen ajettiin vielä
+lanettomien issueiden triage: @apply-inline-json suljettiin duplikaattina ja sen sisältö
+taitettiin @apply-patch-from-stdin -issueen, joka samalla nimettiin intake-slugistaan.
+Tuotekoodiin ei koskettu, vain issue-tiedostoihin ja tähän handoffiin. `main` **vihreä**
+(edellisen rupeaman gate; 24 testibinääriä,
 fmt/clippy/doc puhtaat), synkassa originin kanssa, ei ajossa olevia workereita eikä
 worktreitä tässä repossa. **Live-release `v0.16.0` kaikissa kanavissa** (crates.io ×2,
 GitHub Release 12 assetia, tap 0.16.0); `ossctl release verify` reconciloi 4/4 matches,
@@ -77,11 +81,12 @@ mainiin intake-lifecyclen schema-käyttöönoton ja legacy-labelien migraation
   papercut — tuntemattoman muodon pitää nimetä hyväksytyt muodot. Avoin nyanssi: sisarrepon
   filaus-wrapper toi tämän legacy-konventiolla (`status: open` + `needs-triage`), eli juurisyy
   filaavassa päässä on yhä korjaamatta. Tyyppi `feature`, sisältö lukee bugina — retype-kandidaatti.
-- **Seuraava rupeama: molemmat `verb-surface`-laneen issuet.** @deprecate-triage-inbox ja
-  @apply-patch-from-stdin tehdään joko rinnakkain tai peräkkäin. Ne eivät ole toistensa
-  blockereita, mutta molemmat voivat koskea skill-templateja (hot file) — jos rinnakkain, pidä
-  templatemuutokset vain deprekointi-issuen puolella, muuten aja peräkkäin. Sen jälkeen DAG on
-  tyhjä ja 0.17.0 on cuttivalmis (ADR 0004:n versiolappu, ks. yllä).
+- **Jarin päätös (2026-08-20): seuraava rupeama tekee molemmat yllä olevat issuet**,
+  @deprecate-triage-inbox ja @apply-patch-from-stdin, joko rinnakkain tai peräkkäin.
+  Rinnakkaisuuden ainoa varaus on hot-file-sääntö: molemmat voivat koskea skill-templateja,
+  joten pidä templatemuutokset vain deprekoinnin puolella tai aja ne peräkkäin. Kun molemmat
+  ovat landanneet, tuotepuolelta ei ole muuta avointa työtä ja 0.17.0 on cuttivalmis
+  (ADR 0004:n versiolappu, ks. yllä). Aloita rupeama lukemalla `issuectl dag`.
 - `issuectl doctor` huomauttaa kahdesta asiasta: tuntematon frontmatter-avain
   `pidev-pi-skill-lifecycle: title`, ja `.issuectl/AGENTS.md` puuttuu.
 
