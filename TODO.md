@@ -14,6 +14,73 @@ säännöt → `AGENTS.md`.
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
+**Tila (2026-08-19/20, rupeama 3 valmis):** `main` **vihreä** (24 testibinääriä,
+fmt/clippy/doc puhtaat), synkassa originin kanssa, ei ajossa olevia workereita eikä
+worktreitä tässä repossa. **Live-release `v0.16.0` kaikissa kanavissa** (crates.io ×2,
+GitHub Release 12 assetia, tap 0.16.0); `ossctl release verify` reconciloi 4/4 matches,
+0 missing. Paikallinen binääri 0.16.0.
+
+**Rupeama 3 (0.16.0):** seitsemän yksikköä landattu, kaikki omina workereinaan.
+1. @intake-bug-issuectl-d5b6669a98fe: `update --json` echottaa scheduling-kentät lukitusta
+   kirjoituksen jälkeisestä tilasta (bugi toistui livenä heti rupeaman alussa).
+2. @update-title-flag: `update --title` olemassa, ja `body set` säilyttää H1:n otsikottomalla
+   bodylla, varoittaa kun otsikko vaihtuisi.
+3. @update-canonical-forms: ADR 0004:n valmisteluslice, `update --patch-file` ja `--query`
+   uudelleenkäyttävät `apply`:n ja `bulk`:n koneistoa. Parity-testit (520 riviä), foldattaviin
+   komentoihin ei koskettu. Worker raportoi nolla parity-aukkoa.
+4. @intake-feature-issuectl-42403ae544e3: `/issue`-skill dokumentoi lane-liput.
+5. @intake-feature-issuectl-4f9dbc60a05e: `deferred`-label eläkkeelle, doctor-check + `--fix`.
+6. @purge-telegram-surfaces: kanavanimi pois tuotepinnalta, `via:<channel>`-migraatio
+   yleistetty (kattaa nyt myös historialliset `via:agent-*`-arvot).
+7. @homebrew-double-writer-contract: homebrew-targetin adapteri `cargo-dist`.
+
+**RELEASE-HAVAINTO (0.16.0 cut, ossctl 0.9.0):** kohdan 7 kontrahtikorjaus **toimi**:
+`dist`-vaihe meni puhtaasti läpi eikä engine ajanut omaa tap-legiään lainkaan (0.15.0:n
+false-red-syy poistui). MUTTA verify kaatui `gh-releases`-targettiin, ja tämä oli **aito
+vika, ei kilpailutilanne**: cargo-distin workflow **peruuntui**, koska
+`aarch64-unknown-linux-musl` jonotti hostatulla runnerilla 6 h (06:56 → 12:56) ja osui
+GitHubin kovaan job-kattoon. Downstream-jobit (`host`, `publish-homebrew-formula`) skipattiin,
+joten Releaseä ei syntynyt ja tap jäi 0.15.0:aan vaikka crates.io-julkaisu oli jo
+peruuttamaton. Kaatuneiden jobien rerun meni läpi ~5 minuutissa. Diagnoosi: transientti
+hostatun ARM64-kapasiteetin puute, ei konfiguraatiovika, joten `dist-workspace.toml` jätettiin
+ennalleen (self-hosted-override koskee vain `aarch64-apple-darwin`, ja se job onnistui).
+
+- **SEURATTAVA (Jari 2026-08-20):** jos tämä toistuu, se lakkaa olemasta huono tuuri ja
+  muuttuu oikeaksi päätökseksi: oma build-kapasiteetti, targetin pudotus, vai manuaalinen
+  rerun käytäntönä. Yksi datapiste ei riitä perusteluksi, joten nyt vain seurataan.
+- **Backstop-tarkistukset pysyvät pakollisina.** Tässä cutissa ne olivat ainoa asia joka
+  paljasti että alkuperäinen "tämä on vain kilpailutilanne" -tulkintani oli väärä. Työkalun
+  oma verdikti on nyt ollut väärässä molempiin suuntiin (0.15.0 false-red, 0.16.0 false-calm).
+- **ossctl-parannusehdotus (pohdittu 2026-08-20, ei vielä filattu):** verify päättelee
+  toimituksen *kohteesta* (onko assetteja) eikä *delegoidusta ajosta*, joten "ei vielä",
+  "valmis" ja "kaatui lopullisesti" näyttävät identtisiltä (nolla assettia). Jos verify lukisi
+  delegoidun workflow'n tilan, se kertoisi syyn heti: `in_progress` → odota, `success` →
+  tarkista kohde, `cancelled`/`failure` → punainen syineen. Lisäksi `pending` ansaitsee oman
+  exit-koodinsa erillään `missing`ista. Rajattu odotus on toissijainen, se ei yksin korjaa
+  sitä että "ei vielä" ja "kaatui" näyttävät samalta.
+
+**Rinnakkainen sessio (2026-08-20 aamu, ei tästä rupeamasta):** toinen sessio landasi
+mainiin intake-lifecyclen schema-käyttöönoton ja legacy-labelien migraation
+(`91cfd8c`, `f8d80ce`). Green gate ajettu näiden päällä, main on vihreä.
+
+**Seuraava askel:**
+- @deprecate-triage-inbox: intake-konsolidaation viimeinen osa (`issuectl triage` +
+  `issues/inbox/`-laskeutumisalue pois rinnakkaisena vastaanottomekanismina). Molemmat sen
+  esityöt on toimitettu.
+- **ADR 0004:n versiolappu korjattava:** ADR puhuu deprekointi-releasesta nimellä "0.16.0",
+  mutta 0.16.0 vei valmisteluslicen (puhtaasti additiivinen, joten semver pakotti minoriin).
+  Osoita lappu 0.17.0:aan kun deprekointi-issue filataan.
+- @intake-feature-issuectl-0b1bf129b13b: **kaipaa triagea.** Sisarrepon filaus-wrapper toi
+  sen legacy-konventiolla (`status: open` + `needs-triage`-label), joten se ei näy
+  status-pohjaisessa jonossa ennen `intake migrate --apply`:ia. Tyyppi on `feature` mutta
+  sisältö lukee bugina (`apply` ei lue patchia stdinistä), eli retype-kandidaatti. Juurisyy
+  on filaavassa päässä: wrapper filaa yhä vanhalla konventiolla.
+- `issuectl doctor` huomauttaa kahdesta asiasta: tuntematon frontmatter-avain
+  `pidev-pi-skill-lifecycle: title`, ja `.issuectl/AGENTS.md` puuttuu.
+
+<details>
+<summary>Aiemmat rupeamat (2026-08-17)</summary>
+
 **Tila (2026-08-17, ilta — kaksi rupeamaa samana päivänä valmiina):** `main` **vihreä**
 (1082 testiä + integraatiot, fmt/clippy/doc puhtaat, orkestroija verifioi mergien jälkeen),
 pushattu. **Live-release `v0.15.0` kaikissa kanavissa** (crates.io ×2, GitHub Release 12
@@ -60,6 +127,8 @@ tap-formula) — dist-vaiheen kaatuminen ei tarkoita että julkaisu epäonnistui
   mitään; törmää templateihin, joten älä rinnakkain 42403:n kanssa).
 - ADR:n deprekointi-release (piilotetut aliakset + varoitukset + canonical-only skillit)
   filataan kun @update-canonical-forms on landannut.
+
+</details>
 
 **Dogfood:** `cargo install issuectl` / `brew upgrade jarimustonen/issuectl/issuectl` /
 `cargo install --path crates/issuectl`. Skillit `/issue`, `/issue-new`, `/issue-intake`
@@ -110,7 +179,3 @@ Hyväksytty kohde lanetetaan `issuectl`-frontmatteriin ja näkyy sen jälkeen
 Huom: raportoivan pään filaus-flow (sisarrepon wrapper) appendaa tänne oman
 checklist-osionsa joka kerta. Se ei tule issuectl:n binääristä eikä templateista;
 poista osio triagen yhteydessä kunnes lähdepää on korjattu.
-
-## Piialiisan bugiraportit
-
-- [ ] 🐛 Piialiisan bugiraportti: issuectl apply cannot read a patch from stdin — jari via Telegram ([`intake-feature-issuectl-0b1bf129b13b`](issues/intake-feature-issuectl-0b1bf129b13b/item.md))
