@@ -1,13 +1,12 @@
 ---
 created: 2026-08-15
-updated: 2026-08-16
+updated: 2026-08-20
 type: feature
 reporter: jari
 status: obsolete
 priority: normal
 labels:
 - via:agent-intakectl-conductor
-- needs-triage
 closed: 2026-08-16
 ---
 

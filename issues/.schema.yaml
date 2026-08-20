@@ -29,6 +29,12 @@ fields:
       - open
       - in-progress
       - testing
+      # Intake-flow reception/holding states. All active-class: the
+      # binary has only `active | closing`, and the design keeps
+      # `deferred` active rather than adding a `parked` class.
+      - untriaged
+      - deferred
+      - needs-info
       - done
       - fixed
       - wontfix
