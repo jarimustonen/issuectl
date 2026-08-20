@@ -1,13 +1,13 @@
 ---
 created: 2026-05-06
-updated: 2026-08-10
+updated: 2026-08-20
 type: feature
 status: obsolete
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
-labels: [kanban, v0.6.0-candidate, web-ui, deferred]
+labels: [kanban, v0.6.0-candidate, web-ui]
 closed: 2026-08-10
 ---
 

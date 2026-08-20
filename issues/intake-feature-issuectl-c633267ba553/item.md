@@ -1,15 +1,14 @@
 ---
 created: 2026-08-16
-updated: 2026-08-16
+updated: 2026-08-20
 type: feature
 reporter: jari
 status: done
 priority: normal
-labels:
-- via:agent-aggountant-wrapup
+closed: 2026-08-16
 lane: docs
 lane_seq: 10
-closed: 2026-08-16
+provenance: agent-aggountant-wrapup
 ---
 
 # Document how to design a lane structure: lanes are serial queues, so la…

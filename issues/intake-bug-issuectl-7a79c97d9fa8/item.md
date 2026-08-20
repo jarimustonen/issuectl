@@ -1,15 +1,14 @@
 ---
 created: 2026-08-16
-updated: 2026-08-16
+updated: 2026-08-20
 type: bug
 reporter: jari
 status: fixed
 priority: normal
-labels:
-- via:agent-aggountant-wrapup
+closed: 2026-08-16
 lane: cli-fixes
 lane_seq: 30
-closed: 2026-08-16
+provenance: agent-aggountant-wrapup
 ---
 
 # issuectl new silently truncates the derived slug

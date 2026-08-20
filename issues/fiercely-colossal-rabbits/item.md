@@ -1,10 +1,9 @@
 ---
 created: 2026-05-07
-updated: 2026-08-10
+updated: 2026-08-20
 type: chore
 status: obsolete
 priority: high
-labels: [deferred]
 closed: 2026-08-10
 ---
 

@@ -1,13 +1,13 @@
 ---
 created: 2026-05-06
-updated: 2026-08-15
+updated: 2026-08-20
 type: feature
 status: obsolete
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
-labels: [v0.6.0-candidate, visualization, deferred]
+labels: [v0.6.0-candidate, visualization]
 closed: 2026-08-15
 ---
 

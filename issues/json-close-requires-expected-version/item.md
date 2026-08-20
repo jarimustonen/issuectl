@@ -37,6 +37,6 @@ The error is well-formed and has a helpful hint, so this is not a crash — it i
 1. `--json` is a pure output-format flag: do NOT make it mandate `--expected-version`. Keep optimistic-concurrency opt-in (pass `--expected-version` when you want the CAS check) regardless of output format.
 2. If the coupling is intentional (per design D4=B), document it prominently — at minimum in the `--json` flag help on `close`/`update` — and consider having `close` without a token succeed but WARN, rather than hard-fail, so agent callers aren't blocked.
 
-## Notes
+## Comments
 - Same coupling presumably applies to `issuectl --json update` (same `--expected-version` semantics noted in `close --help`). Worth checking both.
 - Affects automated agents most: they default to `--json` for parseable output and don't expect required-arg drift between output formats.

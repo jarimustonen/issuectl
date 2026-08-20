@@ -1,10 +1,9 @@
 ---
 created: 2026-05-06
-updated: 2026-08-10
+updated: 2026-08-20
 type: improvement
 status: obsolete
 priority: normal
-labels: [deferred]
 closed: 2026-08-10
 ---
 

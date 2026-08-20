@@ -1,12 +1,11 @@
 ---
 created: 2026-08-17
-updated: 2026-08-19
+updated: 2026-08-20
 type: feature
 reporter: jari
 status: done
 priority: normal
-labels:
-- via:agent-homebase-wrapup
+closed: 2026-08-19
 lane: intake
 lane_seq: 20
 collision: [crates/issuectl-core/src/doctor, crates/issuectl-core/src/agents.rs]
@@ -27,7 +26,7 @@ commits:
   summary: record implementation commits (rebased)
 - hash: 644e91b
   summary: close deferred label retirement (rebased)
-closed: 2026-08-19
+provenance: agent-homebase-wrapup
 ---
 
 # Retire the deferred label; doctor must flag residual uses

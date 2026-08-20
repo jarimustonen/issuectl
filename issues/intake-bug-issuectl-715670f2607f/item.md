@@ -1,15 +1,14 @@
 ---
 created: 2026-08-16
-updated: 2026-08-16
+updated: 2026-08-20
 type: bug
 reporter: jari
 status: fixed
 priority: normal
-labels:
-- via:agent-aggountant-wrapup
+closed: 2026-08-16
 lane: cli-fixes
 lane_seq: 50
-closed: 2026-08-16
+provenance: agent-aggountant-wrapup
 ---
 
 # note rejects --comment although its own help says it mirrors close --co…

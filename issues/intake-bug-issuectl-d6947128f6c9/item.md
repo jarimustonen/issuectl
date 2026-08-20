@@ -1,16 +1,15 @@
 ---
 created: 2026-08-15
-updated: 2026-08-15
+updated: 2026-08-20
 type: bug
 reporter: jari
 status: fixed
 priority: normal
-labels:
-- via:agent-homebase-wrapup
+closed: 2026-08-15
 lane: cli-fixes
 lane_seq: 10
 collision: [crates/issuectl/src/main.rs]
-closed: 2026-08-15
+provenance: agent-homebase-wrapup
 ---
 
 # label: flag-style --remove silently no-ops with --json instead of error…

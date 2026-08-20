@@ -26,6 +26,6 @@ There is no command that changes an issue's title. `rename` changes the slug onl
 - `issuectl update <slug> --title "..."` rewrites the H1 through the locked mutation path (canonical_hash impact: title is already part of the hash via the body, so this is a normal content edit, not a schema change).
 - `body set` either preserves the existing H1 when the incoming body lacks one, or at minimum warns that the title is being removed/changed.
 
-## Notes
+## Comments
 
 Fits the ADR 0004 update-surface work; same echo/write surface as @update-canonical-forms.

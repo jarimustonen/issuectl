@@ -1,19 +1,18 @@
 ---
 created: 2026-08-17
-updated: 2026-08-17
+updated: 2026-08-20
 type: bug
 reporter: jari
 status: fixed
 priority: normal
-labels:
-- via:agent-homebase-wrapup
+closed: 2026-08-17
 lane: help-docs
 lane_seq: 20
 collision: [crates/issuectl/src/cmd/views.rs]
 commits:
 - hash: 3cfbc3b
   summary: surface deliberate DAG intra-lane ordering
-closed: 2026-08-17
+provenance: agent-homebase-wrapup
 ---
 
 # dag lane ordering: priority silently outranks lane_seq within a lane

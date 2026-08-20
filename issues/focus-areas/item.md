@@ -1,11 +1,10 @@
 ---
 created: 2026-06-04
-updated: 2026-08-10
+updated: 2026-08-20
 type: feature
 reporter: jari
 status: wontfix
 priority: normal
-labels: [deferred]
 closed: 2026-08-10
 ---
 

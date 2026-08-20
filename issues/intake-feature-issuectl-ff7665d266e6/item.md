@@ -1,15 +1,14 @@
 ---
 created: 2026-08-16
-updated: 2026-08-16
+updated: 2026-08-20
 type: feature
 reporter: jari
 status: done
 priority: normal
-labels:
-- via:agent-aggountant-wrapup
+closed: 2026-08-16
 lane: cli-fixes
 lane_seq: 40
-closed: 2026-08-16
+provenance: agent-aggountant-wrapup
 ---
 
 # update --type epic tells you to hand-edit the YAML instead of migrating…

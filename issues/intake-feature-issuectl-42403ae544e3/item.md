@@ -1,12 +1,11 @@
 ---
 created: 2026-08-17
-updated: 2026-08-19
+updated: 2026-08-20
 type: feature
 reporter: jari
 status: done
 priority: normal
-labels:
-- via:agent-homebase-wrapup
+closed: 2026-08-19
 lane: skills
 lane_seq: 30
 collision: [templates]
@@ -15,7 +14,7 @@ commits:
   summary: document issue lane updates
 - hash: b8e614f
   summary: refine scheduling field guidance after review
-closed: 2026-08-19
+provenance: agent-homebase-wrapup
 ---
 
 # issue skill: document update --lane/--lane-seq flags

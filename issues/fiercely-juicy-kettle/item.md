@@ -1,6 +1,6 @@
 ---
 created: 2026-05-06
-updated: 2026-08-10
+updated: 2026-08-20
 type: feature
 status: obsolete
 priority: normal
@@ -8,7 +8,7 @@ reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
 related: ['@excessively-beneficial-owner']
-labels: [kanban, web-ui, deferred]
+labels: [kanban, web-ui]
 closed: 2026-08-10
 ---
 

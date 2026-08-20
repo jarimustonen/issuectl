@@ -1,13 +1,13 @@
 ---
 created: 2026-05-06
-updated: 2026-08-12
+updated: 2026-08-20
 type: improvement
 status: wontfix
 priority: normal
 reporter: jari
 assignee: jari
 epic: hugely-exciting-spiders
-labels: [discuss, reporting, v0.6.0-candidate, deferred]
+labels: [discuss, reporting, v0.6.0-candidate]
 closed: 2026-08-12
 ---
 

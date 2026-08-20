@@ -5,9 +5,8 @@ type: feature
 reporter: jari
 status: obsolete
 priority: normal
-labels:
-- via:agent-homebase-wrapup
 closed: 2026-08-17
+provenance: agent-homebase-wrapup
 ---
 
 # collision frontmatter field is documented but not implemented in update

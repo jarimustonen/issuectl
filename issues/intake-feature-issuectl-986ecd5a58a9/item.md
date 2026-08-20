@@ -5,9 +5,8 @@ type: feature
 reporter: jari
 status: obsolete
 priority: normal
-labels:
-- via:agent-intakectl-conductor
 closed: 2026-08-16
+provenance: agent-intakectl-conductor
 ---
 
 # issuectl label: accept --add/--remove flag aliases (canonical skills us…

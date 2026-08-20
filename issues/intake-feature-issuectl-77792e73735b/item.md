@@ -1,19 +1,18 @@
 ---
 created: 2026-08-16
-updated: 2026-08-17
+updated: 2026-08-20
 type: feature
 reporter: jari
 status: done
 priority: normal
-labels:
-- via:agent-homebase-wrapup
+closed: 2026-08-17
 lane: help-docs
 lane_seq: 10
 collision: [crates/issuectl/src/cmd/write.rs]
 commits:
 - hash: 48f4881
   summary: document body_ops patch shapes in apply help
-closed: 2026-08-17
+provenance: agent-homebase-wrapup
 ---
 
 # apply --help does not document body_ops operation shapes

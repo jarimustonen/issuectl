@@ -45,7 +45,7 @@ $ issuectl new --help | grep -iE '\--body|\--file'   # → nothing
 So today: `issuectl new --type feature --title X --slug y` then a separate edit
 of `issues/y/item.md`.
 
-## Notes
+## Comments
 
 Found while filing several issues from an agent session in another repo
 (homebase digest system). Low priority but a nice ergonomic win for agent use.

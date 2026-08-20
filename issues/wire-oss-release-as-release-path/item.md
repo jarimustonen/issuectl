@@ -43,5 +43,5 @@ Release work is split across three places, all tag-triggered or manual:
 ## First step when unblocked
 Run `ossctl release plan` as a dry-run to see exactly what the engine would do here (it seals a content-addressed plan), reconcile against the three workflows above, then decide/execute the retirement of `publish-crates.yml`.
 
-## Notes
+## Comments
 - The `OSS-RELEASE.md` contract is already `approved` (maturity mvp). Its `## Rationale`/`## Release notes` currently say 'keep cargo-dist; /oss-release-cut must not regenerate release.yml' — that framing was a guardrail and should be revisited/relaxed as part of this work, since the goal is now to USE /oss-release.

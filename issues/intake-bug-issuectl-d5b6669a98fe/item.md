@@ -1,12 +1,11 @@
 ---
 created: 2026-08-17
-updated: 2026-08-19
+updated: 2026-08-20
 type: bug
 reporter: jari
 status: fixed
 priority: normal
-labels:
-- via:agent-homebase-wrapup
+closed: 2026-08-19
 lane: verb-surface
 lane_seq: 3
 collision: [crates/issuectl/src/cmd/write.rs]
@@ -17,7 +16,7 @@ commits:
   summary: echo updated scheduling fields in JSON
 - hash: 12a1f57
   summary: strengthen scheduling echo regression coverage
-closed: 2026-08-19
+provenance: agent-homebase-wrapup
 ---
 
 # update response envelope echoes null for fields it just set (lane_seq)

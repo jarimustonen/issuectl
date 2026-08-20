@@ -75,7 +75,7 @@ When v0.6.0 planning starts:
 ### Discuss / maybe-don't-build
 - [ ] @events-jsonl-log — Per-issue `events.jsonl` log (only if v0.5.0 git-derived activity proves insufficient)
 
-## Notes
+## Comments
 
 - The v0.5.0 → v0.6.0 deferrals were made because v0.5.0 was overscoped;
   these items are good ideas but not foundational to "writable agent-safe
@@ -87,8 +87,6 @@ When v0.6.0 planning starts:
 - Several candidates explicitly build on v0.5.0 issues; their shape and
   feasibility depend on v0.5.0 outcomes — re-evaluate then.
 - Brainstorm synthesis: `history/plan-feature-brainstorm.md` (gitignored).
-
-## Comments
 
 ### 2026-07-26T07:36:41Z · @jari
 
