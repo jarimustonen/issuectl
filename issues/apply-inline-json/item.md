@@ -2,8 +2,10 @@
 created: 2026-08-20
 updated: 2026-08-20
 type: feature
-status: open
+status: duplicate
 priority: low
+closed: 2026-08-20
+closed_by: agent-triage
 ---
 
 # apply: accept an inline JSON patch, not only a file path
@@ -45,3 +47,9 @@ name the file it tried to read.
 
 Hit 2026-08-20 while wiring a `blocked_by` edge between two issues in the `glasspad` repo
 during a stint handoff. Filed from that session.
+
+## Resolution
+
+### 2026-08-20T12:15:51Z · @agent-triage
+
+Duplicate of @apply-patch-from-stdin, which asks for the same one-step patch input (stdin instead of a temp file) and is already laned in verb-surface. The inline-`{` suggestion and the misleading "cannot read patch file" error message have been folded into that issue as part of its scope. Reopen only if stdin support lands while an inline argument still fails with the file-not-found wording.

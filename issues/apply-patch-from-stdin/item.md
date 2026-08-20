@@ -11,7 +11,7 @@ labels:
 lane: verb-surface
 ---
 
-# issuectl apply cannot read a patch from stdin
+# apply: accept a patch from stdin or inline JSON, not only a file path
 
 ## Description
 
@@ -52,3 +52,22 @@ Filing it as a papercut, not a defect.
 
 Hit 2026-08-20 while re-laning six issues in ossctl in one transaction during a stint
 wrap. Fell back to six separate `issuectl update` calls.
+
+## Comments
+
+### 2026-08-20T12:15:47Z · @agent-triage
+
+Folded in from the duplicate `apply-inline-json` (closed 2026-08-20), which reported the same
+temp-file round trip from the inline-argument angle. Two extra asks come with it:
+
+1. **Inline JSON.** An argument that starts with `{` after trimming is unambiguous — no real
+   filename does — so it could be parsed as an inline patch directly. Optional: stdin alone
+   already removes the temp file. Decide inline support as part of this issue rather than
+   leaving it as a separate ticket.
+2. **The error message is the real papercut.** Both reports hit
+   `cannot read patch file <thing>: No such file or directory`, which reads as a missing file
+   rather than "this form is not supported". Whatever input forms land, an unsupported
+   argument must name the accepted forms (path, `-`, `--stdin`, and inline if adopted).
+
+Original inline-JSON provenance: hit 2026-08-20 while wiring a `blocked_by` edge between two
+issues in the `glasspad` repo during a stint handoff.

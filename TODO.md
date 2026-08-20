@@ -70,11 +70,18 @@ mainiin intake-lifecyclen schema-käyttöönoton ja legacy-labelien migraation
 - **ADR 0004:n versiolappu korjattava:** ADR puhuu deprekointi-releasesta nimellä "0.16.0",
   mutta 0.16.0 vei valmisteluslicen (puhtaasti additiivinen, joten semver pakotti minoriin).
   Osoita lappu 0.17.0:aan kun deprekointi-issue filataan.
-- @intake-feature-issuectl-0b1bf129b13b: **kaipaa triagea.** Sisarrepon filaus-wrapper toi
-  sen legacy-konventiolla (`status: open` + `needs-triage`-label), joten se ei näy
-  status-pohjaisessa jonossa ennen `intake migrate --apply`:ia. Tyyppi on `feature` mutta
-  sisältö lukee bugina (`apply` ei lue patchia stdinistä), eli retype-kandidaatti. Juurisyy
-  on filaavassa päässä: wrapper filaa yhä vanhalla konventiolla.
+- @apply-patch-from-stdin: **triagattu 2026-08-20** (oli `intake-feature-issuectl-0b1bf129b13b`,
+  nimetty kunnolla). `apply` ottaa patchin vain tiedostopolkuna; pyyntö on `-`/`--stdin`, ja
+  duplikaatti @apply-inline-json suljettiin taittaen sen sisään kaksi lisäkohtaa: inline-`{`
+  -argumentin tuki (valinnainen) ja se että virheviesti `cannot read patch file …` on varsinainen
+  papercut — tuntemattoman muodon pitää nimetä hyväksytyt muodot. Avoin nyanssi: sisarrepon
+  filaus-wrapper toi tämän legacy-konventiolla (`status: open` + `needs-triage`), eli juurisyy
+  filaavassa päässä on yhä korjaamatta. Tyyppi `feature`, sisältö lukee bugina — retype-kandidaatti.
+- **Seuraava rupeama: molemmat `verb-surface`-laneen issuet.** @deprecate-triage-inbox ja
+  @apply-patch-from-stdin tehdään joko rinnakkain tai peräkkäin. Ne eivät ole toistensa
+  blockereita, mutta molemmat voivat koskea skill-templateja (hot file) — jos rinnakkain, pidä
+  templatemuutokset vain deprekointi-issuen puolella, muuten aja peräkkäin. Sen jälkeen DAG on
+  tyhjä ja 0.17.0 on cuttivalmis (ADR 0004:n versiolappu, ks. yllä).
 - `issuectl doctor` huomauttaa kahdesta asiasta: tuntematon frontmatter-avain
   `pidev-pi-skill-lifecycle: title`, ja `.issuectl/AGENTS.md` puuttuu.
 
