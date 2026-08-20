@@ -111,3 +111,6 @@ Huom: raportoivan pään filaus-flow (sisarrepon wrapper) appendaa tänne oman
 checklist-osionsa joka kerta. Se ei tule issuectl:n binääristä eikä templateista;
 poista osio triagen yhteydessä kunnes lähdepää on korjattu.
 
+## Piialiisan bugiraportit
+
+- [ ] 🐛 Piialiisan bugiraportti: issuectl apply cannot read a patch from stdin — jari via Telegram ([`intake-feature-issuectl-0b1bf129b13b`](issues/intake-feature-issuectl-0b1bf129b13b/item.md))
