@@ -8,6 +8,7 @@ priority: normal
 labels:
 - via:agent-homebase-wrapup
 - needs-triage
+lane: verb-surface
 ---
 
 # issuectl apply cannot read a patch from stdin

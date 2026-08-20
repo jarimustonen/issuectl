@@ -234,12 +234,29 @@ project's operating policy.
   cut is interrupted: `ossctl release resume`; `ossctl release verify` is a
   read-only reconcile. Full steps: [CONTRIBUTING.md](CONTRIBUTING.md)
   "Per-release steps".
-- **Post-cut backstop check** (cheap, keep doing it until the 0.7.0 verify
-  barrier has proven itself on a real cut): `gh release view vX.Y.Z --json
-  assets --jq '.assets|length'` non-zero (compare against the previous tag —
-  the count tracks `dist-workspace.toml`'s target/installer set), and the tap
-  formula advanced. History: the tap once sat stale through three releases
-  because nobody checked (`@homebrew-tap-stale`).
+- **Post-cut backstop check — permanent, not a temporary measure.** The engine's
+  own verdict has now been wrong in **both** directions on real cuts (0.15.0
+  false-red: reported failed, everything delivered; 0.16.0 false-calm: `verify`
+  correctly said `gh-releases` was missing but gave no cause, and the
+  destination alone read the same as "still building"). So always check the
+  channels directly: `gh release view vX.Y.Z --json assets --jq '.assets|length'`
+  non-zero (compare against the previous tag — the count tracks
+  `dist-workspace.toml`'s target/installer set), and the tap formula advanced.
+  History: the tap once sat stale through three releases because nobody checked
+  (`@homebrew-tap-stale`).
+  - **A zero asset count is ambiguous** — "CI still building", "CI died", and
+    "CI never ran" look identical from the destination. Resolve it at the
+    *delegated run*, not the destination: `gh run list --workflow=release.yml
+    --limit 1` then `gh run view <id> --json jobs` for the per-job breakdown. A
+    cancelled build job skips every downstream job (`host`,
+    `publish-homebrew-formula`), so there is no Release **and** a stale tap.
+  - **Recovery for a cancelled/failed dist workflow is `gh run rerun <id>
+    --failed`.** The crates.io publish and the tag are already done and are
+    irreversible — never re-cut, never re-tag. Re-run only the delegated build.
+  - **crates.io's API returns `null` for every field without a `User-Agent`
+    header.** `curl -s -H 'User-Agent: <anything>'
+    https://crates.io/api/v1/crates/issuectl | jq -r '.crate.max_version'`. A
+    bare `curl` will make a successful publish look like a failed one.
 - **Homebrew publishing is cargo-dist's, driven by `dist-workspace.toml`**
   (`homebrew` installer + `tap` + `publish-jobs`; `HOMEBREW_TAP_TOKEN` is
   configured on the repo). The contract's `distribution:` block declares this
