@@ -172,6 +172,7 @@ pub(crate) fn apply_via(
     }
 
     if legacy_dirs.is_empty() {
+        apply_inbox_migration(repo_root, &mut actions, &mut outcome, lock);
         return Ok(outcome);
     }
 
@@ -228,7 +229,39 @@ pub(crate) fn apply_via(
     // run. Idempotent and best-effort.
     crate::migrate_layout::prune_empty_legacy_parents(&repo_root.join("issues"));
 
+    apply_inbox_migration(repo_root, &mut actions, &mut outcome, lock);
     Ok(outcome)
+}
+
+/// Promote every stranded inbox draft through the same lock-aware mutation
+/// body as the deprecated `triage` compatibility command. Earlier doctor
+/// phases may rewrite these item files in place; moving them last keeps those
+/// scan-time paths valid throughout the rest of the pipeline.
+pub(crate) fn apply_inbox_migration(
+    repo_root: &Path,
+    actions: &mut DoctorActions,
+    outcome: &mut ApplyOutcome,
+    lock: &crate::mutate::WriteLock,
+) {
+    for (slug, _) in std::mem::take(&mut actions.inbox_drafts) {
+        match crate::mutate::triage::triage_locked(repo_root, &slug, lock) {
+            Ok(migrated) => outcome.inbox_drafts_migrated.push(migrated),
+            Err(error) => {
+                outcome.apply_error = Some(format!(
+                    "failed to migrate deprecated inbox draft {slug}: {error}"
+                ));
+                return;
+            }
+        }
+    }
+    let inbox = repo_root.join("issues").join(crate::repo::INBOX_DIR);
+    if inbox.is_dir()
+        && fs::read_dir(&inbox)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false)
+    {
+        let _ = fs::remove_dir(inbox);
+    }
 }
 
 /// Apply the Notes → Comments rename to every slug in

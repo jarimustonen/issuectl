@@ -727,8 +727,10 @@ If the user asks to "check the repo" or "migrate legacy issues", use
 
 Doctor migrates legacy `<NN>-<slug>/` directories to slug-only layout,
 rewrites `number:` → `slug:` in frontmatter, migrates `epic:` and
-`related:` references, and rewrites `#NN` body refs to `@<slug>`. It
-also flags invalid slugs, duplicates, missing item.md files, orphan
+`related:` references, rewrites `#NN` body refs to `@<slug>`, and promotes
+stranded `issues/inbox/<slug>/` drafts into the canonical flat layout. The
+inbox path is deprecated; new reception items use `issuectl intake file`.
+It also flags invalid slugs, duplicates, missing item.md files, orphan
 epic refs, self-dependencies in `blocked_by:`, and residual uses of the retired
 `deferred` lifecycle label. The JSON report exposes those as `blocked_by_self`
 and `deferred_labels`; `--fix` removes the retired label without changing the

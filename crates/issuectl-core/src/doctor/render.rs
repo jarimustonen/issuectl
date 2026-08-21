@@ -9,6 +9,8 @@ pub(crate) fn render_text(
     let outcome_default = ApplyOutcome::default();
     let oc = outcome.unwrap_or(&outcome_default);
     let has_problems = !report.legacy_dirs.is_empty()
+        || !report.inbox_drafts.is_empty()
+        || !oc.inbox_drafts_migrated.is_empty()
         || !planned_moves(report).is_empty()
         || !oc.flat_layout_migrated.is_empty()
         || !report.flat_layout_conflicts.is_empty()
@@ -78,6 +80,25 @@ pub(crate) fn render_text(
             println!("Repository OK — no migrations or fixes needed.");
         }
         return;
+    }
+
+    if !oc.inbox_drafts_migrated.is_empty() {
+        println!("Migrated deprecated inbox drafts to the flat layout:");
+        for draft in &oc.inbox_drafts_migrated {
+            println!(
+                "  {}  ({} → {})",
+                draft.slug,
+                draft.from.display(),
+                draft.to.display()
+            );
+        }
+        println!();
+    } else if !report.inbox_drafts.is_empty() {
+        println!("Deprecated inbox drafts (re-run with --fix to migrate):");
+        for (slug, _) in &report.inbox_drafts {
+            println!("  {slug}");
+        }
+        println!();
     }
 
     if !oc.flat_layout_migrated.is_empty() {
@@ -462,6 +483,22 @@ pub(crate) fn render_json(
 ) -> serde_json::Value {
     let outcome_default = ApplyOutcome::default();
     let oc = outcome.unwrap_or(&outcome_default);
+    let inbox_drafts: Vec<serde_json::Value> = report
+        .inbox_drafts
+        .iter()
+        .map(|(slug, path)| serde_json::json!({"slug": slug, "dir": rel(repo_root, path)}))
+        .collect();
+    let inbox_drafts_migrated: Vec<serde_json::Value> = oc
+        .inbox_drafts_migrated
+        .iter()
+        .map(|draft| {
+            serde_json::json!({
+                "slug": draft.slug,
+                "from": rel(repo_root, &draft.from),
+                "to": rel(repo_root, &draft.to),
+            })
+        })
+        .collect();
     let migrated_legacy: Vec<serde_json::Value> = oc
         .legacy_dirs_migrated
         .iter()
@@ -674,6 +711,14 @@ pub(crate) fn render_json(
     // BTreeMap, so insertion order does not affect the rendered output.
     if let serde_json::Value::Object(map) = &mut json_obj {
         map.insert(
+            "inbox_drafts".to_string(),
+            serde_json::Value::Array(inbox_drafts),
+        );
+        map.insert(
+            "inbox_drafts_migrated".to_string(),
+            serde_json::Value::Array(inbox_drafts_migrated.clone()),
+        );
+        map.insert(
             "large_binaries".to_string(),
             serde_json::Value::Array(large_binaries),
         );
@@ -723,6 +768,7 @@ pub(crate) fn render_json(
                     "stop_phase": oc.stop_phase.as_str(),
                     "blockers": oc.blockers,
                     "schema_bootstrapped": oc.schema_bootstrapped,
+                    "inbox_drafts_migrated": inbox_drafts_migrated,
                     "agents_md_regenerated": oc.agents_md_regenerated,
                     "issues_agents_md_rewritten": oc.issues_agents_md_rewritten,
                     "deferred_labels_removed": oc.deferred_labels_removed,

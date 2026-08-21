@@ -147,6 +147,11 @@ pub(crate) fn populate_slug_and_legacy(
 
     for s in &scan.issues {
         let location = format!("{}/{}", s.folder, s.dir_name);
+        if s.folder == "inbox" && s.item_present {
+            report
+                .inbox_drafts
+                .push((s.dir_name.clone(), s.dir_path.clone()));
+        }
         if let Some(number) = s.legacy_number {
             let new_slug = slug::generate_unique(repo_root);
             // Always migrate to the canonical flat path — even if the
@@ -210,6 +215,7 @@ pub(crate) fn populate_slug_and_legacy(
             report.duplicate_slugs.push(slug_name.clone());
         }
     }
+    report.inbox_drafts.sort();
 }
 
 /// Orphan epic-reference detection. Uses the cached parser output for

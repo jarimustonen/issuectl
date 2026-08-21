@@ -1,7 +1,12 @@
 # Standard intake flow (design)
 
-> **Status: APPROVED (2026-08-04).** The user reviewed this design and settled
-> every open decision — see [Approved decisions](#approved-decisions-2026-08-04)
+> **Status: APPROVED (2026-08-04), amended by ADR 0004.** The user reviewed this
+> design and settled every open decision. ADR 0004 later retired the optional
+> `issues/inbox/` draft path: new reception items are flat `untriaged` issues,
+> `scan-todos --file-intake` uses `intake file`, and `doctor --fix` migrates
+> stranded drafts during the deprecation window. Historical inbox alternatives
+> below remain as decision context, not current guidance. See
+> [Approved decisions](#approved-decisions-2026-08-04)
 > immediately below, which is now authoritative where it differs from a section's
 > in-body recommendation. Implementation may proceed against the approved shape.
 > This document is the deliverable for issue `standard-intake-flow`. It was

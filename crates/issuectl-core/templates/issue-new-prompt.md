@@ -10,8 +10,9 @@ never to this skill.
 
 `issuectl intake file` creates the item directly in the **`untriaged`**
 reception state; the filing agent never names the entry state and cannot spoof
-lifecycle fields. Your job is to capture the report faithfully and hand it to
-that one command.
+lifecycle fields. It is the sole reception filing path — never use the deprecated
+`create --inbox` path. Your job is to capture the report faithfully and hand it
+to that one command.
 
 Arguments: `$ARGUMENTS`
 

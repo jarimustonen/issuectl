@@ -472,7 +472,7 @@ pub(crate) struct TodoHit {
     context: String,
 }
 
-pub(crate) fn cmd_scan_todos(json: bool, create_inbox: bool) -> Result<()> {
+pub(crate) fn cmd_scan_todos(json: bool, file_intake: bool) -> Result<()> {
     let root = find_root();
     let issues = repo::load_issues(&root);
     // Build slug -> closing-or-not map.
@@ -519,7 +519,7 @@ pub(crate) fn cmd_scan_todos(json: bool, create_inbox: bool) -> Result<()> {
         }
     }
 
-    if create_inbox {
+    if file_intake {
         let untracked: Vec<&TodoHit> = hits.iter().filter(|h| h.status == "untracked").collect();
         for h in untracked {
             let title = if h.context.is_empty() {
@@ -527,36 +527,32 @@ pub(crate) fn cmd_scan_todos(json: bool, create_inbox: bool) -> Result<()> {
             } else {
                 h.context.clone()
             };
-            let args = mutate::new_issue::NewArgs {
+            let source_ref = format!("{}:{}", h.file.display(), h.line);
+            let request = mutate::intake::FileRequest {
                 issue_type: "task".into(),
-                title: title.clone(),
-                priority: "normal".into(),
-                description: Some(format!(
-                    "_Source: {}:{}_\n\n```\n{}\n```\n",
-                    h.file.display(),
-                    h.line,
+                title,
+                body: Some(format!(
+                    "_Source: {source_ref}_\n\n```\n{}\n```\n",
                     h.context
                 )),
-                inbox: true,
-                ..mutate::new_issue::NewArgs::default()
+                reporter: None,
+                provenance: "scan-todos".into(),
+                provenance_detail: None,
+                source_ref: Some(source_ref.clone()),
+                priority: Some("normal".into()),
+                slug: None,
+                labels: vec![],
+                fields: vec![],
             };
-            match do_new(&root, args) {
+            match mutate::intake::file(&root, request) {
                 Ok(out) => {
                     if !json {
-                        println!(
-                            "  + inbox draft {} for {}:{}",
-                            out.slug,
-                            h.file.display(),
-                            h.line
-                        );
+                        let action = if out.deduplicated { "found" } else { "filed" };
+                        println!("  + {action} intake item {} for {source_ref}", out.slug);
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "warn: could not create inbox draft for {}:{}: {e:#}",
-                        h.file.display(),
-                        h.line
-                    );
+                    eprintln!("warning: could not file intake item for {source_ref}: {e}");
                 }
             }
         }

@@ -98,11 +98,9 @@ terminal too, but the design centre is the agent.
   every query-matched issue under a single repo-wide lock;
   `--dry-run` shows the per-issue diff.
 - `pick [QUERY]` — interactive fuzzy picker; prints the chosen slug.
-- `triage` / `create --inbox` — `issues/inbox/<slug>/` landing zone for
-  drafts; `triage <slug>` promotes one to the canonical layout.
 - `scan-todos` — finds `// TODO(issue: <slug>)` markers in source;
-  reports stale, untracked, and unknown hits;
-  `--create-inbox` files untracked ones.
+  reports stale, untracked, and unknown hits; `--file-intake` files
+  untracked findings through the standard intake flow.
 - `completions {bash,zsh,fish,powershell,elvish}` — shell completion
   scripts with dynamic value completion for slugs / statuses /
   labels / users.
@@ -528,13 +526,18 @@ slugs plus a per-issue unified diff.
 
 ```sh
 issuectl doctor                          # read-only health report
-issuectl doctor --fix                    # apply migrations + alias coercions + AGENTS.md regen
+issuectl doctor --fix                    # apply migrations, including stranded inbox drafts
 issuectl stale --days 90                 # issues with no recent activity
 issuectl archive --older-than 180        # move old closed issues to issues/archive/YYYY/MM/
 issuectl rename old-slug new-slug        # rewrites every reference across the repo
 issuectl fmt [--check] [--diff]          # normalise on-disk files
-issuectl scan-todos [--create-inbox]     # find TODO(issue:slug) markers in source
+issuectl scan-todos [--file-intake]      # optionally file untracked TODOs into intake
 ```
+
+`triage`, `create --inbox`, and `scan-todos --create-inbox` are deprecated
+in 0.17.0 and scheduled for removal in 0.18.0. They remain compatible during
+the warning window; `doctor --fix` safely promotes any stranded
+`issues/inbox/<slug>/` drafts.
 
 `doctor --fix` is conservative: notes/comments merges that need
 human judgement, malformed `AGENTS.md`, schema parse errors are

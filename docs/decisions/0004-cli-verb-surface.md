@@ -114,7 +114,7 @@ queries, not synonyms.
 Hidden completion helpers are implementation details and are not surface
 commands. The current `new`, `comment`, and hidden `ls` aliases are covered above even
 though clap does not list them as separate command rows. `ls` is an
-alias-then-remove spelling of `list` in the same 0.16.0 → 0.17.0 window.
+alias-then-remove spelling of `list` in the same 0.17.0 → 0.18.0 window.
 
 ### New top-level verb policy
 
@@ -139,21 +139,21 @@ contract. Permanent synonyms are forbidden.
 The target releases are deliberately batched to avoid maintaining several
 half-converted surfaces:
 
-- **0.15.0, preparation:** fix `@intake-queue-legacy-mismatch`; add the
+- **0.16.0, preparation:** fix `@intake-queue-legacy-mismatch`; add the
   canonical replacement forms, doctor inbox migration/check, and tests. No
   deprecated spelling is removed.
-- **0.16.0, deprecation release:** hide each folded command and alias it to
+- **0.17.0, deprecation release:** hide each folded command and alias it to
   its replacement. `triage`, `pick`, `new`, and `comment` follow the same
   treatment. CSV/Markdown `export` formats and `scan-todos --create-inbox`
   are deprecated aliases. Ship canonical-only help, completions, and all six
-  skill-template updates in this release, and name 0.17.0 as removal.
-- **0.17.0, removal release:** remove the deprecated command/format/flag
+  skill-template updates in this release, and name 0.18.0 as removal.
+- **0.18.0, removal release:** remove the deprecated command/format/flag
   implementations, inbox writers and discovery after migration coverage is
   proven, and batch the resulting breaking changes in the changelog.
-- **0.18.0:** remove any compatibility tombstone that recognized a removed
+- **0.19.0:** remove any compatibility tombstone that recognized a removed
   spelling solely to return a targeted `deprecated-verb-removed` error.
 
-During 0.16.0 every deprecated invocation remains behaviorally equivalent and
+During 0.17.0 every deprecated invocation remains behaviorally equivalent and
 exits as before. Text mode writes `warning:` to stderr; `--json` puts a
 structured warning in the successful stdout envelope with a deprecation id,
 replacement argv, and removal version. `ISSUECTL_NO_DEPRECATION_WARNINGS=1`

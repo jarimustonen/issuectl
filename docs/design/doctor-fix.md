@@ -6,7 +6,7 @@ Reference for `doctor --fix`'s apply pipeline. Origin issues:
 ## Forward-progress only
 
 When the apply pipeline mutates the repo (flat-layout migration, status
-reconciliation, notes rename, ...) and a *later* phase finds a new critical
+reconciliation, notes rename, deprecated inbox-draft promotion, ...) and a *later* phase finds a new critical
 blocker, doctor bails with the partial progress intact rather than rolling
 back. Rolling back N already-completed renames is itself a multi-step
 operation that can fail mid-rollback. The `apply_outcome` JSON envelope
@@ -19,6 +19,11 @@ carries both the work that landed and the new blockers, distinguished by
 - `"post_apply"` — partial-progress bail; some writes already landed
   (`fix_applied: true`, `blockers != []`). The user resolves the blockers and
   re-runs `--fix`.
+
+Inbox promotion runs under the same repo lock and uses the same lock-aware move
+as the deprecated `triage` command. It runs after item rewrites so scan-time
+`issues/inbox/<slug>/item.md` paths remain valid; the post-run scan then reports
+the canonical flat paths.
 
 Scripted callers should branch on `stop_phase` rather than infer from
 `blockers` + `fix_applied`.

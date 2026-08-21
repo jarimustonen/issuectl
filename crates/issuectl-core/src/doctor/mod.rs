@@ -157,6 +157,13 @@ fn scan_issues(repo_root: &Path) -> Result<ScanResult> {
         &mut symlinked_dirs,
         &mut tempfiles,
     )?;
+    collect_issue_dir(
+        &issues_dir.join(crate::repo::INBOX_DIR),
+        "inbox",
+        &mut issues,
+        &mut symlinked_dirs,
+        &mut tempfiles,
+    )?;
     Ok(ScanResult {
         issues,
         symlinked_dirs,
@@ -194,7 +201,12 @@ fn collect_issue_dir(
         if !ftype.is_dir() {
             continue;
         }
-        if folder == "flat" && (name == "open" || name == "closed" || name == "archive") {
+        if folder == "flat"
+            && (name == "open"
+                || name == "closed"
+                || name == "archive"
+                || name == crate::repo::INBOX_DIR)
+        {
             continue;
         }
         // Tempfiles can also live next to item.md.
@@ -265,6 +277,10 @@ struct LegacyMigration {
 #[derive(Debug, Default)]
 struct DoctorFindings {
     legacy_dirs: Vec<LegacyMigration>,
+    /// Stranded drafts under the deprecated `issues/inbox/<slug>/` zone.
+    /// Warning-only and auto-fixable: `doctor --fix` promotes each draft to
+    /// the canonical flat layout without changing its frontmatter.
+    inbox_drafts: Vec<(String, PathBuf)>,
     /// Slug-shaped issues still living under `issues/{open,closed}/<slug>/`
     /// (post-flat-layout legacy). Planned moves to `issues/<slug>/`.
     /// Pending migration plan from `plan_migrate_layout`. Held opaque
@@ -437,6 +453,7 @@ struct DoctorFindings {
 #[derive(Debug, Default)]
 struct DoctorActions {
     legacy_dirs: Vec<LegacyMigration>,
+    inbox_drafts: Vec<(String, PathBuf)>,
     flat_layout_plan: Option<MigrateLayoutPlan>,
     notes_to_rename: Vec<String>,
     /// Slugs with an ambiguous legacy-section shape (multiple
@@ -480,6 +497,7 @@ impl DoctorActions {
         let preflight_blockers = apply_blockers(findings);
         DoctorActions {
             legacy_dirs: std::mem::take(&mut findings.legacy_dirs),
+            inbox_drafts: std::mem::take(&mut findings.inbox_drafts),
             flat_layout_plan: findings.flat_layout_plan.take(),
             notes_to_rename: std::mem::take(&mut findings.notes_to_rename),
             // Taken (not cloned): `run()` unconditionally re-scans
@@ -562,6 +580,7 @@ struct ApplyOutcome {
     /// See `StopPhase`. Default `Ok`.
     stop_phase: StopPhase,
     legacy_dirs_migrated: Vec<LegacyMigration>,
+    inbox_drafts_migrated: Vec<crate::mutate::triage::TriageOutcome>,
     flat_layout_migrated: Vec<MigrateMove>,
     notes_renamed: Vec<String>,
     orphan_tempfiles_removed: Vec<PathBuf>,
@@ -601,6 +620,7 @@ impl ApplyOutcome {
     /// and three other functions.
     fn fix_applied(&self) -> bool {
         !self.legacy_dirs_migrated.is_empty()
+            || !self.inbox_drafts_migrated.is_empty()
             || !self.flat_layout_migrated.is_empty()
             || !self.notes_renamed.is_empty()
             || !self.orphan_tempfiles_removed.is_empty()
@@ -660,6 +680,7 @@ impl ApplyOutcome {
     /// preflight pass.
     fn fix_applied_beyond_schema_bootstrap(&self) -> bool {
         !self.legacy_dirs_migrated.is_empty()
+            || !self.inbox_drafts_migrated.is_empty()
             || !self.flat_layout_migrated.is_empty()
             || !self.notes_renamed.is_empty()
             || !self.orphan_tempfiles_removed.is_empty()

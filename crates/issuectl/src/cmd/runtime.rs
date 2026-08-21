@@ -564,6 +564,15 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             check_duplicates,
             inbox,
         } => {
+            if inbox {
+                emit_deprecation_warning(
+                    json_output,
+                    "create-inbox",
+                    "`issuectl create --inbox`",
+                    &["issuectl", "intake", "file"],
+                    None,
+                );
+            }
             // `--body-file` is a body source that conflicts with
             // `--description`/`--body` at the clap layer, so at most one
             // is set. Reading the file (or stdin for `-`) here — before
@@ -944,11 +953,34 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 default_type,
             } => cmd_import_github(json_output, &repo, &state, limit, &default_type),
         },
-        Command::Triage { slug } => cmd_triage(json_output, slug),
+        Command::Triage { slug } => {
+            emit_deprecation_warning(
+                json_output,
+                "triage-command",
+                "`issuectl triage`",
+                &["issuectl", "doctor", "--fix"],
+                Some("then process the migrated item with `issuectl intake queue` and `issuectl intake accept` (or another intake disposition)"),
+            );
+            cmd_triage(json_output, slug)
+        }
         Command::Pick { query, all, first } => cmd_pick(json_output, query, all, first),
         Command::Completions { shell } => cmd_completions(shell),
         Command::CompleteValues { kind } => cmd_complete_values(kind),
-        Command::ScanTodos { create_inbox } => cmd_scan_todos(json_output, create_inbox),
+        Command::ScanTodos {
+            file_intake,
+            create_inbox,
+        } => {
+            if create_inbox {
+                emit_deprecation_warning(
+                    json_output,
+                    "scan-todos-create-inbox",
+                    "`issuectl scan-todos --create-inbox`",
+                    &["issuectl", "scan-todos", "--file-intake"],
+                    None,
+                );
+            }
+            cmd_scan_todos(json_output, file_intake || create_inbox)
+        }
         Command::Activity { since, limit } => cmd_activity(json_output, since, limit),
         Command::Timeline { slug } => cmd_timeline(json_output, &slug),
         Command::Changelog { range } => cmd_changelog(json_output, &range),

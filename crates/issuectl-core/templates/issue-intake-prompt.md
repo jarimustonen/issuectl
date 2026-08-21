@@ -3,8 +3,10 @@
 
 The standard intake flow (`docs/design/intake-flow.md`) files reports into the
 tracker in the **`untriaged`** reception state (via `/issue-new` / `issuectl
-intake file`). This skill is the next step: **pull the untriaged queue in,
-understand the unclear items, and present them so the user can decide.** You fix
+intake file`). The deprecated `issues/inbox/` path is not a second queue;
+`issuectl doctor --fix` migrates any stranded drafts. This skill is the next
+step: **pull the untriaged queue in, understand the unclear items, and present
+them so the user can decide.** You fix
 nothing and file nothing; you *recommend* a disposition but neither decide nor
 apply it — that is the user's call.
 

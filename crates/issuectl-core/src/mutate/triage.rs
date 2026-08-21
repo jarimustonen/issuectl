@@ -27,8 +27,17 @@ pub struct TriageOutcome {
 /// - `Validation` for missing slug / wrong layout (not in inbox).
 /// - `Validation` if the target flat path already exists.
 pub fn triage(repo_root: &Path, slug: &str) -> Result<TriageOutcome, MutateError> {
-    let _lock = WriteLock::acquire(repo_root).map_err(MutateError::Io)?;
+    let lock = WriteLock::acquire(repo_root).map_err(MutateError::Io)?;
+    triage_locked(repo_root, slug, &lock)
+}
 
+/// Lock-aware body shared with `doctor --fix` while it holds the repository
+/// write lock for its whole migration pipeline.
+pub(crate) fn triage_locked(
+    repo_root: &Path,
+    slug: &str,
+    _lock: &WriteLock,
+) -> Result<TriageOutcome, MutateError> {
     let item_path = match repo::resolve_layout(repo_root, slug) {
         repo::LayoutState::Inbox { item_path } => item_path,
         repo::LayoutState::Absent => return Err(MutateError::NotFound),

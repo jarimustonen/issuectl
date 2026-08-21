@@ -88,7 +88,7 @@ issuectl --json skill list
 
 ## Install or upgrade `issuectl`
 
-This skill was installed for `issuectl 0.15.0`. On the
+This skill was installed for `issuectl 0.16.0`. On the
 first invocation in a session, run `issuectl --version` and compare:
 
 - **Missing**: install one of:
@@ -96,12 +96,12 @@ first invocation in a session, run `issuectl --version` and compare:
   - **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
   - **Shell installer** (no toolchain):
     `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
-- **Older than `0.15.0`**: tell the user the skill expects
-  `0.15.0` and suggest upgrading via the same channel
+- **Older than `0.16.0`**: tell the user the skill expects
+  `0.16.0` and suggest upgrading via the same channel
   they originally used (`brew upgrade jarimustonen/issuectl/issuectl`,
   `cargo install issuectl --force`, or re-run the shell installer).
   Stop and wait — schema/CLI surface may have changed.
-- **Newer than `0.15.0`**: the installed binary is ahead
+- **Newer than `0.16.0`**: the installed binary is ahead
   of what this skill was written for. Tell the user to refresh the
   skill so the instructions match the CLI surface they actually have:
   `issuectl skill install --force` (Claude Code; add `--agent codex`
@@ -727,8 +727,10 @@ If the user asks to "check the repo" or "migrate legacy issues", use
 
 Doctor migrates legacy `<NN>-<slug>/` directories to slug-only layout,
 rewrites `number:` → `slug:` in frontmatter, migrates `epic:` and
-`related:` references, and rewrites `#NN` body refs to `@<slug>`. It
-also flags invalid slugs, duplicates, missing item.md files, orphan
+`related:` references, rewrites `#NN` body refs to `@<slug>`, and promotes
+stranded `issues/inbox/<slug>/` drafts into the canonical flat layout. The
+inbox path is deprecated; new reception items use `issuectl intake file`.
+It also flags invalid slugs, duplicates, missing item.md files, orphan
 epic refs, self-dependencies in `blocked_by:`, and residual uses of the retired
 `deferred` lifecycle label. The JSON report exposes those as `blocked_by_self`
 and `deferred_labels`; `--fix` removes the retired label without changing the

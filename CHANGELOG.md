@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The legacy inbox reception path is deprecated for 0.17.0.** `triage`,
+  `create --inbox`, and `scan-todos --create-inbox` remain compatible for one
+  warning-bearing release and are scheduled for removal in 0.18.0. The new
+  `scan-todos --file-intake` files untracked findings through `intake file`
+  with stable source-reference deduplication, and `doctor --fix` promotes
+  stranded `issues/inbox/<slug>/` drafts without changing their frontmatter.
+
 ## [0.16.0] - 2026-08-19
 
 ### Added

@@ -16,6 +16,48 @@ use issuectl_core::{
 use mutate::new_issue::{do_new, NewArgs};
 
 static JSON_OUTPUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PENDING_WARNINGS: std::sync::OnceLock<std::sync::Mutex<Vec<serde_json::Value>>> =
+    std::sync::OnceLock::new();
+
+const DEPRECATED_SURFACE_REMOVAL_VERSION: &str = "0.18.0";
+
+fn deprecation_warnings_suppressed() -> bool {
+    std::env::var("ISSUECTL_NO_DEPRECATION_WARNINGS").as_deref() == Ok("1")
+}
+
+fn emit_deprecation_warning(
+    json: bool,
+    id: &str,
+    deprecated: &str,
+    replacement_argv: &[&str],
+    additional_guidance: Option<&str>,
+) {
+    if deprecation_warnings_suppressed() {
+        return;
+    }
+    let mut message = format!(
+        "{deprecated} is deprecated and will be removed in issuectl {DEPRECATED_SURFACE_REMOVAL_VERSION}; use `{}` instead",
+        replacement_argv.join(" ")
+    );
+    if let Some(guidance) = additional_guidance {
+        message.push_str("; ");
+        message.push_str(guidance);
+    }
+    if json {
+        PENDING_WARNINGS
+            .get_or_init(Default::default)
+            .lock()
+            .expect("warning mutex poisoned")
+            .push(serde_json::json!({
+                "id": id,
+                "message": message,
+                "replacement_argv": replacement_argv,
+                "removal_version": DEPRECATED_SURFACE_REMOVAL_VERSION,
+            }));
+    } else {
+        eprintln!("warning: {message}");
+    }
+}
 
 /// Emit one canonical JSON success envelope when `--json` is active. Command
 /// handlers still render their domain result normally, keeping dispatch thin;
@@ -29,9 +71,15 @@ fn emit_stdout(value: String, newline: bool) {
             return;
         }
         let data = serde_json::from_str(&value).unwrap_or(serde_json::Value::String(value));
-        let rendered = envelope::success(&data)
-            .and_then(|value| serde_json::to_string_pretty(&value))
-            .expect("JSON envelope must serialize");
+        let mut enveloped = envelope::success(&data).expect("JSON envelope must serialize");
+        if let Some(pending) = PENDING_WARNINGS.get() {
+            let mut pending = pending.lock().expect("warning mutex poisoned");
+            if let Some(warnings) = enveloped["warnings"].as_array_mut() {
+                warnings.append(&mut pending);
+            }
+        }
+        let rendered =
+            serde_json::to_string_pretty(&enveloped).expect("JSON envelope must serialize");
         let mut stdout = std::io::stdout().lock();
         let _ = newline;
         writeln!(stdout, "{rendered}").expect("stdout must be writable");
@@ -576,10 +624,9 @@ pub(crate) enum Command {
         #[arg(long = "check-duplicates")]
         check_duplicates: bool,
 
-        /// Drop the new issue under `issues/inbox/<slug>/` as a draft.
-        /// Inbox drafts stay out of `ls` by default; promote one to the
-        /// canonical flat layout with `issuectl triage <slug>`.
-        #[arg(long)]
+        /// Deprecated: create an inbox draft. Use `intake file`; existing
+        /// inbox drafts are migrated by `doctor --fix`.
+        #[arg(long, hide = true)]
         inbox: bool,
     },
 
@@ -1370,9 +1417,8 @@ pub(crate) enum Command {
         closed: bool,
     },
 
-    /// Promote a draft issue from `issues/inbox/<slug>/` to the
-    /// canonical flat `issues/<slug>/` layout. Without a slug, lists
-    /// the current inbox drafts.
+    /// Deprecated inbox-draft compatibility command
+    #[command(hide = true)]
     Triage {
         /// Inbox slug to promote. Omit to list inbox drafts.
         #[arg(value_parser = parse_slug_arg)]
@@ -1433,14 +1479,15 @@ pub(crate) enum Command {
     /// Walk repository source files and report `TODO(issue: <slug>)`
     /// markers. Categorises each hit as `tracked` (slug → open issue),
     /// `stale` (slug → closed issue), `unknown` (slug not found), or
-    /// `untracked` (marker without a slug). With `--create-inbox` every
-    /// `untracked` hit is materialised as a fresh draft under
-    /// `issues/inbox/<slug>/` whose body links back to the source line.
+    /// `untracked` (marker without a slug).
     ScanTodos {
-        /// Create an inbox draft per untracked TODO hit. The source
-        /// path:line and surrounding context land in the draft body so
-        /// the user can `issuectl triage` it later.
-        #[arg(long = "create-inbox")]
+        /// File every untracked TODO through the standard intake flow
+        /// with provenance `scan-todos` and a stable source reference.
+        #[arg(long = "file-intake")]
+        file_intake: bool,
+
+        /// Deprecated alias for `--file-intake`.
+        #[arg(long = "create-inbox", hide = true)]
         create_inbox: bool,
     },
 

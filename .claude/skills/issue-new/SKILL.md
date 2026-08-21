@@ -15,8 +15,9 @@ never to this skill.
 
 `issuectl intake file` creates the item directly in the **`untriaged`**
 reception state; the filing agent never names the entry state and cannot spoof
-lifecycle fields. Your job is to capture the report faithfully and hand it to
-that one command.
+lifecycle fields. It is the sole reception filing path — never use the deprecated
+`create --inbox` path. Your job is to capture the report faithfully and hand it
+to that one command.
 
 Arguments: `$ARGUMENTS`
 
@@ -153,7 +154,7 @@ the `deduplicated` flag so the caller can branch.
 
 ## Install or upgrade `issuectl`
 
-This skill was installed for `issuectl 0.15.0` and drives the
+This skill was installed for `issuectl 0.16.0` and drives the
 `issuectl intake` command group (issuectl ≥ 0.6.6). On first use in a session, run
 `issuectl --version`; if `intake` is missing (`issuectl intake --help` errors), the
 binary is too old — tell the user to upgrade (`brew upgrade
