@@ -6,6 +6,11 @@ reporter: jari
 status: in-progress
 priority: normal
 lane: verb-surface
+commits:
+- hash: 97ae6ea
+  summary: mark work in progress and clear intake labels
+- hash: 485b001
+  summary: add stdin transactional patch input and diagnostics
 ---
 
 # apply: accept a patch from stdin or inline JSON, not only a file path
@@ -68,3 +73,9 @@ temp-file round trip from the inline-argument angle. Two extra asks come with it
 
 Original inline-JSON provenance: hit 2026-08-20 while wiring a `blocked_by` edge between two
 issues in the `glasspad` repo during a stint handoff.
+
+## Decisions
+
+### 2026-08-21T08:15:13Z · @agent
+
+Inline JSON argv was declined: stdin already provides temp-file-free composition while avoiding a second, shell-quoting-sensitive positional grammar. JSON remains accepted from both supported sources (a path or stdin). Bare unsupported tokens now name those accepted forms; path-shaped missing files retain the useful file diagnostic.
