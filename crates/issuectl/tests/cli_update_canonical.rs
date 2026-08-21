@@ -148,9 +148,7 @@ fn patch_file_matches_apply_for_mutation_output_and_conflict() {
     let patch = tmp.path().join("patch.yaml");
     std::fs::write(
         &patch,
-        format!(
-            "slug: patch-target\nexpected_version: {version}\npriority: high\nbody_ops:\n  - append_note:\n      author: ci-bot\n      message: all green\n"
-        ),
+        format!("slug: patch-target\nexpected_version: {version}\npriority: high\n"),
     )
     .unwrap();
     let patch_s = patch.to_string_lossy();
@@ -193,7 +191,8 @@ fn stdin_patch_matches_apply_and_update_for_dry_run_and_write() {
     let shown = run(&apply_root, &["show", "stdin-target"]);
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
     let version = shown["data"]["version"].as_str().unwrap();
-    let patch = format!("slug: stdin-target\nexpected_version: {version}\npriority: high\n");
+    let patch =
+        format!(r#"{{"slug":"stdin-target","expected_version":"{version}","priority":"high"}}"#);
 
     let before = item(&apply_root, "stdin-target");
     let apply_dry = run_stdin(&apply_root, &["apply", "-", "--dry-run"], &patch);
@@ -228,12 +227,19 @@ fn malformed_and_unsupported_patch_inputs_have_parity_and_clear_errors() {
     let update = run_stdin(&update_root, &["update", "--patch-file", "-"], "{not valid");
     assert_same_error_bytes(&apply, &update);
     let malformed: Value = serde_json::from_slice(&apply.stderr).unwrap();
-    assert!(malformed["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("YAML or JSON"));
+    let malformed_message = malformed["error"]["message"].as_str().unwrap();
+    assert!(malformed_message.contains("YAML or JSON"));
+    assert!(malformed_message.contains("from stdin"));
 
-    let inline = r#"{"slug":"some-issue"}"#;
+    let empty = run_stdin(&apply_root, &["apply", "-"], "");
+    assert_eq!(empty.status.code(), Some(1), "{empty:?}");
+    let empty_message = String::from_utf8(empty.stderr).unwrap();
+    assert!(
+        empty_message.contains("from stdin is empty"),
+        "{empty_message}"
+    );
+
+    let inline = r#"{"slug":"some-issue","url":"https://example.test/a.b"}"#;
     let apply = run(&apply_root, &["apply", inline]);
     let update = run(&update_root, &["update", "--patch-file", inline]);
     assert_same_error_bytes(&apply, &update);
@@ -242,7 +248,7 @@ fn malformed_and_unsupported_patch_inputs_have_parity_and_clear_errors() {
         "patch file path",
         "`-`",
         "`./-`",
-        "inline JSON is not accepted",
+        "inline patch input is not accepted",
     ] {
         assert!(
             unsupported.contains(accepted),
@@ -250,10 +256,12 @@ fn malformed_and_unsupported_patch_inputs_have_parity_and_clear_errors() {
         );
     }
 
-    let missing = run(&apply_root, &["apply", "missing.yaml"]);
-    let message = String::from_utf8(missing.stderr).unwrap();
+    let apply = run(&apply_root, &["apply", "missing-patch"]);
+    let update = run(&update_root, &["update", "--patch-file", "missing-patch"]);
+    assert_same_error_bytes(&apply, &update);
+    let message = String::from_utf8(apply.stderr).unwrap();
     assert!(
-        message.contains("cannot read patch file missing.yaml"),
+        message.contains("cannot read patch file missing-patch"),
         "{message}"
     );
 }
@@ -285,6 +293,30 @@ fn literal_dash_file_is_addressable_as_dot_slash_dash() {
         &update_root,
         &["update", "--patch-file", "./-"],
     );
+    assert!(item(&apply_root, "dash-file-target").contains("priority: high"));
+    assert!(item(&update_root, "dash-file-target").contains("priority: high"));
+
+    // Even while the literal file exists, bare `-` remains stdin rather than
+    // falling back to that file. Give the two sources different priorities so
+    // the persisted result proves which one won.
+    let shown = run(&apply_root, &["show", "dash-file-target"]);
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let version = shown["data"]["version"].as_str().unwrap();
+    let file_patch =
+        format!(r#"{{"slug":"dash-file-target","expected_version":"{version}","priority":"low"}}"#);
+    std::fs::write(apply_root.join("-"), &file_patch).unwrap();
+    std::fs::write(update_root.join("-"), &file_patch).unwrap();
+    let stdin_patch = format!(
+        r#"{{"slug":"dash-file-target","expected_version":"{version}","priority":"normal"}}"#
+    );
+    let apply = run_stdin(&apply_root, &["apply", "-"], &stdin_patch);
+    let update = run_stdin(&update_root, &["update", "--patch-file", "-"], &stdin_patch);
+    assert_eq!(
+        normalized_json(&apply, &apply_root),
+        normalized_json(&update, &update_root)
+    );
+    assert!(item(&apply_root, "dash-file-target").contains("priority: normal"));
+    assert!(item(&update_root, "dash-file-target").contains("priority: normal"));
 }
 
 #[test]

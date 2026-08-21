@@ -212,7 +212,13 @@ pub(crate) fn cmd_depend(
 }
 
 pub(crate) fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
-    let (slug, mut req) = patch_input::read_and_parse(patch_path, &mut std::io::stdin(), json)?;
+    let stdin = std::io::stdin();
+    let policy = if json {
+        patch_input::ExpectedVersionPolicy::Required
+    } else {
+        patch_input::ExpectedVersionPolicy::Optional
+    };
+    let (slug, mut req) = patch_input::read_and_parse(patch_path, &mut stdin.lock(), policy)?;
     req.dry_run = dry_run;
     let root = find_root();
     let outcome = mutate::update_issue(&root, &slug, req).map_err(anyhow::Error::new)?;
@@ -474,7 +480,12 @@ pub(crate) fn parse_apply_patch(
     text: &str,
     json: bool,
 ) -> Result<(String, mutate::UpdateIssueRequest)> {
-    patch_input::parse(text, json)
+    let policy = if json {
+        patch_input::ExpectedVersionPolicy::Required
+    } else {
+        patch_input::ExpectedVersionPolicy::Optional
+    };
+    patch_input::parse(text, policy)
 }
 
 /// Shared CLI epilogue for the new mutation verbs. On `--dry-run`

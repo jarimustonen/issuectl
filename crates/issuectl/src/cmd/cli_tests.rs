@@ -1673,8 +1673,8 @@ mod tests {
         let yaml = "slug: some-issue\ndry_run: true\npriority: high\n";
         let err = parse_apply_patch(yaml, false).unwrap_err();
         assert!(
-            err.to_string().contains("dry_run") && err.to_string().contains("CLI flag"),
-            "expected dry_run CLI-flag error, got {err}"
+            err.to_string().contains("dry_run") && err.to_string().contains("command-line flag"),
+            "expected dry_run command-line-flag error, got {err}"
         );
     }
 

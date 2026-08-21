@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "source_review": "history/review-apply-patch-from-stdin.md",
+  "head_sha": "9e75f694208b6e3c7e0dde0b8afc35db1dfa479d",
+  "generated_at": "2026-08-21T20:11:33Z",
+  "findings": [
+    {
+      "id": "F1", "cluster_key": "sha1:49061e96f40a33a23aa888e4a796825e63255147", "title": "Path-shape inference misclassifies inputs", "kind": "CODE",
+      "sources": [{"file":"history/review-apply-patch-from-stdin.md","line":9,"section":"Critical Issues (Consensus)","model":null}],
+      "target_file": "crates/issuectl-core/src/patch_input.rs", "target_symbol": "read / looks_path_shaped",
+      "claim": "Path-shape inference rejects valid extensionless missing paths and treats dotted or slashed inline JSON as a file path.",
+      "suggested_fix": "Detect only leading { or [ inline payloads and treat every other non-dash token as a path without an exists preflight.",
+      "confirmation": "CONFIRMED", "likelihood": "REGULAR", "readability": "IMPROVES", "architecture": "MINOR", "confidence": "HIGH", "recommendation": "FIX", "drop_rule": null, "applicability": "clean", "write_up": null, "user_override": false,
+      "evidence": "The committed classifier branches on extension/components and Path::exists, so the examples in the review follow directly. Focused tests now reproduce the formerly misclassified dotted/slashed payload and extensionless path cases."
+    },
+    {
+      "id": "F2", "cluster_key": "sha1:764f414c3b6c4d3c66d267cd5a578e861a941834", "title": "Shared errors are surface-specific and duplicative", "kind": "CODE",
+      "sources": [{"file":"history/review-apply-patch-from-stdin.md","line":18,"section":"Partial-Consensus Findings","model":null}],
+      "target_file": "crates/issuectl-core/src/patch_input.rs", "target_symbol": "read_and_parse / parse",
+      "claim": "The dry_run error recommends update even for apply, and nested contexts repeat patch fields.",
+      "suggested_fix": "Use verb-neutral dry-run guidance and a nonduplicating source context.",
+      "confirmation": "CONFIRMED", "likelihood": "OCCASIONAL", "readability": "IMPROVES", "architecture": "NONE", "confidence": "HIGH", "recommendation": "FIX", "drop_rule": null, "applicability": "clean", "write_up": null, "user_override": false,
+      "evidence": "The committed strings contain both the update-only remediation and inner/outer 'patch fields' contexts. The localized core edit makes the remediation neutral and the outer context 'cannot process patch <source>'."
+    },
+    {
+      "id": "F3", "cluster_key": "sha1:a45899d930b55a2d3489eea01fb9a56c145e96ac", "title": "Classifier and source regression tests are too narrow", "kind": "CODE",
+      "sources": [{"file":"history/review-apply-patch-from-stdin.md","line":21,"section":"Partial-Consensus Findings","model":null}],
+      "target_file": "crates/issuectl/tests/cli_update_canonical.rs", "target_symbol": "stdin and malformed input tests",
+      "claim": "Tests omit dotted/slashed inline payloads, extensionless missing paths, JSON stdin, empty stdin, missing-path parity, and bare-dash precedence.",
+      "suggested_fix": "Add focused unit and black-box cases for each source-selection contract.",
+      "confirmation": "CONFIRMED", "likelihood": "REGULAR", "readability": "NEUTRAL", "architecture": "MINOR", "confidence": "HIGH", "recommendation": "FIX", "drop_rule": null, "applicability": "unclear", "write_up": null, "user_override": false,
+      "evidence": "Inspection of the committed tests confirms each omission. The affected core and integration tests now cover those cases and preserve apply/update JSON error parity."
+    },
+    {
+      "id": "F4", "cluster_key": "sha1:d50203a10d3a9ddde764f7777462c8422050792f", "title": "json_output boolean obscures expected-version policy", "kind": "CODE",
+      "sources": [{"file":"history/review-apply-patch-from-stdin.md","line":24,"section":"Partial-Consensus Findings","model":null}],
+      "target_file": "crates/issuectl-core/src/patch_input.rs", "target_symbol": "parse",
+      "claim": "A presentation-mode boolean is passed where the semantic input is whether expected_version is required.",
+      "suggested_fix": "Introduce an explicit ExpectedVersionPolicy enum.",
+      "confirmation": "CONFIRMED", "likelihood": "OCCASIONAL", "readability": "IMPROVES", "architecture": "MINOR", "confidence": "HIGH", "recommendation": "FIX", "drop_rule": null, "applicability": "clean", "write_up": null, "user_override": false,
+      "evidence": "The committed API names the bool json_output but uses it only to enforce expected_version. The localized enum replacement makes both call sites explicit."
+    },
+    {
+      "id": "F5", "cluster_key": "sha1:f538c4a7636458f8ae17b54a3a87a7a367abe6c1", "title": "TTY blocking and unbounded stdin", "kind": "DESIGN",
+      "sources": [{"file":"history/review-apply-patch-from-stdin.md","line":29,"section":"Disputed Issues","model":null}],
+      "target_file": null, "target_symbol": "stdin behavior",
+      "claim": "The command should refuse TTY stdin and cap patch size.", "suggested_fix": "Add is-terminal refusal and a byte limit.",
+      "confirmation": "CONFIRMED", "likelihood": "RARE", "readability": "WORSENS", "architecture": "MINOR", "confidence": "HIGH", "recommendation": "DROP", "drop_rule": "1d", "applicability": null, "write_up": null, "user_override": false,
+      "evidence": "Reads are blocking and unbounded, but this is conventional when the caller explicitly passes dash and file input was already unbounded. Adding separate policy does not fix a demonstrated regression and worsens the simple source contract."
+    },
+    {
+      "id": "F6", "cluster_key": "sha1:c8c941da848187f3372e835fc6d92c006044d00f", "title": "Patch failures lack specific JSON error codes", "kind": "DESIGN",
+      "sources": [{"file":"history/review-apply-patch-from-stdin.md","line":34,"section":"Disputed Issues","model":null}],
+      "target_file": null, "target_symbol": "error envelope taxonomy",
+      "claim": "Unsupported, missing, unreadable, and malformed patch failures all collapse to command-failed.", "suggested_fix": "Introduce patch-specific structured error variants and codes.",
+      "confirmation": "CONFIRMED", "likelihood": "RARE", "readability": "NEUTRAL", "architecture": "MODERATE", "confidence": "MED", "recommendation": "DROP", "drop_rule": "1c", "applicability": null, "write_up": null, "user_override": false,
+      "evidence": "The central anyhow mapping does collapse these errors, but this is repository-wide existing behavior and no caller impact was demonstrated for this feature. A local patch-specific taxonomy would add cross-layer complexity outside the filed message contract."
+    },
+    {
+      "id": "F7", "cluster_key": "sha1:089017cedf29ba7955e32e88c25d3948b4f3fdea", "title": "Test-only parser forwarding shim", "kind": "CODE",
+      "sources": [{"file":"history/review-apply-patch-from-stdin.md","line":39,"section":"Disputed Issues","model":null}],
+      "target_file": "crates/issuectl/src/cmd/views_extra.rs", "target_symbol": "parse_apply_patch",
+      "claim": "A cfg(test) forwarding function preserves old CLI test call sites after parser ownership moved to core.", "suggested_fix": "Move the tests or import the core parser directly.",
+      "confirmation": "CONFIRMED", "likelihood": "RARE", "readability": "NEUTRAL", "architecture": "NONE", "confidence": "HIGH", "recommendation": "DROP", "drop_rule": "1b", "applicability": null, "write_up": null, "user_override": false,
+      "evidence": "The shim exists only in test builds and forwards to the one core implementation. It creates no production drift, and moving the established tests provides no strict readability gain for this issue."
+    },
+    {
+      "id": "F8", "cluster_key": "sha1:b6c08a92d9a7e20cc727abdefae075b603e0036d", "title": "Module and skill artifacts were allegedly missing", "kind": "CODE",
+      "sources": [{"file":"history/review-apply-patch-from-stdin.md","line":46,"section":"Dropped Concerns","model":null}],
+      "target_file": "crates/issuectl-core/src/lib.rs", "target_symbol": null,
+      "claim": "The core module was undeclared and required skill/template copies were absent.", "suggested_fix": null,
+      "confirmation": "INCORRECT", "likelihood": null, "readability": null, "architecture": null, "confidence": "HIGH", "recommendation": "DROP", "drop_rule": "1a", "applicability": null, "write_up": null, "user_override": false,
+      "evidence": "lib.rs registers patch_input; both template formats and dogfooded copies contain the new contract; the dogfood parity test passed. Reviewers retracted the claim after receiving the omitted files."
+    },
+    {
+      "id": "F9", "cluster_key": "sha1:2724999deb66d9edc979b15e92ff6d4cce47f358", "title": "Literal dash path allegedly fails on Windows", "kind": "CODE",
+      "sources": [{"file":"history/review-apply-patch-from-stdin.md","line":47,"section":"Dropped Concerns","model":null}],
+      "target_file": "crates/issuectl-core/src/patch_input.rs", "target_symbol": "source classification",
+      "claim": "Path::components strips leading CurDir so ./- is not recognized as path-shaped on Windows.", "suggested_fix": null,
+      "confirmation": "INCORRECT", "likelihood": null, "readability": null, "architecture": null, "confidence": "HIGH", "recommendation": "DROP", "drop_rule": "1a", "applicability": null, "write_up": null, "user_override": false,
+      "evidence": "The reviewer rechecked Components and explicitly retracted the claim. The final lexical classifier no longer uses path-shape inference at all, and black-box coverage pins ./- behavior."
+    }
+  ]
+}
