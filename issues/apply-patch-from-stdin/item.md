@@ -1,13 +1,10 @@
 ---
 created: 2026-08-20
-updated: 2026-08-20
+updated: 2026-08-21
 type: feature
 reporter: jari
-status: open
+status: in-progress
 priority: normal
-labels:
-- via:agent-homebase-wrapup
-- needs-triage
 lane: verb-surface
 ---
 
