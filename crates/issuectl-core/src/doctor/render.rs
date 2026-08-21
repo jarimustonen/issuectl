@@ -715,10 +715,6 @@ pub(crate) fn render_json(
             serde_json::Value::Array(inbox_drafts),
         );
         map.insert(
-            "inbox_drafts_migrated".to_string(),
-            serde_json::Value::Array(inbox_drafts_migrated.clone()),
-        );
-        map.insert(
             "large_binaries".to_string(),
             serde_json::Value::Array(large_binaries),
         );

@@ -405,9 +405,11 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "hex",
  "issuectl-core",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "similar",
  "tempfile",
 ]

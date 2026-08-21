@@ -34,6 +34,8 @@ clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 serde_json = "1"
 serde_yaml = "0.9"
+sha2 = "0.10"
+hex = "0.4"
 similar = { version = "2", default-features = false, features = ["text"] }
 
 [dev-dependencies]

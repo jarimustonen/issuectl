@@ -954,13 +954,23 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             } => cmd_import_github(json_output, &repo, &state, limit, &default_type),
         },
         Command::Triage { slug } => {
-            emit_deprecation_warning(
-                json_output,
-                "triage-command",
-                "`issuectl triage`",
-                &["issuectl", "doctor", "--fix"],
-                Some("then process the migrated item with `issuectl intake queue` and `issuectl intake accept` (or another intake disposition)"),
-            );
+            if slug.is_some() {
+                emit_deprecation_warning(
+                    json_output,
+                    "triage-command",
+                    "`issuectl triage <slug>`",
+                    &["issuectl", "doctor", "--fix"],
+                    Some("doctor migrates every stranded inbox draft and may apply other safe repository repairs; promoted drafts keep their existing status"),
+                );
+            } else {
+                emit_deprecation_warning(
+                    json_output,
+                    "triage-command",
+                    "`issuectl triage`",
+                    &["issuectl", "doctor"],
+                    Some("read the `inbox_drafts` finding; use `issuectl doctor --fix` only when you intend to apply the reported repairs"),
+                );
+            }
             cmd_triage(json_output, slug)
         }
         Command::Pick { query, all, first } => cmd_pick(json_output, query, all, first),

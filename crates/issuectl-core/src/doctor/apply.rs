@@ -172,7 +172,7 @@ pub(crate) fn apply_via(
     }
 
     if legacy_dirs.is_empty() {
-        apply_inbox_migration(repo_root, &mut actions, &mut outcome, lock);
+        apply_inbox_migration(repo_root, &mut actions, &mut outcome, lock, clock);
         return Ok(outcome);
     }
 
@@ -229,7 +229,7 @@ pub(crate) fn apply_via(
     // run. Idempotent and best-effort.
     crate::migrate_layout::prune_empty_legacy_parents(&repo_root.join("issues"));
 
-    apply_inbox_migration(repo_root, &mut actions, &mut outcome, lock);
+    apply_inbox_migration(repo_root, &mut actions, &mut outcome, lock, clock);
     Ok(outcome)
 }
 
@@ -242,6 +242,7 @@ pub(crate) fn apply_inbox_migration(
     actions: &mut DoctorActions,
     outcome: &mut ApplyOutcome,
     lock: &crate::mutate::WriteLock,
+    clock: &dyn crate::clock::Clock,
 ) {
     for (slug, _) in std::mem::take(&mut actions.inbox_drafts) {
         match crate::mutate::triage::triage_locked(repo_root, &slug, lock) {
@@ -261,6 +262,27 @@ pub(crate) fn apply_inbox_migration(
             .unwrap_or(false)
     {
         let _ = fs::remove_dir(inbox);
+    }
+
+    // Inbox entries were deliberately excluded from the flat-only Notes scan.
+    // Re-scan after promotion so a single `doctor --fix` also performs the
+    // ordinary safe body-heading migration on the newly-flat issues.
+    if !outcome.inbox_drafts_migrated.is_empty() {
+        match scan_via(repo_root, clock) {
+            Ok(fresh) => {
+                actions.notes_to_rename = fresh.notes_to_rename;
+                actions.notes_conflicts = fresh.notes_conflicts;
+                if let Err(error) = rename_notes_to_comments(repo_root, actions, outcome) {
+                    outcome.apply_error = Some(format!(
+                        "failed to repair a promoted inbox draft: {error:#}"
+                    ));
+                }
+            }
+            Err(error) => {
+                outcome.apply_error =
+                    Some(format!("failed to rescan after inbox migration: {error:#}"));
+            }
+        }
     }
 }
 
@@ -1024,6 +1046,7 @@ pub(crate) fn print_section<T>(
 /// critical ones for the user to resolve.
 pub(crate) fn remaining_finding_count(report: &DoctorFindings) -> usize {
     report.legacy_dirs.len()
+        + report.inbox_drafts.len()
         + planned_moves(report).len()
         + report.flat_layout_conflicts.len()
         + report.invalid_slugs.len()
@@ -1065,7 +1088,8 @@ pub(crate) fn remaining_finding_count(report: &DoctorFindings) -> usize {
 
 pub(crate) fn fix_summary(report: &DoctorFindings, oc: &ApplyOutcome) -> String {
     let counts = format!(
-        "{} legacy dir(s) migrated, {} flat-layout dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} retired label(s) removed, {} AGENTS.md block(s) regenerated.",
+        "{} inbox draft(s) migrated, {} legacy dir(s) migrated, {} flat-layout dir(s) migrated, {} markdown file(s) rewritten, {} `## Notes` rename(s), {} retired label(s) removed, {} AGENTS.md block(s) regenerated.",
+        oc.inbox_drafts_migrated.len(),
         oc.legacy_dirs_migrated.len(),
         oc.flat_layout_migrated.len(),
         oc.files_rewritten,

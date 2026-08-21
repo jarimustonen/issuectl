@@ -152,7 +152,10 @@ pub(crate) fn populate_slug_and_legacy(
                 .inbox_drafts
                 .push((s.dir_name.clone(), s.dir_path.clone()));
         }
-        if let Some(number) = s.legacy_number {
+        // Number-shaped inbox names are drafts, not numbered-layout issues.
+        // Doctor promotes them with their existing slug; planning both the
+        // NN rename and inbox promotion would move the same directory twice.
+        if let Some(number) = s.legacy_number.filter(|_| s.folder != "inbox") {
             let new_slug = slug::generate_unique(repo_root);
             // Always migrate to the canonical flat path — even if the
             // legacy `<NN>-<slug>` dir lives under

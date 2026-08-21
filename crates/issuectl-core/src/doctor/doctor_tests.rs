@@ -2609,7 +2609,6 @@ mod tests {
   "flat_layout_planned": [],
   "gitignored_paths": [],
   "inbox_drafts": [],
-  "inbox_drafts_migrated": [],
   "invalid_slugs": [],
   "issues_agents_md_rewritten": false,
   "large_binaries": [],

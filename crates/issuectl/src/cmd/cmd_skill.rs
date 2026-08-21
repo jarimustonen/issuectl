@@ -274,7 +274,7 @@ pub(crate) fn cmd_triage(json: bool, slug: Option<String>) -> Result<()> {
                 for i in &drafts {
                     println!("  {}  {}", i.slug, i.title);
                 }
-                println!("\nPromote one with: issuectl triage <slug>");
+                println!("\nMigrate stranded drafts with: issuectl doctor --fix");
             }
             Ok(())
         }
@@ -473,6 +473,8 @@ pub(crate) struct TodoHit {
 }
 
 pub(crate) fn cmd_scan_todos(json: bool, file_intake: bool) -> Result<()> {
+    use sha2::{Digest, Sha256};
+
     let root = find_root();
     let issues = repo::load_issues(&root);
     // Build slug -> closing-or-not map.
@@ -485,21 +487,7 @@ pub(crate) fn cmd_scan_todos(json: bool, file_intake: bool) -> Result<()> {
     }
     let hits = scan_todos_walk(&root, &known)?;
 
-    if json {
-        let arr: Vec<_> = hits
-            .iter()
-            .map(|h| {
-                serde_json::json!({
-                    "file": h.file.to_string_lossy(),
-                    "line": h.line,
-                    "slug": h.slug,
-                    "status": h.status,
-                    "context": h.context,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&arr)?);
-    } else {
+    if !json {
         if hits.is_empty() {
             println!("No TODO(issue: …) markers found.");
         }
@@ -519,20 +507,35 @@ pub(crate) fn cmd_scan_todos(json: bool, file_intake: bool) -> Result<()> {
         }
     }
 
+    let mut filings = Vec::new();
+    let mut filing_warnings = Vec::new();
     if file_intake {
         let untracked: Vec<&TodoHit> = hits.iter().filter(|h| h.status == "untracked").collect();
+        let mut occurrences: std::collections::BTreeMap<(PathBuf, String), usize> =
+            Default::default();
         for h in untracked {
+            let occurrence = occurrences
+                .entry((h.file.clone(), h.context.clone()))
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+            let normalized_path = h.file.to_string_lossy().replace('\\', "/");
+            let identity = format!("{normalized_path}\n{}", h.context);
+            let digest = Sha256::digest(identity.as_bytes());
+            let source_ref = format!(
+                "scan-todos:{normalized_path}:{}:{occurrence}",
+                hex::encode(&digest[..8])
+            );
+            let source_location = format!("{}:{}", h.file.display(), h.line);
             let title = if h.context.is_empty() {
                 format!("TODO from {}:{}", h.file.display(), h.line)
             } else {
                 h.context.clone()
             };
-            let source_ref = format!("{}:{}", h.file.display(), h.line);
             let request = mutate::intake::FileRequest {
                 issue_type: "task".into(),
                 title,
                 body: Some(format!(
-                    "_Source: {source_ref}_\n\n```\n{}\n```\n",
+                    "_Source: {source_location}_\n\n    {}\n",
                     h.context
                 )),
                 reporter: None,
@@ -548,13 +551,58 @@ pub(crate) fn cmd_scan_todos(json: bool, file_intake: bool) -> Result<()> {
                 Ok(out) => {
                     if !json {
                         let action = if out.deduplicated { "found" } else { "filed" };
-                        println!("  + {action} intake item {} for {source_ref}", out.slug);
+                        println!(
+                            "  + {action} intake item {} for {source_location}",
+                            out.slug
+                        );
                     }
+                    filings.push(serde_json::json!({
+                        "source_ref": source_ref,
+                        "source": source_location,
+                        "slug": out.slug,
+                        "deduplicated": out.deduplicated,
+                    }));
                 }
                 Err(e) => {
-                    eprintln!("warning: could not file intake item for {source_ref}: {e}");
+                    let message = format!("could not file intake item for {source_location}: {e}");
+                    if !json {
+                        eprintln!("warning: {message}");
+                    }
+                    filing_warnings.push(message.clone());
+                    filings.push(serde_json::json!({
+                        "source_ref": source_ref,
+                        "source": source_location,
+                        "error": message,
+                    }));
                 }
             }
+        }
+    }
+
+    if json {
+        let arr: Vec<_> = hits
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "file": h.file.to_string_lossy(),
+                    "line": h.line,
+                    "slug": h.slug,
+                    "status": h.status,
+                    "context": h.context,
+                })
+            })
+            .collect();
+        if file_intake {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "hits": arr,
+                    "filings": filings,
+                    "warnings": filing_warnings,
+                }))?
+            );
+        } else {
+            println!("{}", serde_json::to_string_pretty(&arr)?);
         }
     }
     Ok(())

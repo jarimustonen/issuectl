@@ -717,6 +717,22 @@ names must be plain filenames (no `/`, `\`, `..`, leading `.`).
 - Print rendered prompt: `issuectl prompt <template> <slug>`
 - Cache to `.issuectl/cache/agent/<slug>/prompts/<template>.md`: add `--write`
 
+### Action: Scan source TODO markers
+
+`issuectl scan-todos --json` reports `TODO(issue: <slug>)` markers as
+`tracked`, `stale`, `unknown`, or `untracked`. Add `--file-intake` to file each
+untracked marker through the standard intake path with provenance `scan-todos`.
+The mutating JSON form returns `{ "hits": [...], "filings": [...] }`; each
+filing carries `source_ref`, `source`, and either `slug` + `deduplicated` or an
+`error`. Non-fatal per-marker failures also appear in top-level `warnings`.
+The source identity is content-derived, so moving an unchanged marker to another
+line deduplicates; changing its path or text creates a new intake report.
+
+```sh
+issuectl scan-todos --json
+issuectl scan-todos --file-intake --json
+```
+
 ### Action: Doctor (repository health-check + migration)
 
 If the user asks to "check the repo" or "migrate legacy issues", use
