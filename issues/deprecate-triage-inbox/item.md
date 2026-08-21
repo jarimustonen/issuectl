@@ -8,6 +8,9 @@ related: ['@cli-verb-surface']
 lane: verb-surface
 lane_seq: 10
 blocked_by: ['@cli-verb-surface', '@intake-queue-legacy-mismatch']
+commits:
+- hash: a3119e6
+  summary: deprecate triage inbox reception path
 ---
 
 # Deprecate issuectl triage and the inbox landing zone
