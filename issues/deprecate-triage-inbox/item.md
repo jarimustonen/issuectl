@@ -2,7 +2,7 @@
 created: 2026-08-17
 updated: 2026-08-21
 type: chore
-status: in-progress
+status: done
 priority: normal
 related: ['@cli-verb-surface']
 lane: verb-surface
@@ -11,6 +11,9 @@ blocked_by: ['@cli-verb-surface', '@intake-queue-legacy-mismatch']
 commits:
 - hash: a3119e6
   summary: deprecate triage inbox reception path
+- hash: 61c8507
+  summary: address triage deprecation review findings
+closed: 2026-08-21
 ---
 
 # Deprecate issuectl triage and the inbox landing zone
@@ -70,3 +73,9 @@ surface decision — this issue is the worked example and first implementation s
 ### 2026-08-17T08:49:04Z · @agent-decision
 
 ADR 0004 ratified this deprecation direction. Scope is clarified: deprecation waits for @intake-queue-legacy-mismatch, scan-todos receives an explicit intake-filing flag rather than ambiguous --file, and doctor --fix migrates stranded inbox drafts throughout the transition.
+
+## Resolution
+
+### 2026-08-21T08:07:56Z · @issuectl
+
+Delivered the ADR-approved 0.17.0 deprecation slice. Full green gate passed after multi-model review and assessed localized fixes.
