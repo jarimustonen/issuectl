@@ -3,7 +3,7 @@ created: 2026-08-20
 updated: 2026-08-21
 type: feature
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 lane: verb-surface
 commits:
@@ -11,6 +11,11 @@ commits:
   summary: mark work in progress and clear intake labels
 - hash: 485b001
   summary: add stdin transactional patch input and diagnostics
+- hash: 9e75f69
+  summary: record inline JSON decision and implementation commits
+- hash: eace1dc
+  summary: apply assessed review fixes and persist review artifacts
+closed: 2026-08-21
 ---
 
 # apply: accept a patch from stdin or inline JSON, not only a file path
