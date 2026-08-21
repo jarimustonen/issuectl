@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-21
+
 ### Changed
+- **Transactional patches can now be piped through stdin.**
+  `issuectl update --patch-file -` is the canonical form and `issuectl apply -`
+  remains behaviorally identical; use `./-` for a literal file named `-`.
+  Unsupported bare inputs now explain the accepted path-or-stdin forms.
 - **The legacy inbox reception path is deprecated for 0.17.0.** `triage`,
   `create --inbox`, and `scan-todos --create-inbox` remain compatible for one
   warning-bearing release and are scheduled for removal in 0.18.0. The new
