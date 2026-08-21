@@ -1,8 +1,8 @@
 ---
 created: 2026-08-17
-updated: 2026-08-17
+updated: 2026-08-21
 type: chore
-status: open
+status: in-progress
 priority: normal
 related: ['@cli-verb-surface']
 lane: verb-surface
