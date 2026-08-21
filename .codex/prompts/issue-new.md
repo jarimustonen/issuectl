@@ -149,7 +149,7 @@ the `deduplicated` flag so the caller can branch.
 
 ## Install or upgrade `issuectl`
 
-This skill was installed for `issuectl 0.16.0` and drives the
+This skill was installed for `issuectl 0.17.0` and drives the
 `issuectl intake` command group (issuectl ≥ 0.6.6). On first use in a session, run
 `issuectl --version`; if `intake` is missing (`issuectl intake --help` errors), the
 binary is too old — tell the user to upgrade (`brew upgrade
