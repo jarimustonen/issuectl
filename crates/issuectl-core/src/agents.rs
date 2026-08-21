@@ -80,9 +80,10 @@ unrelated to this file.
 - **Checklist toggles**: `issuectl check <slug> "<task text>"` —
   flips a single `- [ ]` ↔ `- [x]` in the body without rewriting
   surrounding markdown.
-- **Multi-field changes**: `issuectl apply <patch.yaml>` — one
-  transactional write covering frontmatter, list ops, custom fields,
-  and recorded commits.
+- **Multi-field changes**: `issuectl update --patch-file <patch.yaml|->`
+  — one transactional write covering frontmatter, list ops, custom fields,
+  and recorded commits. Pass `-` for stdin; use `./-` for a literal file
+  named `-`.
 
 ## Body conventions
 

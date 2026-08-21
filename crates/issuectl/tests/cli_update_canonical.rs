@@ -1,7 +1,8 @@
 //! Black-box parity coverage for ADR 0004's canonical `update` forms.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -18,6 +19,30 @@ fn run(root: &Path, args: &[&str]) -> Output {
         .args(args)
         .output()
         .expect("spawn issuectl")
+}
+
+fn run_stdin(root: &Path, args: &[&str], stdin: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_issuectl"))
+        .env_remove("RUST_BACKTRACE")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .current_dir(root)
+        .arg("--root")
+        .arg(root)
+        .arg("--json")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn issuectl");
+    child
+        .stdin
+        .take()
+        .expect("stdin pipe")
+        .write_all(stdin.as_bytes())
+        .expect("write stdin");
+    child.wait_with_output().expect("wait for issuectl")
 }
 
 fn pair() -> (TempDir, PathBuf, PathBuf) {
@@ -157,6 +182,108 @@ fn patch_file_matches_apply_for_mutation_output_and_conflict() {
         &["apply", &patch_s],
         &update_root,
         &["update", "--patch-file", &patch_s],
+    );
+}
+
+#[test]
+fn stdin_patch_matches_apply_and_update_for_dry_run_and_write() {
+    let (_tmp, apply_root, update_root) = pair();
+    create(&apply_root, "stdin-target");
+    create(&update_root, "stdin-target");
+    let shown = run(&apply_root, &["show", "stdin-target"]);
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let version = shown["data"]["version"].as_str().unwrap();
+    let patch = format!("slug: stdin-target\nexpected_version: {version}\npriority: high\n");
+
+    let before = item(&apply_root, "stdin-target");
+    let apply_dry = run_stdin(&apply_root, &["apply", "-", "--dry-run"], &patch);
+    let update_dry = run_stdin(
+        &update_root,
+        &["update", "--patch-file", "-", "--dry-run"],
+        &patch,
+    );
+    assert_eq!(
+        normalized_json(&apply_dry, &apply_root),
+        normalized_json(&update_dry, &update_root)
+    );
+    assert_eq!(item(&apply_root, "stdin-target"), before);
+    assert_eq!(item(&update_root, "stdin-target"), before);
+
+    let apply = run_stdin(&apply_root, &["apply", "-"], &patch);
+    let update = run_stdin(&update_root, &["update", "--patch-file", "-"], &patch);
+    assert_eq!(
+        normalized_json(&apply, &apply_root),
+        normalized_json(&update, &update_root)
+    );
+    assert_eq!(
+        item(&apply_root, "stdin-target"),
+        item(&update_root, "stdin-target")
+    );
+}
+
+#[test]
+fn malformed_and_unsupported_patch_inputs_have_parity_and_clear_errors() {
+    let (_tmp, apply_root, update_root) = pair();
+    let apply = run_stdin(&apply_root, &["apply", "-"], "{not valid");
+    let update = run_stdin(&update_root, &["update", "--patch-file", "-"], "{not valid");
+    assert_same_error_bytes(&apply, &update);
+    let malformed: Value = serde_json::from_slice(&apply.stderr).unwrap();
+    assert!(malformed["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("YAML or JSON"));
+
+    let inline = r#"{"slug":"some-issue"}"#;
+    let apply = run(&apply_root, &["apply", inline]);
+    let update = run(&update_root, &["update", "--patch-file", inline]);
+    assert_same_error_bytes(&apply, &update);
+    let unsupported = String::from_utf8(apply.stderr).unwrap();
+    for accepted in [
+        "patch file path",
+        "`-`",
+        "`./-`",
+        "inline JSON is not accepted",
+    ] {
+        assert!(
+            unsupported.contains(accepted),
+            "missing {accepted:?}: {unsupported}"
+        );
+    }
+
+    let missing = run(&apply_root, &["apply", "missing.yaml"]);
+    let message = String::from_utf8(missing.stderr).unwrap();
+    assert!(
+        message.contains("cannot read patch file missing.yaml"),
+        "{message}"
+    );
+}
+
+fn assert_same_error_bytes(a: &Output, b: &Output) {
+    assert_eq!(a.status.code(), Some(1), "{a:?}");
+    assert_eq!(b.status.code(), Some(1), "{b:?}");
+    assert!(a.stdout.is_empty(), "{a:?}");
+    assert!(b.stdout.is_empty(), "{b:?}");
+    assert_eq!(a.stderr, b.stderr, "a={a:?}\nb={b:?}");
+}
+
+#[test]
+fn literal_dash_file_is_addressable_as_dot_slash_dash() {
+    let (_tmp, apply_root, update_root) = pair();
+    create(&apply_root, "dash-file-target");
+    create(&update_root, "dash-file-target");
+    let shown = run(&apply_root, &["show", "dash-file-target"]);
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let version = shown["data"]["version"].as_str().unwrap();
+    let patch = format!(
+        r#"{{"slug":"dash-file-target","expected_version":"{version}","priority":"high"}}"#
+    );
+    std::fs::write(apply_root.join("-"), &patch).unwrap();
+    std::fs::write(update_root.join("-"), &patch).unwrap();
+    assert_same_success(
+        &apply_root,
+        &["apply", "./-"],
+        &update_root,
+        &["update", "--patch-file", "./-"],
     );
 }
 

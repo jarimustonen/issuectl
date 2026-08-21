@@ -337,8 +337,9 @@ issuectl note     <slug> --as alice "Repros on Safari 17.0"
 issuectl note     <slug> --decision --as alice "We'll ship the fix as a hotfix"
 echo "log…" | issuectl note <slug> --as ci-bot --stdin
 
-# Multi-field transactional patch:
-issuectl apply patch.yaml                # slug + fields + body_ops in one flock
+# Multi-field transactional patch (file or stdin):
+issuectl update --patch-file patch.yaml  # slug + fields + body_ops in one flock
+generate-patch | issuectl update --patch-file -  # use ./- for a literal file named -
 
 # Close:
 issuectl close <slug>                    # → `fixed` for bugs, `done` otherwise

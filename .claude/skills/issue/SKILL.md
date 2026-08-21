@@ -278,11 +278,15 @@ Example flows:
 - `issuectl --json update extremely-quiet-otter --no-assignee --type epic` (clear an assignee before converting to an epic)
 - `issuectl --json update extremely-quiet-otter --no-owner --type task` (clear an epic owner before converting to a non-epic)
 - `issuectl --json update --query "status:open label:stale" --priority high --add-label triaged` applies the same update flags to every query match under one repo lock. Add `--dry-run` for bulk-compatible per-issue diffs without writes.
-- `issuectl --json update --patch-file patch.yaml` applies the same one-transaction YAML format as `apply`, including `expected_version:` compare-and-swap and ordered `body_ops:`. Add `--dry-run` to preview it.
+- `issuectl --json update --patch-file patch.yaml` applies the same one-transaction YAML/JSON format as `apply`, including `expected_version:` compare-and-swap and ordered `body_ops:`. Add `--dry-run` to preview it.
+- `generate-patch | issuectl --json update --patch-file -` reads that patch from stdin without a temporary file. Use `./-` to read a file literally named `-`.
 
 Supply exactly one target: a positional `<slug>`, `--query <q>`, or
-`--patch-file <path>`. Patch files cannot be combined with field flags. Under
-`--json`, a patch file must contain a non-empty `expected_version:` just as it
+`--patch-file <path|->`. Patch inputs cannot be combined with field flags. The
+accepted forms are a patch file path or `-` for stdin; inline JSON argv is not
+accepted because stdin provides composition without adding a quoting-sensitive
+second input grammar. JSON content is accepted through either supported form.
+Under `--json`, a patch must contain a non-empty `expected_version:` just as it
 does with `apply`. `--dry-run` is available for query and patch-file targets,
 not the positional-slug form. Query results use bulk's `{dry_run, count,
 results[]}` data shape; patch-file results use apply's single-mutation shape.
@@ -421,8 +425,10 @@ multi-field patch keeps its own concurrency contract).
   `issuectl label <slug> --add|--remove <label>`; pass exactly one
   form. A malformed invocation under `--json` emits the standard
   error envelope (never a silent no-op).
-- **`issuectl apply <patch.yaml>`** — multi-field transactional
-  patch. The YAML file declares `slug:` plus any combination of
+- **`issuectl apply <patch.yaml|->`** — compatibility spelling for a
+  multi-field transactional patch; prefer canonical `update --patch-file`.
+  Pass `-` for stdin or `./-` for a literal file named `-`. The YAML/JSON
+  patch declares `slug:` plus any combination of
   built-in fields, `custom_fields:`, label / related list ops,
   commits, and a `body_ops:` list of body mutations applied in
   order under the same flock. Each body op is one of:

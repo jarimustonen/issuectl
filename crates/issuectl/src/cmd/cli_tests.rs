@@ -1570,6 +1570,36 @@ mod tests {
     // ── parse_apply_patch (round-2 #4) ────────────────────────────
 
     #[test]
+    fn patch_input_help_names_stdin_and_literal_dash_file() {
+        let root = Cli::command();
+        let apply = root
+            .get_subcommands()
+            .find(|command| command.get_name() == "apply")
+            .unwrap();
+        let apply_help = apply
+            .get_arguments()
+            .find(|arg| arg.get_id() == "patch")
+            .unwrap()
+            .get_help()
+            .unwrap()
+            .to_string();
+        assert!(apply_help.contains("stdin") && apply_help.contains("./-"));
+
+        let update = root
+            .get_subcommands()
+            .find(|command| command.get_name() == "update")
+            .unwrap();
+        let update_help = update
+            .get_arguments()
+            .find(|arg| arg.get_id() == "patch_file")
+            .unwrap()
+            .get_help()
+            .unwrap()
+            .to_string();
+        assert!(update_help.contains("stdin") && update_help.contains("./-"));
+    }
+
+    #[test]
     fn apply_help_body_ops_example_parses_as_a_patch() {
         let root = Cli::command();
         let apply = root
@@ -1650,8 +1680,9 @@ mod tests {
 
     #[test]
     fn parse_apply_patch_accepts_well_formed_json_patch() {
-        let yaml = "slug: well-formed-issue\nexpected_version: sha256:abc123\npriority: high\n";
-        let (slug, req) = parse_apply_patch(yaml, true).unwrap();
+        let json =
+            r#"{"slug":"well-formed-issue","expected_version":"sha256:abc123","priority":"high"}"#;
+        let (slug, req) = parse_apply_patch(json, true).unwrap();
         assert_eq!(slug, "well-formed-issue");
         assert_eq!(req.expected_version.as_deref(), Some("sha256:abc123"));
     }

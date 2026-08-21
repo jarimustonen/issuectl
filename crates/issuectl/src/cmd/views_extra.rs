@@ -212,10 +212,7 @@ pub(crate) fn cmd_depend(
 }
 
 pub(crate) fn cmd_apply(json: bool, patch_path: &Path, dry_run: bool) -> Result<()> {
-    let yaml_text = fs::read_to_string(patch_path)
-        .with_context(|| format!("cannot read patch file {}", patch_path.display()))?;
-    let (slug, mut req) = parse_apply_patch(&yaml_text, json)
-        .with_context(|| format!("cannot parse patch fields in {}", patch_path.display()))?;
+    let (slug, mut req) = patch_input::read_and_parse(patch_path, &mut std::io::stdin(), json)?;
     req.dry_run = dry_run;
     let root = find_root();
     let outcome = mutate::update_issue(&root, &slug, req).map_err(anyhow::Error::new)?;
@@ -472,53 +469,12 @@ fn bulk_apply_request(
         .collect())
 }
 
-/// Parse the YAML patch text into `(slug, UpdateIssueRequest)`,
-/// applying every CLI-side rule that doesn't require disk access.
-/// Extracted so tests can pin the `--json` `expected_version`
-/// rejection rules (round-2 #4) without spinning up `find_root` or
-/// the global `ROOT_OVERRIDE`.
+#[cfg(test)]
 pub(crate) fn parse_apply_patch(
-    yaml_text: &str,
+    text: &str,
     json: bool,
 ) -> Result<(String, mutate::UpdateIssueRequest)> {
-    let mut yaml: serde_yaml::Value =
-        serde_yaml::from_str(yaml_text).context("cannot parse as YAML")?;
-    let map = yaml
-        .as_mapping_mut()
-        .ok_or_else(|| anyhow::anyhow!("patch file must be a YAML mapping at the top level"))?;
-    let slug = map
-        .remove(serde_yaml::Value::String("slug".into()))
-        .ok_or_else(|| anyhow::anyhow!("patch file must declare `slug:`"))?
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("`slug:` must be a string"))?
-        .to_string();
-    if !slug::is_valid(&slug) {
-        bail!("invalid slug shape: {slug:?}");
-    }
-    // `dry_run` is `#[serde(skip)]` on UpdateIssueRequest, so a
-    // user-supplied `dry_run: true` would otherwise fail with a generic
-    // "unknown field" error from `deny_unknown_fields`. Catch it here
-    // with a precise message — dry-run is a CLI execution mode, not a
-    // patch field.
-    if map.contains_key(serde_yaml::Value::String("dry_run".into())) {
-        bail!("`dry_run` is a CLI flag; use `issuectl apply --dry-run`, not a patch field");
-    }
-    let req: mutate::UpdateIssueRequest =
-        serde_yaml::from_value(yaml).context("cannot parse patch fields")?;
-    // Validate `--json` D4=B contract AFTER deserialization so we
-    // catch `expected_version: null` and empty/whitespace strings —
-    // a presence-only `map.contains_key` check passed `null` through,
-    // which then deserialized to `None` and bypassed concurrency.
-    if json {
-        match req.expected_version.as_deref() {
-            Some(v) if !v.trim().is_empty() && v.trim() == v => {}
-            _ => bail!(
-                "patch must include a non-empty `expected_version:` when invoked with --json \
-                 (per design D4=B); fetch with `issuectl show <slug> --json`"
-            ),
-        }
-    }
-    Ok((slug, req))
+    patch_input::parse(text, json)
 }
 
 /// Shared CLI epilogue for the new mutation verbs. On `--dry-run`

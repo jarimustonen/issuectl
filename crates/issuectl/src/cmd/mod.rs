@@ -10,8 +10,8 @@ use issuectl_core::issue_fields::{ISSUE_TYPES, PRIORITIES};
 use issuectl_core::{
     agents, body_sections, canonical, config, context, cycle as cycle_mod, dag, doctor, duplicates,
     envelope, epic_tree, estimate as estimate_mod, fmt, git_trailers, help, hooks,
-    init as init_cmd, merge_driver, models, mutate, query, recurrence, repo, report as report_mod,
-    schema, skill, slug, sync_commits,
+    init as init_cmd, merge_driver, models, mutate, patch_input, query, recurrence, repo,
+    report as report_mod, schema, skill, slug, sync_commits,
 };
 use mutate::new_issue::{do_new, NewArgs};
 
@@ -652,12 +652,13 @@ pub(crate) enum Command {
         #[arg(value_parser = parse_slug_arg)]
         slug: Option<String>,
 
-        /// Apply an `apply`-compatible YAML patch in one transaction.
+        /// Apply an `apply`-compatible YAML/JSON patch in one transaction.
+        /// Pass `-` to read stdin (use `./-` for a file literally named `-`).
         /// The parser, expected-version contract, body_ops, output, and
-        /// errors are identical to `apply <path>`.
+        /// errors are identical to `apply <path|->`.
         #[arg(
             long = "patch-file",
-            value_name = "PATH",
+            value_name = "PATH|-",
             conflicts_with = "update_fields"
         )]
         patch_file: Option<PathBuf>,
@@ -1130,8 +1131,10 @@ pub(crate) enum Command {
         expected_version: Option<String>,
     },
 
-    /// Apply a multi-field YAML patch in a single transaction.
-    /// The file declares `slug:` plus any combination of built-in
+    /// Apply a multi-field YAML/JSON patch in a single transaction.
+    /// Pass a file path, or `-` to read stdin; use `./-` for a file
+    /// literally named `-`. Inline JSON argv is intentionally not accepted.
+    /// The patch declares `slug:` plus any combination of built-in
     /// fields, `custom_fields:`, label/related list ops, commits,
     /// and `body_ops:` (`set_checkbox` / `append_note`), all applied
     /// under one flock with one schema-validation pass.
@@ -1158,8 +1161,8 @@ pub(crate) enum Command {
     /// read-modify-write shape a stale token protects.
     #[command(verbatim_doc_comment)]
     Apply {
-        /// Path to the YAML patch file
-        #[arg(value_name = "PATCH")]
+        /// YAML/JSON patch file path, or `-` for stdin (`./-` names a literal file)
+        #[arg(value_name = "PATH|-")]
         patch: PathBuf,
 
         /// Plan only: print a unified diff and exit 0 without writing.

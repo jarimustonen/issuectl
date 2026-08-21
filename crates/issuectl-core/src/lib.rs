@@ -91,6 +91,8 @@ pub mod mutate;
 #[doc(hidden)]
 pub mod parser;
 #[doc(hidden)]
+pub mod patch_input;
+#[doc(hidden)]
 pub mod query;
 #[doc(hidden)]
 pub mod recurrence;
