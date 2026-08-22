@@ -3,10 +3,13 @@ created: 2026-08-22
 updated: 2026-08-22
 type: bug
 reporter: jari
-status: untriaged
+status: wontfix
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:orchestratectl-stint8-issuectl-update-blocked-by-json
+closed: 2026-08-22
+disposition_note: blocked_by persists correctly and its canonical value is read through show or dag; the conditional update echo contract covers lane, lane_seq, and collision. The wording clarification has been folded into intake-bug-issuectl-71ea534241c2.
+disposition_reason: by-design
 ---
 
 # update JSON omits persisted blocked_by after add-blocked-by
@@ -58,3 +61,9 @@ This distinction is deliberate: ADR 0003 keeps `blocked_by` in `Issue::extra` to
 Affected callers are agents or orchestrators that add/remove a dependency and then assume the mutation result is a full issue object. They may raise a false alarm or need a follow-up `show`/`dag`, but no edge is lost and the response's new `version` confirms a mutation landed. This is therefore not an implementation bug against the current documented output shape; at most it is a documentation ambiguity exposed by a real machine caller.
 
 **Narrow correction:** change the template sentence to say explicitly “when an update requests `lane`, `lane_seq`, or `collision`…” and state that `--add/--remove-blocked-by` callers must use `show` or `dag` to read the canonical edge. If a one-call dependency confirmation is desired as a new additive contract, extend `UpdateEchoes`/`UpdateOutcome` to emit the canonical top-level `blocked_by` array only when a blocked-by operation was requested, with black-box add/remove/no-op tests; keep storage in `extra`.
+
+## Comments
+
+### 2026-08-22T18:50:04Z · @intake
+
+Rejected (by-design): blocked_by persists correctly and its canonical value is read through show or dag; the conditional update echo contract covers lane, lane_seq, and collision. The wording clarification has been folded into intake-bug-issuectl-71ea534241c2.

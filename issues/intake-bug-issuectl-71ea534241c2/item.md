@@ -3,10 +3,12 @@ created: 2026-08-22
 updated: 2026-08-22
 type: bug
 reporter: jari
-status: untriaged
+status: open
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:homebase-wrapup-issuectl-create-path-field-20260821
+lane: skills
+related: ['@intake-bug-issuectl-704cd8eb0a0e']
 ---
 
 # Issue skill reads the wrong create result path field
@@ -42,3 +44,9 @@ The bundled skill and the CLI's actual schema should use the same canonical fiel
 - issuectl 0.16.0
 - installed `/issue` skill also declares issuectl 0.16.0
 - observed 2026-08-21 in Homebase
+
+## Decisions
+
+### 2026-08-22T18:50:04Z · @agent-triage
+
+Accepted scope also includes clarifying the update echo wording: only lane, lane_seq, and collision are echoed conditionally; blocked_by callers read the canonical value with show or dag. This folds the useful documentation correction from @intake-bug-issuectl-704cd8eb0a0e into this single skill-contract unit without adding a second implementation issue.
