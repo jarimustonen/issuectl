@@ -195,3 +195,4 @@ poista osio triagen yhteydessä kunnes lähdepää on korjattu.
 ## Piialiisan bugiraportit
 
 - [ ] 🐛 Piialiisan bugiraportti: Issue skill reads the wrong create result path field — jari via Telegram ([`intake-bug-issuectl-71ea534241c2`](issues/intake-bug-issuectl-71ea534241c2/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: update JSON omits persisted blocked_by after add-blocked-by — jari via Telegram ([`intake-bug-issuectl-704cd8eb0a0e`](issues/intake-bug-issuectl-704cd8eb0a0e/item.md))
