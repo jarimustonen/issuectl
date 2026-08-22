@@ -1,10 +1,11 @@
 ---
 created: 2026-08-21
-updated: 2026-08-21
+updated: 2026-08-22
 type: bug
 reporter: jari
 status: open
 priority: low
+lane: lifecycle
 ---
 
 # close: the Definition-of-Done gate fires on non-delivery closing statuses
