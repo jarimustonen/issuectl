@@ -191,3 +191,7 @@ Hyväksytty kohde lanetetaan `issuectl`-frontmatteriin ja näkyy sen jälkeen
 Huom: raportoivan pään filaus-flow (sisarrepon wrapper) appendaa tänne oman
 checklist-osionsa joka kerta. Se ei tule issuectl:n binääristä eikä templateista;
 poista osio triagen yhteydessä kunnes lähdepää on korjattu.
+
+## Piialiisan bugiraportit
+
+- [ ] 🐛 Piialiisan bugiraportti: Issue skill reads the wrong create result path field — jari via Telegram ([`intake-bug-issuectl-71ea534241c2`](issues/intake-bug-issuectl-71ea534241c2/item.md))
