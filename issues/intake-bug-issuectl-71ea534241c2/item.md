@@ -9,6 +9,9 @@ provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:homebase-wrapup-issuectl-create-path-field-20260821
 lane: skills
 related: ['@intake-bug-issuectl-704cd8eb0a0e']
+commits:
+- hash: 95740050093c0affe4b5b6fdbedc795aaa013214
+  summary: fix shipped create path and echo guidance
 ---
 
 # Issue skill reads the wrong create result path field
