@@ -1784,9 +1784,17 @@ mod tests {
         let claude = Agent::Claude.template();
         let codex = Agent::Codex.template();
         assert_ne!(claude, codex);
-        // Claude template carries the YAML frontmatter; Codex strips it
+        // Claude template carries the YAML frontmatter; Codex strips it.
         assert!(claude.starts_with("---\nname: issue"));
         assert!(!codex.starts_with("---\nname:"));
+        // Their agent-facing bodies are one contract. Pin the generated Codex
+        // prompt to the Claude body so either half cannot drift independently.
+        let body = claude
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n"))
+            .expect("well-formed frontmatter")
+            .1;
+        assert_eq!(body, codex, "/issue template bodies must match");
     }
 
     #[test]

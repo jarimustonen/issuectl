@@ -120,6 +120,7 @@ fn dag_json_shape_and_head_of_line() {
     assert_eq!(issues[0]["slug"], "schema-a");
     assert_eq!(issues[0]["is_head_of_line"], serde_json::json!(true));
     assert_eq!(issues[0]["spawnable"], serde_json::json!(true));
+    assert_eq!(issues[0]["blocked_by"], serde_json::json!([]));
     // schema-b sits behind the head and carries its blocker + collision.
     assert_eq!(issues[1]["slug"], "schema-b");
     assert_eq!(issues[1]["is_head_of_line"], serde_json::json!(false));
@@ -131,6 +132,7 @@ fn dag_json_shape_and_head_of_line() {
     assert_eq!(uns.len(), 1);
     assert_eq!(uns[0]["slug"], "loose-one");
     assert_eq!(uns[0]["spawnable"], serde_json::json!(true));
+    assert_eq!(uns[0]["blocked_by"], serde_json::json!([]));
 }
 
 #[test]

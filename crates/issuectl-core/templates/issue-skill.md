@@ -568,7 +568,7 @@ issuectl --json create --type feature --title "Bulk export" \
 (An issue created without any of these hashes identically to the pre-field
 shape — the lane fields are projected only when set.)
 
-Output shape:
+Relevant `.data` shape for a plain create:
 
 ```json
 { "slug": "login-redirect-loops",
@@ -580,7 +580,7 @@ Output shape:
 The CLI:
 - Uses `--slug <kebab>` when given (validated: ≥2 lowercase ASCII kebab segments)
 - Otherwise derives a 2-3 significant-word kebab slug from the title, dropping stop-words (numeric suffix on collision); if the result differs from straightforward title slugification, top-level `warnings` explains why. `--slug-random`, or an unsluggable title, yields a random `intensifier-adjective-noun` slug instead
-- Writes `issues/<slug>/item.md` with the right frontmatter
+- Writes the issue item and returns its canonical location in `.data.path`; do not reconstruct the path from the slug
 - Returns the slug and item file path in `--json` (parse `.data.slug` and `.data.path`)
 
 Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slug>"` (repeatable), `--field key=value` (repeatable; for custom frontmatter fields declared in `issues/.schema.yaml`, e.g. `--field team=payments`), `--check-duplicates` (refuse to create and exit 2 — printing the shared error envelope `{"error":{"code":"duplicate-precheck","message":...,"matches":[...]}}` on stderr — when a strong duplicate already exists; re-run without the flag to create anyway).

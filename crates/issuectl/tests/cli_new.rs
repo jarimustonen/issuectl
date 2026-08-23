@@ -123,14 +123,42 @@ fn new_json_success_prints_expected_payload() {
     // extraction guidance must name the same canonical key the binary emits;
     // otherwise creation succeeds but an agent's follow-up filesystem action
     // receives `null`.
-    let skill = include_str!("../../issuectl-core/templates/issue-skill.md");
-    assert!(skill.contains("parse `.data.slug` and `.data.path`"));
-    assert!(skill.contains("use `.data.path` for the file"));
-    assert!(skill.contains("\"path\": \"/abs/path/issues/login-redirect-loops/item.md\""));
-    assert!(
-        !skill.contains("item_path"),
-        "shipped /issue guidance must use create's canonical `path` key"
-    );
+    for (name, template) in [
+        (
+            "Claude",
+            include_str!("../../issuectl-core/templates/issue-skill.md"),
+        ),
+        (
+            "Codex",
+            include_str!("../../issuectl-core/templates/issue-prompt.md"),
+        ),
+    ] {
+        let skill = template.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            skill.contains("parse `.data.slug` and `.data.path`"),
+            "{name}"
+        );
+        assert!(
+            skill.contains("use `.data.path` for the file or `.data.dir` for its directory"),
+            "{name}"
+        );
+        assert!(
+            skill.contains("\"path\": \"/abs/path/issues/login-redirect-loops/item.md\""),
+            "{name}"
+        );
+        assert!(
+            skill.contains("\"dir\": \"/abs/path/issues/login-redirect-loops\""),
+            "{name}"
+        );
+        assert!(
+            skill.contains("do not reconstruct the path from the slug"),
+            "{name}"
+        );
+        assert!(
+            !skill.contains("item_path"),
+            "{name} /issue guidance must use create's canonical `path` key"
+        );
+    }
 }
 
 #[test]

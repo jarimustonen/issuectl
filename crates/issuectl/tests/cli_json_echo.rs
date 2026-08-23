@@ -78,16 +78,48 @@ fn update_scheduling_echoes_are_conditional_and_blocked_by_is_read_via_show() {
     let shown = json(&run(r, &["--json", "show", "echo-target"]));
     assert_eq!(shown["blocked_by"], serde_json::json!(["@echo-blocker"]));
 
-    // Keep production guidance pinned to the behavior above. `cli_dag`'s
-    // black-box shape test separately binds each DAG issue row's bare-slug
-    // `blocked_by` list.
-    let skill = include_str!("../../issuectl-core/templates/issue-skill.md");
-    assert!(skill
-        .contains("Among scheduling and dependency fields, `update` conditionally echoes only"));
-    assert!(skill.contains("`lane`, `lane_seq`, and `collision`"));
-    assert!(skill.contains("`blocked_by` is not an update echo"));
-    assert!(skill.contains("at `.data.blocked_by`"));
-    assert!(skill.contains("canonical bare-slug\n`blocked_by` list"));
+    // The absent-vs-null distinction is load-bearing agent behavior: a
+    // requested clear remains present as null, while unrequested fields stay
+    // absent.
+    let cleared = json(&run(r, &["--json", "update", "echo-target", "--no-lane"]));
+    assert_eq!(cleared.get("lane"), Some(&serde_json::Value::Null));
+    assert!(cleared.get("lane_seq").is_none());
+    assert!(cleared.get("collision").is_none());
+
+    // Keep both production templates pinned to the behavior above. The DAG
+    // black-box test separately binds bare-slug blocker lists for populated
+    // and empty scheduled/unscheduled rows.
+    for (name, template) in [
+        (
+            "Claude",
+            include_str!("../../issuectl-core/templates/issue-skill.md"),
+        ),
+        (
+            "Codex",
+            include_str!("../../issuectl-core/templates/issue-prompt.md"),
+        ),
+    ] {
+        let skill = template.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            skill.contains(
+                "Among scheduling and dependency fields, `update` conditionally echoes only"
+            ),
+            "{name}"
+        );
+        assert!(
+            skill.contains("`lane`, `lane_seq`, and `collision`"),
+            "{name}"
+        );
+        assert!(
+            skill.contains("`blocked_by` is not an update echo"),
+            "{name}"
+        );
+        assert!(skill.contains("at `.data.blocked_by`"), "{name}");
+        assert!(
+            skill.contains("canonical bare-slug `blocked_by` list"),
+            "{name}"
+        );
+    }
 }
 
 #[test]
