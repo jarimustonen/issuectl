@@ -138,8 +138,12 @@ Examples:
     after_help = TOP_LEVEL_HELP
 )]
 struct Cli {
+    // Keep the very wide derived subcommand enum off the parser's stack. Clap
+    // constructs the complete command tree before selecting a verb, and an
+    // inline `Command` pushed Linux's normal 2 MiB test-thread stack over its
+    // limit as the CLI grew.
     #[command(subcommand)]
-    command: Command,
+    command: Box<Command>,
 
     /// Output as JSON
     #[arg(global = true, long)]
@@ -368,6 +372,27 @@ fn parse_slug_arg(s: &str) -> std::result::Result<String, String> {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Frequently used issue-management commands.
+    #[command(flatten)]
+    Primary(Box<PrimaryCommand>),
+
+    /// Repository tooling, reporting, and intake commands.
+    #[command(flatten)]
+    Extended(Box<ExtendedCommand>),
+}
+
+impl Command {
+    #[cfg(test)]
+    fn into_primary(self) -> Box<PrimaryCommand> {
+        match self {
+            Self::Primary(command) => command,
+            Self::Extended(_) => panic!("expected a primary command"),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PrimaryCommand {
     /// Print the running CLI and JSON-contract versions for drift audits.
     Version,
 
@@ -1317,7 +1342,10 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: AgentsAction,
     },
+}
 
+#[derive(Subcommand)]
+pub(crate) enum ExtendedCommand {
     /// Install or preview the /issue skill template (Claude Code or Codex)
     Skill {
         #[command(subcommand)]

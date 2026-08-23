@@ -3,6 +3,28 @@ use super::*;
 #[cfg(test)]
 mod tests {
     #[test]
+    fn full_cli_constructs_and_parses_on_two_mib_stack() {
+        const TWO_MIB: usize = 2 * 1024 * 1024;
+
+        std::thread::Builder::new()
+            .name("two-mib-cli-parser".to_string())
+            .stack_size(TWO_MIB)
+            .spawn(|| {
+                // Command construction traverses every flattened group. Parse
+                // one command from each group as a regression for both
+                // FromArgMatches paths as well.
+                Cli::command().debug_assert();
+                Cli::try_parse_from(["issuectl", "apply", "patch.yaml"])
+                    .expect("primary command should parse");
+                Cli::try_parse_from(["issuectl", "intake", "queue"])
+                    .expect("extended command should parse");
+            })
+            .expect("two-MiB parser thread should spawn")
+            .join()
+            .expect("full CLI should fit on a two-MiB stack");
+    }
+
+    #[test]
     fn help_document_includes_global_flags_and_new_examples() {
         let root = Cli::command();
         let new = root
@@ -118,7 +140,10 @@ mod tests {
     fn new_alias_resolves_to_create() {
         let cli =
             Cli::try_parse_from(["issuectl", "new", "--type", "task", "--title", "x"]).unwrap();
-        assert!(matches!(cli.command, Command::Create { .. }));
+        assert!(matches!(
+            *cli.command.into_primary(),
+            PrimaryCommand::Create { .. }
+        ));
     }
 
     #[test]
@@ -143,8 +168,8 @@ mod tests {
             "foo/bar.rs",
         ])
         .unwrap();
-        match cli.command {
-            Command::Create {
+        match *cli.command.into_primary() {
+            PrimaryCommand::Create {
                 lane,
                 lane_seq,
                 add_collision,
@@ -176,8 +201,8 @@ mod tests {
             "-5",
         ])
         .unwrap();
-        match cli.command {
-            Command::Create { lane_seq, .. } => assert_eq!(lane_seq, Some(-5)),
+        match *cli.command.into_primary() {
+            PrimaryCommand::Create { lane_seq, .. } => assert_eq!(lane_seq, Some(-5)),
             _ => panic!("expected Create"),
         }
     }
@@ -188,8 +213,8 @@ mod tests {
             "issuectl", "create", "--type", "task", "--title", "x", "--body", "hello",
         ])
         .unwrap();
-        match cli.command {
-            Command::Create { description, .. } => {
+        match *cli.command.into_primary() {
+            PrimaryCommand::Create { description, .. } => {
                 assert_eq!(description.as_deref(), Some("hello"))
             }
             _ => panic!("expected Create"),
@@ -209,8 +234,8 @@ mod tests {
             "notes.md",
         ])
         .unwrap();
-        match cli.command {
-            Command::Create {
+        match *cli.command.into_primary() {
+            PrimaryCommand::Create {
                 body_file,
                 description,
                 ..
@@ -225,11 +250,11 @@ mod tests {
     #[test]
     fn comment_is_visible_alias_for_note() {
         // The natural guess `issuectl comment <slug> …` resolves to the
-        // exact same `Command::Note` variant (and thus `cmd_note` handler)
+        // exact same `PrimaryCommand::Note` variant (and thus `cmd_note` handler)
         // as `note`.
         let cli = Cli::try_parse_from(["issuectl", "comment", "sl-ug", "--as", "u", "hi"]).unwrap();
-        match cli.command {
-            Command::Note { slug, message, .. } => {
+        match *cli.command.into_primary() {
+            PrimaryCommand::Note { slug, message, .. } => {
                 assert_eq!(slug, "sl-ug");
                 assert_eq!(message.as_deref(), Some("hi"));
             }
@@ -242,8 +267,8 @@ mod tests {
         let cli =
             Cli::try_parse_from(["issuectl", "note", "sl-ug", "--as", "u", "--message", "hi"])
                 .unwrap();
-        match cli.command {
-            Command::Note {
+        match *cli.command.into_primary() {
+            PrimaryCommand::Note {
                 message,
                 message_flag,
                 ..
@@ -262,8 +287,8 @@ mod tests {
         for flag in ["--body", "--comment"] {
             let cli = Cli::try_parse_from(["issuectl", "note", "sl-ug", "--as", "u", flag, "hi"])
                 .unwrap();
-            match cli.command {
-                Command::Note { message_flag, .. } => {
+            match *cli.command.into_primary() {
+                PrimaryCommand::Note { message_flag, .. } => {
                     assert_eq!(message_flag.as_deref(), Some("hi"))
                 }
                 _ => panic!("expected Note"),
@@ -275,8 +300,10 @@ mod tests {
     fn message_and_note_are_aliases_for_comment_on_close() {
         for flag in ["--message", "--note"] {
             let cli = Cli::try_parse_from(["issuectl", "close", "sl-ug", flag, "done"]).unwrap();
-            match cli.command {
-                Command::Close { comment, .. } => assert_eq!(comment.as_deref(), Some("done")),
+            match *cli.command.into_primary() {
+                PrimaryCommand::Close { comment, .. } => {
+                    assert_eq!(comment.as_deref(), Some("done"))
+                }
                 _ => panic!("expected Close"),
             }
         }
@@ -296,8 +323,8 @@ mod tests {
             "note.md",
         ])
         .unwrap();
-        match cli.command {
-            Command::Note { from_file, .. } => {
+        match *cli.command.into_primary() {
+            PrimaryCommand::Note { from_file, .. } => {
                 assert_eq!(from_file.as_deref(), Some(Path::new("note.md")));
             }
             _ => panic!("expected Note"),
@@ -378,8 +405,8 @@ mod tests {
             "-",
         ])
         .unwrap();
-        match cli.command {
-            Command::Create { body_file, .. } => {
+        match *cli.command.into_primary() {
+            PrimaryCommand::Create { body_file, .. } => {
                 assert_eq!(body_file.as_deref(), Some(Path::new("-")));
             }
             _ => panic!("expected Create"),
@@ -474,8 +501,8 @@ mod tests {
     #[test]
     fn assign_parses_user_and_clear() {
         let cli = Cli::try_parse_from(["issuectl", "assign", "some-slug", "alice"]).unwrap();
-        match cli.command {
-            Command::Assign {
+        match *cli.command.into_primary() {
+            PrimaryCommand::Assign {
                 slug, user, clear, ..
             } => {
                 assert_eq!(slug, "some-slug");
@@ -486,8 +513,8 @@ mod tests {
         }
 
         let cli = Cli::try_parse_from(["issuectl", "assign", "some-slug", "--clear"]).unwrap();
-        match cli.command {
-            Command::Assign { user, clear, .. } => {
+        match *cli.command.into_primary() {
+            PrimaryCommand::Assign { user, clear, .. } => {
                 assert!(user.is_none());
                 assert!(clear);
             }

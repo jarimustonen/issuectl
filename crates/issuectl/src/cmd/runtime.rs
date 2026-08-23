@@ -473,7 +473,7 @@ pub(crate) fn run() -> Result<()> {
     // command failed. Without `--json` we return the error unchanged so
     // anyhow's default `Error: …` rendering (and existing tests) are
     // preserved byte-for-byte.
-    let result = dispatch(cli.command, json_output);
+    let result = dispatch(*cli.command, json_output);
     if json_output {
         if let Err(e) = result {
             emit_json_error(
@@ -506,9 +506,16 @@ pub(crate) fn cmd_version(json: bool) -> Result<()> {
 
 pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
     match command {
-        Command::Version => cmd_version(json_output),
-        Command::Config { action } => cmd_config(json_output, action),
-        Command::List {
+        Command::Primary(command) => dispatch_primary(*command, json_output),
+        Command::Extended(command) => dispatch_extended(*command, json_output),
+    }
+}
+
+fn dispatch_primary(command: PrimaryCommand, json_output: bool) -> Result<()> {
+    match command {
+        PrimaryCommand::Version => cmd_version(json_output),
+        PrimaryCommand::Config { action } => cmd_config(json_output, action),
+        PrimaryCommand::List {
             query,
             assignee,
             issue_type,
@@ -530,18 +537,18 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             all,
             closed,
         ),
-        Command::Show { slug } => cmd_show(json_output, &slug),
-        Command::Ready { slug } => cmd_ready(json_output, &slug),
-        Command::Open { slug, dir, editor } => cmd_open(json_output, &slug, dir, editor),
-        Command::Attach { slug, files } => cmd_attach(json_output, &slug, files),
-        Command::Search { query, all } => cmd_search(json_output, &query, all),
-        Command::Stats => cmd_stats(json_output),
-        Command::Duplicates {
+        PrimaryCommand::Show { slug } => cmd_show(json_output, &slug),
+        PrimaryCommand::Ready { slug } => cmd_ready(json_output, &slug),
+        PrimaryCommand::Open { slug, dir, editor } => cmd_open(json_output, &slug, dir, editor),
+        PrimaryCommand::Attach { slug, files } => cmd_attach(json_output, &slug, files),
+        PrimaryCommand::Search { query, all } => cmd_search(json_output, &query, all),
+        PrimaryCommand::Stats => cmd_stats(json_output),
+        PrimaryCommand::Duplicates {
             slug,
             threshold,
             all,
         } => cmd_duplicates(json_output, slug.as_deref(), threshold, all),
-        Command::Create {
+        PrimaryCommand::Create {
             issue_type,
             title_pos,
             title_flag,
@@ -622,7 +629,7 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 check_duplicates,
             )
         }
-        Command::Update {
+        PrimaryCommand::Update {
             slug,
             patch_file,
             query,
@@ -703,7 +710,7 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 None => cmd_update(json_output, args),
             }
         }
-        Command::Close {
+        PrimaryCommand::Close {
             slug,
             status,
             author,
@@ -721,17 +728,17 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             stamp,
             expected_version,
         ),
-        Command::Rename {
+        PrimaryCommand::Rename {
             old_slug,
             new_slug,
             dry_run,
         } => cmd_rename(json_output, &old_slug, &new_slug, dry_run),
-        Command::Stale { days } => cmd_stale(json_output, days),
-        Command::Archive {
+        PrimaryCommand::Stale { days } => cmd_stale(json_output, days),
+        PrimaryCommand::Archive {
             older_than,
             dry_run,
         } => cmd_archive(json_output, older_than, dry_run),
-        Command::Note {
+        PrimaryCommand::Note {
             slug,
             author,
             message,
@@ -755,7 +762,7 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             dry_run,
             expected_version,
         ),
-        Command::Set {
+        PrimaryCommand::Set {
             slug,
             field,
             value,
@@ -776,7 +783,7 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
         // `set --clear`). Route through the same handler so validation,
         // idempotency, and the `--json`/`--expected-version` contract are
         // identical — no new mutation verb or storage semantics.
-        Command::Assign {
+        PrimaryCommand::Assign {
             slug,
             user,
             clear,
@@ -791,13 +798,13 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             dry_run,
             expected_version,
         ),
-        Command::Check {
+        PrimaryCommand::Check {
             slug,
             task,
             dry_run,
             expected_version,
         } => cmd_check(json_output, &slug, &task, dry_run, expected_version),
-        Command::Label {
+        PrimaryCommand::Label {
             slug,
             op,
             label,
@@ -809,8 +816,8 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             let (op, label) = resolve_label_target(op, label, add, remove)?;
             cmd_label(json_output, &slug, op, &label, dry_run, expected_version)
         }
-        Command::Apply { patch, dry_run } => cmd_apply(json_output, &patch, dry_run),
-        Command::Bulk {
+        PrimaryCommand::Apply { patch, dry_run } => cmd_apply(json_output, &patch, dry_run),
+        PrimaryCommand::Bulk {
             query,
             set,
             clear,
@@ -832,7 +839,7 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             },
             dry_run,
         ),
-        Command::Body { action } => match action {
+        PrimaryCommand::Body { action } => match action {
             BodyAction::Set {
                 slug,
                 stdin,
@@ -840,7 +847,7 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 expected_version,
             } => cmd_body_set(json_output, &slug, stdin, from_file, expected_version),
         },
-        Command::Init {
+        PrimaryCommand::Init {
             agent,
             with_hooks,
             with_merge_driver,
@@ -857,19 +864,26 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             };
             init_cmd::run(&root, opts, json_output)
         }
-        Command::Doctor { fix, verbose } => doctor::run(&find_root(), fix, json_output, verbose),
-        Command::Hooks { action } => match action {
+        PrimaryCommand::Doctor { fix, verbose } => {
+            doctor::run(&find_root(), fix, json_output, verbose)
+        }
+        PrimaryCommand::Hooks { action } => match action {
             HooksAction::Install { uninstall, force } => hooks::run(&find_root(), uninstall, force),
         },
-        Command::SyncCommits {
+        PrimaryCommand::SyncCommits {
             range,
             no_branch_fallback,
             dry_run,
         } => cmd_sync_commits(json_output, range, no_branch_fallback, dry_run),
-        Command::Agents { action } => match action {
+        PrimaryCommand::Agents { action } => match action {
             AgentsAction::Init { force } => agents::run_init(&find_root(), force, json_output),
         },
-        Command::Skill { action } => match action {
+    }
+}
+
+fn dispatch_extended(command: ExtendedCommand, json_output: bool) -> Result<()> {
+    match command {
+        ExtendedCommand::Skill { action } => match action {
             SkillAction::List => cmd_skill_list(json_output),
             SkillAction::Install {
                 agent,
@@ -880,8 +894,8 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             SkillAction::PiStatus => cmd_skill_pi_status(json_output),
             SkillAction::PiPrune { force } => cmd_skill_pi_prune(json_output, force),
         },
-        Command::Fmt { slugs, check, diff } => cmd_fmt(json_output, slugs, check, diff),
-        Command::MergeDriver {
+        ExtendedCommand::Fmt { slugs, check, diff } => cmd_fmt(json_output, slugs, check, diff),
+        ExtendedCommand::MergeDriver {
             base,
             ours,
             theirs,
@@ -895,23 +909,23 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             })?;
             std::process::exit(code);
         }
-        Command::Context { slug, write } => cmd_context(json_output, &slug, write),
-        Command::Prompt {
+        ExtendedCommand::Context { slug, write } => cmd_context(json_output, &slug, write),
+        ExtendedCommand::Prompt {
             template,
             slug,
             write,
         } => cmd_prompt(json_output, &template, &slug, write),
-        Command::InstallMergeDriver { apply } => {
+        ExtendedCommand::InstallMergeDriver { apply } => {
             let root = find_root();
             merge_driver::install(&root, apply)
         }
-        Command::Export {
+        ExtendedCommand::Export {
             format,
             query,
             all,
             closed,
         } => cmd_export(json_output, format, query, all, closed),
-        Command::Depend { action } => match action {
+        ExtendedCommand::Depend { action } => match action {
             DependAction::Add {
                 slug,
                 blocked_by,
@@ -923,13 +937,13 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 expected_version,
             } => cmd_depend(json_output, &slug, blocked_by, false, expected_version),
         },
-        Command::Dag { reservations } => cmd_dag(json_output, reservations),
-        Command::Epic { action } => match action {
+        ExtendedCommand::Dag { reservations } => cmd_dag(json_output, reservations),
+        ExtendedCommand::Epic { action } => match action {
             EpicAction::Tree { slug } => cmd_epic_tree(json_output, slug.as_deref()),
         },
-        Command::Workload => cmd_workload(json_output),
-        Command::Burndown { cycle } => cmd_burndown(json_output, &cycle),
-        Command::Cycle { action } => match action {
+        ExtendedCommand::Workload => cmd_workload(json_output),
+        ExtendedCommand::Burndown { cycle } => cmd_burndown(json_output, &cycle),
+        ExtendedCommand::Cycle { action } => match action {
             CycleAction::Current => cmd_cycle_current(json_output),
             CycleAction::Plan { name, all, closed } => {
                 cmd_cycle_plan(json_output, &name, all, closed)
@@ -938,11 +952,11 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 cmd_cycle_status(json_output, name.as_deref(), all)
             }
         },
-        Command::Schedule { action } => match action {
+        ExtendedCommand::Schedule { action } => match action {
             ScheduleAction::List => cmd_schedule_list(json_output),
             ScheduleAction::Run { dry_run } => cmd_schedule_run(json_output, dry_run),
         },
-        Command::Import { source } => match source {
+        ExtendedCommand::Import { source } => match source {
             ImportSource::Json { file, default_type } => {
                 cmd_import_json(json_output, &file, &default_type)
             }
@@ -953,7 +967,7 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
                 default_type,
             } => cmd_import_github(json_output, &repo, &state, limit, &default_type),
         },
-        Command::Triage { slug } => {
+        ExtendedCommand::Triage { slug } => {
             if slug.is_some() {
                 emit_deprecation_warning(
                     json_output,
@@ -973,10 +987,10 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             }
             cmd_triage(json_output, slug)
         }
-        Command::Pick { query, all, first } => cmd_pick(json_output, query, all, first),
-        Command::Completions { shell } => cmd_completions(shell),
-        Command::CompleteValues { kind } => cmd_complete_values(kind),
-        Command::ScanTodos {
+        ExtendedCommand::Pick { query, all, first } => cmd_pick(json_output, query, all, first),
+        ExtendedCommand::Completions { shell } => cmd_completions(shell),
+        ExtendedCommand::CompleteValues { kind } => cmd_complete_values(kind),
+        ExtendedCommand::ScanTodos {
             file_intake,
             create_inbox,
         } => {
@@ -991,11 +1005,11 @@ pub(crate) fn dispatch(command: Command, json_output: bool) -> Result<()> {
             }
             cmd_scan_todos(json_output, file_intake || create_inbox)
         }
-        Command::Activity { since, limit } => cmd_activity(json_output, since, limit),
-        Command::Timeline { slug } => cmd_timeline(json_output, &slug),
-        Command::Changelog { range } => cmd_changelog(json_output, &range),
-        Command::Metrics { since } => cmd_metrics(json_output, since),
-        Command::Intake { action } => dispatch_intake(json_output, action),
+        ExtendedCommand::Activity { since, limit } => cmd_activity(json_output, since, limit),
+        ExtendedCommand::Timeline { slug } => cmd_timeline(json_output, &slug),
+        ExtendedCommand::Changelog { range } => cmd_changelog(json_output, &range),
+        ExtendedCommand::Metrics { since } => cmd_metrics(json_output, since),
+        ExtendedCommand::Intake { action } => dispatch_intake(json_output, action),
     }
 }
 

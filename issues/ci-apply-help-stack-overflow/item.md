@@ -1,9 +1,9 @@
 ---
 created: 2026-08-22
-updated: 2026-08-22
+updated: 2026-08-23
 type: bug
 reporter: mail-triage
-status: open
+status: in-progress
 priority: normal
 lane: cli-parser
 ---
