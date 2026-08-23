@@ -1,0 +1,572 @@
+{
+  "schema_version": 1,
+  "source_review": "history/review-dod-delivery-gate.md",
+  "head_sha": "ed29f3a7f9f7e49aad7e5c4c4dba150ebefda6d2",
+  "generated_at": "2026-08-23T19:01:44Z",
+  "findings": [
+    {
+      "id": "F1",
+      "cluster_key": "sha1:1d448c3e9c1b88035511bcae0ff7186037492aae",
+      "title": "Non-delivery close to delivery bypasses strict DoD",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 9,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 9,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 9,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 9,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/transitions.rs",
+      "target_symbol": "evaluate_dod",
+      "claim": "The source-side `was_closing` guard skips DoD for non-delivery closing to delivery transitions.",
+      "suggested_fix": "Use `is_delivery_status` for the previous status and add both directional regressions.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "REGULAR",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The predicate uses `is_closing(prev_status)`, so `duplicate → fixed` returns before acceptance criteria evaluation. The existing done→wontfix test is vacuous because the target itself is not a delivery status."
+    },
+    {
+      "id": "F2",
+      "cluster_key": "sha1:9c1abe956ab028bb649efc5c972024702ec75466",
+      "title": "README custom-status example breaks initialized transition rules",
+      "kind": "DESIGN",
+      "sources": [
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 16,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 16,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 16,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 16,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": null,
+      "target_symbol": "README DoD configuration example",
+      "claim": "The narrowed status enum in the README conflicts with the default transition matrix.",
+      "suggested_fix": "Show an additive enum containing built-ins plus the custom status and document replacement semantics.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "REGULAR",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "`load_validated_rules` checks every transition status against the configured status universe; the example removes statuses referenced by the scaffolded matrix."
+    },
+    {
+      "id": "F3",
+      "cluster_key": "sha1:b84405ce512af6c932b19c884df0781850a704e3",
+      "title": "Explicit delivery-status policy fails open on typos",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 23,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 23,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 23,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 23,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/schema.rs",
+      "target_symbol": "load / validate_loadability",
+      "claim": "Explicit `dod.delivery_statuses` entries are not validated, so typos silently disable strict policy.",
+      "suggested_fix": "Track whether the list was explicitly authored and validate explicit entries while preserving inherited defaults under narrowed schemas.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "OCCASIONAL",
+      "readability": "IMPROVES",
+      "architecture": "MINOR",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "unclear",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The loader validates aliases and body sections but never checks `dod.delivery_statuses`; exact string membership makes an unknown value inert. Presence-aware validation is needed to avoid rejecting inherited defaults in narrowed schemas."
+    },
+    {
+      "id": "F4",
+      "cluster_key": "sha1:275c45dae55654d9c9261c13511ca5ef8b629e37",
+      "title": "Strict-only compatibility lacks a positive load-path regression",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 32,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 32,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 32,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 32,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/mutate/mutate_tests.rs",
+      "target_symbol": "dod_delivery_policy_flows_through_update_warnings_and_strict_errors",
+      "claim": "The strict-only test does not prove that omitted `delivery_statuses` inherit done/fixed.",
+      "suggested_fix": "Add a strict-only loaded-schema transition to done/fixed that must block.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "OCCASIONAL",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The test asserts only that duplicate is ungated, which would also pass with an accidentally empty delivery list."
+    },
+    {
+      "id": "F5",
+      "cluster_key": "sha1:deaf8e5e7663a7ebedbc2893d03598cc2c78fc5e",
+      "title": "evaluate_dod rustdoc contradicts behavior",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 35,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 35,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 35,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 35,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/transitions.rs",
+      "target_symbol": "evaluate_dod",
+      "claim": "Rustdoc says empty acceptance criteria passes and describes only active-to-built-in delivery.",
+      "suggested_fix": "Describe present non-empty fully checked criteria, configured delivery targets, and delivery-to-delivery suppression.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "REGULAR",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "`acceptance_criteria_message` returns a message for missing and zero-item sections, and custom delivery statuses are supported."
+    },
+    {
+      "id": "F6",
+      "cluster_key": "sha1:158cb66464682bbd7a2f1a622b63c584259c4e3f",
+      "title": "Built-in delivery names lack a central constant or drift guard",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 38,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 38,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 38,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 38,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/schema.rs",
+      "target_symbol": "default_delivery_statuses",
+      "claim": "The default names duplicate taxonomy strings outside issue_fields.",
+      "suggested_fix": "Add an issue_fields delivery-status constant and derive defaults from it.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "`done` and `fixed` are literal strings in `default_delivery_statuses` while related built-in sets are centralized in issue_fields. Centralization reduces taxonomy drift."
+    },
+    {
+      "id": "F7",
+      "cluster_key": "sha1:9c9606354b8072ebd36794d9b5d1c4825ad80916",
+      "title": "Reject an explicit empty delivery list",
+      "kind": "DESIGN",
+      "sources": [
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 43,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 43,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 43,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 43,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": null,
+      "target_symbol": "Empty delivery-list semantics",
+      "claim": "An explicit empty delivery list should be rejected as fail-open.",
+      "suggested_fix": "Reject an empty configured list.",
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "An empty list is an unambiguous policy opt-out, unlike a typoed non-empty list; the moderator resolution is to allow and document it."
+    },
+    {
+      "id": "F8",
+      "cluster_key": "sha1:cc4d172009b6f57d714efcc9306897456641fdf6",
+      "title": "Expose a derived effective delivery set in config show",
+      "kind": "DESIGN",
+      "sources": [
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 53,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 53,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 53,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 53,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": null,
+      "target_symbol": "Config inspection",
+      "claim": "Config show should add another key for the intersection of delivery statuses and lifecycle classes.",
+      "suggested_fix": "Add `schema.dod.effective_delivery_statuses`.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "NEUTRAL",
+      "architecture": "MINOR",
+      "confidence": "MED",
+      "recommendation": "DROP",
+      "drop_rule": "1b",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The two effective inputs are already inspectable. Once explicit contradictory policy is validated, another derived API key has little real-world value and adds surface."
+    },
+    {
+      "id": "F9",
+      "cluster_key": "sha1:dff60e528e2af7725835ee353e530da0a365ca76",
+      "title": "Use BTreeSet instead of Vec",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 60,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 60,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 60,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 60,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/schema.rs",
+      "target_symbol": "DodConfig::delivery_statuses",
+      "claim": "A set container is needed for membership and uniqueness.",
+      "suggested_fix": "Change the public field to BTreeSet.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "NEUTRAL",
+      "architecture": "MINOR",
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1b",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The list is tiny and order-preserving Vec plus duplicate validation is simpler; lookup performance has no practical impact."
+    },
+    {
+      "id": "F10",
+      "cluster_key": "sha1:b6aa155fd3467fa53aa6f1d71a779e03221a3723",
+      "title": "Deduplicate DoD and explicit transition-rule messages",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 61,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 61,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 61,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 61,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/mutate/update.rs",
+      "target_symbol": "update_issue_under_lock",
+      "claim": "DoD and explicit acceptance rules can emit duplicate errors.",
+      "suggested_fix": "Suppress DoD when an explicit rule checks acceptance criteria.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "NEUTRAL",
+      "architecture": "MINOR",
+      "confidence": "MED",
+      "recommendation": "DROP",
+      "drop_rule": "1b",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Both evaluators can produce similar messages, but this behavior predates the patch and the new policy narrows its occurrence. Fixing it adds coupling without demonstrated impact."
+    },
+    {
+      "id": "F11",
+      "cluster_key": "sha1:c1c6b0fca4268e655d893d47b47b6704f70cecee",
+      "title": "ready command mismatches delivery configuration",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 62,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 62,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 62,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 62,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl/src/cmd/read.rs",
+      "target_symbol": "cmd_ready",
+      "claim": "The read-only ready command should classify delivery statuses.",
+      "suggested_fix": "Route ready through delivery-status policy.",
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "`ready` reports body checklist completion independent of a transition target. The README transition sentence is adjacent context, not a claim that ready evaluates statuses."
+    },
+    {
+      "id": "F12",
+      "cluster_key": "sha1:cea4278541f0b344631a538004d5ba7c7001717e",
+      "title": "Doctor should audit historical DoD compliance",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 63,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 63,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 63,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-dod-delivery-gate.md",
+          "line": 63,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/doctor/checks.rs",
+      "target_symbol": null,
+      "claim": "Doctor should evaluate configured delivery statuses for historical DoD compliance.",
+      "suggested_fix": "Add a doctor DoD check.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "NEUTRAL",
+      "architecture": "MODERATE",
+      "confidence": "MED",
+      "recommendation": "DROP",
+      "drop_rule": "1c",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Doctor has no zero-config historical DoD audit, but that is pre-existing scope expansion rather than a defect in transition gating and would add a new subsystem behavior without evidence."
+    }
+  ]
+}

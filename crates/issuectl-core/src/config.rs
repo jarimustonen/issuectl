@@ -277,7 +277,7 @@ mod tests {
         fs::create_dir_all(tmp.path().join("issues")).unwrap();
         fs::write(
             tmp.path().join("issues/.schema.yaml"),
-            "version: 1\ndod:\n  strict: true\n  delivery_statuses: [done, fixed, archived]\nfields:\n  priority:\n    required: false\nstatus_classes:\n  archived: closing\n",
+            "version: 1\ndod:\n  strict: true\n  delivery_statuses: [done, fixed]\nfields:\n  priority:\n    required: false\nstatus_classes:\n  archived: closing\n",
         )
         .unwrap();
 
@@ -287,7 +287,7 @@ mod tests {
         assert_eq!(report.values["schema.dod.strict"].source, ValueSource::File);
         assert_eq!(
             report.values["schema.dod.delivery_statuses"].value,
-            serde_json::json!(["done", "fixed", "archived"])
+            serde_json::json!(["done", "fixed"])
         );
         assert_eq!(
             report.values["schema.dod.delivery_statuses"].source,

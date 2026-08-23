@@ -241,7 +241,8 @@ The Definition-of-Done gate applies only to delivery closes (`done` and `fixed`
 by default). Non-delivery dispositions stay ungated even with `dod.strict: true`.
 A project can declare custom delivery closes in `issues/.schema.yaml` by
 classifying the status as `closing` under `status_classes` and including it in
-`dod.delivery_statuses`.
+`dod.delivery_statuses`. That list replaces the defaults, so restate `done` and
+`fixed` to retain them; an explicit empty list disables the transition-time gate.
 
 **Steps**:
 1. Determine the appropriate closing status from the user's message

@@ -461,14 +461,16 @@ fn acceptance_criteria_message(body: &str, status: &str) -> Option<String> {
 /// Returns `(warnings, errors)`. Both vectors are empty when:
 ///
 /// - The transition is *not* into a delivery-signifying closing status, OR
-/// - `prev_status` is already closing (closing → closing is a
-///   metadata tweak, not a "ship-it" moment), OR
-/// - The Acceptance Criteria section is empty or fully checked.
+/// - `prev_status` is already a delivery status (delivery → delivery is
+///   a metadata tweak, not a fresh "ship-it" moment), OR
+/// - The Acceptance Criteria section is present, contains at least one
+///   task-list item, and every item is checked.
 ///
 /// Existing per-status rules using `requires_acceptance_criteria_checked`
 /// continue to apply through [`evaluate_transition`]; the DoD gate is
 /// the *zero-config* default that activates whenever a transition
-/// moves the issue from active → built-in delivery (`done` / `fixed`).
+/// enters a configured delivery status (`done` / `fixed` by default)
+/// from a non-delivery status.
 pub fn evaluate_dod(
     schema: &crate::schema::Schema,
     issue_after: &Issue,
@@ -476,8 +478,8 @@ pub fn evaluate_dod(
 ) -> (Vec<String>, Vec<String>) {
     let new_status = issue_after.status.as_str();
     let going_delivery = crate::schema::is_delivery_status(schema, new_status);
-    let was_closing = crate::schema::is_closing(schema, prev_status);
-    if !going_delivery || was_closing || prev_status == new_status {
+    let was_delivery = crate::schema::is_delivery_status(schema, prev_status);
+    if !going_delivery || was_delivery || prev_status == new_status {
         return (Vec::new(), Vec::new());
     }
     let Some(msg) = acceptance_criteria_message(&issue_after.body, new_status) else {
@@ -655,14 +657,25 @@ mod tests {
     }
 
     #[test]
-    fn dod_skipped_when_already_closing() {
-        // done → wontfix is a closing-to-closing tweak, not a fresh ship.
+    fn dod_skipped_between_delivery_statuses() {
+        // done → fixed changes the delivery disposition without shipping
+        // afresh, so it must not re-run the gate.
         let body = "## Acceptance Criteria\n\n- [ ] pending\n";
-        let issue = make_issue("wontfix", "feature", body);
+        let issue = make_issue("fixed", "bug", body);
         let s = schema_with_dod(true);
         let (w, e) = evaluate_dod(&s, &issue, "done");
         assert!(w.is_empty());
         assert!(e.is_empty());
+    }
+
+    #[test]
+    fn dod_runs_from_non_delivery_close_to_delivery_close() {
+        let body = "## Acceptance Criteria\n\n- [ ] pending\n";
+        let issue = make_issue("done", "feature", body);
+        let s = schema_with_dod(true);
+        let (warnings, errors) = evaluate_dod(&s, &issue, "wontfix");
+        assert!(warnings.is_empty());
+        assert_eq!(errors.len(), 1);
     }
 
     #[test]

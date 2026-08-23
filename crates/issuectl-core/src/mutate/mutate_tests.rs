@@ -239,6 +239,23 @@ mod tests {
         assert!(duplicate.warnings.is_empty());
         assert!(duplicate.moved_to_closed);
 
+        // Declaring only the pre-existing severity knob must inherit the new
+        // built-in delivery defaults rather than silently disabling the gate.
+        seed_issue(tmp.path(), "open", "fixed-strict-target", "open");
+        let err = update_issue(
+            tmp.path(),
+            "fixed-strict-target",
+            UpdateIssueRequest {
+                status: Patch::Set("fixed".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, MutateError::TransitionViolation(ref msg) if msg.contains("dod:")),
+            "expected strict DoD violation, got {err:?}"
+        );
+
         let custom_schema = |strict| {
             format!(
                 "version: 1\nfields:\n  status:\n    required: true\n    enum: [open, shipped]\nstatus_classes:\n  shipped: closing\ndod:\n  strict: {strict}\n  delivery_statuses: [shipped]\n"

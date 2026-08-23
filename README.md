@@ -483,13 +483,31 @@ schema-aware lifecycle handling:
 fields:
   status:
     required: true
-    enum: [open, shipped, duplicate]
+    enum:
+      - open
+      - in-progress
+      - testing
+      - untriaged
+      - deferred
+      - needs-info
+      - done
+      - fixed
+      - shipped
+      - wontfix
+      - duplicate
+      - cannot-reproduce
+      - obsolete
 status_classes:
   shipped: closing
 dod:
   strict: true
-  delivery_statuses: [shipped]
+  delivery_statuses: [done, fixed, shipped]
 ```
+
+`delivery_statuses` replaces the default list rather than extending it; restate
+`done` and `fixed` when retaining them. An explicit empty list disables the
+transition-time gate. If a project narrows the status enum instead of adding to
+it, its `.issuectl/transitions.yaml` must use the same reduced status set.
 
 ### Recurring / scheduled issues
 

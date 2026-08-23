@@ -117,7 +117,10 @@ impl Default for DodConfig {
 }
 
 fn default_delivery_statuses() -> Vec<String> {
-    vec!["done".into(), "fixed".into()]
+    crate::issue_fields::DELIVERY_STATUSES
+        .iter()
+        .map(|status| (*status).to_string())
+        .collect()
 }
 
 /// Lifecycle classification for a status value.
@@ -368,9 +371,11 @@ fields:
 # Definition-of-Done applies only to delivery-signifying closing statuses.
 # The default delivery statuses are `done` and `fixed`; non-delivery closes
 # (`wontfix`, `duplicate`, `cannot-reproduce`, `obsolete`) stay ungated.
-# Replace `delivery_statuses` to include a custom closing status. A listed
-# status still has to resolve to `closing` through `status_classes` (or the
-# built-in fallback), so lifecycle overrides remain authoritative.
+# Replace `delivery_statuses` to include a custom closing status. This list
+# replaces (does not extend) the default; restate `done` and `fixed` to retain
+# them. A listed status must also be in `fields.status.enum` and resolve to
+# `closing` through `status_classes` (or the built-in fallback). An explicit
+# empty list disables transition-time DoD checks.
 #
 # dod:
 #   strict: false
@@ -420,8 +425,15 @@ pub fn load(root: &Path) -> Result<Schema> {
     }
     let text =
         fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-    let user: Schema =
+    let raw: Value =
         serde_yaml::from_str(&text).with_context(|| format!("cannot parse {}", path.display()))?;
+    let delivery_statuses_declared = raw
+        .as_mapping()
+        .and_then(|root| root.get(Value::String("dod".into())))
+        .and_then(Value::as_mapping)
+        .is_some_and(|dod| dod.contains_key(Value::String("delivery_statuses".into())));
+    let user: Schema =
+        serde_yaml::from_value(raw).with_context(|| format!("cannot parse {}", path.display()))?;
     if user.version != SUPPORTED_SCHEMA_VERSION {
         anyhow::bail!(
             "{}: unsupported schema version {} (this build supports {})",
@@ -477,7 +489,45 @@ pub fn load(root: &Path) -> Result<Schema> {
     );
     validate_body_sections(&merged.body_sections).with_context(|| format!("{}", path.display()))?;
     validate_loadability(&merged).with_context(|| format!("{}", path.display()))?;
+    if delivery_statuses_declared {
+        validate_explicit_delivery_statuses(&merged)
+            .with_context(|| format!("{}", path.display()))?;
+    }
     Ok(merged)
+}
+
+/// Validate only an explicitly authored DoD delivery list. Inherited defaults
+/// deliberately remain lenient when a project narrows its status enum or
+/// reclassifies a built-in status as active; those statuses are unreachable or
+/// inert. An explicit list, by contrast, is operator intent and must not fail
+/// open because of a typo or contradictory lifecycle declaration.
+fn validate_explicit_delivery_statuses(schema: &Schema) -> Result<()> {
+    let universe = status_universe(schema);
+    let mut seen = std::collections::BTreeSet::new();
+    for status in &schema.dod.delivery_statuses {
+        if status.trim().is_empty() || status.trim() != status {
+            anyhow::bail!(
+                "dod.delivery_statuses: status {status:?} must be non-empty with no surrounding whitespace"
+            );
+        }
+        if status.chars().any(char::is_control) {
+            anyhow::bail!("dod.delivery_statuses: status {status:?} contains a control character");
+        }
+        if !seen.insert(status.as_str()) {
+            anyhow::bail!("dod.delivery_statuses: status {status:?} is declared twice");
+        }
+        if !universe.contains(status) {
+            anyhow::bail!(
+                "dod.delivery_statuses: unknown status {status:?}; add it to `fields.status.enum` or remove it from the delivery list"
+            );
+        }
+        if !is_closing(schema, status) {
+            anyhow::bail!(
+                "dod.delivery_statuses: status {status:?} is not closing; classify it under `status_classes` or remove it from the delivery list"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Reject body-section declarations that would render to malformed
@@ -1582,6 +1632,52 @@ mod tests {
         // Built-ins still classify correctly through the same schema.
         assert!(is_closing(&schema, "done"));
         assert!(!is_closing(&schema, "open"));
+    }
+
+    #[test]
+    fn load_validates_only_explicit_delivery_statuses() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        let schema_path = tmp.path().join("issues/.schema.yaml");
+
+        // Inherited defaults remain compatible with a narrowed project enum.
+        fs::write(
+            &schema_path,
+            "version: 1\nfields:\n  status:\n    required: true\n    enum: [open, shipped]\nstatus_classes:\n  shipped: closing\n",
+        )
+        .unwrap();
+        let inherited = load(tmp.path()).unwrap();
+        assert_eq!(inherited.dod.delivery_statuses, vec!["done", "fixed"]);
+
+        // The same otherwise-unreachable value is rejected when the project
+        // explicitly claims it is a delivery outcome.
+        fs::write(
+            &schema_path,
+            "version: 1\nfields:\n  status:\n    required: true\n    enum: [open, shipped]\nstatus_classes:\n  shipped: closing\ndod:\n  delivery_statuses: [shiped]\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load(tmp.path()).unwrap_err());
+        assert!(err.contains("unknown status \"shiped\""), "{err}");
+
+        fs::write(
+            &schema_path,
+            "version: 1\nfields:\n  status:\n    required: true\n    enum: [open, shipped]\nstatus_classes:\n  shipped: closing\ndod:\n  delivery_statuses: [shipped, shipped]\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load(tmp.path()).unwrap_err());
+        assert!(err.contains("declared twice"), "{err}");
+
+        fs::write(
+            &schema_path,
+            "version: 1\nfields:\n  status:\n    required: true\n    enum: [open, shipped]\nstatus_classes:\n  shipped: active\ndod:\n  delivery_statuses: [shipped]\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load(tmp.path()).unwrap_err());
+        assert!(err.contains("is not closing"), "{err}");
+
+        // An explicit empty list is the supported opt-out.
+        fs::write(&schema_path, "version: 1\ndod:\n  delivery_statuses: []\n").unwrap();
+        assert!(load(tmp.path()).unwrap().dod.delivery_statuses.is_empty());
     }
 
     #[test]

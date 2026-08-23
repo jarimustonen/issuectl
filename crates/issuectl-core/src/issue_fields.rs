@@ -27,6 +27,10 @@ pub const ACTIVE_STATUSES: &[&str] = &[
     "deferred",
     "needs-info",
 ];
+/// Closing statuses that signify delivered work and therefore participate in
+/// the zero-config Definition-of-Done gate.
+pub const DELIVERY_STATUSES: &[&str] = &["done", "fixed"];
+
 pub const CLOSING_STATUSES: &[&str] = &[
     "done",
     "fixed",
