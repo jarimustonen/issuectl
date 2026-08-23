@@ -1,7 +1,7 @@
 ## Review: Shipped `/issue` create-path and update-echo guidance
 
-**Reviewed:** `e332fde..146a042`, chiefly `crates/issuectl-core/templates/issue-{skill,prompt}.md` and the related black-box contract tests  
-**Reviewers:** `gemini-3.1-pro-preview`, `gpt-5.6-sol`, `claude-opus-5`, `deepseek-v4-pro`  
+**Reviewed:** `e332fde..146a042`, chiefly `crates/issuectl-core/templates/issue-{skill,prompt}.md` and the related black-box contract tests
+**Reviewers:** `gemini-3.1-pro-preview`, `gpt-5.6-sol`, `claude-opus-5`, `deepseek-v4-pro`
 **Rounds:** 2 cross-review rounds after independent review
 
 ### Critical Issues (Consensus)
