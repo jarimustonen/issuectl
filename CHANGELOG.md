@@ -13,9 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   historical `ossctl` release evidence and permanent compatibility identifiers remain intact.
 
 ### Fixed
+- CLI command construction and parsing no longer overflow Linux's normal 2 MiB
+  Rust test-thread stack, so tests run without a `RUST_MIN_STACK` workaround.
 - Definition-of-Done checks now apply only to delivery closes (`done` and `fixed`
   by default), leaving duplicate and other non-delivery dispositions ungated.
   Projects can configure custom delivery statuses with `dod.delivery_statuses`.
+- The bundled `/issue` guidance now reads create results from `.data.path`,
+  documents update's conditional `lane` / `lane_seq` / `collision` echoes, and
+  directs blocker reads to `show` or `dag` instead of the update response.
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.17.0] - 2026-08-21
