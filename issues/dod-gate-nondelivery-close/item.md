@@ -9,6 +9,10 @@ lane: lifecycle
 commits:
 - hash: 1e62627e5926ae0d00a60780ef43e45da41922fd
   summary: 'chore(issue): start DoD delivery gate fix'
+- hash: d560cf8ef8217964d66db824e7f017228256451e
+  summary: 'fix(dod): resolve delivery gate review findings'
+- hash: ed29f3a7f9f7e49aad7e5c4c4dba150ebefda6d2
+  summary: 'fix(dod): gate only delivery closing statuses'
 ---
 
 # close: the Definition-of-Done gate fires on non-delivery closing statuses
@@ -64,6 +68,13 @@ declares custom closing statuses that do imply delivery.
 
 Note the schema-config angle when picking the shape: hardcoding a status list in
 `transitions.rs` reintroduces the same rigidity for projects with custom closing statuses.
+
+## Acceptance Criteria
+
+- [x] Built-in non-delivery dispositions do not trigger warning or strict DoD checks.
+- [x] Built-in and project-defined delivery statuses trigger the configured gate.
+- [x] Custom lifecycle classification remains authoritative and explicit policy is validated.
+- [x] Full green gate, multi-model review, and findings assessment pass.
 
 ## Provenance
 
