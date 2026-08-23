@@ -14,6 +14,50 @@ säännöt → `AGENTS.md`.
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
+**Tila (2026-08-22, rupeama 4 + release + triage valmis):** `main` on puhdas,
+synkassa originin kanssa, eikä tässä repossa ole eläviä workereita tai worktreitä.
+**Live-release on v0.17.0 kaikissa kanavissa:** `issuectl` ja `issuectl-core`
+crates.io:ssa 0.17.0, GitHub Releasessa 12 assetia ja Homebrew-tapissa 0.17.0.
+Paikallinen cargo-binääri ja agenttiohjeet on päivitetty 0.17.0:aan. Integroitu paikallinen
+green gate meni läpi, mutta GitHubin Linux-testilinja on nyt punainen alla kuvatun
+parser-stack-regression vuoksi; macOS-testit ja lintit ovat vihreitä.
+
+**Rupeama 4 (0.17.0):** @deprecate-triage-inbox toimitti ADR:n mukaisen yhden releasen
+varoitusikkunan, intake-backed scanner-filaamisen ja doctorin inbox-migraation; varsinainen
+legacy-pintojen poisto kuuluu 0.18.0:aan. @apply-patch-from-stdin toimitti canonical
+`update --patch-file -` -stdin-polun (`apply -` säilyy yhteensopivana) sekä täsmälliset
+path-or-stdin-virheet; inline JSON argv hylättiin tarkoituksella quoting-herkkänä toisena
+syötekielenä. Molemmat kävivät läpi ulkoisen katselmuksen ja täyden gaten.
+
+**Release-havainto (0.17.0):** ossctl 0.10.0 raportoi jälleen Homebrew-targetin
+`missing`, vaikka tap-formula oli jo 0.17.0. Suorat backstopit vahvistivat cratet,
+12 GitHub-assetia, onnistuneen cargo-dist-ajon ja tapin; tuore read-only verify näki
+lopulta 4/4 matches mutta ei terminalisoinut ajoa. Run suljettiin journalissa
+backstop-todisteet sisältävällä abandon-syyllä, ja `in_flight_count` on nolla. Tämä on
+toistuva verifierin false-negative, ei puuttuva toimitus.
+
+**Seuraavan stintin valmisteltu intentio:** tee kaikki kolme hyväksyttyä issuea;
+`issuectl dag --json --reservations '[]'` on ainoa lähde niiden ajantasaiselle
+suoritusjärjestykselle ja törmäyksille.
+
+- @ci-apply-help-stack-overflow: Linuxin 2 MiB testisäikeessä koko clap-komentopuun
+  rakentaminen ylittää stack-rajan. Tämä pitää Linux-CI:n punaisena; korjaa stack-käyttö,
+  älä peitä vikaa globaalilla `RUST_MIN_STACK`-nostolla.
+- @dod-gate-nondelivery-close: DoD-portti pitää rajata toimituksen merkitseviin
+  sulkutiloihin niin, että projektien omat statusluokat säilyvät tuettuina.
+- @intake-bug-issuectl-71ea534241c2: `/issue`-ohjeen create-tulos käyttää väärää
+  `item_path`-kenttää canonical `path`-kentän sijasta. Samaan yksikköön on taitettu
+  täsmennys, että ehdollinen update-echo koskee `lane`/`lane_seq`/`collision`-kenttiä;
+  `blocked_by` luetaan `show`/`dag`-pinnalta.
+
+**Intake-konteksti, ei hyväksytty agenda:** @migrate-release-guidance-shipshape on
+`untriaged` ja odottaa ihmisen intake-päätöstä. Älä käynnistä sitä ennen triagea,
+hyväksyntää ja lanetusta. Intake-slugien kuvaavuusraportti suljettiin by-design:
+luottamattoman otsikon sisältöä ei vuodateta pysyviin tunnisteisiin.
+
+<details>
+<summary>Edellinen handoff (2026-08-20)</summary>
+
 **Tila (2026-08-20, rupeama 3 valmis + triage-pass):** rupeaman jälkeen ajettiin vielä
 lanettomien issueiden triage: @apply-inline-json suljettiin duplikaattina ja sen sisältö
 taitettiin @apply-patch-from-stdin -issueen, joka samalla nimettiin intake-slugistaan.
@@ -90,6 +134,8 @@ mainiin intake-lifecyclen schema-käyttöönoton ja legacy-labelien migraation
   (ADR 0004:n versiolappu, ks. yllä). Aloita rupeama lukemalla `issuectl dag`.
 - `issuectl doctor` huomauttaa kahdesta asiasta: tuntematon frontmatter-avain
   `pidev-pi-skill-lifecycle: title`, ja `.issuectl/AGENTS.md` puuttuu.
+
+</details>
 
 <details>
 <summary>Aiemmat rupeamat (2026-08-17)</summary>
