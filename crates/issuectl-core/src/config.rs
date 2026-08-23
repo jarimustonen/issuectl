@@ -90,6 +90,12 @@ pub fn show(root: &Path) -> Result<ConfigShow> {
         &effective.dod.strict,
         nested_source_for(&raw, "dod", "strict"),
     )?;
+    insert(
+        &mut values,
+        "schema.dod.delivery_statuses",
+        &effective.dod.delivery_statuses,
+        nested_source_for(&raw, "dod", "delivery_statuses"),
+    )?;
 
     for (name, spec) in &effective.fields {
         insert(
@@ -231,6 +237,14 @@ mod tests {
             report.values["schema.dod.strict"].source,
             ValueSource::Default
         );
+        assert_eq!(
+            report.values["schema.dod.delivery_statuses"].value,
+            serde_json::json!(["done", "fixed"])
+        );
+        assert_eq!(
+            report.values["schema.dod.delivery_statuses"].source,
+            ValueSource::Default
+        );
     }
 
     #[test]
@@ -263,7 +277,7 @@ mod tests {
         fs::create_dir_all(tmp.path().join("issues")).unwrap();
         fs::write(
             tmp.path().join("issues/.schema.yaml"),
-            "version: 1\ndod:\n  strict: true\nfields:\n  priority:\n    required: false\nstatus_classes:\n  archived: closing\n",
+            "version: 1\ndod:\n  strict: true\n  delivery_statuses: [done, fixed, archived]\nfields:\n  priority:\n    required: false\nstatus_classes:\n  archived: closing\n",
         )
         .unwrap();
 
@@ -271,6 +285,14 @@ mod tests {
         assert!(report.exists);
         assert_eq!(report.values["schema.version"].source, ValueSource::File);
         assert_eq!(report.values["schema.dod.strict"].source, ValueSource::File);
+        assert_eq!(
+            report.values["schema.dod.delivery_statuses"].value,
+            serde_json::json!(["done", "fixed", "archived"])
+        );
+        assert_eq!(
+            report.values["schema.dod.delivery_statuses"].source,
+            ValueSource::File
+        );
         assert_eq!(
             report.values["schema.fields.priority"].source,
             ValueSource::File

@@ -81,25 +81,43 @@ pub struct Schema {
     /// [`status_aliases`](Self::status_aliases).
     #[serde(default)]
     pub type_aliases: BTreeMap<String, String>,
-    /// Definition-of-Done gate configuration. When `strict` is true, a
-    /// transition into a closing status with unchecked items in
-    /// `## Acceptance Criteria` is rejected. When false (default),
-    /// the same condition surfaces as a warning. Heading and parser
-    /// live in [`crate::body`]; only the gate's *severity* is
-    /// configurable. Zero frontmatter changes — the gate reads the
+    /// Definition-of-Done gate configuration. The gate applies when a
+    /// transition enters one of the configured `delivery_statuses` and that
+    /// status is closing under the schema's lifecycle classification. With
+    /// `strict: true`, unchecked `## Acceptance Criteria` reject the write;
+    /// otherwise (the default) they surface as a warning. Heading and parser
+    /// live in [`crate::body`]. Zero frontmatter changes — the gate reads the
     /// body, not custom YAML fields.
     #[serde(default)]
     pub dod: DodConfig,
 }
 
-/// Severity knob for the Definition-of-Done gate. Default = warn.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+/// Definition-of-Done gate policy. Defaults to warning on the built-in
+/// delivery statuses (`done` and `fixed`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DodConfig {
     /// When true, the gate blocks the write; otherwise it surfaces as
     /// a non-fatal warning.
     #[serde(default)]
     pub strict: bool,
+    /// Closing statuses that signify delivered work and therefore invoke the
+    /// gate. Projects can replace this list to include custom closing statuses.
+    #[serde(default = "default_delivery_statuses")]
+    pub delivery_statuses: Vec<String>,
+}
+
+impl Default for DodConfig {
+    fn default() -> Self {
+        Self {
+            strict: false,
+            delivery_statuses: default_delivery_statuses(),
+        }
+    }
+}
+
+fn default_delivery_statuses() -> Vec<String> {
+    vec!["done".into(), "fixed".into()]
 }
 
 /// Lifecycle classification for a status value.
@@ -346,6 +364,17 @@ fields:
 # status_classes:
 #   archived: closing
 #   verified: active
+
+# Definition-of-Done applies only to delivery-signifying closing statuses.
+# The default delivery statuses are `done` and `fixed`; non-delivery closes
+# (`wontfix`, `duplicate`, `cannot-reproduce`, `obsolete`) stay ungated.
+# Replace `delivery_statuses` to include a custom closing status. A listed
+# status still has to resolve to `closing` through `status_classes` (or the
+# built-in fallback), so lifecycle overrides remain authoritative.
+#
+# dod:
+#   strict: false
+#   delivery_statuses: [done, fixed, shipped]
 
 # Legacy-value aliases for `doctor --fix` migration. When an issue's
 # `status` or `type` equals a key below, `doctor --fix` rewrites it to
@@ -902,6 +931,20 @@ pub fn status_class(schema: &Schema, status: &str) -> StatusClass {
 /// stamp, doctor consistency).
 pub fn is_closing(schema: &Schema, status: &str) -> bool {
     status_class(schema, status) == StatusClass::Closing
+}
+
+/// True when `status` is both lifecycle-closing and configured as a delivery
+/// outcome for the Definition-of-Done gate. Keeping the lifecycle check here
+/// makes a project's `status_classes` override authoritative: listing an
+/// active status under `dod.delivery_statuses` cannot accidentally close-gate
+/// it.
+pub fn is_delivery_status(schema: &Schema, status: &str) -> bool {
+    is_closing(schema, status)
+        && schema
+            .dod
+            .delivery_statuses
+            .iter()
+            .any(|candidate| candidate == status)
 }
 
 /// Project the `status` field's allowed-value enum into a set. Used

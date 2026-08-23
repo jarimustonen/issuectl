@@ -217,6 +217,69 @@ mod tests {
     }
 
     #[test]
+    fn dod_delivery_policy_flows_through_update_warnings_and_strict_errors() {
+        let tmp = fresh_repo();
+
+        // Built-in non-delivery closes remain possible even under strict DoD.
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\ndod:\n  strict: true\n",
+        )
+        .unwrap();
+        seed_issue(tmp.path(), "open", "duplicate-target", "open");
+        let duplicate = update_issue(
+            tmp.path(),
+            "duplicate-target",
+            UpdateIssueRequest {
+                status: Patch::Set("duplicate".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(duplicate.warnings.is_empty());
+        assert!(duplicate.moved_to_closed);
+
+        let custom_schema = |strict| {
+            format!(
+                "version: 1\nfields:\n  status:\n    required: true\n    enum: [open, shipped]\nstatus_classes:\n  shipped: closing\ndod:\n  strict: {strict}\n  delivery_statuses: [shipped]\n"
+            )
+        };
+
+        // A project-defined delivery close gets the default warning behavior.
+        fs::write(tmp.path().join("issues/.schema.yaml"), custom_schema(false)).unwrap();
+        seed_issue(tmp.path(), "open", "shipped-warning-target", "open");
+        let warned = update_issue(
+            tmp.path(),
+            "shipped-warning-target",
+            UpdateIssueRequest {
+                status: Patch::Set("shipped".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(warned.warnings.len(), 1);
+        assert!(warned.warnings[0].contains("dod:"));
+
+        // The same custom declaration blocks before writing in strict mode.
+        fs::write(tmp.path().join("issues/.schema.yaml"), custom_schema(true)).unwrap();
+        seed_issue(tmp.path(), "open", "shipped-strict-target", "open");
+        let err = update_issue(
+            tmp.path(),
+            "shipped-strict-target",
+            UpdateIssueRequest {
+                status: Patch::Set("shipped".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, MutateError::TransitionViolation(ref msg) if msg.contains("dod:")));
+        let unchanged =
+            fs::read_to_string(tmp.path().join("issues/shipped-strict-target/item.md")).unwrap();
+        assert!(unchanged.contains("status: open"));
+        assert!(!unchanged.contains("closed:"));
+    }
+
+    #[test]
     fn status_write_rejects_empty_closed_on_closing_status() {
         // An issue at a closing status whose `closed:` is empty (an
         // explicit unset). Re-asserting a closing status *touches* the

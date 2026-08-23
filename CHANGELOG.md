@@ -5,11 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
 
 ### Changed
 - Active release operations now use Shipshape and the `/shipshape-*` skill family;
   historical `ossctl` release evidence and permanent compatibility identifiers remain intact.
+
+### Fixed
+- Definition-of-Done checks now apply only to delivery closes (`done` and `fixed`
+  by default), leaving duplicate and other non-delivery dispositions ungated.
+  Projects can configure custom delivery statuses with `dod.delivery_statuses`.
+<!-- oss-changelog:unreleased-end -->
 
 ## [0.17.0] - 2026-08-21
 

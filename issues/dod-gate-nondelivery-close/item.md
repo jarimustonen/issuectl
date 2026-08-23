@@ -6,6 +6,9 @@ reporter: jari
 status: in-progress
 priority: low
 lane: lifecycle
+commits:
+- hash: 1e62627e5926ae0d00a60780ef43e45da41922fd
+  summary: 'chore(issue): start DoD delivery gate fix'
 ---
 
 # close: the Definition-of-Done gate fires on non-delivery closing statuses

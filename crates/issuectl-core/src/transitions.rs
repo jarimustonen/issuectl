@@ -446,12 +446,12 @@ fn acceptance_criteria_message(body: &str, status: &str) -> Option<String> {
 }
 
 /// Evaluate the schema-level Definition-of-Done gate for a write
-/// that transitions the issue to a closing status. Separate from
-/// [`evaluate_transition`] because:
+/// that transitions the issue to a delivery-signifying closing status.
+/// Separate from [`evaluate_transition`] because:
 ///
-/// - DoD operates on the schema's lifecycle classification (any
-///   `closing` status, not a hard-coded `done`), so callers that
-///   already had a `&Schema` use this directly.
+/// - DoD combines the schema's lifecycle classification with
+///   `dod.delivery_statuses`, so built-in non-delivery dispositions stay
+///   ungated while projects can declare custom delivery closes.
 /// - DoD distinguishes *warnings* (default — visible on stderr /
 ///   JSON `warnings`) from *errors* (when `schema.dod.strict` is
 ///   set — blocks the write). The existing `evaluate_transition`
@@ -460,7 +460,7 @@ fn acceptance_criteria_message(body: &str, status: &str) -> Option<String> {
 ///
 /// Returns `(warnings, errors)`. Both vectors are empty when:
 ///
-/// - The transition is *not* into a closing status, OR
+/// - The transition is *not* into a delivery-signifying closing status, OR
 /// - `prev_status` is already closing (closing → closing is a
 ///   metadata tweak, not a "ship-it" moment), OR
 /// - The Acceptance Criteria section is empty or fully checked.
@@ -468,16 +468,16 @@ fn acceptance_criteria_message(body: &str, status: &str) -> Option<String> {
 /// Existing per-status rules using `requires_acceptance_criteria_checked`
 /// continue to apply through [`evaluate_transition`]; the DoD gate is
 /// the *zero-config* default that activates whenever a transition
-/// moves the issue from active → closing.
+/// moves the issue from active → built-in delivery (`done` / `fixed`).
 pub fn evaluate_dod(
     schema: &crate::schema::Schema,
     issue_after: &Issue,
     prev_status: &str,
 ) -> (Vec<String>, Vec<String>) {
     let new_status = issue_after.status.as_str();
-    let going_closing = crate::schema::is_closing(schema, new_status);
+    let going_delivery = crate::schema::is_delivery_status(schema, new_status);
     let was_closing = crate::schema::is_closing(schema, prev_status);
-    if !going_closing || was_closing || prev_status == new_status {
+    if !going_delivery || was_closing || prev_status == new_status {
         return (Vec::new(), Vec::new());
     }
     let Some(msg) = acceptance_criteria_message(&issue_after.body, new_status) else {
@@ -585,11 +585,52 @@ mod tests {
     #[test]
     fn dod_blocks_in_strict_mode() {
         let body = "## Acceptance Criteria\n\n- [ ] pending\n";
-        let issue = make_issue("done", "feature", body);
+        let issue = make_issue("fixed", "bug", body);
         let s = schema_with_dod(true);
         let (w, e) = evaluate_dod(&s, &issue, "in-progress");
         assert_eq!(w.len(), 0);
         assert_eq!(e.len(), 1);
+    }
+
+    #[test]
+    fn dod_skips_builtin_non_delivery_closes_in_warn_and_strict_modes() {
+        let body = "## Acceptance Criteria\n\n- [ ] pending\n";
+        for strict in [false, true] {
+            let s = schema_with_dod(strict);
+            for status in ["wontfix", "duplicate", "cannot-reproduce", "obsolete"] {
+                let issue = make_issue(status, "bug", body);
+                let (warnings, errors) = evaluate_dod(&s, &issue, "in-progress");
+                assert!(warnings.is_empty(), "unexpected warning for {status}");
+                assert!(errors.is_empty(), "unexpected strict error for {status}");
+            }
+        }
+    }
+
+    #[test]
+    fn dod_honours_custom_delivery_status_and_lifecycle_class() {
+        let body = "## Acceptance Criteria\n\n- [ ] pending\n";
+        let mut s = schema_with_dod(false);
+        s.status_classes
+            .insert("shipped".into(), crate::schema::StatusClass::Closing);
+        s.dod.delivery_statuses.push("shipped".into());
+
+        let issue = make_issue("shipped", "feature", body);
+        let (warnings, errors) = evaluate_dod(&s, &issue, "testing");
+        assert_eq!(warnings.len(), 1);
+        assert!(errors.is_empty());
+
+        s.dod.strict = true;
+        let (warnings, errors) = evaluate_dod(&s, &issue, "testing");
+        assert!(warnings.is_empty());
+        assert_eq!(errors.len(), 1);
+
+        // Lifecycle classification remains authoritative even when a status
+        // appears in the delivery list.
+        s.status_classes
+            .insert("shipped".into(), crate::schema::StatusClass::Active);
+        let (warnings, errors) = evaluate_dod(&s, &issue, "testing");
+        assert!(warnings.is_empty());
+        assert!(errors.is_empty());
     }
 
     #[test]

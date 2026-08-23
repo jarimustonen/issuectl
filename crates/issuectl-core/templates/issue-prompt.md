@@ -233,6 +233,12 @@ Reopening (`update --status <active>`) clears `closed_by` alongside `closed:`.
 - `cannot-reproduce` — bug could not be reproduced
 - `obsolete` — no longer relevant
 
+The Definition-of-Done gate applies only to delivery closes (`done` and `fixed`
+by default). Non-delivery dispositions stay ungated even with `dod.strict: true`.
+A project can declare custom delivery closes in `issues/.schema.yaml` by
+classifying the status as `closing` under `status_classes` and including it in
+`dod.delivery_statuses`.
+
 **Steps**:
 1. Determine the appropriate closing status from the user's message
 2. Run `issuectl --json close <slug> [--status X] [--as <user>] [--commit HASH:summary]`

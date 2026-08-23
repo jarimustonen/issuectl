@@ -77,8 +77,8 @@ terminal too, but the design centre is the agent.
   as one file per occurrence.
 - `ready <slug>` — Markdown DoD validation. Parses `## Acceptance
   Criteria` / `## Tests Run` / `## Implementation Notes` task lists;
-  `→ done` transition warns (or blocks, with `dod.strict: true`) on
-  unchecked acceptance criteria.
+  transitions to delivery statuses (`done` / `fixed` by default) warn on
+  unchecked acceptance criteria, or block with `dod.strict: true`.
 
 **Git-derived reporting.**
 - `activity [--since 7d]` — recent commits that touched `issues/`,
@@ -473,8 +473,23 @@ issuectl ready <slug>                    # exit 0 only if AC is fully checked
 issuectl --json ready <slug>             # parseable totals + per-section breakdown
 ```
 
-Set `dod.strict: true` in `issues/.schema.yaml` to upgrade the
-`→ done` warning to a hard block.
+Set `dod.strict: true` in `issues/.schema.yaml` to upgrade delivery-close
+warnings to hard blocks. The gate defaults to `done` and `fixed`; non-delivery
+closing dispositions such as `duplicate`, `wontfix`, `cannot-reproduce`, and
+`obsolete` are not gated. Projects can replace the list while retaining
+schema-aware lifecycle handling:
+
+```yaml
+fields:
+  status:
+    required: true
+    enum: [open, shipped, duplicate]
+status_classes:
+  shipped: closing
+dod:
+  strict: true
+  delivery_statuses: [shipped]
+```
 
 ### Recurring / scheduled issues
 
