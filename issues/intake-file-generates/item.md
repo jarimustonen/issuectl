@@ -1,9 +1,11 @@
 ---
 created: 2026-08-21
-updated: 2026-08-21
+updated: 2026-08-23
 type: bug
-status: open
+status: wontfix
 priority: normal
+closed: 2026-08-23
+closed_by: jari
 ---
 
 # intake file generates meaningless slugs where create derives them from the title
@@ -64,3 +66,9 @@ Close as fixed when an agent-filed intake issue with a descriptive title lands w
 derived from that title. Close as wontfix if slug collision-avoidance across concurrent filers
 provably requires an opaque identifier — in which case record that reasoning, and consider
 whether the descriptive form can still be used as a prefix.
+
+## Resolution
+
+### 2026-08-23T18:34:24Z · @jari
+
+By design: intake titles are untrusted and may contain customer names or secrets that must not enter persistent directory or automation identifiers. Reopen only for an explicit trusted-title mode with documented privacy guarantees.
