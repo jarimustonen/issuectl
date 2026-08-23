@@ -11,13 +11,23 @@ mod tests {
             .stack_size(TWO_MIB)
             .spawn(|| {
                 // Command construction traverses every flattened group. Parse
-                // one command from each group as a regression for both
-                // FromArgMatches paths as well.
+                // the widest representative command from each group as a
+                // regression for their value-materialization paths as well.
                 Cli::command().debug_assert();
-                Cli::try_parse_from(["issuectl", "apply", "patch.yaml"])
-                    .expect("primary command should parse");
-                Cli::try_parse_from(["issuectl", "intake", "queue"])
-                    .expect("extended command should parse");
+                Cli::try_parse_from(["issuectl", "update", "some-slug"])
+                    .expect("wide primary command should parse");
+                Cli::try_parse_from([
+                    "issuectl",
+                    "intake",
+                    "file",
+                    "--type",
+                    "bug",
+                    "--title",
+                    "parser regression",
+                    "--provenance",
+                    "other",
+                ])
+                .expect("wide extended command should parse");
             })
             .expect("two-MiB parser thread should spawn")
             .join()

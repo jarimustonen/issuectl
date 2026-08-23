@@ -138,10 +138,8 @@ Examples:
     after_help = TOP_LEVEL_HELP
 )]
 struct Cli {
-    // Keep the very wide derived subcommand enum off the parser's stack. Clap
-    // constructs the complete command tree before selecting a verb, and an
-    // inline `Command` pushed Linux's normal 2 MiB test-thread stack over its
-    // limit as the CLI grew.
+    // The flattened groups below split clap's generated command-construction
+    // and parsing frames; boxing keeps the parsed wrapper values small.
     #[command(subcommand)]
     command: Box<Command>,
 
@@ -372,11 +370,13 @@ fn parse_slug_arg(s: &str) -> std::result::Result<String, String> {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    /// Frequently used issue-management commands.
+    // This internal split bounds clap derive's stack frames; flattening keeps
+    // one public command namespace. If the two-MiB regression fails as the CLI
+    // grows, split a group again rather than raising the stack budget or
+    // setting RUST_MIN_STACK globally.
     #[command(flatten)]
     Primary(Box<PrimaryCommand>),
 
-    /// Repository tooling, reporting, and intake commands.
     #[command(flatten)]
     Extended(Box<ExtendedCommand>),
 }

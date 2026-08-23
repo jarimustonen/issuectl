@@ -6,6 +6,9 @@ reporter: mail-triage
 status: in-progress
 priority: normal
 lane: cli-parser
+commits:
+- hash: 4e03801
+  summary: bound clap parser stack usage
 ---
 
 # Linux CI stack-overflows parsing apply help example
