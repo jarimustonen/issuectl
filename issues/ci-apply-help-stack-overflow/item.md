@@ -3,12 +3,16 @@ created: 2026-08-22
 updated: 2026-08-23
 type: bug
 reporter: mail-triage
-status: in-progress
+status: fixed
 priority: normal
 lane: cli-parser
 commits:
 - hash: 4e03801
   summary: bound clap parser stack usage
+- hash: 7b7c252
+  summary: strengthen parser stack regression after review
+closed: 2026-08-23
+closed_by: orchestratectl:01m0qyqxgddx9wc05ha92vyp38
 ---
 
 # Linux CI stack-overflows parsing apply help example
@@ -45,3 +49,9 @@ A container comparison pins the regression to `a3119e6` (`feat: deprecate triage
 **Reachability and impact.** Every affected test calls `Cli::command()` or `Cli::try_parse_from()`, whose clap derive builds the full, monolithic `Command` tree before selecting a verb. Parallel test scheduling explains the changing blamed test. The consequence is an early SIGABRT that prevents the Linux unit suite and green gate from completing. Product/runtime risk is currently low: normal CLI parsing occurs on the process main stack rather than a 2 MiB test worker, and Linux `issuectl apply --help` completes there. The narrow margin nevertheless makes future parser growth fragile.
 
 **Fix sketch.** Reduce stack use in the clap construction path—prefer splitting/boxing the large derived command tree or otherwise moving generated intermediates off the test-thread stack—and retain a Linux/default-stack parser regression. Do not paper over it with repository-wide `RUST_MIN_STACK`. This is a genuine CI regression, not an overprotective speculative test finding, although it is not an apply/body-ops runtime bug.
+
+## Resolution
+
+### 2026-08-23T19:01:20Z · @orchestratectl:01m0qyqxgddx9wc05ha92vyp38
+
+Split the generated clap command tree into flattened boxed groups, added a two-MiB construction and wide-parse regression, and passed the full green gate plus multi-model review.
