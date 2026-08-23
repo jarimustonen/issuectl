@@ -1,9 +1,9 @@
 ---
 created: 2026-08-22
-updated: 2026-08-22
+updated: 2026-08-23
 type: bug
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:homebase-wrapup-issuectl-create-path-field-20260821
