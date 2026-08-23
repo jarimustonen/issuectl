@@ -46,6 +46,51 @@ fn new_issue(root: &Path, slug: &str) {
 }
 
 #[test]
+fn update_scheduling_echoes_are_conditional_and_blocked_by_is_read_via_show() {
+    let tmp = fresh_repo();
+    let r = tmp.path();
+    new_issue(r, "echo-target");
+    new_issue(r, "echo-blocker");
+
+    let lane = json(&run(
+        r,
+        &["--json", "update", "echo-target", "--lane", "cli"],
+    ));
+    assert_eq!(lane["lane"], serde_json::json!("cli"));
+    assert!(lane.get("lane_seq").is_none());
+    assert!(lane.get("collision").is_none());
+    assert!(lane.get("blocked_by").is_none());
+
+    let dependency = json(&run(
+        r,
+        &[
+            "--json",
+            "update",
+            "echo-target",
+            "--add-blocked-by",
+            "echo-blocker",
+        ],
+    ));
+    assert!(
+        dependency.get("blocked_by").is_none(),
+        "blocked_by is a canonical read projection, not an update echo"
+    );
+    let shown = json(&run(r, &["--json", "show", "echo-target"]));
+    assert_eq!(shown["blocked_by"], serde_json::json!(["@echo-blocker"]));
+
+    // Keep production guidance pinned to the behavior above. `cli_dag`'s
+    // black-box shape test separately binds each DAG issue row's bare-slug
+    // `blocked_by` list.
+    let skill = include_str!("../../issuectl-core/templates/issue-skill.md");
+    assert!(skill
+        .contains("Among scheduling and dependency fields, `update` conditionally echoes only"));
+    assert!(skill.contains("`lane`, `lane_seq`, and `collision`"));
+    assert!(skill.contains("`blocked_by` is not an update echo"));
+    assert!(skill.contains("at `.data.blocked_by`"));
+    assert!(skill.contains("canonical bare-slug\n`blocked_by` list"));
+}
+
+#[test]
 fn update_priority_json_echoes_new_priority() {
     let tmp = fresh_repo();
     let r = tmp.path();

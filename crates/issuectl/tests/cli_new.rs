@@ -118,6 +118,19 @@ fn new_json_success_prints_expected_payload() {
         item_path.display(),
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+
+    // Bind the shipped agent prose to this black-box contract. The example and
+    // extraction guidance must name the same canonical key the binary emits;
+    // otherwise creation succeeds but an agent's follow-up filesystem action
+    // receives `null`.
+    let skill = include_str!("../../issuectl-core/templates/issue-skill.md");
+    assert!(skill.contains("parse `.data.slug` and `.data.path`"));
+    assert!(skill.contains("use `.data.path` for the file"));
+    assert!(skill.contains("\"path\": \"/abs/path/issues/login-redirect-loops/item.md\""));
+    assert!(
+        !skill.contains("item_path"),
+        "shipped /issue guidance must use create's canonical `path` key"
+    );
 }
 
 #[test]

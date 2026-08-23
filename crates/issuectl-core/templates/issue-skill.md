@@ -293,17 +293,24 @@ results[]}` data shape; patch-file results use apply's single-mutation shape.
 
 For whole-document replacement, `issuectl body set <slug> --from-file <path>` and `issuectl update <slug> --body-file <path>` preserve the existing title H1 when the incoming body has no H1 and report that preservation in top-level `warnings[]`. An incoming different H1 is accepted but also warns; use `update --title` when the title change is intentional.
 
-When an update invocation requests a scheduling-field operation, its `.data`
-echoes that field's persisted post-update value, even when the operation was a
-no-op. Set values are returned directly, cleared `lane`/`lane_seq` are `null`,
-and `collision` is the resulting list or `null` when empty. Presence matters: a
-missing key means this invocation did not request that field, so its stored
-value is unknown from this response; a present `null` means the field is now
-unset or empty. Use `has("lane")` (and the corresponding key name) before
+Among scheduling and dependency fields, `update` conditionally echoes only
+`lane`, `lane_seq`, and `collision`: when the invocation requests one of those
+fields, `.data` carries its persisted post-update value even when the operation
+was a no-op. Set values are returned directly, cleared `lane`/`lane_seq` are
+`null`, and `collision` is the resulting list or `null` when empty. Presence
+matters: a missing key means this invocation did not request that field, so its
+stored value is unknown from this response; a present `null` means the field is
+now unset or empty. Use `has("lane")` (and the corresponding key name) before
 reading it.
 
+`blocked_by` is not an update echo. After `update --add-blocked-by` /
+`--remove-blocked-by`, read the canonical `@`-prefixed references from
+`issuectl show <slug> --json` at `.data.blocked_by`; use `issuectl dag --json`
+when you need the scheduling view, where each issue row has a canonical bare-slug
+`blocked_by` list.
+
 For example, the scheduling-field excerpt of `.data` for a call that requests
-all three fields is:
+all three conditionally echoed fields is:
 
 ```json
 { "lane": "cli-fixes", "lane_seq": 40,
@@ -566,15 +573,15 @@ Output shape:
 ```json
 { "slug": "login-redirect-loops",
   "title": "Login redirect loops on safari",
-  "item_path": "/abs/path/issues/open/login-redirect-loops/item.md",
-  "dir": "/abs/path/issues/open/login-redirect-loops" }
+  "path": "/abs/path/issues/login-redirect-loops/item.md",
+  "dir": "/abs/path/issues/login-redirect-loops" }
 ```
 
 The CLI:
 - Uses `--slug <kebab>` when given (validated: ≥2 lowercase ASCII kebab segments)
 - Otherwise derives a 2-3 significant-word kebab slug from the title, dropping stop-words (numeric suffix on collision); if the result differs from straightforward title slugification, top-level `warnings` explains why. `--slug-random`, or an unsluggable title, yields a random `intensifier-adjective-noun` slug instead
-- Writes `issues/open/<slug>/item.md` with the right frontmatter
-- Returns the slug and path in `--json` (parse `.data.slug`)
+- Writes `issues/<slug>/item.md` with the right frontmatter
+- Returns the slug and item file path in `--json` (parse `.data.slug` and `.data.path`)
 
 Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slug>"` (repeatable), `--field key=value` (repeatable; for custom frontmatter fields declared in `issues/.schema.yaml`, e.g. `--field team=payments`), `--check-duplicates` (refuse to create and exit 2 — printing the shared error envelope `{"error":{"code":"duplicate-precheck","message":...,"matches":[...]}}` on stderr — when a strong duplicate already exists; re-run without the flag to create anyway).
 
@@ -582,8 +589,8 @@ Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slu
 
 `issuectl create` writes a minimal body (`# Title`, optional `_Source: ..._`,
 `## Description`). For bugs, append `## Reproduction` and `## Quick Test`
-sections by editing the item.md directly (use the `dir` or `item_path`
-from the JSON output to find it). For epics, add `## Goal`, `## Issues`,
+sections by editing the item.md directly (use `.data.path` for the file or
+`.data.dir` for its directory). For epics, add `## Goal`, `## Issues`,
 `## Phases`, and `## Notes` sections — the CLI does not write these.
 
 #### 4. Copy Screenshots
