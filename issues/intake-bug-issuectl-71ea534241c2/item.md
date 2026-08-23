@@ -3,7 +3,7 @@ created: 2026-08-22
 updated: 2026-08-23
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:homebase-wrapup-issuectl-create-path-field-20260821
@@ -14,6 +14,9 @@ commits:
   summary: fix shipped create path and echo guidance
 - hash: dddba8c8f37c90b9d898f3130910986c4dffbf4e
   summary: harden reviewed skill contract coverage
+- hash: 4535d77
+  summary: assess multi-model skill review
+closed: 2026-08-23
 ---
 
 # Issue skill reads the wrong create result path field
@@ -55,3 +58,9 @@ The bundled skill and the CLI's actual schema should use the same canonical fiel
 ### 2026-08-22T18:50:04Z · @agent-triage
 
 Accepted scope also includes clarifying the update echo wording: only lane, lane_seq, and collision are echoed conditionally; blocked_by callers read the canonical value with show or dag. This folds the useful documentation correction from @intake-bug-issuectl-704cd8eb0a0e into this single skill-contract unit without adding a second implementation issue.
+
+## Resolution
+
+### 2026-08-23T19:03:47Z · @issuectl
+
+Shipped and dogfooded guidance now uses .data.path, documents conditional scheduling echoes and blocked_by reads, and is pinned by contract tests. Full workspace green gate passed.
