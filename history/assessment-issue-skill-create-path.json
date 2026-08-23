@@ -1,0 +1,478 @@
+{
+  "schema_version": 1,
+  "source_review": "history/review-issue-skill-create-path.md",
+  "head_sha": "dddba8c8f37c90b9d898f3130910986c4dffbf4e",
+  "generated_at": "2026-08-23T19:01:21Z",
+  "findings": [
+    {
+      "id": "F1",
+      "cluster_key": "sha1:338293e9ee6e7c25728286a1bc2ef831f836e00e",
+      "title": "Claude and Codex contract bodies were not pinned to each other",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 13,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 13,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 13,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 13,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/skill.rs",
+      "target_symbol": "templates_differ_between_agents",
+      "claim": "The Claude and frontmatter-stripped Codex /issue bodies could drift while copy-vs-template tests stayed green.",
+      "suggested_fix": "Add a body-equality assertion using the established frontmatter stripping pattern.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "OCCASIONAL",
+      "readability": "IMPROVES",
+      "architecture": "MINOR",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The existing test only proved format inequality and per-template dogfood parity; it did not compare the two shipped bodies. The added equality assertion directly closes that path."
+    },
+    {
+      "id": "F2",
+      "cluster_key": "sha1:7b01065fad90a96d2965bb43ef7969ed2b7c31ca",
+      "title": "Prose assertions were sensitive to Markdown wrapping",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 20,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 20,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 20,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 20,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl/tests/cli_json_echo.rs",
+      "target_symbol": null,
+      "claim": "Literal newlines and fenced-JSON spacing made semantic contract assertions fail on harmless Markdown reflow.",
+      "suggested_fix": "Normalize whitespace before matching and check both templates.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "OCCASIONAL",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "unclear",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The reviewed assertion contained an exact newline between bare-slug and blocked_by. Whitespace normalization preserves the semantic guard without coupling it to wrapping."
+    },
+    {
+      "id": "F3",
+      "cluster_key": "sha1:64cab69d943fe79707b705e3df3028a29da2cefb",
+      "title": "Absent-versus-null scheduling echo lacked a black-box clear case",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 27,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 27,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 27,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 27,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl/tests/cli_json_echo.rs",
+      "target_symbol": null,
+      "claim": "The process-level test covered a set echo but not a requested clear echoed as present null.",
+      "suggested_fix": "Add update --no-lane coverage asserting present null and absent unrequested fields.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "OCCASIONAL",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Focused report-builder tests covered clear behavior, but the new process-boundary test did not exercise the exact absent-versus-null distinction agents consume."
+    },
+    {
+      "id": "F4",
+      "cluster_key": "sha1:55411307850203e2d93dbd357724fc1e58299866",
+      "title": "DAG each-row blocker claim lacked empty-row assertions",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 34,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 34,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 34,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 34,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl/tests/cli_dag.rs",
+      "target_symbol": "dag_json_shape_and_head_of_line",
+      "claim": "The prose promised every DAG issue row a bare-slug blocked_by list while the black-box test asserted only one populated row.",
+      "suggested_fix": "Assert empty blocked_by arrays on scheduled and unscheduled rows.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "OCCASIONAL",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "DagIssue serializes blocked_by on every row, but the integration test only pinned a populated list. Empty scheduled and unscheduled assertions now bind the full claim."
+    },
+    {
+      "id": "F5",
+      "cluster_key": "sha1:f48498d11c0a20e2190d65ff087f9f6dd629085e",
+      "title": "Filesystem guidance encouraged layout coupling",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 41,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 41,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 41,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 41,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/templates/issue-skill.md",
+      "target_symbol": "Action: Create",
+      "claim": "The guidance still described the current flat path as a durable behavior instead of telling agents not to reconstruct paths.",
+      "suggested_fix": "Direct agents to .data.path and forbid reconstructing the location from the slug.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "OCCASIONAL",
+      "readability": "IMPROVES",
+      "architecture": "MINOR",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "unclear",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The stale item_path bug arose from coupling guidance to output/layout details. Using the returned path as the sole operational contract prevents the same drift class."
+    },
+    {
+      "id": "F6",
+      "cluster_key": "sha1:13362c43e1d3e027732f6a473ae80305615b7035",
+      "title": "Add blocked_by to update echoes",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 50,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 50,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 50,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 50,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl/src/cmd/write.rs",
+      "target_symbol": "UpdateEchoes",
+      "claim": "The documentation fix should redesign update to conditionally echo blocked_by.",
+      "suggested_fix": "Add blocked_by to UpdateEchoes.",
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The accepted scope explicitly preserves blocked_by as a canonical read projection, and repository policy keeps it untyped in extra. This is an API redesign, not evidence that the corrected prose is wrong."
+    },
+    {
+      "id": "F7",
+      "cluster_key": "sha1:bb7b9e555779a8897c76b6971c15c934ff573e5c",
+      "title": "Normalize show and DAG blocker sigils",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 51,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 51,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 51,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 51,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/dag.rs",
+      "target_symbol": null,
+      "claim": "show and dag must use one identical blocked_by wire representation.",
+      "suggested_fix": "Change one command to match the other.",
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The command-specific representations are deliberate: show exposes frontmatter-facing @refs while dag exposes graph-node slugs. Both current shapes are contract-tested."
+    },
+    {
+      "id": "F8",
+      "cluster_key": "sha1:fd1f24abbc092380d15c5184bbabd9b7efa79e3e",
+      "title": "Duplicate every scheduling echo case as black-box coverage",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 52,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 52,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 52,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 52,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl/tests/cli_json_echo.rs",
+      "target_symbol": null,
+      "claim": "Every lane_seq, collision, no-op, and clear case needs duplicate process-level coverage.",
+      "suggested_fix": "Add a full black-box matrix.",
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "MED",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Focused tests already bind the report-builder matrix. One set, one absent, and one clear integration case cover the process boundary without duplicating the entire suite."
+    },
+    {
+      "id": "F9",
+      "cluster_key": "sha1:e04cd5bd2948ce06f48069be78b985a3e244b8ed",
+      "title": "Document create all-three scheduling echoes in this patch",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 53,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 53,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 53,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 53,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/templates/issue-skill.md",
+      "target_symbol": "Action: Create",
+      "claim": "The patch must additionally explain create scheduling echo semantics.",
+      "suggested_fix": "Add create-specific scheduling echo prose and tests.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "WORSENS",
+      "architecture": "MINOR",
+      "confidence": "MED",
+      "recommendation": "DROP",
+      "drop_rule": "1b",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Create has distinct all-three scheduling echo behavior, but this is a pre-existing omission unrelated to the stale create path and update blocked_by claims. Expanding this already dense patch would reduce clarity."
+    },
+    {
+      "id": "F10",
+      "cluster_key": "sha1:c343525bf32cd5125798bebfdb4545258d9e6b97",
+      "title": "Add a concurrency caveat for update followed by show",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 54,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 54,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 54,
+          "section": null,
+          "model": "claude-opus-5"
+        },
+        {
+          "file": "history/review-issue-skill-create-path.md",
+          "line": 54,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/templates/issue-skill.md",
+      "target_symbol": "Action: Update",
+      "claim": "The blocked_by read guidance should warn that a later show can observe another writer.",
+      "suggested_fix": "Add a race caveat to the agent guidance.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "WORSENS",
+      "architecture": "NONE",
+      "confidence": "MED",
+      "recommendation": "DROP",
+      "drop_rule": "1b",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "A later show reports current state, as read commands normally do. A concurrency caveat is theoretically true but rare and would obscure the actionable contract without changing behavior."
+    }
+  ]
+}

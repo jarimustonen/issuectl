@@ -12,6 +12,8 @@ related: ['@intake-bug-issuectl-704cd8eb0a0e']
 commits:
 - hash: 95740050093c0affe4b5b6fdbedc795aaa013214
   summary: fix shipped create path and echo guidance
+- hash: dddba8c8f37c90b9d898f3130910986c4dffbf4e
+  summary: harden reviewed skill contract coverage
 ---
 
 # Issue skill reads the wrong create result path field
