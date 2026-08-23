@@ -55,8 +55,9 @@ ennalleen (self-hosted-override koskee vain `aarch64-apple-darwin`, ja se job on
 - **Backstop-tarkistukset pysyvät pakollisina.** Tässä cutissa ne olivat ainoa asia joka
   paljasti että alkuperäinen "tämä on vain kilpailutilanne" -tulkintani oli väärä. Työkalun
   oma verdikti on nyt ollut väärässä molempiin suuntiin (0.15.0 false-red, 0.16.0 false-calm).
-- **ossctl-parannusehdotus (pohdittu 2026-08-20, ei vielä filattu):** verify päättelee
-  toimituksen *kohteesta* (onko assetteja) eikä *delegoidusta ajosta*, joten "ei vielä",
+- **Shipshape-parannusehdotus (havaittu ossctl 0.9.0:ssä 2026-08-20, ei vielä
+  filattu):** verify päättelee toimituksen *kohteesta* (onko assetteja) eikä
+  *delegoidusta ajosta*, joten "ei vielä",
   "valmis" ja "kaatui lopullisesti" näyttävät identtisiltä (nolla assettia). Jos verify lukisi
   delegoidun workflow'n tilan, se kertoisi syyn heti: `in_progress` → odota, `success` →
   tarkista kohde, `cancelled`/`failure` → punainen syineen. Lisäksi `pending` ansaitsee oman

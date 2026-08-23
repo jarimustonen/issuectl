@@ -41,6 +41,9 @@ docs_site: none
 > **Updated 2026-08-19 (`@homebrew-double-writer-contract`):** the Homebrew target now uses
 > `adapter: cargo-dist`, matching `dist-workspace.toml`'s Homebrew installer and publish job.
 > cargo-dist is the single tap writer; the engine plans and verifies this delegated target.
+> **Updated 2026-08-23:** the maintained release engine is now Shipshape. Active operations use
+> `/shipshape-release` and `shipshape release plan|cut`; the dated notes above remain migration
+> history, and the `OSS-RELEASE.md` filename remains a permanent compatibility identifier.
 
 ## Rationale
 - **maturity: mvp** — inferred by `ossctl facts` (mvp because there is **no ≥1.0 release** yet;
@@ -48,7 +51,7 @@ docs_site: none
   *infrastructure* this is production-grade (cargo-dist, Homebrew tap, crates.io dual-publish,
   CHANGELOG, SECURITY.md). The only signal keeping it at mvp is the deliberate pre-1.0 version.
   Consider `--maturity production` if you want the production quality-gates (coverage/security
-  lints) treated as expected — but note those workflows are not yet present, so `/oss-readiness`
+  lints) treated as expected — but note those workflows are not yet present, so `/shipshape-readiness`
   would then report them as gaps.
 - **ecosystems: [rust]** — two Rust crates in a Cargo workspace (`crates/issuectl`,
   `crates/issuectl-core`); no other package manifests. Not `binary`: `binary` is only used
@@ -56,7 +59,7 @@ docs_site: none
 - **targets: two crates.io publishes plus delegated binary distribution** — the workspace
   publishes BOTH `issuectl` and `issuectl-core` (the latter is an internal, explicitly-unstable
   crate that `issuectl` depends on). Adapter `cargo-publish` describes the crates.io mechanism,
-  now executed by `ossctl release cut`'s `publish-all` phase (was
+  now executed by `shipshape release cut`'s `publish-all` phase (was
   `.github/workflows/publish-crates.yml`, retired 2026-08-10). The `cargo-dist` targets describe
   the tag-triggered binary-distribution layer: GitHub-Release binaries, a shell installer, and a
   Homebrew formula pushed to `jarimustonen/homebrew-issuectl`. See Release notes.
@@ -69,14 +72,15 @@ docs_site: none
 - **conventional_commits: true** — commit history is uniformly `type(scope): summary`
   (`feat(cli):`, `fix(doctor):`, `docs(todo):`). Recorded as fact; no commitlint gate exists yet.
 - **release: gated / single** — a deliberate, explicitly-versioned step (not `auto` on-merge),
-  now driven by `ossctl release plan|cut`: the releaser supplies the approved version, ossctl
-  bumps + finalizes CHANGELOG + publishes both crates to crates.io + tags `vX.Y.Z`; the tag then
+  now driven by `shipshape release plan|cut`: the releaser selects the SemVer bump and inspects
+  the sealed plan; Shipshape bumps + finalizes CHANGELOG + publishes both crates to crates.io +
+  tags `vX.Y.Z`; the tag then
   triggers cargo-dist for binaries. ("Releaser" = the maintainer, or the autonomous conductor
   where AGENTS.md grants it — the `gated` contract means the version is a discrete decision, not
   that a human must be in the loop.) `single` layout: the workspace shares one version + one
   `vX.Y.Z` tag.
 - **provenance_level: keyless** — the mvp default; not `slsa-l3` (production-only). ⚠️ As of
-  2026-08-10 the crates.io publish is **not** CI-published — `ossctl release cut` runs
+  2026-08-10 the crates.io publish is **not** CI-published — `shipshape release cut` runs
   `cargo publish` wherever the releaser invokes it (locally), so the crates.io artifacts have no
   CI/OIDC provenance. Only the cargo-dist **binaries** (`release.yml`) are CI-published. Revisit
   (crates.io trusted publishing / a `workflow_dispatch` CI cut) when moving to `production`.
@@ -87,18 +91,19 @@ docs_site: none
   Respecting the maintainer's explicit choice (not offering the rust `MIT OR Apache-2.0` dual).
 
 ## Release notes
-- **Release path is `ossctl release plan|cut` (`/oss-release`).** ossctl owns version bump +
-  CHANGELOG finalize + crates.io publish (`publish-all`, adapter `cargo-publish`) + the `vX.Y.Z`
-  tag. cargo-dist `release.yml` is **kept** as a pure binary-distribution backend (GitHub-Release
-  binaries + shell installer + Homebrew tap), fired by the tag ossctl pushes — ossctl does **not**
-  regenerate `release.yml`, and `release.yml` does **not** publish to crates.io (no double-publish).
-  Dry-run `ossctl release plan` phases: `dry-run-all → build-all → publish-all → tag → dist`.
-  Full steps live in CONTRIBUTING.md "Per-release steps" + AGENTS.md "Operating facts".
+- **Release path is `shipshape release plan|cut` (`/shipshape-release`).** Shipshape owns the
+  version bump + CHANGELOG finalization + crates.io publish (`publish-all`, adapter
+  `cargo-publish`) + the `vX.Y.Z` tag. cargo-dist `release.yml` is **kept** as a pure
+  binary-distribution backend (GitHub-Release binaries + shell installer + Homebrew tap), fired
+  by the tag Shipshape pushes — Shipshape does **not** regenerate `release.yml`, and
+  `release.yml` does **not** publish to crates.io (no double-publish). A bump plan covers
+  `bump → dry-run-all → build-all → publish-all → tag → dist → verify`. Full steps live in
+  CONTRIBUTING.md "Per-release steps" + AGENTS.md "Operating policy".
 - **`publish-crates.yml` was retired 2026-08-10** (`@wire-oss-release-as-release-path`). Its
   `release: [published]` trigger never fired: cargo-dist publishes the GitHub Release with the
   default `GITHUB_TOKEN`, and GitHub does not fire downstream workflows from `GITHUB_TOKEN`-authored
   events, so crates.io needed a manual `gh workflow run` every release. Moving the publish into
-  `ossctl release cut` closes that gap.
+  the release engine closed that gap; Shipshape retains this behavior.
 - **crates.io publishes are permanent** — a published `name@version` can be yanked but never
   reused or overwritten. Both crates publish; `issuectl-core` must publish before `issuectl`.
 - **Homebrew formula** is auto-pushed to `jarimustonen/homebrew-issuectl` by cargo-dist on tag.

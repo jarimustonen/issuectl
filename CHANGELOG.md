@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Active release operations now use Shipshape and the `/shipshape-*` skill family;
+  historical `ossctl` release evidence and permanent compatibility identifiers remain intact.
+
 ## [0.17.0] - 2026-08-21
 
 ### Changed

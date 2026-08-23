@@ -213,26 +213,22 @@ work queue and session handoff live in [TODO.md](TODO.md); this section is the
 project's operating policy.
 
 - **What "deploy" means here.** This is a Rust CLI, not a server. The release
-  path is the `ossctl` engine (`/oss-release` → `ossctl release plan|cut`,
-  **ossctl ≥ 0.7.0**), reading the approved [OSS-RELEASE.md](OSS-RELEASE.md)
-  contract. Steps: **(1)** bump `version` in root `Cargo.toml`
-  `[workspace.package]` (on a minor/major boundary also the internal dep
-  `version` in `crates/issuectl/Cargo.toml` — caret gotcha), `cargo update
-  --workspace`; **(2)** finalize `CHANGELOG.md` `[Unreleased] → [X.Y.Z] -
-  <date>`; **(3)** `git commit -am "release: X.Y.Z"`; **(4)** `ossctl release
-  plan` (no flags), then `ossctl release cut --plan <id>`. The cut publishes
-  the version already in `Cargo.toml`: crates.io for both crates
-  (`issuectl-core` before `issuectl`) and the `vX.Y.Z` tag; the tag triggers
-  cargo-dist (`.github/workflows/release.yml`) for GitHub-Release binaries,
-  the shell installer, and the Homebrew tap. Since ossctl 0.7.0 +
-  the declared `distribution:` block (2026-08-17), the engine **plans and
-  verifies the delegated cargo-dist legs** — a cut only reports complete after
-  the verify barrier has observed crates.io receipts, GitHub Release assets,
-  and the tap formula. The two 0.6.1-era gotchas (`plan --bump` sealing an
-  uncuttable plan; the `tag` phase pre-creating the GitHub Release and
-  silently killing the Homebrew publish) are **fixed upstream in 0.7.0**. If a
-  cut is interrupted: `ossctl release resume`; `ossctl release verify` is a
-  read-only reconcile. Full steps: [CONTRIBUTING.md](CONTRIBUTING.md)
+  path is the Shipshape engine (`/shipshape-release` → `shipshape release
+  plan|cut`), reading the approved [OSS-RELEASE.md](OSS-RELEASE.md) contract.
+  Ensure `[Unreleased]` is complete and `main` is clean, pushed, and green.
+  Before a minor or major bump, update and commit the internal dependency
+  requirement in `crates/issuectl/Cargo.toml` (the caret boundary gotcha).
+  Then run `shipshape release plan --bump patch|minor|major`, inspect the
+  sealed plan, and run `shipshape release cut --plan <id>`. The cut owns the
+  workspace version bump, Cargo.lock refresh, CHANGELOG finalization, release
+  commit, crates.io publishes (`issuectl-core` before `issuectl`), and
+  `vX.Y.Z` tag. The tag triggers cargo-dist (`.github/workflows/release.yml`)
+  for GitHub-Release binaries, the shell installer, and the Homebrew tap.
+  Shipshape plans and verifies those delegated cargo-dist legs; a cut only
+  reports complete after the verify barrier observes crates.io receipts,
+  GitHub Release assets, and the tap formula. If a cut is interrupted, use
+  `shipshape release resume <run_id>`; `shipshape release verify <run_id>` is
+  the read-only reconcile. Full steps: [CONTRIBUTING.md](CONTRIBUTING.md)
   "Per-release steps".
 - **Post-cut backstop check — permanent, not a temporary measure.** The engine's
   own verdict has now been wrong in **both** directions on real cuts (0.15.0
@@ -260,11 +256,11 @@ project's operating policy.
 - **Homebrew publishing is cargo-dist's, driven by `dist-workspace.toml`**
   (`homebrew` installer + `tap` + `publish-jobs`; `HOMEBREW_TAP_TOKEN` is
   configured on the repo). The contract's `distribution:` block declares this
-  delegation so the engine verifies it. **Do not run `ossctl dist generate`**
+  delegation so the engine verifies it. **Do not run `shipshape dist generate`**
   without a deliberate decision — it would strip this repo's self-hosted
   macOS ARM64 runner override (`[dist.github-custom-runners]`: fast local
-  builds versus a 45+ min hosted-queue allocation), and `/oss-dist` refuses
-  to emit a runner override at all.
+  builds versus a 45+ min hosted-queue allocation), and `/shipshape-dist`
+  refuses to emit a runner override at all.
 - **Releases MAY be cut automatically whenever there is something to
   release** (maintainer decision, 2026-08-05). When `main` carries unreleased
   user-facing changes, `/stint` may bump, finalize the CHANGELOG, and run the
