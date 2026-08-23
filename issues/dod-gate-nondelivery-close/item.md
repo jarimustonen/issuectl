@@ -3,7 +3,7 @@ created: 2026-08-21
 updated: 2026-08-23
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: low
 lane: lifecycle
 commits:
@@ -13,6 +13,7 @@ commits:
   summary: 'fix(dod): resolve delivery gate review findings'
 - hash: ed29f3a7f9f7e49aad7e5c4c4dba150ebefda6d2
   summary: 'fix(dod): gate only delivery closing statuses'
+closed: 2026-08-23
 ---
 
 # close: the Definition-of-Done gate fires on non-delivery closing statuses
@@ -81,3 +82,9 @@ Note the schema-config angle when picking the shape: hardcoding a status list in
 Observed 2026-08-20 during an unlaned-issue triage pass in this repo, while closing
 @apply-inline-json as a duplicate of @apply-patch-from-stdin. Confirmed against
 `transitions.rs` (the gate keys on "is closing", not on which closing status).
+
+## Resolution
+
+### 2026-08-23T19:09:32Z · @issuectl
+
+Delivery-only DoD classification implemented and validated; custom closing delivery statuses are supported, explicit policy is validated, all green gates passed, and review findings were resolved.
