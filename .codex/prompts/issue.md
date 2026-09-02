@@ -598,7 +598,7 @@ supplied structured Markdown after the title/source preamble without that
 wrapper. For bugs, append `## Reproduction` and `## Quick Test` sections by
 editing the item.md directly (use `.data.path` for the file or
 `.data.dir` for its directory). For epics, ensure `## Goal`, `## Issues`,
-`## Phases`, and `## Notes` sections exist. The default renderer does not add
+`## Phases`, and `## Comments` sections exist. The default renderer does not add
 them, although repository schema requirements may append missing stubs.
 
 #### 4. Copy Screenshots

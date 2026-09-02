@@ -157,6 +157,47 @@ fn body_file_is_structured_markdown_without_description_wrapper() {
 }
 
 #[test]
+fn body_file_schema_appends_only_missing_sections() {
+    let tmp = fresh_repo();
+    std::fs::write(
+        tmp.path().join("issues/.schema.yaml"),
+        "version: 1\nbody_sections:\n  bug: [Description, Expected, Quick Test]\n",
+    )
+    .expect("write schema");
+    let body_path = tmp.path().join("body.md");
+    std::fs::write(
+        &body_path,
+        "## Description\n\nObserved.\n\n---\n\n## Expected\n\nExpected.\n",
+    )
+    .expect("write body file");
+
+    let out = run(
+        tmp.path(),
+        &[
+            "create",
+            "--type",
+            "bug",
+            "--title",
+            "Schema body",
+            "--slug",
+            "schema-body",
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let item = std::fs::read_to_string(tmp.path().join("issues/schema-body/item.md"))
+        .expect("read created issue");
+    assert_eq!(item.matches("## Description").count(), 1, "{item}");
+    assert_eq!(item.matches("## Expected").count(), 1, "{item}");
+    assert_eq!(item.matches("## Quick Test").count(), 1, "{item}");
+    assert!(
+        item.contains("---\n\n## Expected\n\nExpected.\n\n## Quick Test\n"),
+        "{item}"
+    );
+}
+
+#[test]
 fn body_file_stdin_with_source_preserves_preamble_without_description_wrapper() {
     let tmp = fresh_repo();
     let out = run_with_stdin(

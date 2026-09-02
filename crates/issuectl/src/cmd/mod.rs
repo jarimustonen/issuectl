@@ -628,7 +628,8 @@ pub(crate) enum PrimaryCommand {
 
         /// Read a complete structured Markdown body from a file and write it
         /// directly below the `# <title>`/`--source` preamble without adding a
-        /// wrapper heading. Pass `-` to read stdin (use `./-` for a file
+        /// wrapper heading. Repository schema requirements may append stubs for
+        /// missing H2 sections. Pass `-` to read stdin (use `./-` for a file
         /// literally named `-`). Mutually exclusive with
         /// `--description`/`--body`. A body using a reserved legacy
         /// section heading (`## Notes` — use `## Comments`) is accepted
