@@ -321,6 +321,7 @@ pub fn file(root: &Path, req: FileRequest) -> Result<FileOutcome, IntakeError> {
         related: vec![],
         source: None,
         description: req.body,
+        structured_body: false,
         custom_fields,
         lane: None,
         lane_seq: None,

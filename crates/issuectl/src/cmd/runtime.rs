@@ -583,9 +583,11 @@ fn dispatch_primary(command: PrimaryCommand, json_output: bool) -> Result<()> {
             // `--body-file` is a body source that conflicts with
             // `--description`/`--body` at the clap layer, so at most one
             // is set. Reading the file (or stdin for `-`) here — before
-            // `do_new` — keeps all I/O + the input cap in the CLI layer
-            // and lets the resolved markdown flow through the same
-            // flock/schema write path as an inline `--description`.
+            // `do_new` — keeps all I/O + the input cap in the CLI layer.
+            // Preserve which source was used: a file is a complete structured
+            // Markdown body, while an inline description is free text that
+            // retains the generated `## Description` wrapper.
+            let structured_body = body_file.is_some();
             let description = match body_file {
                 Some(path) => Some(read_body_file_arg(&path)?),
                 None => description,
@@ -619,6 +621,7 @@ fn dispatch_primary(command: PrimaryCommand, json_output: bool) -> Result<()> {
                     collision: add_collision,
                     source,
                     description,
+                    structured_body,
                     custom_fields,
                     // `create` never files into a reception state — status is
                     // fixed at `open`. Intake filing goes through

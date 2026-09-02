@@ -16,7 +16,10 @@
 //! Convention: see `AGENTS.md` (`Tests`) for when integration tests in
 //! `tests/` are warranted vs. inline `#[cfg(test)]` modules.
 
-use std::process::{Command, Output};
+use std::{
+    io::Write,
+    process::{Command, Output, Stdio},
+};
 
 use tempfile::TempDir;
 
@@ -50,6 +53,30 @@ fn run(root: &std::path::Path, args: &[&str]) -> Output {
         .args(args)
         .output()
         .expect("spawn issuectl")
+}
+
+fn run_with_stdin(root: &std::path::Path, args: &[&str], stdin: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_issuectl"))
+        .env_remove("RUST_BACKTRACE")
+        .env_remove("RUST_LIB_BACKTRACE")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .current_dir(root)
+        .arg("--root")
+        .arg(root)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn issuectl");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(stdin.as_bytes())
+        .expect("write stdin");
+    child.wait_with_output().expect("wait for issuectl")
 }
 
 fn dump(out: &Output) -> String {
@@ -91,6 +118,100 @@ fn new_success_writes_file_and_prints_created_lines() {
     let expected = format!("Created ab-cd: Hello\n  {}\n", item_path.display());
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
     assert!(out.stderr.is_empty(), "{}", dump(&out));
+}
+
+#[test]
+fn body_file_is_structured_markdown_without_description_wrapper() {
+    let tmp = fresh_repo();
+    let body_path = tmp.path().join("body.md");
+    std::fs::write(
+        &body_path,
+        "## Description\n\nBody text.\n\n## Expected\n\nDone.\n",
+    )
+    .expect("write body file");
+
+    let out = run(
+        tmp.path(),
+        &[
+            "create",
+            "--type",
+            "bug",
+            "--title",
+            "Structured file",
+            "--slug",
+            "structured-file",
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let item = std::fs::read_to_string(tmp.path().join("issues/structured-file/item.md"))
+        .expect("read created issue");
+    assert_eq!(item.matches("## Description").count(), 1, "{item}");
+    assert!(
+        item.ends_with(
+            "# Structured file\n\n## Description\n\nBody text.\n\n## Expected\n\nDone.\n"
+        ),
+        "{item}"
+    );
+}
+
+#[test]
+fn body_file_stdin_with_source_preserves_preamble_without_description_wrapper() {
+    let tmp = fresh_repo();
+    let out = run_with_stdin(
+        tmp.path(),
+        &[
+            "create",
+            "--type",
+            "bug",
+            "--title",
+            "Structured stdin",
+            "--slug",
+            "structured-stdin",
+            "--source",
+            "live test",
+            "--body-file",
+            "-",
+        ],
+        "## Description\n\nPiped text.\n\n## Observed\n\nObserved text.\n",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let item = std::fs::read_to_string(tmp.path().join("issues/structured-stdin/item.md"))
+        .expect("read created issue");
+    assert_eq!(item.matches("## Description").count(), 1, "{item}");
+    assert!(
+        item.ends_with(
+            "# Structured stdin\n\n_Source: live test_\n\n## Description\n\nPiped text.\n\n## Observed\n\nObserved text.\n"
+        ),
+        "{item}"
+    );
+}
+
+#[test]
+fn inline_description_retains_generated_description_heading() {
+    let tmp = fresh_repo();
+    let out = run(
+        tmp.path(),
+        &[
+            "create",
+            "--type",
+            "bug",
+            "--title",
+            "Inline description",
+            "--slug",
+            "inline-description",
+            "--description",
+            "Free text.",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
+    let item = std::fs::read_to_string(tmp.path().join("issues/inline-description/item.md"))
+        .expect("read created issue");
+    assert!(
+        item.ends_with("# Inline description\n\n## Description\n\nFree text.\n"),
+        "{item}"
+    );
 }
 
 #[test]
@@ -1126,18 +1247,19 @@ fn new_body_file_writes_markdown_below_heading() {
     );
     assert_eq!(out.status.code(), Some(0), "{}", dump(&out));
     let body = show_body(tmp.path(), "bf-file");
-    // Structural, not just substring: the file markdown must land below
-    // the `# <title>` heading, under the `## Description` section the
-    // shared renderer emits, in order — proving it flowed through the
-    // same write path as an inline `--description` rather than being
-    // dropped into frontmatter or before the title.
+    // Structural, not just substring: the file markdown must land directly
+    // below the `# <title>` heading, in order, without the free-text
+    // `## Description` wrapper used by inline `--description`.
     let title = body.find("# From a file").expect("title heading");
-    let desc = body.find("## Description").expect("description heading");
     let first = body.find("First paragraph.").expect("first paragraph");
     let second = body.find("Second paragraph.").expect("second paragraph");
     assert!(
-        title < desc && desc < first && first < second,
+        title < first && first < second,
         "body out of order: {body:?}"
+    );
+    assert!(
+        !body.contains("## Description"),
+        "unexpected wrapper: {body:?}"
     );
 }
 

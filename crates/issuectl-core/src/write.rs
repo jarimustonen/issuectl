@@ -344,6 +344,10 @@ pub struct NewIssueArgs<'a> {
     pub related: &'a [String],
     pub source: Option<&'a str>,
     pub description: Option<&'a str>,
+    /// Whether `description` is already a complete structured Markdown body.
+    /// Structured bodies are placed directly below the title/source preamble;
+    /// free-text descriptions retain the generated `## Description` heading.
+    pub structured_body: bool,
     /// Creation status. `None` ⇒ the historical default `open`. Only the
     /// intake `file` path overrides it (to `untriaged`), so a filed item
     /// lands in its reception state directly rather than being created
@@ -424,7 +428,9 @@ pub fn render_new_item_from_fm(args: &NewIssueArgs<'_>, map: &Mapping) -> String
     if let Some(s) = args.source {
         body.push_str(&format!("_Source: {}_\n\n", s));
     }
-    body.push_str("## Description\n\n");
+    if !args.structured_body {
+        body.push_str("## Description\n\n");
+    }
     if let Some(d) = args.description {
         body.push_str(d.trim_end());
         body.push('\n');
@@ -902,6 +908,7 @@ mod tests {
             related: &[],
             source: None,
             description: None,
+            structured_body: false,
             status: None,
             custom_fields: &[],
         }
@@ -948,6 +955,7 @@ mod tests {
             related: &related,
             source: Some("frontend/login"),
             description: Some("Stuck in loop."),
+            structured_body: false,
             status: None,
             custom_fields: &[],
         };

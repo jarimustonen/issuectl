@@ -65,6 +65,11 @@ pub struct NewArgs {
     pub related: Vec<String>,
     pub source: Option<String>,
     pub description: Option<String>,
+    /// Treat `description` as a complete structured Markdown body rather than
+    /// free text that needs a generated `## Description` wrapper. The CLI sets
+    /// this for `create --body-file`; other creation paths retain their
+    /// historical free-text rendering.
+    pub structured_body: bool,
     pub custom_fields: Vec<(String, String)>,
     /// Scheduling lane set at creation (`issuectl new --lane`). `None`
     /// leaves the issue unclassified; `Some` writes a string `lane:`
@@ -109,6 +114,7 @@ impl Default for NewArgs {
             related: Vec::new(),
             source: None,
             description: None,
+            structured_body: false,
             custom_fields: Vec::new(),
             lane: None,
             lane_seq: None,
@@ -282,6 +288,7 @@ pub(crate) fn do_new_locked(
         related: &related,
         source: args.source.as_deref(),
         description: args.description.as_deref(),
+        structured_body: args.structured_body,
         status: args.status.as_deref(),
         custom_fields: &args.custom_fields,
     };
@@ -645,6 +652,7 @@ mod tests {
             related: vec![],
             source: None,
             description: None,
+            structured_body: false,
             custom_fields: vec![],
             lane: None,
             lane_seq: None,

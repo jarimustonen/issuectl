@@ -626,9 +626,10 @@ pub(crate) enum PrimaryCommand {
         #[arg(long, visible_alias = "body", value_parser = parse_non_empty)]
         description: Option<String>,
 
-        /// Read the initial body from a file, written below the
-        /// `# <title>` heading. Pass `-` to read stdin (use `./-` for a
-        /// file literally named `-`). Mutually exclusive with
+        /// Read a complete structured Markdown body from a file and write it
+        /// directly below the `# <title>`/`--source` preamble without adding a
+        /// wrapper heading. Pass `-` to read stdin (use `./-` for a file
+        /// literally named `-`). Mutually exclusive with
         /// `--description`/`--body`. A body using a reserved legacy
         /// section heading (`## Notes` — use `## Comments`) is accepted
         /// but warns; `issuectl doctor --fix` migrates it later.

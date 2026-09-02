@@ -133,6 +133,7 @@ mod tests {
             related: vec![],
             source: None,
             description: None,
+            structured_body: false,
             custom_fields: vec![],
             lane: None,
             lane_seq: None,

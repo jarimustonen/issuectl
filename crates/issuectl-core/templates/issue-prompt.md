@@ -537,7 +537,8 @@ for `--description`, so `issuectl --json create --type task --title X
 text, use `--body-file <path>` (mutually exclusive with
 `--description`/`--body` — combining them is a usage error); pass `-`
 to read the body from stdin (use `./-` for a file literally named `-`).
-The file's markdown is written below the `# <title>` heading, so a
+The file's markdown is written directly below the `# <title>` heading (and
+optional `--source` line) without an added `## Description` wrapper, so a
 fully-formed issue can be filed in one argv:
 
 ```

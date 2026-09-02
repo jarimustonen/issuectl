@@ -217,6 +217,7 @@ impl ImportRecord {
             related: vec![],
             source: self.source,
             description: self.description,
+            structured_body: false,
             custom_fields: vec![],
             lane: None,
             lane_seq: None,

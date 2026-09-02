@@ -515,6 +515,7 @@ fn materialize(
         related: vec![],
         source: None,
         description: def.file.description.clone(),
+        structured_body: false,
         custom_fields: vec![
             (
                 RECURRENCE_OF_KEY.to_string(),

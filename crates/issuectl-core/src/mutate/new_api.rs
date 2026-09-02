@@ -193,6 +193,7 @@ pub fn new_issue(root: &Path, req: NewIssueRequest) -> Result<NewOutcome, Mutate
             related: req.related,
             source: req.source,
             description: req.description,
+            structured_body: false,
             custom_fields: req.custom_fields,
             lane: None,
             lane_seq: None,
