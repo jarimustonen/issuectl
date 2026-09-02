@@ -3,7 +3,7 @@ created: 2026-08-28
 updated: 2026-09-02
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:homebase-wrapup-2026-08-28-issuectl-body-file-description
@@ -20,6 +20,7 @@ commits:
   summary: close final structured-body test, help, and template review gaps
 - hash: 4e6aaea
   summary: preserve complete final review and assessment evidence
+closed: 2026-09-02
 ---
 
 # issuectl create --body-file duplicates Description heading
@@ -56,3 +57,9 @@ The first heading was empty. It had to be removed manually before committing.
 When `--body-file` supplies structured Markdown, `issuectl create` should write it below the H1 as documented without injecting an additional `## Description` heading. Supplying `--source` may add the `_Source: ..._` line, but should not duplicate a body heading.
 
 Alternatively, if `## Description` is intentionally always generated, validation/help should state that `--body-file` must contain only section content rather than a complete Markdown body. Current help says the initial body is read from the file and written below the H1, and its example permits H2 sections.
+
+## Resolution
+
+### 2026-09-02T16:57:32Z · @issuectl
+
+Adopted the preserved structured body-file fix onto current main, independently reproduced the original defect and the separate export/import follow-up, verified complete four-model review evidence with two cross-review rounds, applied the warranted final test/help/template corrections, and passed all five repository gate commands.
