@@ -348,6 +348,29 @@ fields:
   # graveyard. Stored as a string date, like `closed:`.
   deferred_until:
     required: false
+  # --- Agent workflow provenance -----------------------------------
+  # Metadata written by the issuectl intake/review workflow contract.
+  # These remain ordinary optional extension fields (rather than typed
+  # `Issue` fields), so adding them does not alter canonical version tokens.
+  # Declaring the complete workflow-owned vocabulary here only teaches
+  # validation and `doctor` that the keys are intentional. Values stay open
+  # because model/reviewer vocabularies and orchestrator run kinds evolve.
+  review_source:
+    required: false
+  originating_run:
+    required: false
+  originating_run_kind:
+    required: false
+  review_target:
+    required: false
+  assessment_classification:
+    required: false
+  assessment_outcome:
+    required: false
+  review_severity:
+    required: false
+  review_confidence:
+    required: false
   # `commits` is intentionally not declared: it is a list of mapping
   # entries (`{hash, summary}`), which the v1 schema's scalar/list-of-
   # string model cannot describe. Unknown fields are allowed, so it
@@ -1241,6 +1264,56 @@ mod tests {
     }
 
     #[test]
+    fn default_schema_declares_agent_workflow_metadata_without_typing_it() {
+        let schema = default_schema();
+        let fields = [
+            "review_source",
+            "originating_run",
+            "originating_run_kind",
+            "review_target",
+            "assessment_classification",
+            "assessment_outcome",
+            "review_severity",
+            "review_confidence",
+        ];
+        for field in fields {
+            let spec = schema
+                .fields
+                .get(field)
+                .unwrap_or_else(|| panic!("missing workflow-owned field {field:?}"));
+            assert!(!spec.required, "{field:?} must remain optional");
+            assert!(!spec.list, "{field:?} must remain scalar");
+            assert!(spec.allowed.is_none(), "{field:?} must remain open-valued");
+        }
+
+        let fm: Mapping = serde_yaml::from_str(
+            "type: bug\nstatus: untriaged\npriority: normal\n\
+             review_source: ai-review\noriginating_run: 01m1g988nx073zd4h76kp63nrg\n\
+             originating_run_kind: spinoff\nreview_target: HEAD~1..HEAD\n\
+             assessment_classification: CONFIRMED\nassessment_outcome: SPIN_OFF\n\
+             review_severity: high\nreview_confidence: HIGH\n",
+        )
+        .unwrap();
+        assert!(validate(&schema, &fm).is_empty());
+    }
+
+    #[test]
+    fn user_schema_inherits_agent_workflow_metadata() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("issues")).unwrap();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: false\n",
+        )
+        .unwrap();
+
+        let schema = load(tmp.path()).unwrap();
+        assert!(schema.fields.contains_key("originating_run"));
+        assert!(schema.fields.contains_key("review_confidence"));
+        assert!(schema.fields.contains_key("team"));
+    }
+
+    #[test]
     fn disposition_reason_enum_is_enforced() {
         let schema = default_schema();
         let ok: Mapping = serde_yaml::from_str(
@@ -1347,6 +1420,9 @@ mod tests {
         fs::create_dir_all(tmp.path().join("issues")).unwrap();
         ensure_default_written(tmp.path()).unwrap();
         assert!(tmp.path().join("issues/.schema.yaml").is_file());
+        let installed = load(tmp.path()).unwrap();
+        assert!(installed.fields.contains_key("originating_run"));
+        assert!(installed.fields.contains_key("review_confidence"));
     }
 
     #[test]

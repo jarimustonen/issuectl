@@ -1731,6 +1731,51 @@ mod tests {
     }
 
     #[test]
+    fn recognises_workflow_owned_metadata_but_still_flags_arbitrary_extensions() {
+        let tmp = fresh_repo();
+        // Keep a pre-existing, minimal repo schema: load() must layer newly
+        // built-in workflow metadata over it, which is also the path used by
+        // read-only doctor and doctor --fix before/after schema installation.
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nfields:\n  team:\n    required: false\n",
+        )
+        .unwrap();
+        put_flat(
+            &tmp,
+            "quiet-brave-otter",
+            "---\ntype: bug\nstatus: untriaged\npriority: normal\n\
+             review_source: ai-review\noriginating_run: 01m1g988nx073zd4h76kp63nrg\n\
+             originating_run_kind: spinoff\nreview_target: HEAD~1..HEAD\n\
+             assessment_classification: CONFIRMED\nassessment_outcome: SPIN_OFF\n\
+             review_severity: high\nreview_confidence: HIGH\nwhimsy: 1\n---\n# T\n",
+        );
+
+        let r = scan(tmp.path()).unwrap();
+        for field in [
+            "review_source",
+            "originating_run",
+            "originating_run_kind",
+            "review_target",
+            "assessment_classification",
+            "assessment_outcome",
+            "review_severity",
+            "review_confidence",
+        ] {
+            assert!(
+                !r.unknown_keys.iter().any(|(_, key)| key == field),
+                "workflow-owned {field:?} flagged as unknown: {:?}",
+                r.unknown_keys
+            );
+        }
+        assert!(
+            r.unknown_keys.iter().any(|(_, key)| key == "whimsy"),
+            "genuinely undeclared extension must still warn: {:?}",
+            r.unknown_keys
+        );
+    }
+
+    #[test]
     fn does_not_flag_schema_known_custom_key() {
         let tmp = fresh_repo();
         fs::write(
