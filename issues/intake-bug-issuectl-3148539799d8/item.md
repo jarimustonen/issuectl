@@ -9,6 +9,17 @@ provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:homebase-wrapup-2026-08-28-issuectl-body-file-description
 lane: create-body
 collision: [crates/issuectl-core/src/write.rs, crates/issuectl/src/cmd/mod.rs]
+commits:
+- hash: c5e14c5
+  summary: preserve structured body-file Markdown without generated wrapper
+- hash: 577b1f1
+  summary: harden structured body rendering and required-section detection
+- hash: 2f3ea89
+  summary: complete preserved review fixes and file verified follow-up intake item
+- hash: 52f09a1
+  summary: close final structured-body test, help, and template review gaps
+- hash: 4e6aaea
+  summary: preserve complete final review and assessment evidence
 ---
 
 # issuectl create --body-file duplicates Description heading
