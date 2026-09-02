@@ -601,8 +601,9 @@ optional `_Source: ..._`, `## Description`). With `--body-file`, it places the
 supplied structured Markdown after the title/source preamble without that
 wrapper. For bugs, append `## Reproduction` and `## Quick Test` sections by
 editing the item.md directly (use `.data.path` for the file or
-`.data.dir` for its directory). For epics, add `## Goal`, `## Issues`,
-`## Phases`, and `## Notes` sections — the CLI does not write these.
+`.data.dir` for its directory). For epics, ensure `## Goal`, `## Issues`,
+`## Phases`, and `## Notes` sections exist. The default renderer does not add
+them, although repository schema requirements may append missing stubs.
 
 #### 4. Copy Screenshots
 

@@ -1,26 +1,46 @@
 {
   "schema_version": 1,
   "source_review": "history/review-create-body-file.md",
-  "head_sha": "323ce2d5d75f8f80398c512fb74a96c1e18fec7f",
-  "generated_at": "2026-09-02T06:09:40Z",
+  "head_sha": "1b741a9d54eeef547fe0ffab352c36b4d2e70e26",
+  "generated_at": "2026-09-02T06:52:26Z",
   "findings": [
     {
       "id": "F1",
-      "cluster_key": "sha1:1cab24727aa960abb2d9fd1f154552f994c2675d",
-      "title": "Naive body extraction can duplicate required sections after a Markdown horizontal rule",
+      "cluster_key": "sha1:94e91e345442776635197d771f2027c32bfdbcfb",
+      "title": "Structured-body schema completion lacked a positive regression",
       "kind": "CODE",
       "sources": [
-        {"file":"history/review-create-body-file.md","line":10,"section":null,"model":"gemini-3.1-pro-preview"},
-        {"file":"history/review-create-body-file.md","line":10,"section":null,"model":"gpt-5.6-sol"},
-        {"file":"history/review-create-body-file.md","line":10,"section":null,"model":"claude-fable-5"},
-        {"file":"history/review-create-body-file.md","line":10,"section":null,"model":"deepseek-v4-pro"}
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 13,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 13,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 13,
+          "section": null,
+          "model": "claude-fable-5"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 13,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
       ],
       "target_file": "crates/issuectl-core/src/mutate/new_issue.rs",
-      "target_symbol": "do_new_locked",
-      "claim": "Naive rendered-body splitting can hide required headings after a Markdown horizontal rule and append duplicates.",
-      "suggested_fix": "Use crate::item_text::split and add a structured-body horizontal-rule regression.",
+      "target_symbol": "structured_body_with_horizontal_rule_does_not_duplicate_required_sections",
+      "claim": "The structured-body path did not test that a genuinely missing schema-required H2 stub is appended with canonical spacing.",
+      "suggested_fix": "Extend the adjacent mutation regression with one omitted required section and exact spacing assertions.",
       "confirmation": "CONFIRMED",
-      "likelihood": "OCCASIONAL",
+      "likelihood": "REGULAR",
       "readability": "IMPROVES",
       "architecture": "NONE",
       "confidence": "HIGH",
@@ -29,78 +49,27 @@
       "applicability": "clean",
       "write_up": null,
       "user_override": false,
-      "evidence": "The previous split matched both the closing frontmatter delimiter and an ordinary Markdown horizontal rule. The canonical item_text splitter now preserves the full body, and the custom-schema regression proves Expected is emitted once."
+      "evidence": "The original regression supplied every required section. It now requires an omitted Quick Test section and proves exactly one correctly separated stub is appended."
     },
     {
       "id": "F2",
-      "cluster_key": "sha1:edb43497a7dd6fd82231d51ec46d40d860ed31e8",
-      "title": "Structured-body renderer lacked an adjacent unit test",
-      "kind": "CODE",
-      "sources": [
-        {"file":"history/review-create-body-file.md","line":18,"section":null,"model":"gemini-3.1-pro-preview"},
-        {"file":"history/review-create-body-file.md","line":18,"section":null,"model":"gpt-5.6-sol"},
-        {"file":"history/review-create-body-file.md","line":18,"section":null,"model":"claude-fable-5"},
-        {"file":"history/review-create-body-file.md","line":18,"section":null,"model":"deepseek-v4-pro"}
-      ],
-      "target_file": "crates/issuectl-core/src/write.rs",
-      "target_symbol": "render_new_item_from_fm",
-      "claim": "The changed structured-body renderer branch lacked an adjacent core unit test.",
-      "suggested_fix": "Add a write.rs unit test for wrapper suppression and source placement.",
-      "confirmation": "CONFIRMED",
-      "likelihood": "REGULAR",
-      "readability": "IMPROVES",
-      "architecture": "NONE",
-      "confidence": "HIGH",
-      "recommendation": "FIX",
-      "drop_rule": null,
-      "applicability": "clean",
-      "write_up": null,
-      "user_override": false,
-      "evidence": "Before the review fix, write.rs test constructors only set structured_body=false and no test exercised the true branch. The new renderer test now passes and pins exact source/body placement."
-    },
-    {
-      "id": "F3",
-      "cluster_key": "sha1:c111f3708b36686c1582b4bf64bcd530e2452ec0",
-      "title": "Shipped issue template contradicted body-file behavior",
+      "cluster_key": "sha1:0e851a614ae505cbf1c3f71db0dc90a57365cf27",
+      "title": "Agent guidance overstated default epic rendering",
       "kind": "DESIGN",
       "sources": [
-        {"file":"history/review-create-body-file.md","line":26,"section":null,"model":"gpt-5.6-sol"},
-        {"file":"history/review-create-body-file.md","line":26,"section":null,"model":"claude-fable-5"},
-        {"file":"history/review-create-body-file.md","line":26,"section":null,"model":"deepseek-v4-pro"},
-        {"file":"history/review-create-body-file.md","line":26,"section":null,"model":"gemini-3.1-pro-preview"}
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 20,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        }
       ],
       "target_file": null,
       "target_symbol": "Action: Create / Flesh out the body",
-      "claim": "The shipped issue template contradicted itself about whether body-file creates a Description wrapper.",
-      "suggested_fix": "Qualify minimal-body behavior by input mode and document schema-required stubs.",
+      "claim": "The agent template categorically said the CLI never writes epic sections although repository schema requirements can append those stubs.",
+      "suggested_fix": "Qualify the statement as default-renderer behavior in both templates and dogfooded copies.",
       "confirmation": "CONFIRMED",
-      "likelihood": "REGULAR",
-      "readability": "IMPROVES",
-      "architecture": "NONE",
-      "confidence": "HIGH",
-      "recommendation": "FIX",
-      "drop_rule": null,
-      "applicability": "unclear",
-      "write_up": null,
-      "user_override": false,
-      "evidence": "The template's body-file paragraph said no wrapper while the later create step unconditionally listed Description. Both source formats and dogfooded copies now carry conditional wording."
-    },
-    {
-      "id": "F4",
-      "cluster_key": "sha1:6922773025806a133378947398d152ff3b1ea5dc",
-      "title": "User-visible fix lacked an Unreleased changelog entry",
-      "kind": "DESIGN",
-      "sources": [
-        {"file":"history/review-create-body-file.md","line":34,"section":null,"model":"gpt-5.6-sol"},
-        {"file":"history/review-create-body-file.md","line":34,"section":null,"model":"claude-fable-5"},
-        {"file":"history/review-create-body-file.md","line":34,"section":null,"model":"deepseek-v4-pro"}
-      ],
-      "target_file": null,
-      "target_symbol": "CHANGELOG.md / Unreleased / Fixed",
-      "claim": "The user-visible body-file fix lacked an Unreleased changelog entry.",
-      "suggested_fix": "Add a concise Fixed bullet through the curated changelog workflow.",
-      "confirmation": "CONFIRMED",
-      "likelihood": "REGULAR",
+      "likelihood": "OCCASIONAL",
       "readability": "IMPROVES",
       "architecture": "NONE",
       "confidence": "HIGH",
@@ -109,76 +78,90 @@
       "applicability": "clean",
       "write_up": null,
       "user_override": false,
-      "evidence": "The initial diff changed persisted CLI output but did not touch the marked Unreleased section. A Fixed bullet has now been added under the approved curated changelog contract."
+      "evidence": "do_new_locked appends configured required sections after rendering. The four agent-facing files now distinguish default rendering from schema completion."
     },
     {
-      "id": "F5",
-      "cluster_key": "sha1:eb42be2d4722c73523fde67dd82bb39edc320a8c",
-      "title": "Intake body-file structured-versus-free-text semantics are unresolved",
+      "id": "F3",
+      "cluster_key": "sha1:a4c841fb4444af33cd2a67a4effce804ba6e6854",
+      "title": "Issuectl JSON export-to-import duplicates structured body headings",
       "kind": "CODE",
       "sources": [
-        {"file":"history/review-create-body-file.md","line":44,"section":null,"model":"gemini-3.1-pro-preview"},
-        {"file":"history/review-create-body-file.md","line":44,"section":null,"model":"claude-fable-5"},
-        {"file":"history/review-create-body-file.md","line":44,"section":null,"model":"deepseek-v4-pro"},
-        {"file":"history/review-create-body-file.md","line":45,"section":null,"model":"gpt-5.6-sol"}
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 29,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 29,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 29,
+          "section": null,
+          "model": "claude-fable-5"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 29,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
       ],
-      "target_file": "crates/issuectl-core/src/mutate/intake.rs",
-      "target_symbol": "file",
-      "claim": "Intake file body-file still uses free-text wrapping and may duplicate a supplied Description heading.",
-      "suggested_fix": "Decide whether intake body-file is free text under a generated section or structured Markdown, then align help, skills, and tests.",
+      "target_file": "crates/issuectl-core/src/transfer.rs",
+      "target_symbol": "ImportRecord::into_new_args",
+      "claim": "Issuectl JSON export body aliases to free-text import description and receives another generated Description wrapper when rendered.",
+      "suggested_fix": "Design separate structured body versus free-text description import handling and add an end-to-end round-trip regression.",
       "confirmation": "CONFIRMED",
       "likelihood": "OCCASIONAL",
       "readability": "NEUTRAL",
       "architecture": "MODERATE",
       "confidence": "HIGH",
-      "recommendation": "DISCUSS",
+      "recommendation": "SPIN_OFF",
       "drop_rule": null,
       "applicability": null,
-      "write_up": "- **Milloin tämä näkyy käyttäjälle** — kun intake-raportti annetaan `--body-file`-tiedostona ja sisältö on jo jäsennelty H2-otsikoilla.\n- **Miten se näkyy** — intake käsittelee tiedoston vapaana tekstinä ja lisää oman `## Description` -otsikkonsa; tiedostossa jo oleva sama otsikko voi siksi kahdentua.\n- **Miksi sillä on väliä** — intake on agenteille suositeltu vastaanottopolku, joten epäselvä sopimus tuottaa eri rakenteen kuin saman niminen `create --body-file` -valitsin.\n- **Mistä päätös on kyse** — säilytetäänkö intaken nykyinen vastaanottorakenne, jossa raportti sijoitetaan generoituun kuvausosioon, vai määritelläänkö tiedostosyöte jäsennellyksi Markdowniksi kuten create-komennossa.\n- Päätös vaatii erillisen yhteensopivuus- ja dokumentointiarvion; tämän tehtävän nimenomainen create-rajaus säilyttää nykyisen intake-käytöksen.",
+      "write_up": "- **Milloin tämä näkyy käyttäjälle** — kun käyttäjä vie issuectl-issuet JSON-muotoon ja tuo saman JSON-aineiston takaisin `issuectl import` -komennolla.\n- **Miten se näkyy** — tuotu body käsitellään vapaana kuvauksena, joten jo rakenteisessa bodyssa oleva `## Description` saa eteensä uuden samannimisen otsikon; myös vanha H1 voi jäädä uuden otsikon alle.\n- **Miksi sillä on väliä** — työkalun oma JSON-vienti on dokumentoitu importin syötteeksi, mutta uudelleentuonti voi rikkoa bodyn rakenteen jokaisessa tietueessa.\n- **Miksi tämä vaatii oman suunnittelunsa** — parserin pitää erottaa issuectl-exportin rakenteinen `body` ulkoisten lähteiden vapaasta `description`-tekstistä rikkomatta GitHub- ja käsin kirjoitettujen importtien nykyisiä semantiikkoja.\n- Korjaus tarvitsee erilliset yhteensopivuustestit koko export → parse → create -ketjulle; tämän create-only-korjauksen vaatimus nimenomaisesti säilyttää importin nykyisen käytöksen.",
       "user_override": false,
-      "evidence": "dispatch_intake collapses body_file into FileRequest.body, and intake::file explicitly constructs NewArgs with structured_body=false. This is real behavior, but intake help calls the body free text and the requested task explicitly preserves other creation paths."
+      "evidence": "Issue.body serializes as body; ImportRecord aliases body into description; into_new_args sets free-text mode. The existing round-trip test stops after parse and does not render the imported record."
     },
     {
-      "id": "F6",
-      "cluster_key": "sha1:0f7bfc147667ee6c3fb5950b2fe10397ed9d5ff6",
-      "title": "Boolean body mode permits contradictory core states",
-      "kind": "CODE",
+      "id": "F4",
+      "cluster_key": "sha1:321bab932ab522b4d43fcbb15f14fd5ee1bede08",
+      "title": "Changelog entry should move from Fixed to Changed",
+      "kind": "DESIGN",
       "sources": [
-        {"file":"history/review-create-body-file.md","line":49,"section":null,"model":"gemini-3.1-pro-preview"},
-        {"file":"history/review-create-body-file.md","line":49,"section":null,"model":"gpt-5.6-sol"},
-        {"file":"history/review-create-body-file.md","line":49,"section":null,"model":"claude-fable-5"},
-        {"file":"history/review-create-body-file.md","line":49,"section":null,"model":"deepseek-v4-pro"}
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 38,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 38,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 38,
+          "section": null,
+          "model": "claude-fable-5"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 38,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
       ],
-      "target_file": "crates/issuectl-core/src/mutate/new_issue.rs",
-      "target_symbol": "NewArgs",
-      "claim": "Option description plus a structured-body Boolean permits contradictory core states.",
-      "suggested_fix": "Replace the fields with an InitialBody enum.",
-      "confirmation": "CONFIRMED",
-      "likelihood": "RARE",
-      "readability": "NEUTRAL",
-      "architecture": "MODERATE",
-      "confidence": "HIGH",
-      "recommendation": "DROP",
-      "drop_rule": "1b",
-      "applicability": null,
-      "write_up": null,
-      "user_override": false,
-      "evidence": "The core type can represent structured_body=true with no description, but the CLI cannot produce it because empty body files are rejected. Replacing the model would coordinate many callers without demonstrated real-world failure in this bounded path."
-    },
-    {
-      "id": "F7",
-      "cluster_key": "sha1:af198e5de8d163aff0358c9f45f6ab934a860dc2",
-      "title": "Plain-prose body-file behavior is an unintended regression",
-      "kind": "CODE",
-      "sources": [
-        {"file":"history/review-create-body-file.md","line":54,"section":null,"model":"gemini-3.1-pro-preview"},
-        {"file":"history/review-create-body-file.md","line":54,"section":null,"model":"claude-fable-5"},
-        {"file":"history/review-create-body-file.md","line":55,"section":null,"model":"gpt-5.6-sol"}
-      ],
-      "target_file": "crates/issuectl/src/cmd/runtime.rs",
-      "target_symbol": "PrimaryCommand::Create dispatch",
-      "claim": "Suppressing the wrapper for plain-prose body files is an unintended compatibility regression.",
-      "suggested_fix": "Sniff content or add a separate structured-body flag.",
+      "target_file": null,
+      "target_symbol": "CHANGELOG.md / Unreleased",
+      "claim": "The corrected body-file semantics must be classified as Changed rather than Fixed in the changelog.",
+      "suggested_fix": null,
       "confirmation": "INCORRECT",
       "likelihood": null,
       "readability": null,
@@ -189,7 +172,421 @@
       "applicability": null,
       "write_up": null,
       "user_override": false,
-      "evidence": "The verified contract defines body-file as structured Markdown placed directly below the generated preamble. Deterministic source-mode semantics are intentional; content sniffing would make behavior formatting-dependent."
+      "evidence": "The entry precisely describes correction of the reported duplicate-heading bug. Keep a Changelog permits persisted behavior corrections under Fixed; no repository rule requires Changed here."
+    },
+    {
+      "id": "F5",
+      "cluster_key": "sha1:23473f85aa44c78f1293986bfb426a12cad11a3b",
+      "title": "Heading-less structured bodies must warn or error",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 43,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 43,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 43,
+          "section": null,
+          "model": "claude-fable-5"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 43,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/mutate/new_issue.rs",
+      "target_symbol": "do_new_locked",
+      "claim": "A structured body without H2 headings must warn or error, especially when schema completion appends a missing Description stub.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Markdown body content need not contain H2 headings, and the declared mode intentionally places supplied content as-is. Schema completion correctly appends sections that are absent; sniffing would invent a second implicit mode grammar."
+    },
+    {
+      "id": "F6",
+      "cluster_key": "sha1:5b0ca435d647e1858268561149d8f0f341b8d51f",
+      "title": "Boolean body mode permits contradictory core states",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 48,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 48,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 48,
+          "section": null,
+          "model": "claude-fable-5"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 48,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/mutate/new_issue.rs",
+      "target_symbol": "NewArgs",
+      "claim": "Option description plus structured_body bool permits None plus true and requires callers to coordinate a cross-field invariant.",
+      "suggested_fix": "Replace the body fields with an InitialBody enum.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "NEUTRAL",
+      "architecture": "MODERATE",
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1b",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The type can represent None plus true, but every current constructor is explicit and correct and the CLI rejects empty files. An enum refactor would coordinate owned and borrowed argument shapes without demonstrated production failure."
+    },
+    {
+      "id": "F7",
+      "cluster_key": "sha1:5c7874eb25ff56e34f6d6931ce605f684f8bf241",
+      "title": "Trailing Markdown whitespace is lost by the new structured mode",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 55,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "target_file": "crates/issuectl/src/cmd/write.rs",
+      "target_symbol": "read_body_file_arg",
+      "claim": "The structured-body change newly loses Markdown-significant trailing whitespace.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Trailing document whitespace normalization predates this diff, is explicitly documented, and is shared with body replacement. Interior-line Markdown hard breaks remain intact."
+    },
+    {
+      "id": "F8",
+      "cluster_key": "sha1:62257fabb7dccd899b6c5df4b0c74c6d58d98037",
+      "title": "Schema stubs lack a separating blank line",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 57,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/mutate/new_issue.rs",
+      "target_symbol": "do_new_locked",
+      "claim": "Appending missing schema sections places the heading directly against preceding structured-body text.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The append path checks for one and then two terminal newlines before adding stubs. The expanded regression directly verifies canonical separation."
+    },
+    {
+      "id": "F9",
+      "cluster_key": "sha1:8a487b2989f5de0d630f92e1f72ba8084d336a7b",
+      "title": "Canonical frontmatter splitting is a no-op",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 58,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/mutate/new_issue.rs",
+      "target_symbol": "do_new_locked",
+      "claim": "item_text::split is ineffective because the rendered string has no frontmatter.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "render_new_item_from_fm serializes and prepends YAML frontmatter. Gemini retracted the claim in the final round."
+    },
+    {
+      "id": "F10",
+      "cluster_key": "sha1:0f9b52b63522ef5481f594a913aa03ce32fe1188",
+      "title": "Templates drifted and a constructor field was missing",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 59,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "target_file": "crates/issuectl/src/cmd/cli_tests.rs",
+      "target_symbol": null,
+      "claim": "The final diff omitted synchronized template copies and structured_body initialization in cli_tests.rs.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The complete tree contains both templates, both dogfooded copies, and the test constructor field. OpenAI retracted claims caused by a reduced cross-round attachment set."
+    },
+    {
+      "id": "F11",
+      "cluster_key": "sha1:2ab04fdbd281c32ad13ddab97eda01e6e481e6be",
+      "title": "Compatibility paths should adopt structured mode",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 60,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 60,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 60,
+          "section": null,
+          "model": "claude-fable-5"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 60,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/mutate/intake.rs",
+      "target_symbol": null,
+      "claim": "Intake, recurrence, core API, or foreign imports should switch to structured mode as part of this patch.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The task explicitly requires those paths to preserve free-text semantics. Their false assignments are deliberate and architecture-consistent compatibility choices."
+    },
+    {
+      "id": "F12",
+      "cluster_key": "sha1:4a98750aa89bb52095b74a8101a31dc5abcbfd04",
+      "title": "Structured body files need an H1 prohibition",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 61,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 61,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl/src/cmd/write.rs",
+      "target_symbol": "read_body_file_arg",
+      "claim": "Create should reject or warn when structured body content includes its own H1.",
+      "suggested_fix": null,
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "NEUTRAL",
+      "architecture": "MINOR",
+      "confidence": "MED",
+      "recommendation": "DROP",
+      "drop_rule": "1b",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "A supplied H1 is accepted beneath the generated title, but no observed occurrence or harmful ambiguity was demonstrated. Validation would add a new content restriction for a rare misuse."
+    },
+    {
+      "id": "F13",
+      "cluster_key": "sha1:a7993c9877510f51fddfc885182d69a6764055a0",
+      "title": "Create should reject unclosed Markdown fences",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 61,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl/src/cmd/write.rs",
+      "target_symbol": "read_body_file_arg",
+      "claim": "Structured create body input should reject an unclosed code fence before schema stubs are appended.",
+      "suggested_fix": null,
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "NEUTRAL",
+      "architecture": "MINOR",
+      "confidence": "MED",
+      "recommendation": "DROP",
+      "drop_rule": "1b",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The path does not validate fence balance, but this is pre-existing acceptance of malformed user Markdown. No real-world occurrence was shown and adding rejection broadens the CLI contract."
+    },
+    {
+      "id": "F14",
+      "cluster_key": "sha1:46eb269043f8386a26a3712be0dcbe43af2ca9ef",
+      "title": "Required headings should support broader CommonMark forms",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 61,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 61,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/body_sections.rs",
+      "target_symbol": "all_h2_sections",
+      "claim": "Schema-required section detection should accept additional CommonMark-equivalent H2 forms.",
+      "suggested_fix": null,
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "WORSENS",
+      "architecture": "MODERATE",
+      "confidence": "MED",
+      "recommendation": "DROP",
+      "drop_rule": "1b",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The repository deliberately uses canonical exact H2 section names across formatting, schema, and doctor behavior. Broadening the grammar is cross-cutting hardening without a demonstrated occurrence."
+    },
+    {
+      "id": "F15",
+      "cluster_key": "sha1:c956016b9ac51e1d66ac12ffc678d26fa14e51da",
+      "title": "Duplicate precheck must score the rendered body",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 61,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl/src/cmd/write.rs",
+      "target_symbol": "duplicate_precheck",
+      "claim": "Duplicate precheck using supplied content rather than generated heading boilerplate materially mis-scores structured bodies.",
+      "suggested_fix": null,
+      "confirmation": "UNABLE_TO_VERIFY",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "MED",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The precheck intentionally scores semantic supplied content, and no failing score or user-visible regression was demonstrated. Generated title/source/wrapper tokens need not improve duplicate quality."
+    },
+    {
+      "id": "F16",
+      "cluster_key": "sha1:f3d42f6d78685a9db53f84d793775eec8812fb12",
+      "title": "Body-file integration test needs renaming",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 61,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl/tests/cli_new.rs",
+      "target_symbol": "new_body_file_writes_markdown_below_heading",
+      "claim": "The integration test name no longer describes wrapper-free body-file behavior.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The test still verifies exactly what its name states: Markdown from a body file is written below the generated heading. The name does not promise a Description wrapper."
     }
   ]
 }

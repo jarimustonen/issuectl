@@ -698,7 +698,7 @@ mod tests {
         let tmp = fresh_repo();
         fs::write(
             tmp.path().join("issues/.schema.yaml"),
-            "version: 1\nbody_sections:\n  bug: [Description, Expected]\n",
+            "version: 1\nbody_sections:\n  bug: [Description, Expected, Quick Test]\n",
         )
         .unwrap();
         let mut args = new_args("bug", "Structured sections");
@@ -713,7 +713,8 @@ mod tests {
         let content = read(&out.item_path);
         assert_eq!(content.matches("## Description").count(), 1, "{content}");
         assert_eq!(content.matches("## Expected").count(), 1, "{content}");
-        assert!(content.contains("---\n\n## Expected\n\nExpected behavior."));
+        assert_eq!(content.matches("## Quick Test").count(), 1, "{content}");
+        assert!(content.contains("---\n\n## Expected\n\nExpected behavior.\n\n## Quick Test\n"));
     }
 
     #[test]
