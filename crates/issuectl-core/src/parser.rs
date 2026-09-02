@@ -742,6 +742,37 @@ mod tests {
     }
 
     #[test]
+    fn workflow_metadata_remains_in_extra() {
+        // Schema declaration must not promote workflow metadata into typed
+        // Frontmatter slots: `Issue.extra` is its existing canonical-token
+        // projection, just like other extension metadata.
+        let text = "---\ntype: bug\nstatus: untriaged\npriority: normal\n\
+                    review_source: ai-review\noriginating_run: 01m1g988nx073zd4h76kp63nrg\n\
+                    originating_run_kind: spinoff\nreview_target: HEAD~1..HEAD\n\
+                    assessment_classification: CONFIRMED\nassessment_outcome: SPIN_OFF\n\
+                    review_severity: high\nreview_confidence: HIGH\n---\n\n# Title\n";
+        let parsed =
+            parse_item_md_text_with_warnings(text, "some-slug", "flat", Path::new("<test>"));
+
+        for field in [
+            "review_source",
+            "originating_run",
+            "originating_run_kind",
+            "review_target",
+            "assessment_classification",
+            "assessment_outcome",
+            "review_severity",
+            "review_confidence",
+        ] {
+            assert!(
+                parsed.issue.extra.contains_key(field),
+                "workflow metadata {field:?} must remain in Issue.extra: {:?}",
+                parsed.issue.extra
+            );
+        }
+    }
+
+    #[test]
     fn split_frontmatter_does_not_leak_into_body_yaml_block() {
         // Regression: doctor flagged keys inside body ```yaml fenced
         // blocks as "unknown frontmatter keys" because some splitter

@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "source_review": "history/review-doctor-workflow-metadata.md",
+  "head_sha": "71eecca46dfefb69608148812e14ba23cec81b4f",
+  "generated_at": "2026-09-02T05:43:38Z",
+  "findings": [
+    {
+      "id": "F1",
+      "cluster_key": "sha1:57ed88b20e17da1aea7020aee8fc0a4940684c79",
+      "title": "Workflow metadata docs misstate enum-free strings as open-valued",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-doctor-workflow-metadata.md",
+          "line": 13,
+          "section": "Confirmed Findings",
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-doctor-workflow-metadata.md",
+          "line": 13,
+          "section": "Confirmed Findings",
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-doctor-workflow-metadata.md",
+          "line": 13,
+          "section": "Confirmed Findings",
+          "model": "claude-fable-5"
+        },
+        {
+          "file": "history/review-doctor-workflow-metadata.md",
+          "line": 13,
+          "section": "Confirmed Findings",
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/schema.rs",
+      "target_symbol": "DEFAULT_SCHEMA_YAML workflow metadata block",
+      "claim": "The workflow metadata comment and test name imply arbitrary open values, but schema v1 validates declared scalar fields as strings.",
+      "suggested_fix": "Describe the fields as optional enum-free strings retained in Issue.extra, and explain review_source versus provenance.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "OCCASIONAL",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The authoritative writer emits strings, so runtime behavior is correct; schema::validate nevertheless rejects non-string YAML shapes, making the wording technically misleading."
+    },
+    {
+      "id": "F2",
+      "cluster_key": "sha1:016eac1a237e48f16b26f82f5d500434995e2e3b",
+      "title": "Schema installation test does not inspect installed bytes",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-doctor-workflow-metadata.md",
+          "line": 20,
+          "section": "Confirmed Findings",
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-doctor-workflow-metadata.md",
+          "line": 20,
+          "section": "Confirmed Findings",
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-doctor-workflow-metadata.md",
+          "line": 20,
+          "section": "Confirmed Findings",
+          "model": "claude-fable-5"
+        },
+        {
+          "file": "history/review-doctor-workflow-metadata.md",
+          "line": 20,
+          "section": "Confirmed Findings",
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/schema.rs",
+      "target_symbol": "ensure_default_written_creates_file",
+      "claim": "The installation test calls layered schema::load, so field assertions can pass from built-in defaults even if the installed file omitted them.",
+      "suggested_fix": "Read and deserialize issues/.schema.yaml directly, then assert all eight workflow fields.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "OCCASIONAL",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "schema::load starts from default_schema and overlays the file, so the previous assertions did not independently establish emitted-file content."
+    },
+    {
+      "id": "F3",
+      "cluster_key": "sha1:b854831c54cbf490683db1773f20d8456fa34160",
+      "title": "Workflow metadata extra-field projection lacks a named regression",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-doctor-workflow-metadata.md",
+          "line": 27,
+          "section": "Confirmed Findings",
+          "model": "gemini-3.1-pro-preview"
+        },
+        {
+          "file": "history/review-doctor-workflow-metadata.md",
+          "line": 27,
+          "section": "Confirmed Findings",
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-doctor-workflow-metadata.md",
+          "line": 27,
+          "section": "Confirmed Findings",
+          "model": "claude-fable-5"
+        },
+        {
+          "file": "history/review-doctor-workflow-metadata.md",
+          "line": 27,
+          "section": "Confirmed Findings",
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/parser.rs",
+      "target_symbol": "parse_item_md_text_with_warnings",
+      "claim": "The code preserves workflow metadata in Issue.extra, but no field-specific parser test pins all eight names there.",
+      "suggested_fix": "Parse a complete workflow metadata fixture and assert all eight keys remain in Issue.extra.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Parser Frontmatter has no typed slots for these fields and serde flattening currently places them in Issue.extra; a focused test guards a plausible future promotion error."
+    }
+  ]
+}

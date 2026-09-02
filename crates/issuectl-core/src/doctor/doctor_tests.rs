@@ -1773,6 +1773,11 @@ mod tests {
             "genuinely undeclared extension must still warn: {:?}",
             r.unknown_keys
         );
+        assert!(
+            r.schema_violations.is_empty(),
+            "workflow output must pass the same schema doctor uses: {:?}",
+            r.schema_violations
+        );
     }
 
     #[test]

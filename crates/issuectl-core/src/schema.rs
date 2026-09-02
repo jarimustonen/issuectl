@@ -350,11 +350,13 @@ fields:
     required: false
   # --- Agent workflow provenance -----------------------------------
   # Metadata written by the issuectl intake/review workflow contract.
-  # These remain ordinary optional extension fields (rather than typed
-  # `Issue` fields), so adding them does not alter canonical version tokens.
-  # Declaring the complete workflow-owned vocabulary here only teaches
-  # validation and `doctor` that the keys are intentional. Values stay open
-  # because model/reviewer vocabularies and orchestrator run kinds evolve.
+  # These remain optional string fields in `Issue.extra` rather than typed
+  # `Issue` fields, preserving their existing canonical token projection.
+  # The workflow writes them through `--field key=value`; enums are omitted
+  # deliberately because reviewer vocabularies, value casing, and orchestrator
+  # run kinds evolve independently. `review_source` is the stable review-origin
+  # marker consumers query, while intake `provenance` above remains the
+  # repo-configurable source classification and may reject `ai-review`.
   review_source:
     required: false
   originating_run:
@@ -1264,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn default_schema_declares_agent_workflow_metadata_without_typing_it() {
+    fn default_schema_declares_agent_workflow_metadata_as_enum_free_strings() {
         let schema = default_schema();
         let fields = [
             "review_source",
@@ -1283,7 +1285,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing workflow-owned field {field:?}"));
             assert!(!spec.required, "{field:?} must remain optional");
             assert!(!spec.list, "{field:?} must remain scalar");
-            assert!(spec.allowed.is_none(), "{field:?} must remain open-valued");
+            assert!(spec.allowed.is_none(), "{field:?} must remain enum-free");
         }
 
         let fm: Mapping = serde_yaml::from_str(
@@ -1420,9 +1422,23 @@ mod tests {
         fs::create_dir_all(tmp.path().join("issues")).unwrap();
         ensure_default_written(tmp.path()).unwrap();
         assert!(tmp.path().join("issues/.schema.yaml").is_file());
-        let installed = load(tmp.path()).unwrap();
-        assert!(installed.fields.contains_key("originating_run"));
-        assert!(installed.fields.contains_key("review_confidence"));
+        let text = fs::read_to_string(schema_path(tmp.path())).unwrap();
+        let installed: Schema = serde_yaml::from_str(&text).unwrap();
+        for field in [
+            "review_source",
+            "originating_run",
+            "originating_run_kind",
+            "review_target",
+            "assessment_classification",
+            "assessment_outcome",
+            "review_severity",
+            "review_confidence",
+        ] {
+            assert!(
+                installed.fields.contains_key(field),
+                "installed schema is missing {field:?}"
+            );
+        }
     }
 
     #[test]
