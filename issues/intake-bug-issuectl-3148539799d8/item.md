@@ -1,12 +1,14 @@
 ---
 created: 2026-08-28
-updated: 2026-08-28
+updated: 2026-09-02
 type: bug
 reporter: jari
-status: untriaged
+status: open
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:homebase-wrapup-2026-08-28-issuectl-body-file-description
+lane: create-body
+collision: [crates/issuectl-core/src/write.rs, crates/issuectl/src/cmd/mod.rs]
 ---
 
 # issuectl create --body-file duplicates Description heading

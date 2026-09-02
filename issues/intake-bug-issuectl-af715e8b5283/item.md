@@ -1,12 +1,14 @@
 ---
 created: 2026-08-28
-updated: 2026-08-28
+updated: 2026-09-02
 type: bug
 reporter: jari
-status: untriaged
+status: open
 priority: normal
 provenance: agent:aggountant-wrapup
 source_ref: agent:aggountant-wrapup/reporter:jari/id:aggountant-2026-08-28-issuectl-doctor-owned-fields
+lane: doctor-schema
+collision: [crates/issuectl-core/src/schema.rs]
 ---
 
 # doctor warns about issuectl-owned intake fields
