@@ -541,9 +541,10 @@ for `--description`, so `issuectl --json create --type task --title X
 text, use `--body-file <path>` (mutually exclusive with
 `--description`/`--body` — combining them is a usage error); pass `-`
 to read the body from stdin (use `./-` for a file literally named `-`).
-The file's markdown is written directly below the `# <title>` heading (and
-optional `--source` line) without an added `## Description` wrapper, so a
-fully-formed issue can be filed in one argv:
+The file's structured Markdown content is written directly below the generated
+`# <title>` heading (and optional `--source` line) without an added
+`## Description` wrapper. A repository schema may still append stubs for any
+required H2 sections the content omits:
 
 ```
 issuectl --json create --type feature --title "Bulk export" --body-file notes.md
@@ -595,9 +596,11 @@ Other useful flags: `--epic <slug>`, `--label X` (repeatable), `--related "@<slu
 
 #### 3. Flesh out the body
 
-`issuectl create` writes a minimal body (`# Title`, optional `_Source: ..._`,
-`## Description`). For bugs, append `## Reproduction` and `## Quick Test`
-sections by editing the item.md directly (use `.data.path` for the file or
+Without `--body-file`, `issuectl create` writes a minimal body (`# Title`,
+optional `_Source: ..._`, `## Description`). With `--body-file`, it places the
+supplied structured Markdown after the title/source preamble without that
+wrapper. For bugs, append `## Reproduction` and `## Quick Test` sections by
+editing the item.md directly (use `.data.path` for the file or
 `.data.dir` for its directory). For epics, add `## Goal`, `## Issues`,
 `## Phases`, and `## Notes` sections — the CLI does not write these.
 

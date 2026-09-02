@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   historical `ossctl` release evidence and permanent compatibility identifiers remain intact.
 
 ### Fixed
+- `create --body-file` now places complete structured Markdown beneath the
+  generated title/source preamble without injecting an empty duplicate
+  `## Description` heading.
 - CLI command construction and parsing no longer overflow Linux's normal 2 MiB
   Rust test-thread stack, so tests run without a `RUST_MIN_STACK` workaround.
 - Definition-of-Done checks now apply only to delivery closes (`done` and `fixed`

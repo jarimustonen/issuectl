@@ -929,6 +929,20 @@ mod tests {
     }
 
     #[test]
+    fn render_structured_body_omits_wrapper_after_source_preamble() {
+        let mut a = issue_args("bug", "Structured body");
+        a.source = Some("live test");
+        a.description = Some("## Description\n\nBody.\n\n## Expected\n\nDone.");
+        a.structured_body = true;
+
+        let out = render_new_item(&a);
+        assert_eq!(out.matches("## Description").count(), 1, "{out}");
+        assert!(out.ends_with(
+            "# Structured body\n\n_Source: live test_\n\n## Description\n\nBody.\n\n## Expected\n\nDone.\n"
+        ));
+    }
+
+    #[test]
     fn render_new_item_for_epic_uses_owner() {
         let mut a = issue_args("epic", "API v2");
         a.owner = Some("cara");

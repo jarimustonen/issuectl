@@ -351,7 +351,11 @@ pub(crate) fn do_new_locked(
     let render = if required_sections.is_empty() {
         render
     } else {
-        let body_only = render.split("---\n\n").nth(1).unwrap_or(&render);
+        // Use the canonical frontmatter splitter. A structured Markdown body
+        // can legitimately contain `---\n\n` horizontal rules; a plain
+        // string split would truncate at one and falsely append duplicate
+        // required-section stubs for headings that follow it.
+        let body_only = crate::item_text::split(&render).body;
         let present = crate::body_sections::all_h2_sections(body_only);
         let missing: Vec<String> = required_sections
             .iter()
@@ -687,6 +691,29 @@ mod tests {
         assert!(content.contains("reporter: alice"));
         assert!(content.contains("assignee: bob"));
         assert!(content.contains("# First bug"));
+    }
+
+    #[test]
+    fn structured_body_with_horizontal_rule_does_not_duplicate_required_sections() {
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\nbody_sections:\n  bug: [Description, Expected]\n",
+        )
+        .unwrap();
+        let mut args = new_args("bug", "Structured sections");
+        args.slug = Some("structured-sections".into());
+        args.description = Some(
+            "## Description\n\nObserved behavior.\n\n---\n\n## Expected\n\nExpected behavior."
+                .into(),
+        );
+        args.structured_body = true;
+
+        let out = do_new(tmp.path(), args).unwrap();
+        let content = read(&out.item_path);
+        assert_eq!(content.matches("## Description").count(), 1, "{content}");
+        assert_eq!(content.matches("## Expected").count(), 1, "{content}");
+        assert!(content.contains("---\n\n## Expected\n\nExpected behavior."));
     }
 
     #[test]
