@@ -8,11 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
 
+### Added
+
 ### Changed
+
+### Fixed
+<!-- oss-changelog:unreleased-end -->
+
+## [0.17.1] - 2026-09-02
+
+### Changed
+
 - Active release operations now use Shipshape and the `/shipshape-*` skill family;
   historical `ossctl` release evidence and permanent compatibility identifiers remain intact.
 
 ### Fixed
+
 - `create --body-file` now places complete structured Markdown beneath the
   generated title/source preamble without injecting an empty duplicate
   `## Description` heading.
@@ -24,7 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The bundled `/issue` guidance now reads create results from `.data.path`,
   documents update's conditional `lane` / `lane_seq` / `collision` echoes, and
   directs blocker reads to `show` or `dag` instead of the update response.
-<!-- oss-changelog:unreleased-end -->
 
 ## [0.17.0] - 2026-08-21
 
