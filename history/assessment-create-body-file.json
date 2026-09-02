@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "source_review": "history/review-create-body-file.md",
-  "head_sha": "1b741a9d54eeef547fe0ffab352c36b4d2e70e26",
-  "generated_at": "2026-09-02T06:52:26Z",
+  "head_sha": "52f09a11d33c23b15b8f2bc78e4b44d1c38c5004",
+  "generated_at": "2026-09-02T16:54:25Z",
   "findings": [
     {
       "id": "F1",
@@ -59,7 +59,7 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 20,
+          "line": 19,
           "section": null,
           "model": "gpt-5.6-sol"
         }
@@ -88,25 +88,25 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 29,
+          "line": 45,
           "section": null,
           "model": "gemini-3.1-pro-preview"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 29,
+          "line": 45,
           "section": null,
           "model": "gpt-5.6-sol"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 29,
+          "line": 45,
           "section": null,
           "model": "claude-fable-5"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 29,
+          "line": 45,
           "section": null,
           "model": "deepseek-v4-pro"
         }
@@ -135,25 +135,25 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 38,
+          "line": 53,
           "section": null,
           "model": "gemini-3.1-pro-preview"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 38,
+          "line": 53,
           "section": null,
           "model": "gpt-5.6-sol"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 38,
+          "line": 53,
           "section": null,
           "model": "claude-fable-5"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 38,
+          "line": 53,
           "section": null,
           "model": "deepseek-v4-pro"
         }
@@ -182,25 +182,25 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 43,
+          "line": 54,
           "section": null,
           "model": "gemini-3.1-pro-preview"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 43,
+          "line": 54,
           "section": null,
           "model": "gpt-5.6-sol"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 43,
+          "line": 54,
           "section": null,
           "model": "claude-fable-5"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 43,
+          "line": 54,
           "section": null,
           "model": "deepseek-v4-pro"
         }
@@ -229,25 +229,25 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 48,
+          "line": 55,
           "section": null,
           "model": "gemini-3.1-pro-preview"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 48,
+          "line": 55,
           "section": null,
           "model": "gpt-5.6-sol"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 48,
+          "line": 55,
           "section": null,
           "model": "claude-fable-5"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 48,
+          "line": 55,
           "section": null,
           "model": "deepseek-v4-pro"
         }
@@ -276,7 +276,7 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 55,
+          "line": 60,
           "section": null,
           "model": "gpt-5.6-sol"
         }
@@ -305,7 +305,7 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 57,
+          "line": 58,
           "section": null,
           "model": "gemini-3.1-pro-preview"
         }
@@ -363,7 +363,7 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 59,
+          "line": 69,
           "section": null,
           "model": "gpt-5.6-sol"
         }
@@ -392,25 +392,25 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 60,
+          "line": 57,
           "section": null,
           "model": "gemini-3.1-pro-preview"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 60,
+          "line": 57,
           "section": null,
           "model": "gpt-5.6-sol"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 60,
+          "line": 57,
           "section": null,
           "model": "claude-fable-5"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 60,
+          "line": 57,
           "section": null,
           "model": "deepseek-v4-pro"
         }
@@ -439,13 +439,13 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 61,
+          "line": 60,
           "section": null,
           "model": "gpt-5.6-sol"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 61,
+          "line": 60,
           "section": null,
           "model": "deepseek-v4-pro"
         }
@@ -474,7 +474,7 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 61,
+          "line": 60,
           "section": null,
           "model": "deepseek-v4-pro"
         }
@@ -503,13 +503,13 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 61,
+          "line": 60,
           "section": null,
           "model": "gpt-5.6-sol"
         },
         {
           "file": "history/review-create-body-file.md",
-          "line": 61,
+          "line": 60,
           "section": null,
           "model": "deepseek-v4-pro"
         }
@@ -538,7 +538,7 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 61,
+          "line": 60,
           "section": null,
           "model": "deepseek-v4-pro"
         }
@@ -567,7 +567,7 @@
       "sources": [
         {
           "file": "history/review-create-body-file.md",
-          "line": 61,
+          "line": 60,
           "section": null,
           "model": "deepseek-v4-pro"
         }
@@ -587,6 +587,111 @@
       "write_up": null,
       "user_override": false,
       "evidence": "The test still verifies exactly what its name states: Markdown from a body file is written below the generated heading. The name does not promise a Description wrapper."
+    },
+    {
+      "id": "F17",
+      "cluster_key": "sha1:0e7d14653beb93e354a30e61ec9c4c512265c702",
+      "title": "Touched epic guidance recommended a reserved legacy section",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 25,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        }
+      ],
+      "target_file": "crates/issuectl-core/templates/issue-skill.md",
+      "target_symbol": "Flesh out the body",
+      "claim": "The edited agent guidance recommended ## Notes although Notes is a reserved legacy alias whose canonical replacement is ## Comments.",
+      "suggested_fix": "Replace Notes with Comments in both templates and rendered dogfooded copies.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "REGULAR",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "LEGACY_SECTION_ALIASES maps Notes to Comments and create help warns on Notes. All four agent artifacts now use Comments and the dogfood synchronization test passes."
+    },
+    {
+      "id": "F18",
+      "cluster_key": "sha1:fe483427a9dd59589c1438eda177b037fa8fd4a6",
+      "title": "CLI-to-schema composition lacked a black-box regression",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 31,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 31,
+          "section": null,
+          "model": "claude-fable-5"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 31,
+          "section": null,
+          "model": "deepseek-v4-pro"
+        },
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 31,
+          "section": null,
+          "model": "gemini-3.1-pro-preview"
+        }
+      ],
+      "target_file": "crates/issuectl/tests/cli_new.rs",
+      "target_symbol": "body_file_schema_appends_only_missing_sections",
+      "claim": "Separate tests covered CLI mode propagation and core schema completion but not their complete built-binary composition.",
+      "suggested_fix": "Add a CLI integration test with structured body, horizontal rule, present required headings, and one missing appended stub.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "REGULAR",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The new integration test invokes the binary and proves exactly one of each required section plus canonical append ordering after the horizontal rule."
+    },
+    {
+      "id": "F19",
+      "cluster_key": "sha1:dd03cec2b83db50ed622dff396e66881ebf3633d",
+      "title": "CLI help omitted schema-appended stubs",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-create-body-file.md",
+          "line": 37,
+          "section": null,
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "target_file": "crates/issuectl/src/cmd/mod.rs",
+      "target_symbol": "PrimaryCommand::Create::body_file",
+      "claim": "The create body-file help did not disclose that repository schemas can append missing required H2 stubs.",
+      "suggested_fix": "Add the same schema-completion qualification used by the shipped agent template.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "REGULAR",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Create help now states that repository schema requirements may append stubs for missing H2 sections."
     }
   ]
 }

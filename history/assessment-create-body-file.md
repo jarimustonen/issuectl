@@ -2,6 +2,8 @@
 
 Source: [`history/review-create-body-file.md`](review-create-body-file.md)
 
+Assessed tree: `52f09a11d33c23b15b8f2bc78e4b44d1c38c5004`
+
 | # | Finding | Conf | Like | Read | Arch | Confidence | Recommendation |
 |---|---|---|---|---|---|---|---|
 | F1 | Structured-body schema completion lacked a positive regression[^f1] | CONFIRMED | REGULAR | IMPROVES | NONE | HIGH | FIX |
@@ -20,8 +22,11 @@ Source: [`history/review-create-body-file.md`](review-create-body-file.md)
 | F14 | Required headings should support broader CommonMark forms[^f14] | CONFIRMED | RARE | WORSENS | MODERATE | MED | DROP (Rule 1b: RARE, no readability gain) |
 | F15 | Duplicate precheck must score the rendered body[^f15] | UNABLE_TO_VERIFY | — | — | — | MED | DROP (Rule 1a: incorrect or unable to verify) |
 | F16 | Body-file integration test needs renaming[^f16] | INCORRECT | — | — | — | HIGH | DROP (Rule 1a: incorrect or unable to verify) |
+| F17 | Touched epic guidance recommended a reserved legacy section[^f17] | CONFIRMED | REGULAR | IMPROVES | NONE | HIGH | FIX |
+| F18 | CLI-to-schema composition lacked a black-box regression[^f18] | CONFIRMED | REGULAR | IMPROVES | NONE | HIGH | FIX |
+| F19 | CLI help omitted schema-appended stubs[^f19] | CONFIRMED | REGULAR | IMPROVES | NONE | HIGH | FIX |
 
-**FIX: 2   FIX (with care): 0   SPIN-OFF: 1   DISCUSS: 0   DROP: 13**
+**FIX: 5   FIX (with care): 0   SPIN-OFF: 1   DISCUSS: 0   DROP: 13**
 
 ## F3 — Issuectl JSON export-to-import duplicates structured body headings
 
@@ -32,18 +37,21 @@ Source: [`history/review-create-body-file.md`](review-create-body-file.md)
 - Korjaus tarvitsee erilliset yhteensopivuustestit koko export → parse → create -ketjulle; tämän create-only-korjauksen vaatimus nimenomaisesti säilyttää importin nykyisen käytöksen.
 
 [^f1]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:13`](review-create-body-file.md#L13); `gpt-5.6-sol`: [`history/review-create-body-file.md:13`](review-create-body-file.md#L13); `claude-fable-5`: [`history/review-create-body-file.md:13`](review-create-body-file.md#L13); `deepseek-v4-pro`: [`history/review-create-body-file.md:13`](review-create-body-file.md#L13)
-[^f2]: `gpt-5.6-sol`: [`history/review-create-body-file.md:20`](review-create-body-file.md#L20)
-[^f3]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:29`](review-create-body-file.md#L29); `gpt-5.6-sol`: [`history/review-create-body-file.md:29`](review-create-body-file.md#L29); `claude-fable-5`: [`history/review-create-body-file.md:29`](review-create-body-file.md#L29); `deepseek-v4-pro`: [`history/review-create-body-file.md:29`](review-create-body-file.md#L29)
-[^f4]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:38`](review-create-body-file.md#L38); `gpt-5.6-sol`: [`history/review-create-body-file.md:38`](review-create-body-file.md#L38); `claude-fable-5`: [`history/review-create-body-file.md:38`](review-create-body-file.md#L38); `deepseek-v4-pro`: [`history/review-create-body-file.md:38`](review-create-body-file.md#L38)
-[^f5]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:43`](review-create-body-file.md#L43); `gpt-5.6-sol`: [`history/review-create-body-file.md:43`](review-create-body-file.md#L43); `claude-fable-5`: [`history/review-create-body-file.md:43`](review-create-body-file.md#L43); `deepseek-v4-pro`: [`history/review-create-body-file.md:43`](review-create-body-file.md#L43)
-[^f6]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:48`](review-create-body-file.md#L48); `gpt-5.6-sol`: [`history/review-create-body-file.md:48`](review-create-body-file.md#L48); `claude-fable-5`: [`history/review-create-body-file.md:48`](review-create-body-file.md#L48); `deepseek-v4-pro`: [`history/review-create-body-file.md:48`](review-create-body-file.md#L48)
-[^f7]: `gpt-5.6-sol`: [`history/review-create-body-file.md:55`](review-create-body-file.md#L55)
-[^f8]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:57`](review-create-body-file.md#L57)
+[^f2]: `gpt-5.6-sol`: [`history/review-create-body-file.md:19`](review-create-body-file.md#L19)
+[^f3]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:45`](review-create-body-file.md#L45); `gpt-5.6-sol`: [`history/review-create-body-file.md:45`](review-create-body-file.md#L45); `claude-fable-5`: [`history/review-create-body-file.md:45`](review-create-body-file.md#L45); `deepseek-v4-pro`: [`history/review-create-body-file.md:45`](review-create-body-file.md#L45)
+[^f4]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:53`](review-create-body-file.md#L53); `gpt-5.6-sol`: [`history/review-create-body-file.md:53`](review-create-body-file.md#L53); `claude-fable-5`: [`history/review-create-body-file.md:53`](review-create-body-file.md#L53); `deepseek-v4-pro`: [`history/review-create-body-file.md:53`](review-create-body-file.md#L53)
+[^f5]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:54`](review-create-body-file.md#L54); `gpt-5.6-sol`: [`history/review-create-body-file.md:54`](review-create-body-file.md#L54); `claude-fable-5`: [`history/review-create-body-file.md:54`](review-create-body-file.md#L54); `deepseek-v4-pro`: [`history/review-create-body-file.md:54`](review-create-body-file.md#L54)
+[^f6]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:55`](review-create-body-file.md#L55); `gpt-5.6-sol`: [`history/review-create-body-file.md:55`](review-create-body-file.md#L55); `claude-fable-5`: [`history/review-create-body-file.md:55`](review-create-body-file.md#L55); `deepseek-v4-pro`: [`history/review-create-body-file.md:55`](review-create-body-file.md#L55)
+[^f7]: `gpt-5.6-sol`: [`history/review-create-body-file.md:60`](review-create-body-file.md#L60)
+[^f8]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:58`](review-create-body-file.md#L58)
 [^f9]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:58`](review-create-body-file.md#L58)
-[^f10]: `gpt-5.6-sol`: [`history/review-create-body-file.md:59`](review-create-body-file.md#L59)
-[^f11]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:60`](review-create-body-file.md#L60); `gpt-5.6-sol`: [`history/review-create-body-file.md:60`](review-create-body-file.md#L60); `claude-fable-5`: [`history/review-create-body-file.md:60`](review-create-body-file.md#L60); `deepseek-v4-pro`: [`history/review-create-body-file.md:60`](review-create-body-file.md#L60)
-[^f12]: `gpt-5.6-sol`: [`history/review-create-body-file.md:61`](review-create-body-file.md#L61); `deepseek-v4-pro`: [`history/review-create-body-file.md:61`](review-create-body-file.md#L61)
-[^f13]: `deepseek-v4-pro`: [`history/review-create-body-file.md:61`](review-create-body-file.md#L61)
-[^f14]: `gpt-5.6-sol`: [`history/review-create-body-file.md:61`](review-create-body-file.md#L61); `deepseek-v4-pro`: [`history/review-create-body-file.md:61`](review-create-body-file.md#L61)
-[^f15]: `deepseek-v4-pro`: [`history/review-create-body-file.md:61`](review-create-body-file.md#L61)
-[^f16]: `deepseek-v4-pro`: [`history/review-create-body-file.md:61`](review-create-body-file.md#L61)
+[^f10]: `gpt-5.6-sol`: [`history/review-create-body-file.md:69`](review-create-body-file.md#L69)
+[^f11]: `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:57`](review-create-body-file.md#L57); `gpt-5.6-sol`: [`history/review-create-body-file.md:57`](review-create-body-file.md#L57); `claude-fable-5`: [`history/review-create-body-file.md:57`](review-create-body-file.md#L57); `deepseek-v4-pro`: [`history/review-create-body-file.md:57`](review-create-body-file.md#L57)
+[^f12]: `gpt-5.6-sol`: [`history/review-create-body-file.md:60`](review-create-body-file.md#L60); `deepseek-v4-pro`: [`history/review-create-body-file.md:60`](review-create-body-file.md#L60)
+[^f13]: `deepseek-v4-pro`: [`history/review-create-body-file.md:60`](review-create-body-file.md#L60)
+[^f14]: `gpt-5.6-sol`: [`history/review-create-body-file.md:60`](review-create-body-file.md#L60); `deepseek-v4-pro`: [`history/review-create-body-file.md:60`](review-create-body-file.md#L60)
+[^f15]: `deepseek-v4-pro`: [`history/review-create-body-file.md:60`](review-create-body-file.md#L60)
+[^f16]: `deepseek-v4-pro`: [`history/review-create-body-file.md:60`](review-create-body-file.md#L60)
+[^f17]: `deepseek-v4-pro`: [`history/review-create-body-file.md:25`](review-create-body-file.md#L25)
+[^f18]: `gpt-5.6-sol`: [`history/review-create-body-file.md:31`](review-create-body-file.md#L31); `claude-fable-5`: [`history/review-create-body-file.md:31`](review-create-body-file.md#L31); `deepseek-v4-pro`: [`history/review-create-body-file.md:31`](review-create-body-file.md#L31); `gemini-3.1-pro-preview`: [`history/review-create-body-file.md:31`](review-create-body-file.md#L31)
+[^f19]: `gpt-5.6-sol`: [`history/review-create-body-file.md:37`](review-create-body-file.md#L37)

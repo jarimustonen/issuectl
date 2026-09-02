@@ -1,76 +1,75 @@
 ## Review: create `--body-file` structured Markdown fix
 
-**Reviewed:** complete `main..HEAD` production, test, changelog, and agent-contract diff across `write.rs`, `mutate/{new_issue,new_api,intake}.rs`, `recurrence.rs`, `transfer.rs`, CLI dispatch/help/tests, and all shipped/dogfooded `/issue` templates
+**Reviewed:** final `main..52f09a1` production, tests, changelog, CLI help, and shipped/dogfooded agent-contract diff
 **Reviewers:** `gemini-3.1-pro-preview`, `gpt-5.6-sol`, `claude-fable-5`, `deepseek-v4-pro`
-**Rounds:** independent review plus two complete cross-review rounds. Anthropic received one bounded context follow-up. DeepSeek's independent response was truncated in transport, then successfully completed on its existing thread before both cross-review rounds; all four final positions are present.
+**Rounds:** one complete recovered independent review and two complete four-model cross-review rounds from the preserved implementation review, followed by a fresh supplementary review of the adopted tree. The preserved raw evidence is complete and is the authoritative multi-model review; the fresh supplement found and drove three final localized improvements. See [`review-create-body-file-evidence.md`](review-create-body-file-evidence.md).
 
 ### Critical Issues (Consensus)
 
-No production blocker survived verification and cross-review.
+No production blocker survived source verification and cross-review.
 
 ### Warranted In-Patch Improvements
 
 1. **Structured-body schema completion lacked a positive regression**
-   - **What:** the horizontal-rule test proved that existing required sections are not duplicated, but did not prove that a genuinely missing section is appended with canonical spacing.
+   - **What:** the original horizontal-rule test proved that existing required sections were not duplicated, but did not prove that a genuinely missing section is appended with canonical spacing.
    - **Where:** `crates/issuectl-core/src/mutate/new_issue.rs`, `structured_body_with_horizontal_rule_does_not_duplicate_required_sections`.
-   - **Why it matters:** the agent-facing contract explicitly says repository schemas may append missing required H2 stubs.
-   - **Resolution:** expanded the core mutation regression to require `Quick Test`, omit it from the supplied structured body, and assert one correctly separated appended stub while preserving the horizontal rule.
-   - **Raised by:** all four reviewers in their final positions.
+   - **Resolution:** require an omitted `Quick Test` section and assert one correctly separated appended stub while preserving the horizontal rule.
+   - **Raised by:** all four preserved reviewers in their final positions.
 
 2. **Agent guidance overstated default epic rendering**
-   - **What:** the templates first acknowledged schema-generated stubs, then categorically said the CLI does not write the recommended epic sections.
-   - **Where:** `crates/issuectl-core/templates/issue-{skill,prompt}.md` and both dogfooded copies.
-   - **Why it matters:** a configured repository schema can append those sections, so the categorical wording was imprecise.
-   - **Resolution:** qualified the sentence as default-renderer behavior and preserved byte-equivalent Claude/Codex bodies plus rendered dogfooded copies.
-   - **Raised by:** OpenAI; accepted by the moderator after direct comparison with the schema-completion path.
+   - **What:** the templates categorically said the CLI does not write recommended epic sections even though repository schemas can append them.
+   - **Where:** both shipped `/issue` templates and dogfooded copies.
+   - **Resolution:** qualify the statement as default-renderer behavior.
+   - **Raised by:** OpenAI in the preserved review; accepted after direct source verification.
+
+3. **Touched epic guidance recommended a reserved legacy section**
+   - **What:** the edited guidance still told agents to create `## Notes`, while CLI and doctor treat it as a legacy alias and direct users to `## Comments`.
+   - **Where:** both shipped `/issue` templates and dogfooded copies.
+   - **Resolution:** use canonical `## Comments` in all four rendered/template copies.
+   - **Raised by:** DeepSeek in the fresh review; independently confirmed against `body_sections::LEGACY_SECTION_ALIASES` and CLI help.
+
+4. **The full CLI-to-schema composition lacked a black-box regression**
+   - **What:** separate tests covered runtime mode propagation and core schema completion, but no built-binary test composed `--body-file`, a horizontal rule, existing required H2s, and an appended missing stub.
+   - **Where:** `crates/issuectl/tests/cli_new.rs`.
+   - **Resolution:** add `body_file_schema_appends_only_missing_sections`, which exercises the complete command path and exact ordering.
+   - **Raised by:** OpenAI, Anthropic, and DeepSeek in the fresh review; Gemini accepted it in cross-review.
+
+5. **CLI help omitted schema-appended stubs**
+   - **What:** templates documented schema completion but `create --help` did not.
+   - **Where:** `crates/issuectl/src/cmd/mod.rs`.
+   - **Resolution:** state that repository schemas may append stubs for missing H2 sections.
+   - **Raised by:** OpenAI in the fresh review; accepted by the other available cross-reviewers.
 
 ### Confirmed Follow-Up Defect
 
 1. **Issuectl JSON export-to-import duplicates structured body headings**
-   - **What:** JSON export emits the complete structured `Issue.body`; import accepts `body` as an alias for free-text `description`, then adds a generated `## Description` wrapper. Re-import can therefore produce duplicate Description headings (and preserves any exported H1 content inside the new body).
+   - **What:** JSON export emits the complete structured `Issue.body`; import accepts `body` as an alias for free-text `description`, then adds a generated `## Description` wrapper. Re-import can therefore duplicate the heading and nest the exported H1.
    - **Where:** `crates/issuectl-core/src/transfer.rs`, `ImportRecord.description` and `ImportRecord::into_new_args`.
-   - **Why it matters:** the module explicitly supports parsing issuectl's own JSON export, while its current “round trip” test stops before rendering the imported issue.
-   - **Scope:** real and pre-existing. This task explicitly requires import semantics to remain unchanged, so it must not be silently folded into the create-only patch. It warrants a separate intake issue and design of how `body` versus `description` selects structured/free-text mode.
-   - **Raised by:** Anthropic and DeepSeek independently; Gemini agreed after cross-review; OpenAI confirmed it but correctly classified it out of scope.
+   - **Scope:** real, independently reproduced, pre-existing, and intentionally outside this create-only patch. It is preserved unlaned and untriaged as `@dreadfully-robust-pencil`.
+   - **Raised by:** Anthropic and DeepSeek independently; Gemini and OpenAI later confirmed the defect and its separate scope.
 
-### Disputed Issues
+### Disputed and Dropped Issues
 
-1. **Should the changelog entry move from Fixed to Changed?**
-   - **For:** Anthropic and DeepSeek argued that wrapper-free plain-prose files are an intentional semantic change and migration-visible.
-   - **Against:** Gemini and OpenAI observed that this is the exact corrected `create --body-file` contract and the entry precisely scopes itself to that bug fix.
-   - **Moderator's take:** keep it under Fixed. Correcting persisted output necessarily changes behavior; Keep a Changelog's Fixed category is appropriate when the entry plainly states the new body-file semantics.
-
-2. **Should heading-less structured bodies warn or error?**
-   - **For:** Anthropic and DeepSeek argued that, when a schema requires Description, heading-less prose remains before an appended empty stub.
-   - **Against:** Gemini and OpenAI noted that Markdown bodies need not contain H2 headings and the declared contract makes the file responsible for its structure; schema completion correctly appends sections that are actually absent.
-   - **Moderator's take:** do not add content sniffing, warnings, or rejection. Such behavior would penalize valid Markdown and introduce a second implicit body-mode grammar. The positive schema-stub test now pins the intended behavior.
-
-3. **Should `description: Option<String>` plus `structured_body: bool` become an enum now?**
-   - **For:** all reviewers noted that the pair permits `None + true` and makes every creation path maintain a cross-field invariant.
-   - **Against:** every current constructor is explicit and correct, empty CLI files are rejected, and replacing both owned and borrowed argument shapes would broaden this targeted fix without a demonstrated production failure.
-   - **Moderator's take:** valid design debt, but too broad for this patch and below the filing bar without an observed consequence. Keep the explicit compatibility assignments and focused tests.
-
-### Minor and Dropped Findings
-
-- Trailing document whitespace normalization is pre-existing, deliberate, and shared with body replacement; it is not introduced by structured mode.
-- Empty/whitespace-only body files are already rejected before mutation.
-- The alleged missing blank line before schema stubs was false; the append path explicitly ensures `\n\n`.
-- Gemini's claim that `item_text::split` was a no-op was false and retracted: `render_new_item_from_fm` includes serialized frontmatter.
-- OpenAI's temporary claims of template drift and a missing test-constructor field resulted from a reduced cross-round attachment set; the full tree disproved both, and OpenAI retracted them.
-- Intake, recurrence, core API, and foreign-import free-text modes are intentional compatibility behavior required by this task.
-- A no-H1 rule, unclosed-fence rejection, broader CommonMark heading grammar, duplicate-precheck rendering, and test renames are unrelated hardening or cleanup without a demonstrated regression here.
+- **Fixed versus Changed changelog category:** keep the entry under Fixed. The prior implementation contradicted the released help contract that file Markdown is written below the H1; the entry precisely describes the corrected duplicate-heading behavior.
+- **Warnings or content sniffing for heading-less body files:** reject. Markdown need not contain H2 headings, the source-based mode is explicit, and sniffing would create a second implicit grammar.
+- **Replace `description + structured_body` with an enum now:** valid maintainability debt, but all constructors are explicit, empty CLI files are rejected, and a cross-layer enum refactor is not justified by a current failure.
+- **Public Rust API break:** incorrect under this repository's explicit contract: `issuectl-core` is published but internal, its modules are `#[doc(hidden)]`, and only the binary CLI is the semver contract.
+- **Transfer/new API/intake/recurrence should switch modes:** incorrect for this patch. Their free-text semantics are an explicit compatibility requirement; the own-export alias defect needs separate design.
+- **Fence and horizontal-rule parsing is unsafe:** incorrect. `item_text::split` selects canonical generated frontmatter and `all_h2_sections` ignores fenced pseudo-headings.
+- **Empty files can produce title-only output:** incorrect; `read_body_file_arg` rejects empty and whitespace-only input.
+- **Case-insensitive section matching, H1 rejection, unclosed-fence rejection, and stdin-helper hardening:** optional hardening or test debt without a demonstrated production regression here.
 
 ### What's Solid
 
-- The bug reproduced on the pre-fix `main`: a file beginning with `## Description` received an additional empty generated Description heading.
+- The bug independently reproduced on pre-fix `main`: a file beginning with `## Description` received another empty generated Description heading.
 - Runtime records the input source before consuming it, so file/stdin bodies become structured while inline descriptions retain the wrapper.
-- The canonical frontmatter splitter prevents body horizontal rules from truncating required-section detection.
-- Source placement, file/stdin dispatch, wrapper suppression, inline compatibility, and schema completion are covered at the appropriate core/process boundaries.
-- All non-create call sites explicitly preserve their existing semantics; locking and schema validation remain centralized in core mutation code.
-- Shipped Claude/Codex templates and dogfooded copies remain synchronized.
+- Canonical frontmatter splitting prevents a body horizontal rule from truncating required-section detection.
+- File, stdin, source preamble, inline compatibility, schema completion, and full CLI/schema composition are tested.
+- All non-create constructors explicitly preserve prior free-text behavior.
+- Claude/Codex template bodies and rendered dogfooded copies are enforced by repository tests.
 
 ### Moderator's Assessment
 
-OpenAI gave the strongest final review: it corrected its attachment-driven mistakes, separated declared behavior from regressions, and kept the scope disciplined. Anthropic contributed the most important new out-of-scope defect by tracing issuectl's own JSON export into import rendering. DeepSeek persistently stress-tested schema interactions, although it continued to overstate heading-less bodies as corruption after the contract was clarified. Gemini made two substantive factual mistakes and explicitly retracted both.
+The preserved complete review remains valid for the adopted core patch. The fresh supplement was useful: DeepSeek found the `## Notes` contradiction, while OpenAI identified the strongest remaining coverage and help gaps. Those localized findings were source-confirmed and fixed. A fresh DeepSeek cross-review call later hit account exhaustion twice; this did not invalidate the complete preserved DeepSeek independent recovery and both complete preserved cross-review rounds. All failed and recovered attempts are retained in the evidence appendix rather than hidden.
 
-The single most important in-patch action was adding the positive missing-section regression. The only confirmed follow-up with credible real-world impact is the pre-existing JSON export/import heading duplication; it should be filed unlaned through intake with this run's review provenance.
+The final tree has no confirmed in-scope blocker. The only independently reproduced follow-up is the own-JSON export/import corruption already preserved as an unlaned intake item.
