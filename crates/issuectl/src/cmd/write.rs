@@ -172,8 +172,10 @@ pub(crate) fn run_import(
     };
     for rec in records {
         let title = rec.title.clone();
-        let args = rec.into_new_args(default_type);
-        match do_new(&root, args) {
+        match rec
+            .into_new_args(default_type)
+            .and_then(|args| do_new(&root, args))
+        {
             Ok(out) => outcome.created.push((out.slug, out.title)),
             Err(e) => outcome.failed.push((title, format!("{e:#}"))),
         }

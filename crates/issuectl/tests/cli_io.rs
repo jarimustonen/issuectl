@@ -77,6 +77,8 @@ fn export_json_round_trips_through_import_into_fresh_repo() {
             "Login loops",
             "--assignee",
             "bob",
+            "--source",
+            "tracker/login",
             "--body-file",
             structured_body.to_str().unwrap(),
         ],
@@ -110,11 +112,10 @@ fn export_json_round_trips_through_import_into_fresh_repo() {
     let imported = stdout(&run(dst.path(), &["--json", "show", "login-loops"]));
     let imported: serde_json::Value = serde_json::from_str(&imported).unwrap();
     let body = imported["data"]["body"].as_str().unwrap();
-    assert_eq!(body.matches("# Login loops").count(), 1, "{body}");
-    assert_eq!(body.matches("## Description").count(), 1, "{body}");
-    assert_eq!(body.matches("## Expected").count(), 1, "{body}");
-    assert!(body.contains("The login loops."), "{body}");
-    assert!(body.contains("Login succeeds."), "{body}");
+    assert_eq!(
+        body,
+        "# Login loops\n\n_Source: tracker/login_\n\n## Description\n\nThe login loops.\n\n## Expected\n\nLogin succeeds."
+    );
 }
 
 #[test]
@@ -135,10 +136,31 @@ fn import_json_description_remains_free_text() {
     let imported = stdout(&run(repo.path(), &["--json", "show", "foreign-issue"]));
     let imported: serde_json::Value = serde_json::from_str(&imported).unwrap();
     let body = imported["data"]["body"].as_str().unwrap();
-    assert_eq!(body.matches("## Description").count(), 1, "{body}");
-    assert!(
-        body.contains("## Description\n\nPlain foreign text."),
-        "{body}"
+    assert_eq!(
+        body,
+        "# Foreign issue\n\n## Description\n\nPlain foreign text."
+    );
+}
+
+#[test]
+fn import_json_legacy_plain_body_remains_free_text() {
+    let repo = fresh_repo();
+    let file = repo.path().join("legacy.json");
+    std::fs::write(
+        &file,
+        r#"[{"title":"Legacy issue","type":"bug","body":"Plain legacy text."}]"#,
+    )
+    .unwrap();
+
+    stdout(&run(
+        repo.path(),
+        &["--json", "import", "json", file.to_str().unwrap()],
+    ));
+    let imported = stdout(&run(repo.path(), &["--json", "show", "legacy-issue"]));
+    let imported: serde_json::Value = serde_json::from_str(&imported).unwrap();
+    assert_eq!(
+        imported["data"]["body"].as_str().unwrap(),
+        "# Legacy issue\n\n## Description\n\nPlain legacy text."
     );
 }
 

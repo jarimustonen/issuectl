@@ -186,12 +186,15 @@ pub struct ImportRecord {
     /// generated `## Description` section.
     #[serde(default)]
     pub description: Option<String>,
-    /// Structured Markdown from issuectl's own JSON export. Import removes the
-    /// matching exported document H1 because the fresh issue renderer creates
-    /// it again, then preserves the remaining section structure verbatim.
+    /// Structured Markdown from issuectl's own JSON export. Import recognizes
+    /// the canonical matching document H1, removes it because the fresh issue
+    /// renderer creates it again, and preserves the remaining section order and
+    /// content subject to normal creation-time whitespace normalization and
+    /// destination schema requirements.
     ///
-    /// If a hand-authored record supplies both `body` and `description`, the
-    /// explicit structured `body` wins for compatibility with rich exports.
+    /// For compatibility with the former serde alias, an unversioned `body`
+    /// without a leading H1 is treated as free text. `body` and `description`
+    /// are mutually exclusive.
     #[serde(default)]
     pub body: Option<String>,
 }
@@ -201,18 +204,19 @@ impl ImportRecord {
     /// the issue type when the record omits one. Epics carry `owner` and
     /// never `reporter`/`assignee` (which `do_new` rejects for epics);
     /// non-epics carry `reporter`/`assignee` and never `owner`.
-    pub fn into_new_args(self, default_type: &str) -> NewArgs {
+    pub fn into_new_args(self, default_type: &str) -> Result<NewArgs> {
         let issue_type = self
             .issue_type
             .filter(|t| !t.trim().is_empty())
             .unwrap_or_else(|| default_type.to_string());
         let is_epic = issue_type == "epic";
-        let structured_body = self.body.is_some();
-        let description = self
-            .body
-            .map(|body| strip_exported_title(&body, &self.title).to_string())
-            .or(self.description);
-        NewArgs {
+        let content = ImportContent::decode(self.body, self.description, &self.title)?;
+        let (description, structured_body) = match content {
+            ImportContent::None => (None, false),
+            ImportContent::FreeText(text) => (Some(text), false),
+            ImportContent::Structured(body) => (Some(body), true),
+        };
+        Ok(NewArgs {
             issue_type,
             title: self.title,
             slug: None,
@@ -238,28 +242,71 @@ impl ImportRecord {
             collision: vec![],
             status: None,
             inbox: false,
+        })
+    }
+}
+
+/// Explicit internal content representation after decoding the two distinct
+/// JSON fields. The exact-H1 check is only the compatibility decoder for old,
+/// unversioned issuectl exports; it is not inferred from a serde alias.
+enum ImportContent {
+    None,
+    FreeText(String),
+    Structured(String),
+}
+
+impl ImportContent {
+    fn decode(body: Option<String>, description: Option<String>, title: &str) -> Result<Self> {
+        match (body, description) {
+            (Some(_), Some(_)) => anyhow::bail!(
+                "import record {title:?} supplies both `body` and `description`; supply exactly one"
+            ),
+            (None, Some(description)) => Ok(Self::FreeText(description)),
+            (None, None) => Ok(Self::None),
+            (Some(body), None) => {
+                if let Some(stripped) = strip_exported_title(&body, title) {
+                    return Ok(Self::Structured(stripped.to_string()));
+                }
+                if let Some(heading) = leading_h1(&body) {
+                    anyhow::bail!(
+                        "import record {title:?} has body title H1 {heading:?}; it must match the record title"
+                    );
+                }
+                // Before `body` and `description` were separate fields, `body`
+                // was a serde alias for the free-text description. Preserve
+                // that behavior for unversioned, non-document-shaped input.
+                Ok(Self::FreeText(body))
+            }
         }
     }
 }
 
-/// Remove the title H1 emitted by issuectl's item renderer. Only an exact
-/// title match is removed, so hand-authored structured bodies with a distinct
-/// leading H1 are not silently rewritten.
-fn strip_exported_title<'a>(body: &'a str, title: &str) -> &'a str {
-    let Some(after_marker) = body.strip_prefix("# ") else {
-        return body;
-    };
+fn leading_h1(body: &str) -> Option<&str> {
+    let after_marker = body.strip_prefix("# ")?;
+    Some(
+        after_marker
+            .split_once('\n')
+            .map_or(after_marker, |(heading, _)| heading)
+            .trim_end_matches('\r'),
+    )
+}
+
+/// Remove the matching title H1 emitted by issuectl's item renderer.
+fn strip_exported_title<'a>(body: &'a str, title: &str) -> Option<&'a str> {
+    let after_marker = body.strip_prefix("# ")?;
     let (heading, rest) = match after_marker.split_once('\n') {
         Some(parts) => parts,
-        None if after_marker.trim_end_matches('\r') == title => return "",
-        None => return body,
+        None if after_marker.trim_end_matches('\r') == title => return Some(""),
+        None => return None,
     };
     if heading.trim_end_matches('\r') != title {
-        return body;
+        return None;
     }
-    rest.strip_prefix("\r\n")
-        .or_else(|| rest.strip_prefix('\n'))
-        .unwrap_or(rest)
+    Some(
+        rest.strip_prefix("\r\n")
+            .or_else(|| rest.strip_prefix('\n'))
+            .unwrap_or(rest),
+    )
 }
 
 /// Parse a JSON import payload: either a top-level array of records or a
@@ -360,7 +407,7 @@ mod tests {
             lane_seq: None,
             commits: None,
             title: title.to_string(),
-            body: "## Description\n\nSomething broke.".to_string(),
+            body: format!("# {title}\n\n## Description\n\nSomething broke."),
             extra: BTreeMap::new(),
         }
     }
@@ -380,7 +427,12 @@ mod tests {
             .unwrap()
             .contains("Something broke"));
         assert!(records[0].description.is_none());
-        let args = records.into_iter().next().unwrap().into_new_args("task");
+        let args = records
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_new_args("task")
+            .unwrap();
         assert!(args.structured_body);
         assert_eq!(
             args.description.as_deref(),
@@ -450,7 +502,7 @@ mod tests {
     #[test]
     fn into_new_args_defaults_type_and_priority() {
         let rec = parse_json(r#"{"title":"X"}"#).unwrap().pop().unwrap();
-        let args = rec.into_new_args("task");
+        let args = rec.into_new_args("task").unwrap();
         assert_eq!(args.issue_type, "task");
         assert_eq!(args.priority, "normal");
         assert!(args.slug.is_none());
@@ -464,7 +516,7 @@ mod tests {
         .unwrap()
         .pop()
         .unwrap();
-        let args = rec.into_new_args("task");
+        let args = rec.into_new_args("task").unwrap();
         assert_eq!(args.issue_type, "epic");
         assert!(args.assignee.is_none());
         assert!(args.reporter.is_none());
@@ -477,7 +529,7 @@ mod tests {
             .unwrap()
             .pop()
             .unwrap();
-        let args = rec.into_new_args("task");
+        let args = rec.into_new_args("task").unwrap();
         assert!(args.owner.is_none());
     }
 
@@ -518,7 +570,7 @@ mod tests {
         assert!(records[1].body.is_none());
         assert!(records[1].assignee.is_none());
 
-        let args = records[0].clone().into_new_args("task");
+        let args = records[0].clone().into_new_args("task").unwrap();
         assert!(!args.structured_body);
         assert_eq!(args.description.as_deref(), Some("Body text"));
     }
@@ -529,32 +581,70 @@ mod tests {
             .unwrap()
             .pop()
             .unwrap();
-        let args = rec.into_new_args("bug");
+        let args = rec.into_new_args("bug").unwrap();
         assert!(!args.structured_body);
         assert_eq!(args.description.as_deref(), Some("Plain text"));
     }
 
     #[test]
-    fn structured_body_takes_precedence_over_description() {
+    fn body_and_description_are_rejected() {
         let rec = parse_json(
             r##"{"title":"Both","description":"Foreign","body":"# Both\n\n## Expected\n\nStructured"}"##,
         )
         .unwrap()
         .pop()
         .unwrap();
-        let args = rec.into_new_args("bug");
-        assert!(args.structured_body);
-        assert_eq!(
-            args.description.as_deref(),
-            Some("## Expected\n\nStructured")
+        let err = match rec.into_new_args("bug") {
+            Err(err) => err,
+            Ok(_) => panic!("both content fields must be rejected"),
+        };
+        assert!(
+            err.to_string()
+                .contains("supplies both `body` and `description`"),
+            "{err:#}"
         );
     }
 
     #[test]
-    fn structured_body_keeps_a_nonmatching_h1() {
+    fn legacy_plain_and_empty_body_stay_free_text() {
+        for body in ["Plain text", ""] {
+            let json = serde_json::json!({"title": "Legacy", "body": body}).to_string();
+            let rec = parse_json(&json).unwrap().pop().unwrap();
+            let args = rec.into_new_args("bug").unwrap();
+            assert!(!args.structured_body);
+            assert_eq!(args.description.as_deref(), Some(body));
+        }
+    }
+
+    #[test]
+    fn title_only_body_is_recognized_as_structured() {
+        let rec = parse_json(r##"{"title":"Title","body":"# Title"}"##)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let args = rec.into_new_args("bug").unwrap();
+        assert!(args.structured_body);
+        assert_eq!(args.description.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn structured_body_rejects_a_nonmatching_h1() {
+        let rec = parse_json(r##"{"title":"Title","body":"# Other\n\nContent"}"##)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let err = match rec.into_new_args("bug") {
+            Err(err) => err,
+            Ok(_) => panic!("a mismatched document H1 must be rejected"),
+        };
+        assert!(err.to_string().contains("must match the record title"));
+    }
+
+    #[test]
+    fn exported_title_stripping_handles_crlf() {
         assert_eq!(
-            strip_exported_title("# Other\n\nContent", "Title"),
-            "# Other\n\nContent"
+            strip_exported_title("# Title\r\n\r\n## Description\r\n", "Title"),
+            Some("## Description\r\n")
         );
     }
 }
