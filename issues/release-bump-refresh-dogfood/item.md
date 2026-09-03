@@ -3,7 +3,7 @@ created: 2026-09-03
 updated: 2026-09-03
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 provenance: agent:issuectl-wrapup
 source_ref: agent:issuectl-wrapup/2026-09-03/release-bump-dogfood
@@ -16,6 +16,8 @@ commits:
   summary: harden bump hook invariants after review
 - hash: d63efed
   summary: apply assessed review fixes
+closed: 2026-09-03
+closed_by: orchestratectl:01m1kjxmdvwb79n4x78ajt1qfh
 ---
 
 # Release bump leaves dogfooded skills stale
@@ -43,3 +45,9 @@ The release bump should regenerate the six dogfooded copies in an isolated envir
 - `issues/AGENTS.md` and template source files remain unchanged unless their content genuinely changed.
 - The focused dogfood-copy test passes on the release commit itself.
 - The release run does not require a separate post-release version-refresh commit.
+
+## Resolution
+
+### 2026-09-03T13:10:22Z · @orchestratectl:01m1kjxmdvwb79n4x78ajt1qfh
+
+Shipshape now runs the isolated release bump hook before sealing the bump commit. Verified with the exact full green gate after review fixes and a disposable 0.17.1→0.17.2 bump that regenerated all nine tracked copies and passed the focused dogfood invariant.
