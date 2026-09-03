@@ -1,8 +1,8 @@
 ---
 created: 2026-09-02
-updated: 2026-09-02
+updated: 2026-09-03
 type: bug
-status: untriaged
+status: open
 priority: normal
 provenance: ai-review
 source_ref: orchestratectl:01m1gc62273xn52kzkgtpd1p73/review-finding:sha1:a4c841fb4444af33cd2a67a4effce804ba6e6854
@@ -18,6 +18,8 @@ labels:
 - ai-review-model:gpt-5.6-sol
 - ai-review-model:claude-fable-5
 - ai-review-model:deepseek-v4-pro
+lane: transfer
+collision: [crates/issuectl-core/src/transfer.rs]
 ---
 
 # JSON export-to-import duplicates structured body headings

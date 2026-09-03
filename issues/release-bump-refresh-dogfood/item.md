@@ -3,10 +3,12 @@ created: 2026-09-03
 updated: 2026-09-03
 type: bug
 reporter: jari
-status: untriaged
+status: open
 priority: normal
 provenance: agent:issuectl-wrapup
 source_ref: agent:issuectl-wrapup/2026-09-03/release-bump-dogfood
+lane: release-automation
+collision: [OSS-RELEASE.md]
 ---
 
 # Release bump leaves dogfooded skills stale
