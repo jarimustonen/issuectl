@@ -28,7 +28,7 @@ name = "issuectl"
 path = "src/main.rs"
 
 [dependencies]
-issuectl-core = { path = "../issuectl-core", version = "0.17.0" }
+issuectl-core = { path = "../issuectl-core", version = "0.18.0" }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
