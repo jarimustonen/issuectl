@@ -12,7 +12,7 @@ members = ["cargo:."]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax). Pinned to
 # the version this config was generated against so a regenerated workflow and
 # the local `dist` stay in lockstep.
-cargo-dist-version = "0.28.2"
+cargo-dist-version = "0.32.0"
 # CI backend.
 ci = "github"
 # Installer scripts generated as release assets: curl-to-shell (Unix),
