@@ -9,6 +9,9 @@ provenance: agent:issuectl-wrapup
 source_ref: agent:issuectl-wrapup/2026-09-03/release-bump-dogfood
 lane: release-automation
 collision: [OSS-RELEASE.md]
+commits:
+- hash: ad53b0d
+  summary: refresh dogfooded skills during engine bump
 ---
 
 # Release bump leaves dogfooded skills stale
