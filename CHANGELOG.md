@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON export/import round-trips now preserve issuectl's structured Markdown body
   without nesting the title or duplicating the `## Description` heading; foreign
   `description` and GitHub issue bodies remain free text.
+- Engine-owned release bumps now regenerate all nine tracked Claude, pi, and
+  Codex skill copies from the bumped binary before sealing the release commit,
+  using an isolated home and build target.
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.18.0] - 2026-09-03

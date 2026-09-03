@@ -203,6 +203,9 @@ clean checkout while refusing on drift.
    ```
    Shipshape applies the planned workspace version and lockfile edits,
    finalizes `CHANGELOG.md` (moves `[Unreleased]` → `[X.Y.Z]` with the date),
+   and runs the contract's `scripts/release-bump-hook.sh`. The hook builds the
+   bumped `issuectl` in a disposable target and regenerates all nine repo-local
+   Claude, pi, and Codex skill copies under an isolated `HOME`. Shipshape then
    commits those mutations, publishes both crates to crates.io, pushes the
    `vX.Y.Z` tag, and verifies every declared destination.
 4. Watch the workflows on [Actions](https://github.com/jarimustonen/issuectl/actions).

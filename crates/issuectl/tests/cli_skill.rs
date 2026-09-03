@@ -3,6 +3,9 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 fn run(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_issuectl"))
         .env_remove("RUST_BACKTRACE")
@@ -18,19 +21,20 @@ fn assert_success(output: &Output) {
     assert!(output.stderr.is_empty(), "{output:?}");
 }
 
+const DOGFOOD_PATHS: [&str; 9] = [
+    ".claude/skills/issue/SKILL.md",
+    ".claude/skills/issue-new/SKILL.md",
+    ".claude/skills/issue-intake/SKILL.md",
+    ".pi/agent/skills/issue/SKILL.md",
+    ".pi/agent/skills/issue-new/SKILL.md",
+    ".pi/agent/skills/issue-intake/SKILL.md",
+    ".codex/prompts/issue.md",
+    ".codex/prompts/issue-new.md",
+    ".codex/prompts/issue-intake.md",
+];
+
 fn installed_paths(root: &Path) -> [&Path; 9] {
-    [
-        Path::new(".claude/skills/issue/SKILL.md"),
-        Path::new(".claude/skills/issue-new/SKILL.md"),
-        Path::new(".claude/skills/issue-intake/SKILL.md"),
-        Path::new(".pi/agent/skills/issue/SKILL.md"),
-        Path::new(".pi/agent/skills/issue-new/SKILL.md"),
-        Path::new(".pi/agent/skills/issue-intake/SKILL.md"),
-        Path::new(".codex/prompts/issue.md"),
-        Path::new(".codex/prompts/issue-new.md"),
-        Path::new(".codex/prompts/issue-intake.md"),
-    ]
-    .map(|path| {
+    DOGFOOD_PATHS.map(Path::new).map(|path| {
         assert!(root.join(path).is_file(), "{} should exist", path.display());
         path
     })
@@ -198,6 +202,101 @@ fn dry_run_reports_plan_without_creating_target() {
         !target.exists(),
         "dry-run must not create its target directory"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn release_bump_hook_regenerates_every_dogfood_copy_in_isolation() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let contract = std::fs::read_to_string(source_root.join("OSS-RELEASE.md")).unwrap();
+    assert!(
+        contract.contains("bump_hook: scripts/release-bump-hook.sh"),
+        "the approved release contract must make regeneration part of the engine-owned bump"
+    );
+
+    let checkout = tempfile::tempdir().unwrap();
+    let script_dir = checkout.path().join("scripts");
+    std::fs::create_dir(&script_dir).unwrap();
+    let hook = script_dir.join("release-bump-hook.sh");
+    std::fs::copy(source_root.join("scripts/release-bump-hook.sh"), &hook).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Start from stale tracked artifacts, as a Shipshape bump does before the hook.
+    for relative in DOGFOOD_PATHS {
+        let path = checkout.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "stale pre-bump copy\n").unwrap();
+    }
+    let scaffold = checkout.path().join("issues/AGENTS.md");
+    std::fs::create_dir_all(scaffold.parent().unwrap()).unwrap();
+    std::fs::write(&scaffold, "repo-authored scaffold\n").unwrap();
+
+    // The wrapper records the environment the hook gives the bumped binary, then
+    // delegates to the test-built binary so this test never recursively invokes Cargo.
+    let wrapper = checkout.path().join("recording-issuectl");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\nprintf '%s\\n%s\\n' \"$HOME\" \"$CARGO_TARGET_DIR\" > \"$HOOK_ENV_LOG\"\nexec \"$WRAPPED_ISSUECTL\" \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let operator_home = tempfile::tempdir().unwrap();
+    let global_markers = [
+        ".claude/skills/operator-only/SKILL.md",
+        ".pi/agent/skills/operator-only/SKILL.md",
+        ".codex/prompts/operator-only.md",
+    ];
+    for relative in global_markers {
+        let path = operator_home.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "do not touch\n").unwrap();
+    }
+    let env_log = checkout.path().join("hook-environment");
+    let output = Command::new(&hook)
+        .env("HOME", operator_home.path())
+        .env("ISSUECTL_RELEASE_HOOK_BIN", &wrapper)
+        .env("WRAPPED_ISSUECTL", env!("CARGO_BIN_EXE_issuectl"))
+        .env("HOOK_ENV_LOG", &env_log)
+        .output()
+        .expect("run release bump hook");
+    assert_success(&output);
+
+    let hook_environment = std::fs::read_to_string(env_log).unwrap();
+    let mut lines = hook_environment.lines();
+    let isolated_home = Path::new(lines.next().unwrap());
+    let isolated_target = Path::new(lines.next().unwrap());
+    assert_ne!(isolated_home, operator_home.path());
+    assert_ne!(isolated_target, operator_home.path());
+    assert_ne!(isolated_home, isolated_target);
+    assert_eq!(isolated_home.parent(), isolated_target.parent());
+    assert!(lines.next().is_none());
+    assert!(
+        !isolated_home.exists() && !isolated_target.exists(),
+        "the hook must remove its disposable HOME and build target"
+    );
+
+    for relative in global_markers {
+        assert_eq!(
+            std::fs::read_to_string(operator_home.path().join(relative)).unwrap(),
+            "do not touch\n",
+            "the release hook must not mutate operator-global agent installations"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(scaffold).unwrap(),
+        "repo-authored scaffold\n",
+        "the normal force install must preserve issues/AGENTS.md"
+    );
+
+    // Byte equality with the checked-in copies is the immediate post-bump
+    // dogfood invariant. The test binary stands in for the freshly bumped binary.
+    for relative in DOGFOOD_PATHS {
+        let regenerated = std::fs::read(checkout.path().join(relative)).unwrap();
+        let tracked = std::fs::read(source_root.join(relative)).unwrap();
+        assert_eq!(regenerated, tracked, "{relative} was not regenerated");
+        assert_ne!(regenerated, b"stale pre-bump copy\n");
+    }
 }
 
 #[test]

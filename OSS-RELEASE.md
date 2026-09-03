@@ -20,7 +20,7 @@ distribution:
 versioning: semver
 changelog: {mode: curated, source: manual}
 conventional_commits: true
-release: {model: gated, layout: single}
+release: {model: gated, layout: single, bump_hook: scripts/release-bump-hook.sh}
 contribution_provenance: none
 provenance_level: keyless
 dependency_bot: dependabot
@@ -44,6 +44,9 @@ docs_site: none
 > **Updated 2026-08-23:** the maintained release engine is now Shipshape. Active operations use
 > `/shipshape-release` and `shipshape release plan|cut`; the dated notes above remain migration
 > history, and the `OSS-RELEASE.md` filename remains a permanent compatibility identifier.
+> **Updated 2026-09-03 (`@release-bump-refresh-dogfood`):** the engine-owned bump now runs
+> `scripts/release-bump-hook.sh` before sealing its release commit, regenerating every tracked
+> Claude, pi, and Codex issuectl skill copy from the bumped binary in an isolated HOME and target.
 
 ## Rationale
 - **maturity: mvp** — inferred by `ossctl facts` (mvp because there is **no ≥1.0 release** yet;
@@ -75,10 +78,11 @@ docs_site: none
   now driven by `shipshape release plan|cut`: the releaser selects the SemVer bump and inspects
   the sealed plan; Shipshape bumps + finalizes CHANGELOG + publishes both crates to crates.io +
   tags `vX.Y.Z`; the tag then
-  triggers cargo-dist for binaries. ("Releaser" = the maintainer, or the autonomous conductor
-  where AGENTS.md grants it — the `gated` contract means the version is a discrete decision, not
-  that a human must be in the loop.) `single` layout: the workspace shares one version + one
-  `vX.Y.Z` tag.
+  triggers cargo-dist for binaries. The declared `release.bump_hook` regenerates all nine tracked
+  dogfooded skill copies from the bumped binary before the release commit is made. ("Releaser" =
+  the maintainer, or the autonomous conductor where AGENTS.md grants it — the `gated` contract
+  means the version is a discrete decision, not that a human must be in the loop.) `single` layout:
+  the workspace shares one version + one `vX.Y.Z` tag.
 - **provenance_level: keyless** — the mvp default; not `slsa-l3` (production-only). ⚠️ As of
   2026-08-10 the crates.io publish is **not** CI-published — `shipshape release cut` runs
   `cargo publish` wherever the releaser invokes it (locally), so the crates.io artifacts have no
@@ -92,8 +96,9 @@ docs_site: none
 
 ## Release notes
 - **Release path is `shipshape release plan|cut` (`/shipshape-release`).** Shipshape owns the
-  version bump + CHANGELOG finalization + crates.io publish (`publish-all`, adapter
-  `cargo-publish`) + the `vX.Y.Z` tag. cargo-dist `release.yml` is **kept** as a pure
+  version bump + CHANGELOG finalization + the isolated `release.bump_hook` dogfood refresh +
+  crates.io publish (`publish-all`, adapter `cargo-publish`) + the `vX.Y.Z` tag. cargo-dist
+  `release.yml` is **kept** as a pure
   binary-distribution backend (GitHub-Release binaries + shell installer + Homebrew tap), fired
   by the tag Shipshape pushes — Shipshape does **not** regenerate `release.yml`, and
   `release.yml` does **not** publish to crates.io (no double-publish). A bump plan covers

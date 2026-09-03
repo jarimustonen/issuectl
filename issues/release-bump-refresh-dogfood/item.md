@@ -3,7 +3,7 @@ created: 2026-09-03
 updated: 2026-09-03
 type: bug
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 provenance: agent:issuectl-wrapup
 source_ref: agent:issuectl-wrapup/2026-09-03/release-bump-dogfood
