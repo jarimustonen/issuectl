@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Fixed
+<!-- oss-changelog:unreleased-end -->
+
+## [0.18.0] - 2026-09-03
+
+### Added
+
 - `skill install` now supports first-class Claude, pi, and Codex targets, an
   optional bundled skill name, `--target`, and side-effect-free `--dry-run`.
   `skill list --json` declares the complete §15 agent/layout/safety contract.
@@ -18,9 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Omitting `skill install --agent` now defaults to `all`; `init` likewise writes
   all three repo-local native layouts and no longer mutates the global pi corpus.
-
-### Fixed
-<!-- oss-changelog:unreleased-end -->
 
 ## [0.17.1] - 2026-09-02
 
