@@ -209,12 +209,27 @@ fn dry_run_reports_plan_without_creating_target() {
 fn release_bump_hook_regenerates_every_dogfood_copy_in_isolation() {
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let contract = std::fs::read_to_string(source_root.join("OSS-RELEASE.md")).unwrap();
-    assert!(
-        contract.contains("bump_hook: scripts/release-bump-hook.sh"),
+    let frontmatter = contract
+        .strip_prefix("---\n")
+        .unwrap()
+        .split_once("\n---\n")
+        .unwrap()
+        .0;
+    let contract: serde_yaml::Value = serde_yaml::from_str(frontmatter).unwrap();
+    assert_eq!(
+        contract["release"]["bump_hook"], "scripts/release-bump-hook.sh",
         "the approved release contract must make regeneration part of the engine-owned bump"
     );
 
     let checkout = tempfile::tempdir().unwrap();
+    std::fs::write(
+        checkout.path().join("Cargo.toml"),
+        format!(
+            "[workspace]\nmembers = []\n\n[workspace.package]\nversion = \"{}\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .unwrap();
     let script_dir = checkout.path().join("scripts");
     std::fs::create_dir(&script_dir).unwrap();
     let hook = script_dir.join("release-bump-hook.sh");
@@ -231,31 +246,38 @@ fn release_bump_hook_regenerates_every_dogfood_copy_in_isolation() {
     std::fs::create_dir_all(scaffold.parent().unwrap()).unwrap();
     std::fs::write(&scaffold, "repo-authored scaffold\n").unwrap();
 
-    // The wrapper records the environment the hook gives the bumped binary, then
-    // delegates to the test-built binary so this test never recursively invokes Cargo.
-    let wrapper = checkout.path().join("recording-issuectl");
+    // Intercept Cargo rather than giving the production hook a binary bypass.
+    // This exercises its real `cargo run` branch and delegates only the arguments
+    // after `--` to the test-built issuectl.
+    let fake_bin = checkout.path().join("fake-bin");
+    std::fs::create_dir(&fake_bin).unwrap();
+    let fake_cargo = fake_bin.join("cargo");
     std::fs::write(
-        &wrapper,
-        "#!/bin/sh\nprintf '%s\\n%s\\n' \"$HOME\" \"$CARGO_TARGET_DIR\" > \"$HOOK_ENV_LOG\"\nexec \"$WRAPPED_ISSUECTL\" \"$@\"\n",
+        &fake_cargo,
+        "#!/bin/sh\n{\n  printf '%s\\n%s\\n%s\\n' \"$PWD\" \"$HOME\" \"$CARGO_TARGET_DIR\"\n  printf '%s\\n' \"$@\"\n} >> \"$HOOK_ENV_LOG\"\nwhile [ \"$#\" -gt 0 ] && [ \"$1\" != -- ]; do shift; done\n[ \"$#\" -gt 0 ] || exit 64\nshift\nexec \"$WRAPPED_ISSUECTL\" \"$@\"\n",
     )
     .unwrap();
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&fake_cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let operator_home = tempfile::tempdir().unwrap();
-    let global_markers = [
-        ".claude/skills/operator-only/SKILL.md",
-        ".pi/agent/skills/operator-only/SKILL.md",
-        ".codex/prompts/operator-only.md",
-    ];
-    for relative in global_markers {
+    let mut global_markers = DOGFOOD_PATHS.to_vec();
+    global_markers.push(".pi/agent/skills/.issuectl-manifest.json");
+    for relative in &global_markers {
         let path = operator_home.path().join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, "do not touch\n").unwrap();
     }
     let env_log = checkout.path().join("hook-environment");
+    let path = std::env::join_paths(
+        std::iter::once(fake_bin.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
     let output = Command::new(&hook)
+        .current_dir(operator_home.path())
+        .env("PATH", path)
         .env("HOME", operator_home.path())
-        .env("ISSUECTL_RELEASE_HOOK_BIN", &wrapper)
+        .env("ISSUECTL_RELEASE_HOOK_BIN", "/must/not/be/honored")
         .env("WRAPPED_ISSUECTL", env!("CARGO_BIN_EXE_issuectl"))
         .env("HOOK_ENV_LOG", &env_log)
         .output()
@@ -263,14 +285,34 @@ fn release_bump_hook_regenerates_every_dogfood_copy_in_isolation() {
     assert_success(&output);
 
     let hook_environment = std::fs::read_to_string(env_log).unwrap();
-    let mut lines = hook_environment.lines();
-    let isolated_home = Path::new(lines.next().unwrap());
-    let isolated_target = Path::new(lines.next().unwrap());
+    let lines: Vec<_> = hook_environment.lines().collect();
+    assert_eq!(Path::new(lines[0]), checkout.path());
+    let isolated_home = Path::new(lines[1]);
+    let isolated_target = Path::new(lines[2]);
     assert_ne!(isolated_home, operator_home.path());
     assert_ne!(isolated_target, operator_home.path());
     assert_ne!(isolated_home, isolated_target);
     assert_eq!(isolated_home.parent(), isolated_target.parent());
-    assert!(lines.next().is_none());
+    assert_eq!(
+        &lines[3..],
+        &[
+            "run",
+            "--locked",
+            "--quiet",
+            "-p",
+            "issuectl",
+            "--bin",
+            "issuectl",
+            "--",
+            "skill",
+            "install",
+            "--agent",
+            "all",
+            "--target",
+            checkout.path().to_str().unwrap(),
+            "--force"
+        ]
+    );
     assert!(
         !isolated_home.exists() && !isolated_target.exists(),
         "the hook must remove its disposable HOME and build target"
