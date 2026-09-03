@@ -140,8 +140,8 @@ terminal too, but the design centre is the agent.
   can't invent values outside the schema.
 
 **Agent integration.**
-- `skill install --agent claude|codex|all` — install the `/issue`
-  skill template into the current repo (Claude Code or Codex CLI).
+- `skill install [<name>] --agent claude|pi|codex|all` — install one or
+  every bundled skill in native Claude, pi, and Codex layouts (default: all).
 - `context <slug>` — render a deterministic prompt bundle (issue +
   parent epic + related/blocking refs + commits + schema rules).
 - `prompt <template> <slug>` — render repo-local prompt templates
@@ -764,32 +764,29 @@ schema.
 skill template into a target repo so an AI agent can drive issue
 management through `issuectl` rather than poking at the filesystem.
 
-| Agent       | Destination                       | Format                              |
-| ----------- | --------------------------------- | ----------------------------------- |
-| Claude Code | `.claude/skills/issue/SKILL.md`   | YAML frontmatter + markdown body    |
-| Codex CLI   | `.codex/prompts/issue.md`         | Plain markdown prompt               |
+| Agent       | Destination                           | Format                           |
+| ----------- | ------------------------------------- | -------------------------------- |
+| Claude Code | `.claude/skills/issue/SKILL.md`       | Native Agent Skill              |
+| pi          | `.pi/agent/skills/issue/SKILL.md`     | Native Agent Skill              |
+| Codex CLI   | `.codex/prompts/issue.md`             | Self-contained markdown prompt  |
 
 ```sh
-issuectl skill install                   # Claude Code skill (default)
-issuectl skill install --agent codex     # Codex prompt
-issuectl skill install --agent all       # both
-issuectl skill install --force           # refresh when binary > skill version
-issuectl skill print [--agent codex]     # preview without installing
+issuectl skill list --json                        # inspect capabilities/layouts
+issuectl skill install                            # all skills, all agents (default)
+issuectl skill install issue --agent pi           # one skill, one runtime
+issuectl skill install --target /tmp/sandbox      # override the install base
+issuectl skill install --dry-run --json            # validate and plan; no writes
+issuectl skill install --force                     # explicitly overwrite skills
+issuectl skill print [--agent codex]               # preview without installing
 ```
 
-Whenever the Claude layout is installed (`skill install`, `--force`, or
-`--agent all`, and `issuectl init`), each Claude `SKILL.md` is additionally
-**dual-homed** into pi.dev's global skill corpus at
-`~/.pi/agent/skills/<name>/SKILL.md` — `issue`, `issue-new`, and `issue-intake`
-— so the skills are discoverable under the [pi.dev](https://pi.dev) harness
-(invoked there as `/skill:issue`). The mirror is byte-identical to the
-repo-local Claude copy; only the target differs, so no body/link rewrite is
-needed. **Only `SKILL.md` is mirrored**, matching dotfile linkers that copy
-just the skill body into the pi corpus. The Codex prompts are not mirrored, and
-a `--agent codex` install writes no pi copy. The
-repo-local Claude write is unchanged, and the pi mirror is independent: it never
-blocks a plain install from repairing a deleted Claude skill. The mirror is
-skipped when `$HOME` is unset.
+`--target` changes only the install base; each native layout remains relative
+to it. Existing files are preserved by default and overwritten only with
+`--force`. Claude and pi copies are byte-identical Agent Skills; Codex receives
+the corresponding frontmatter-free prompt. Installation is repo-/target-local
+and never mutates `$HOME` implicitly. `skill pi-status` and `skill pi-prune`
+remain available to inspect and clean up copies managed by the older global pi
+mirror behavior.
 
 The skill instructs the agent to:
 

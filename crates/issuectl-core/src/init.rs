@@ -11,7 +11,7 @@
 //! `hooks`, `merge_driver`). This file only sequences them and shapes
 //! the report.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -24,17 +24,12 @@ pub struct InitOptions {
     pub with_hooks: bool,
     pub with_merge_driver: bool,
     pub force: bool,
-    /// pi.dev dual-home skill corpus (`~/.pi/agent/skills`), resolved from
-    /// `$HOME` by the binary via [`skill::pi_skills_root`]. When `Some` and a
-    /// Claude skill is installed, each Claude `SKILL.md` is mirrored there too.
-    /// `None` skips the pi mirror (HOME unset, or an in-process test that must
-    /// not write to the real home).
-    pub pi_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentSelection {
     Claude,
+    Pi,
     Codex,
     All,
 }
@@ -43,8 +38,9 @@ impl AgentSelection {
     fn agents(self) -> &'static [skill::Agent] {
         match self {
             Self::Claude => &[skill::Agent::Claude],
+            Self::Pi => &[skill::Agent::Pi],
             Self::Codex => &[skill::Agent::Codex],
-            Self::All => &[skill::Agent::Claude, skill::Agent::Codex],
+            Self::All => &skill::Agent::ALL,
         }
     }
 }
@@ -227,14 +223,11 @@ pub fn run(root: &Path, opts: InitOptions, json: bool) -> Result<()> {
         })),
     });
 
-    // 3. Skill (one report covering all selected agents + scaffold).
+    // 3. Skill (one report covering all selected native agents + scaffold).
+    // Installation is rooted in the repo and never mutates the caller's HOME.
     let skill_targets = opts.agent.agents();
-    // Dual-home Claude skills into pi.dev's skill dir (~/.pi/agent/skills),
-    // the same as `issuectl skill install`. The binary resolves the root from
-    // `$HOME`; `None` (HOME unset, or a test) skips the pi mirror.
-    let skill_results =
-        skill::install_skill_summary(root, skill_targets, opts.force, opts.pi_root.as_deref())
-            .context("installing skill templates")?;
+    let skill_results = skill::install_skill_summary(root, skill_targets, opts.force, None)
+        .context("installing skill templates")?;
     let artifacts: Vec<ArtifactReport> = skill_results
         .iter()
         .map(|r| ArtifactReport {
@@ -455,8 +448,6 @@ mod tests {
             with_hooks: false,
             with_merge_driver: false,
             force: false,
-            // Never mirror into the real `~/.pi` from an in-process init test.
-            pi_root: None,
         }
     }
 

@@ -48,49 +48,61 @@ pub(crate) fn cmd_skill_list(json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let agent_width = catalog
-        .iter()
-        .flat_map(|entry| &entry.install_targets)
-        .map(|target| target.agent.len())
-        .max()
-        .unwrap_or(0);
-    for entry in &catalog {
+    println!("Supported agents: {}", catalog.supported_agents.join(", "));
+    for entry in &catalog.skills {
         println!("{}  {}", entry.name, entry.description);
-        for target in &entry.install_targets {
-            println!(
-                "  [{:agent_width$}] {}  {}",
-                target.agent, target.label, target.path
-            );
-        }
+    }
+    println!();
+    for layout in &catalog.install.layouts {
+        println!("  [{:6}] {}  {}", layout.agent, layout.form, layout.path);
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_skill_install(
     json: bool,
+    name: Option<&str>,
     agent: &str,
+    target: Option<PathBuf>,
+    dry_run: bool,
     force: bool,
     force_scaffold: bool,
 ) -> Result<()> {
     let agents = match agent {
         "claude" => vec![skill::Agent::Claude],
+        "pi" => vec![skill::Agent::Pi],
         "codex" => vec![skill::Agent::Codex],
-        "all" => vec![skill::Agent::Claude, skill::Agent::Codex],
-        other => bail!("unknown agent {other:?}; expected claude, codex, or all"),
+        "all" => skill::Agent::ALL.to_vec(),
+        other => bail!("unknown agent {other:?}; expected claude, pi, codex, or all"),
     };
-    let root = find_root();
-    // Dual-home Claude skills into pi.dev's skill dir (~/.pi/agent/skills).
-    // Resolved from $HOME; `None` (HOME unset) simply skips the pi mirror.
-    let pi_root = skill::pi_skills_root();
-    let results = skill::install_skill_summary_with_scaffold_force(
+    let root = target.unwrap_or_else(find_root);
+    let results = skill::install_skill_selection_summary(
         &root,
         &agents,
+        name,
         force,
         force_scaffold,
-        pi_root.as_deref(),
+        dry_run,
+        None,
     )?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&results)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "target": root,
+                "agents": agents.iter().map(|agent| agent.argument()).collect::<Vec<_>>(),
+                "skill": name,
+                "dry_run": dry_run,
+                "force": force,
+                "files": results,
+            }))?
+        );
+    } else if dry_run {
+        println!("Dry run — no files written:");
+        for result in &results {
+            println!("  {:?} {}", result.outcome, result.path.display());
+        }
     } else {
         skill::print_skill_install_summary(&root, &agents, &results);
     }

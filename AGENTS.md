@@ -49,21 +49,22 @@ The template files (all under `crates/issuectl-core/templates/`, all
 They are dogfooded into this repo via `issuectl skill install --agent all
 --force`:
 
-| Template | Dogfooded copy |
+| Template | Dogfooded copies |
 |---|---|
-| `issue-skill.md` | `.claude/skills/issue/SKILL.md` |
+| `issue-skill.md` | `.claude/skills/issue/SKILL.md`, `.pi/agent/skills/issue/SKILL.md` |
 | `issue-prompt.md` | `.codex/prompts/issue.md` |
-| `issue-new-skill.md` | `.claude/skills/issue-new/SKILL.md` |
+| `issue-new-skill.md` | `.claude/skills/issue-new/SKILL.md`, `.pi/agent/skills/issue-new/SKILL.md` |
 | `issue-new-prompt.md` | `.codex/prompts/issue-new.md` |
-| `issue-intake-skill.md` | `.claude/skills/issue-intake/SKILL.md` |
+| `issue-intake-skill.md` | `.claude/skills/issue-intake/SKILL.md`, `.pi/agent/skills/issue-intake/SKILL.md` |
 | `issue-intake-prompt.md` | `.codex/prompts/issue-intake.md` |
 
-Each skill ships in **both** formats — a Claude skill (`--agent claude`) and a
-Codex prompt (`--agent codex`); `all` installs both. The Codex prompt is the
-Claude one with its YAML frontmatter stripped (body identical). After editing
-any template, re-run the install command so the local copies don't drift from
+Each skill ships in all three native targets: Claude and pi Agent Skill trees
+(`--agent claude|pi`) plus a self-contained Codex prompt (`--agent codex`).
+`all` is the default and installs all three. The Codex prompt is the Claude/pi
+skill with its YAML frontmatter stripped (body identical). After editing any
+template, re-run the install command so the local copies don't drift from
 `templates/`. The `skill::tests::dogfooded_copies_match_templates` test
-enforces this for **all six** copies (and
+enforces this for **all nine** copies (and
 `standalone_intake_skills_are_wellformed` additionally pins the intake skills'
 filing/processing split). `/triage-bugs` is a repo-local-only deprecation
 alias — it is **not** a binary-shipped template.
@@ -80,13 +81,13 @@ tail -n +6 templates/issue-intake-skill.md  > templates/issue-intake-prompt.md
 (`/issue`'s frontmatter is 4 lines; the intake skills carry an extra
 `argument-hint` line, so their frontmatter is 5 lines — hence `+6`.)
 
-### pi.dev dual-home
+### pi target and legacy global corpus
 
-Claude-layout installs also mirror each `SKILL.md` into pi.dev's global corpus
-at `~/.pi/agent/skills/<name>/SKILL.md`, byte-identical, with an out-of-band
-provenance manifest plus `skill pi-status` / `skill pi-prune` for drift and
-cleanup. Reconciliation is **always-on-force** (a `--force` overwrite never
-version-checks — deliberate). Full mechanics, guarantees, and the reasoning:
+`skill install --agent pi` is first-class and writes repo-/target-local
+`.pi/agent/skills/<name>/SKILL.md`; default/`all` includes it. The older global
+`~/.pi/agent/skills` provenance manifest remains inspectable with `skill
+pi-status` / `skill pi-prune`, but installs no longer mutate HOME implicitly.
+Full history and lifecycle details:
 [docs/design/pi-skill-mirror.md](docs/design/pi-skill-mirror.md).
 
 ## Other conventions

@@ -862,8 +862,6 @@ fn dispatch_primary(command: PrimaryCommand, json_output: bool) -> Result<()> {
                 with_hooks,
                 with_merge_driver,
                 force,
-                // Dual-home Claude skills into pi.dev's skill dir; None = no HOME.
-                pi_root: skill::pi_skills_root(),
             };
             init_cmd::run(&root, opts, json_output)
         }
@@ -889,10 +887,21 @@ fn dispatch_extended(command: ExtendedCommand, json_output: bool) -> Result<()> 
         ExtendedCommand::Skill { action } => match action {
             SkillAction::List => cmd_skill_list(json_output),
             SkillAction::Install {
+                name,
                 agent,
+                target,
+                dry_run,
                 force,
                 force_scaffold,
-            } => cmd_skill_install(json_output, &agent, force, force_scaffold),
+            } => cmd_skill_install(
+                json_output,
+                name.as_deref(),
+                &agent,
+                target,
+                dry_run,
+                force,
+                force_scaffold,
+            ),
             SkillAction::Print { agent } => cmd_skill_print(&agent),
             SkillAction::PiStatus => cmd_skill_pi_status(json_output),
             SkillAction::PiPrune { force } => cmd_skill_pi_prune(json_output, force),

@@ -74,9 +74,11 @@ issuectl --json config show
 ## Companion skill catalog
 
 `issuectl --json skill list` enumerates the bundled `/issue`, `/issue-new`, and
-`/issue-intake` workflows and the Claude and Codex formats each can install.
-It is read-only: use it to discover the shipped catalog, not `issuectl skill
-pi-status`, which instead reports the state of the derived pi.dev mirror.
+`/issue-intake` workflows plus the complete Claude, pi, and Codex installation
+contract. Read `supported_agents`, `install`, and `skills` before automating an
+install. The installer defaults to every skill and all three runtimes; use
+`--agent claude|pi|codex|all`, `--target <dir>`, `--dry-run`, and explicit
+`--force` as needed. `skill pi-status` only reports legacy global pi copies.
 
 ```sh
 issuectl --json skill list
@@ -100,8 +102,8 @@ first invocation in a session, run `issuectl --version` and compare:
 - **Newer than `0.17.1`**: the installed binary is ahead
   of what this skill was written for. Tell the user to refresh the
   skill so the instructions match the CLI surface they actually have:
-  `issuectl skill install --force` (Claude Code; add `--agent codex`
-  for Codex or `--agent all` for both). Then run `issuectl doctor`
+  `issuectl skill install --force` (all bundled skills for Claude, pi, and
+  Codex by default; select one runtime with `--agent`). Then run `issuectl doctor`
   (or `issuectl doctor --fix`) — a newer binary often ships schema
   rules or migrations the repo hasn't picked up yet. Continue with
   the task once both are done.

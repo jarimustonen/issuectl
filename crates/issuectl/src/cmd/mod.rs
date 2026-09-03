@@ -1256,7 +1256,7 @@ pub(crate) enum PrimaryCommand {
     },
 
     /// Bootstrap a new repo: schema scaffold, `.issuectl/AGENTS.md`,
-    /// `/issue` skill (Claude + Codex by default), and optionally the
+    /// `/issue` skill (Claude + pi + Codex by default), and optionally the
     /// pre-commit hook and YAML merge driver. Idempotent — safe to
     /// re-run on an already-initialized repo.
     Init {
@@ -1348,7 +1348,7 @@ pub(crate) enum PrimaryCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum ExtendedCommand {
-    /// Install or preview the /issue skill template (Claude Code or Codex)
+    /// List, install, or print companion skills for Claude, pi, and Codex
     Skill {
         #[command(subcommand)]
         action: SkillAction,
@@ -1896,6 +1896,7 @@ pub(crate) enum CompleteKind {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum AgentArg {
     Claude,
+    Pi,
     Codex,
     All,
 }
@@ -1904,6 +1905,7 @@ impl From<AgentArg> for init_cmd::AgentSelection {
     fn from(a: AgentArg) -> Self {
         match a {
             AgentArg::Claude => Self::Claude,
+            AgentArg::Pi => Self::Pi,
             AgentArg::Codex => Self::Codex,
             AgentArg::All => Self::All,
         }
@@ -1980,14 +1982,24 @@ pub(crate) enum SkillAction {
     /// List the bundled companion skills and their install targets. Read-only;
     /// unlike `pi-status`, this describes what this binary can install.
     List,
-    /// Install the /issue skill template into the current repo. By default
-    /// installs the Claude Code skill; use --agent codex for Codex CLI, or
-    /// --agent all for both. The Claude install also ships the standalone
-    /// intake skills /issue-new and /issue-intake (Claude-only).
+    /// Install one or all bundled skills into native Claude, pi, and Codex
+    /// layouts. Omitting NAME and --agent installs every skill for all agents.
     Install {
-        /// Which agent's skill format to install
-        #[arg(short = 'a', long, default_value = "claude", value_parser = PossibleValuesParser::new(["claude", "codex", "all"]))]
+        /// Bundled skill name; omit to install every bundled skill.
+        #[arg(value_parser = PossibleValuesParser::new(["issue", "issue-new", "issue-intake"]))]
+        name: Option<String>,
+
+        /// Agent runtime to install for.
+        #[arg(short = 'a', long, default_value = "all", value_parser = PossibleValuesParser::new(["claude", "pi", "codex", "all"]))]
         agent: String,
+
+        /// Override the install base. Layouts remain relative to this directory.
+        #[arg(long)]
+        target: Option<PathBuf>,
+
+        /// Validate and report planned file operations without writing.
+        #[arg(long)]
+        dry_run: bool,
 
         /// Overwrite existing skill bodies. A diverged issues/AGENTS.md is preserved.
         #[arg(long)]
@@ -2000,7 +2012,7 @@ pub(crate) enum SkillAction {
     /// Print the skill template to stdout (preview before installing)
     Print {
         /// Which agent's skill format to print
-        #[arg(short = 'a', long, default_value = "claude", value_parser = PossibleValuesParser::new(["claude", "codex"]))]
+        #[arg(short = 'a', long, default_value = "claude", value_parser = PossibleValuesParser::new(["claude", "pi", "codex"]))]
         agent: String,
     },
     /// Report the state of the global pi.dev skill corpus
