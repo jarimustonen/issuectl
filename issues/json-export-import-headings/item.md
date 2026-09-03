@@ -2,7 +2,7 @@
 created: 2026-09-02
 updated: 2026-09-03
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 provenance: ai-review
 source_ref: orchestratectl:01m1gc62273xn52kzkgtpd1p73/review-finding:sha1:a4c841fb4444af33cd2a67a4effce804ba6e6854
@@ -20,6 +20,16 @@ labels:
 - ai-review-model:deepseek-v4-pro
 lane: transfer
 collision: [crates/issuectl-core/src/transfer.rs]
+commits:
+- hash: 4310b37
+  summary: preserve structured JSON bodies
+- hash: e34e192
+  summary: validate JSON body semantics after review
+- hash: 9c03356
+  summary: preserve structured JSON bodies (rebased)
+- hash: 3c82522
+  summary: validate JSON body semantics after review (rebased)
+closed: 2026-09-03
 ---
 
 # JSON export-to-import duplicates structured body headings
@@ -57,3 +67,16 @@ Issuectl's documented own-JSON export/import path should preserve the exported b
 ## Triage context
 
 This was independently reproduced during the create-body production diff review. The responsible path is `crates/issuectl-core/src/transfer.rs`: `ImportRecord.description` aliases `body`, while `ImportRecord::into_new_args` selects free-text rendering. The existing `export_json_round_trips_through_import` test only checks export-to-parse and never renders the resulting record. Fixing this needs an explicit design for distinguishing structured `body` from free-text `description`, plus an end-to-end export → parse → create regression.
+
+## Acceptance Criteria
+
+- [x] issuectl JSON export/import preserves one title H1 and one structured Description section.
+- [x] Foreign description, GitHub body, and legacy plain-body imports retain free-text rendering.
+- [x] Focused regressions, multi-model review, finding assessment, and the full green gate pass.
+
+
+## Resolution
+
+### 2026-09-03T12:57:58Z · @issuectl
+
+Implemented explicit structured-body versus free-text import decoding, preserved legacy plain-body and GitHub semantics, rejected ambiguous body/description records, and verified exact export/import rendering. Multi-model review findings were assessed and all confirmed localized fixes applied. Full repository green gate passed: fmt, clippy, tests, build, and rustdoc.
