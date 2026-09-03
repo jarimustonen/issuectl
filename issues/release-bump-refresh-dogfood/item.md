@@ -12,6 +12,10 @@ collision: [OSS-RELEASE.md]
 commits:
 - hash: ad53b0d
   summary: refresh dogfooded skills during engine bump
+- hash: 5ad9035
+  summary: harden bump hook invariants after review
+- hash: d63efed
+  summary: apply assessed review fixes
 ---
 
 # Release bump leaves dogfooded skills stale
