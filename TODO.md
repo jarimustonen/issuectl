@@ -44,11 +44,12 @@ pitkä ajo päättyi transienttiin `macos-defaults`-timeoutiin; tuore `homebase 
 status` näyttää kaikki tuetut unitit vihreinä. Release-bumpin jälkeen kuusi seurattua
 dogfood-kopiota päivitettiin erillisessä housekeeping-commitissa v0.17.1:een.
 
-**Seuraavan stintin valmisteltu intentio:** ei hyväksyttyä suoritettavaa agendaa.
-@json-export-import-headings (nimetty aiemmasta satunnaisslugista) on reviewssä
-itsenäisesti toistettu JSON export→import -otsikkoduplikaatio, mutta se on edelleen
-`untriaged`, ilman lanea ja odottaa ihmisen lane-or-close-päätöstä. Se on intake-kontekstia,
-ei valmis head eikä lupa käynnistää työtä.
+**Seuraavan stintin valmisteltu intentio:** tee molemmat hyväksytyt follow-upit;
+ajantasainen järjestys ja rinnakkaisuus luetaan aina `issuectl dag --json --reservations
+'[]'` -pinnalta. @json-export-import-headings korjaa issuectl:n oman JSON
+export→import-round-tripin rakenteellisen otsikkoduplikaation. @release-bump-refresh-dogfood
+automatisoi kuuden repossa seurattavan agenttiohjekopion versionpäivityksen engine-owned
+release-bumpiin eristetyssä ympäristössä, jotta release-commit on heti testivihreä.
 
 **Operatiivinen siivous:** kahden epäonnistuneen mutta lopullisella toteutuksella
 syrjäytetyn create-body-reviewn säilytetyt työtilat ovat vielä levyllä
