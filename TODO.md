@@ -14,46 +14,48 @@ säännöt → `AGENTS.md`.
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-08-22, rupeama 4 + release + triage valmis):** `main` on puhdas,
-synkassa originin kanssa, eikä tässä repossa ole eläviä workereita tai worktreitä.
-**Live-release on v0.17.0 kaikissa kanavissa:** `issuectl` ja `issuectl-core`
-crates.io:ssa 0.17.0, GitHub Releasessa 12 assetia ja Homebrew-tapissa 0.17.0.
-Paikallinen cargo-binääri ja agenttiohjeet on päivitetty 0.17.0:aan. Integroitu paikallinen
-green gate meni läpi, mutta GitHubin Linux-testilinja on nyt punainen alla kuvatun
-parser-stack-regression vuoksi; macOS-testit ja lintit ovat vihreitä.
+**Tila (2026-09-03, rupeama 5 + release valmis):** `main` on puhdas ja julkaistu.
+Live-release on **v0.17.1 kaikissa kanavissa**: `issuectl` ja `issuectl-core`
+crates.io:ssa 0.17.1, GitHub Releasessa 12 odotettua assetia, cargo-dist-ajon
+lopputulos `success`, ja Homebrew-tapissa 0.17.1. Paikallinen Homebrew-binääri sekä
+`/issue`, `/issue-new` ja `/issue-intake` -ohjeet ovat 0.17.1:ssa. Integroitu täysi
+green gate meni läpi, samoin release-bumpin jälkeisen dogfood-refreshin täysi gate.
+Repoon ei ole eläviä tai huomiota odottavia orchestratectl-ajoja.
 
-**Rupeama 4 (0.17.0):** @deprecate-triage-inbox toimitti ADR:n mukaisen yhden releasen
-varoitusikkunan, intake-backed scanner-filaamisen ja doctorin inbox-migraation; varsinainen
-legacy-pintojen poisto kuuluu 0.18.0:aan. @apply-patch-from-stdin toimitti canonical
-`update --patch-file -` -stdin-polun (`apply -` säilyy yhteensopivana) sekä täsmälliset
-path-or-stdin-virheet; inline JSON argv hylättiin tarkoituksella quoting-herkkänä toisena
-syötekielenä. Molemmat kävivät läpi ulkoisen katselmuksen ja täyden gaten.
+**Rupeama 5:**
+- @intake-bug-issuectl-af715e8b5283 korjasi doctorin false positivet: issuectl:n omat
+  intake/review-metadatakentät tunnetaan oletusskeemassa, mutta aidosti tuntemattomista
+  avaimista varoitetaan edelleen.
+- @intake-bug-issuectl-3148539799d8 korjasi `create --body-file` -polun: valmis
+  rakenteinen Markdown sijoitetaan H1:n alle ilman tyhjää, duplikoitua
+  `## Description` -otsikkoa. Schema saa edelleen lisätä puuttuvat pakolliset H2-stubit.
+  Työ kävi läpi poikkeuksellisen pitkän provider-retry/review-polun; lopullinen toteutus,
+  review-evidence ja gate ovat valmiit ja issue suljettu fixed-tilaan.
+- v0.17.1 sisältää lisäksi edellisen valmistellun kolmikon: Linuxin clap-stack-korjauksen,
+  toimituksen merkitseviin sulkutiloihin rajatun DoD-portin ja canonical `.data.path`
+  -ohjeen `/issue`-skillissä.
 
-**Release-havainto (0.17.0):** ossctl 0.10.0 raportoi jälleen Homebrew-targetin
-`missing`, vaikka tap-formula oli jo 0.17.0. Suorat backstopit vahvistivat cratet,
-12 GitHub-assetia, onnistuneen cargo-dist-ajon ja tapin; tuore read-only verify näki
-lopulta 4/4 matches mutta ei terminalisoinut ajoa. Run suljettiin journalissa
-backstop-todisteet sisältävällä abandon-syyllä, ja `in_flight_count` on nolla. Tämä on
-toistuva verifierin false-negative, ei puuttuva toimitus.
+**Release-havainto:** ensimmäinen cut pysähtyi ennen publishia, koska paikallinen
+`dist` puuttui. Sama journaloitu run jatkettiin checksum-verifioidulla, disposablella
+cargo-dist 0.28.2:lla (täsmää `dist-workspace.toml`:iin); molemmat cratet julkaistiin,
+tag laukaistiin kerran ja kaikki neljä kohdetta verifioituivat. Pysyvää unmanaged
+cargo-dist-asennusta ei jätetty. Homebase-konvergenssi päivitti issuectl:n, mutta sen
+pitkä ajo päättyi transienttiin `macos-defaults`-timeoutiin; tuore `homebase fleet
+status` näyttää kaikki tuetut unitit vihreinä. Release-bumpin jälkeen kuusi seurattua
+dogfood-kopiota päivitettiin erillisessä housekeeping-commitissa v0.17.1:een.
 
-**Seuraavan stintin valmisteltu intentio:** tee kaikki kolme hyväksyttyä issuea;
-`issuectl dag --json --reservations '[]'` on ainoa lähde niiden ajantasaiselle
-suoritusjärjestykselle ja törmäyksille.
+**Seuraavan stintin valmisteltu intentio:** ei hyväksyttyä suoritettavaa agendaa.
+@json-export-import-headings (nimetty aiemmasta satunnaisslugista) on reviewssä
+itsenäisesti toistettu JSON export→import -otsikkoduplikaatio, mutta se on edelleen
+`untriaged`, ilman lanea ja odottaa ihmisen lane-or-close-päätöstä. Se on intake-kontekstia,
+ei valmis head eikä lupa käynnistää työtä.
 
-- @ci-apply-help-stack-overflow: Linuxin 2 MiB testisäikeessä koko clap-komentopuun
-  rakentaminen ylittää stack-rajan. Tämä pitää Linux-CI:n punaisena; korjaa stack-käyttö,
-  älä peitä vikaa globaalilla `RUST_MIN_STACK`-nostolla.
-- @dod-gate-nondelivery-close: DoD-portti pitää rajata toimituksen merkitseviin
-  sulkutiloihin niin, että projektien omat statusluokat säilyvät tuettuina.
-- @intake-bug-issuectl-71ea534241c2: `/issue`-ohjeen create-tulos käyttää väärää
-  `item_path`-kenttää canonical `path`-kentän sijasta. Samaan yksikköön on taitettu
-  täsmennys, että ehdollinen update-echo koskee `lane`/`lane_seq`/`collision`-kenttiä;
-  `blocked_by` luetaan `show`/`dag`-pinnalta.
-
-**Intake-konteksti, ei hyväksytty agenda:** @migrate-release-guidance-shipshape on
-`untriaged` ja odottaa ihmisen intake-päätöstä. Älä käynnistä sitä ennen triagea,
-hyväksyntää ja lanetusta. Intake-slugien kuvaavuusraportti suljettiin by-design:
-luottamattoman otsikon sisältöä ei vuodateta pysyviin tunnisteisiin.
+**Operatiivinen siivous:** kahden epäonnistuneen mutta lopullisella toteutuksella
+syrjäytetyn create-body-reviewn säilytetyt työtilat ovat vielä levyllä
+(runit `01m1g9865gsc5kjrq3f91rzc2m` ja `01m1gc62273xn52kzkgtpd1p73`). Ne eivät omista
+aktiivista työtä eikä niitä saa pelastaa tai mergeätä; poista ne vain tarkoituksellisessa,
+ihmisen valvomassa cleanupissa, kun lopullisen v0.17.1-toteutuksen säilyminen on vielä
+varmistettu.
 
 <details>
 <summary>Edellinen handoff (2026-08-20)</summary>
