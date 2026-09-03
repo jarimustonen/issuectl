@@ -254,7 +254,7 @@ fn release_bump_hook_regenerates_every_dogfood_copy_in_isolation() {
     let fake_cargo = fake_bin.join("cargo");
     std::fs::write(
         &fake_cargo,
-        "#!/bin/sh\n{\n  printf '%s\\n%s\\n%s\\n' \"$PWD\" \"$HOME\" \"$CARGO_TARGET_DIR\"\n  printf '%s\\n' \"$@\"\n} >> \"$HOOK_ENV_LOG\"\nwhile [ \"$#\" -gt 0 ] && [ \"$1\" != -- ]; do shift; done\n[ \"$#\" -gt 0 ] || exit 64\nshift\nexec \"$WRAPPED_ISSUECTL\" \"$@\"\n",
+        "#!/bin/sh\n{\n  printf '%s\\n%s\\n%s\\n%s\\n%s\\n' \"$PWD\" \"$HOME\" \"$CARGO_TARGET_DIR\" \"$CARGO_HOME\" \"$RUSTUP_HOME\"\n  printf '%s\\n' \"$@\"\n} >> \"$HOOK_ENV_LOG\"\nwhile [ \"$#\" -gt 0 ] && [ \"$1\" != -- ]; do shift; done\n[ \"$#\" -gt 0 ] || exit 64\nshift\nexec \"$WRAPPED_ISSUECTL\" \"$@\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&fake_cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -268,33 +268,42 @@ fn release_bump_hook_regenerates_every_dogfood_copy_in_isolation() {
         std::fs::write(path, "do not touch\n").unwrap();
     }
     let env_log = checkout.path().join("hook-environment");
+    let cargo_home = checkout.path().join("operator-cargo-home");
+    let rustup_home = checkout.path().join("operator-rustup-home");
     let path = std::env::join_paths(
         std::iter::once(fake_bin.clone())
             .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
-    let output = Command::new(&hook)
-        .current_dir(operator_home.path())
-        .env("PATH", path)
-        .env("HOME", operator_home.path())
-        .env("ISSUECTL_RELEASE_HOOK_BIN", "/must/not/be/honored")
-        .env("WRAPPED_ISSUECTL", env!("CARGO_BIN_EXE_issuectl"))
-        .env("HOOK_ENV_LOG", &env_log)
-        .output()
-        .expect("run release bump hook");
+    let run_hook = || {
+        Command::new(&hook)
+            .current_dir(operator_home.path())
+            .env("PATH", &path)
+            .env("HOME", operator_home.path())
+            .env("CARGO_HOME", &cargo_home)
+            .env("RUSTUP_HOME", &rustup_home)
+            .env("ISSUECTL_RELEASE_HOOK_BIN", "/must/not/be/honored")
+            .env("WRAPPED_ISSUECTL", env!("CARGO_BIN_EXE_issuectl"))
+            .env("HOOK_ENV_LOG", &env_log)
+            .output()
+            .expect("run release bump hook")
+    };
+    let output = run_hook();
     assert_success(&output);
 
-    let hook_environment = std::fs::read_to_string(env_log).unwrap();
+    let hook_environment = std::fs::read_to_string(&env_log).unwrap();
     let lines: Vec<_> = hook_environment.lines().collect();
     assert_eq!(Path::new(lines[0]), checkout.path());
     let isolated_home = Path::new(lines[1]);
     let isolated_target = Path::new(lines[2]);
+    assert_eq!(Path::new(lines[3]), cargo_home);
+    assert_eq!(Path::new(lines[4]), rustup_home);
     assert_ne!(isolated_home, operator_home.path());
     assert_ne!(isolated_target, operator_home.path());
     assert_ne!(isolated_home, isolated_target);
     assert_eq!(isolated_home.parent(), isolated_target.parent());
     assert_eq!(
-        &lines[3..],
+        &lines[5..],
         &[
             "run",
             "--locked",
@@ -318,6 +327,25 @@ fn release_bump_hook_regenerates_every_dogfood_copy_in_isolation() {
         "the hook must remove its disposable HOME and build target"
     );
 
+    assert_eq!(
+        std::fs::read_to_string(&scaffold).unwrap(),
+        "repo-authored scaffold\n",
+        "the normal force install must preserve issues/AGENTS.md"
+    );
+
+    std::fs::remove_file(&scaffold).unwrap();
+    let missing_scaffold = run_hook();
+    assert_eq!(
+        missing_scaffold.status.code(),
+        Some(1),
+        "{missing_scaffold:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&missing_scaffold.stderr)
+            .contains("unexpectedly created issues/AGENTS.md"),
+        "{missing_scaffold:?}"
+    );
+
     for relative in global_markers {
         assert_eq!(
             std::fs::read_to_string(operator_home.path().join(relative)).unwrap(),
@@ -325,11 +353,6 @@ fn release_bump_hook_regenerates_every_dogfood_copy_in_isolation() {
             "the release hook must not mutate operator-global agent installations"
         );
     }
-    assert_eq!(
-        std::fs::read_to_string(scaffold).unwrap(),
-        "repo-authored scaffold\n",
-        "the normal force install must preserve issues/AGENTS.md"
-    );
 
     // Byte equality with the checked-in copies is the immediate post-bump
     // dogfood invariant. The test binary stands in for the freshly bumped binary.

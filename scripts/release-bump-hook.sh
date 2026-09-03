@@ -56,7 +56,17 @@ elif [ -e "$scaffold" ]; then
     exit 1
 fi
 
-workspace_version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
+workspace_version=$(awk '
+    /^\[workspace\.package\][[:space:]]*$/ { in_workspace_package = 1; next }
+    /^\[/ { in_workspace_package = 0 }
+    in_workspace_package && /^[[:space:]]*version[[:space:]]*=/ {
+        value = $0
+        sub(/^[^"]*"/, "", value)
+        sub(/".*$/, "", value)
+        print value
+        exit
+    }
+' Cargo.toml)
 [ -n "$workspace_version" ] || {
     echo "release bump hook could not read the workspace version" >&2
     exit 1

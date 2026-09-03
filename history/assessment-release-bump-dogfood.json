@@ -1,0 +1,443 @@
+{
+  "schema_version": 1,
+  "source_review": "history/review-release-bump-dogfood.md",
+  "head_sha": "5ad9035ce3ecf1cd9a524ace67fa6bfb73466d68",
+  "generated_at": "2026-09-03T13:01:40Z",
+  "findings": [
+    {
+      "id": "F1",
+      "cluster_key": "sha1:2ac4579eff94cf5320c65f1db41e69a5b376ed4c",
+      "title": "Production binary override could render stale skills",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 9,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "scripts/release-bump-hook.sh",
+      "target_symbol": "Cargo invocation",
+      "claim": "The test-only binary override was reachable in production.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Current script contains no ISSUECTL_RELEASE_HOOK_BIN branch and always invokes cargo run."
+    },
+    {
+      "id": "F2",
+      "cluster_key": "sha1:880622ea225fed45e7f43adaf6b64fe4ba629a62",
+      "title": "Hard-coded Cargo artifact path breaks configured targets",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 15,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "scripts/release-bump-hook.sh",
+      "target_symbol": "Cargo invocation",
+      "claim": "The hook guesses the built binary path under target/debug.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Current script delegates executable discovery to cargo run --bin issuectl."
+    },
+    {
+      "id": "F3",
+      "cluster_key": "sha1:84695de3ea7e3c1a9ff5c7ff05aeab71fa5dfb62",
+      "title": "Hook test skipped the production Cargo boundary",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 20,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl/tests/cli_skill.rs",
+      "target_symbol": "release_bump_hook_regenerates_every_dogfood_copy_in_isolation",
+      "claim": "The hook test bypasses the Cargo invocation entirely.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The test now intercepts cargo through PATH and asserts the exact production cwd, environment, and argv."
+    },
+    {
+      "id": "F4",
+      "cluster_key": "sha1:e9f8c99074caf3207c333fca54717aa6456f6357",
+      "title": "Generated skill versions were not checked",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 25,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "scripts/release-bump-hook.sh",
+      "target_symbol": "version-marker loop",
+      "claim": "The hook can succeed with skill copies that do not pin the bumped version.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Current lines 59-80 require the workspace-version marker in all nine outputs."
+    },
+    {
+      "id": "F5",
+      "cluster_key": "sha1:2874d38d1641224e078bbadef85d5310677133f4",
+      "title": "Cargo invocation relied on caller CWD",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 32,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "scripts/release-bump-hook.sh",
+      "target_symbol": "repo_root",
+      "claim": "Cargo can run outside the sealed checkout.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Current line 8 changes to the script-derived repository root before Cargo."
+    },
+    {
+      "id": "F6",
+      "cluster_key": "sha1:9b074b69b3979652a2c8df0ee9a1ede596e5c6de",
+      "title": "Broad installer could alter issues/AGENTS.md",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 33,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "scripts/release-bump-hook.sh",
+      "target_symbol": "scaffold guard",
+      "claim": "The release hook can include an unrelated scaffold mutation.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Current hook snapshots an existing scaffold and fails on change or unexpected creation."
+    },
+    {
+      "id": "F7",
+      "cluster_key": "sha1:30386da6b5433b906e04393051476b877dead676",
+      "title": "Operator-home assertions missed managed paths",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 34,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl/tests/cli_skill.rs",
+      "target_symbol": "release_bump_hook_regenerates_every_dogfood_copy_in_isolation",
+      "claim": "The isolation test checks unrelated sentinels rather than all managed global paths.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Current test plants all nine managed paths and the pi manifest in operator HOME and verifies each byte-for-byte."
+    },
+    {
+      "id": "F8",
+      "cluster_key": "sha1:d4b859c13ca852b73d8792234c41595baf58526d",
+      "title": "Signal trap did not explicitly terminate",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 35,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "scripts/release-bump-hook.sh",
+      "target_symbol": "signal traps",
+      "claim": "Signal handlers clean scratch but may continue execution.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Current HUP, INT, and TERM handlers exit explicitly; EXIT owns cleanup."
+    },
+    {
+      "id": "F9",
+      "cluster_key": "sha1:eabb94c9606f17bc6f98cc2685ad77236a062e9d",
+      "title": "Release contract assertion was textual",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 36,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl/tests/cli_skill.rs",
+      "target_symbol": "release_bump_hook_regenerates_every_dogfood_copy_in_isolation",
+      "claim": "The test can pass on a prose substring without a parsed bump_hook.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Current test parses YAML frontmatter and directly asserts release.bump_hook."
+    },
+    {
+      "id": "F10",
+      "cluster_key": "sha1:8f15b080f70d974fb99ce66c2ffb67958b1c569e",
+      "title": "Workspace-version extraction is unscoped",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 40,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "scripts/release-bump-hook.sh",
+      "target_symbol": "workspace_version",
+      "claim": "The first exact version assignment anywhere in Cargo.toml may not be workspace.package.version.",
+      "suggested_fix": null,
+      "confirmation": "CONFIRMED",
+      "likelihood": "OCCASIONAL",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Line 59 uses a global sed scan and head. A section-scoped awk removes ambiguity without adding an abstraction."
+    },
+    {
+      "id": "F11",
+      "cluster_key": "sha1:5b37dd9e763e5ad41b28496f985a5228ad7c6d3b",
+      "title": "Toolchain-home preservation is not asserted",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 45,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl/tests/cli_skill.rs",
+      "target_symbol": "release_bump_hook_regenerates_every_dogfood_copy_in_isolation",
+      "claim": "The fake Cargo test does not record CARGO_HOME or RUSTUP_HOME.",
+      "suggested_fix": null,
+      "confirmation": "CONFIRMED",
+      "likelihood": "OCCASIONAL",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The fake logs only PWD, HOME, and CARGO_TARGET_DIR even though lines 43-44 of the hook are load-bearing under isolated HOME."
+    },
+    {
+      "id": "F12",
+      "cluster_key": "sha1:e462173210b3795797bf5dc8db80e1b8741a3291",
+      "title": "Real Cargo execution is not automated",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 49,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl/tests/cli_skill.rs",
+      "target_symbol": "release_bump_hook_regenerates_every_dogfood_copy_in_isolation",
+      "claim": "CI does not execute a fresh unmocked cargo run through the hook.",
+      "suggested_fix": null,
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "WORSENS",
+      "architecture": "MINOR",
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1b",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The test intentionally fakes Cargo and no CI hook smoke exists. A permanent cold duplicate workspace build adds cost; command shape plus fail-closed marker checks and the manual real run make impact rare."
+    },
+    {
+      "id": "F13",
+      "cluster_key": "sha1:51ae9cfc169c16ce6f2c98c468e3fe13d6f227b9",
+      "title": "Dogfood path inventory is duplicated",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 53,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "scripts/release-bump-hook.sh",
+      "target_symbol": "version-marker loop",
+      "claim": "The nine managed paths are repeated in installer code, shell, and test.",
+      "suggested_fix": null,
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "WORSENS",
+      "architecture": "MODERATE",
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1b",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The lists are visibly duplicated, but deriving shell paths from JSON would add parsing and cross-file coordination for speculative future catalog changes."
+    },
+    {
+      "id": "F14",
+      "cluster_key": "sha1:f94e14f9894e2a6fe87ee3a7b2762214a4e69783",
+      "title": "Missing-scaffold refusal lacks direct coverage",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 57,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl/tests/cli_skill.rs",
+      "target_symbol": "release_bump_hook_regenerates_every_dogfood_copy_in_isolation",
+      "claim": "The hook refusal after installer-created issues/AGENTS.md is untested.",
+      "suggested_fix": null,
+      "confirmation": "CONFIRMED",
+      "likelihood": "OCCASIONAL",
+      "readability": "IMPROVES",
+      "architecture": "NONE",
+      "confidence": "HIGH",
+      "recommendation": "FIX",
+      "drop_rule": null,
+      "applicability": "clean",
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The test always creates the scaffold at line 245, leaving hook lines 54-57 uncovered. A second fake-Cargo invocation can assert refusal locally."
+    },
+    {
+      "id": "F15",
+      "cluster_key": "sha1:fe70a4f58bfcdae5064ad719eb76cd181e44811c",
+      "title": "Immediate byte equality contradicts development-time drift tolerance",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-release-bump-dogfood.md",
+          "line": 61,
+          "section": null,
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl/tests/cli_skill.rs",
+      "target_symbol": "release_bump_hook_regenerates_every_dogfood_copy_in_isolation",
+      "claim": "Comparing regenerated files to tracked copies is invalid because another test tolerates version lag.",
+      "suggested_fix": null,
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The integration test specifically pins the immediate bump-commit invariant; development-time tolerance in the separate template-shape test does not invalidate that release-specific requirement."
+    }
+  ]
+}
