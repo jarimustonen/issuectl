@@ -61,6 +61,12 @@ fn export_csv_lists_open_issues_with_header() {
 #[test]
 fn export_json_round_trips_through_import_into_fresh_repo() {
     let src = fresh_repo();
+    let structured_body = src.path().join("body.md");
+    std::fs::write(
+        &structured_body,
+        "## Description\n\nThe login loops.\n\n## Expected\n\nLogin succeeds.\n",
+    )
+    .unwrap();
     run(
         src.path(),
         &[
@@ -71,6 +77,8 @@ fn export_json_round_trips_through_import_into_fresh_repo() {
             "Login loops",
             "--assignee",
             "bob",
+            "--body-file",
+            structured_body.to_str().unwrap(),
         ],
     );
     run(
@@ -95,6 +103,43 @@ fn export_json_round_trips_through_import_into_fresh_repo() {
     assert!(listing.contains(",bug,open,normal,bob,"), "{listing}");
     assert!(listing.contains("Login loops"), "{listing}");
     assert!(listing.contains("Dark mode"), "{listing}");
+
+    // The issuectl-native `body` field is structured Markdown. Importing it
+    // removes the exported document H1 before the fresh issue renderer adds
+    // its own, and does not wrap the existing sections in another Description.
+    let imported = stdout(&run(dst.path(), &["--json", "show", "login-loops"]));
+    let imported: serde_json::Value = serde_json::from_str(&imported).unwrap();
+    let body = imported["data"]["body"].as_str().unwrap();
+    assert_eq!(body.matches("# Login loops").count(), 1, "{body}");
+    assert_eq!(body.matches("## Description").count(), 1, "{body}");
+    assert_eq!(body.matches("## Expected").count(), 1, "{body}");
+    assert!(body.contains("The login loops."), "{body}");
+    assert!(body.contains("Login succeeds."), "{body}");
+}
+
+#[test]
+fn import_json_description_remains_free_text() {
+    let repo = fresh_repo();
+    let file = repo.path().join("foreign.json");
+    std::fs::write(
+        &file,
+        r#"[{"title":"Foreign issue","type":"bug","description":"Plain foreign text."}]"#,
+    )
+    .unwrap();
+
+    let report = run(
+        repo.path(),
+        &["--json", "import", "json", file.to_str().unwrap()],
+    );
+    stdout(&report);
+    let imported = stdout(&run(repo.path(), &["--json", "show", "foreign-issue"]));
+    let imported: serde_json::Value = serde_json::from_str(&imported).unwrap();
+    let body = imported["data"]["body"].as_str().unwrap();
+    assert_eq!(body.matches("## Description").count(), 1, "{body}");
+    assert!(
+        body.contains("## Description\n\nPlain foreign text."),
+        "{body}"
+    );
 }
 
 #[test]

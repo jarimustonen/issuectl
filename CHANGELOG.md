@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 ### Fixed
+
+- JSON export/import round-trips now preserve issuectl's structured Markdown body
+  without nesting the title or duplicating the `## Description` heading; foreign
+  `description` and GitHub issue bodies remain free text.
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.18.0] - 2026-09-03

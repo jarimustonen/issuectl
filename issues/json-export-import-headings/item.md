@@ -2,7 +2,7 @@
 created: 2026-09-02
 updated: 2026-09-03
 type: bug
-status: open
+status: in-progress
 priority: normal
 provenance: ai-review
 source_ref: orchestratectl:01m1gc62273xn52kzkgtpd1p73/review-finding:sha1:a4c841fb4444af33cd2a67a4effce804ba6e6854

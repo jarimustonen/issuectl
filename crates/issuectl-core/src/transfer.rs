@@ -22,8 +22,9 @@
 //! (so closed issues, including GitHub `--state closed`, arrive open),
 //! `closed`/`created`/`updated` timestamps, `commits`, `related`, and
 //! custom (`extra`) frontmatter fields. Title, type, priority, labels,
-//! assignee/reporter (or owner for epics), epic, and description survive.
-//! See [`ImportRecord`].
+//! assignee/reporter (or owner for epics), epic, and content survive. A foreign
+//! `description` remains free text, while issuectl's exported `body` remains
+//! structured Markdown. See [`ImportRecord`].
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -181,10 +182,18 @@ pub struct ImportRecord {
     pub labels: Option<Vec<String>>,
     #[serde(default)]
     pub source: Option<String>,
-    /// Markdown body. Exported issues land here via the `body` key;
-    /// rendered as the issue description on re-import.
-    #[serde(default, alias = "body")]
+    /// Foreign free-text description. Import wraps this content in the
+    /// generated `## Description` section.
+    #[serde(default)]
     pub description: Option<String>,
+    /// Structured Markdown from issuectl's own JSON export. Import removes the
+    /// matching exported document H1 because the fresh issue renderer creates
+    /// it again, then preserves the remaining section structure verbatim.
+    ///
+    /// If a hand-authored record supplies both `body` and `description`, the
+    /// explicit structured `body` wins for compatibility with rich exports.
+    #[serde(default)]
+    pub body: Option<String>,
 }
 
 impl ImportRecord {
@@ -198,6 +207,11 @@ impl ImportRecord {
             .filter(|t| !t.trim().is_empty())
             .unwrap_or_else(|| default_type.to_string());
         let is_epic = issue_type == "epic";
+        let structured_body = self.body.is_some();
+        let description = self
+            .body
+            .map(|body| strip_exported_title(&body, &self.title).to_string())
+            .or(self.description);
         NewArgs {
             issue_type,
             title: self.title,
@@ -216,8 +230,8 @@ impl ImportRecord {
             labels: self.labels.unwrap_or_default(),
             related: vec![],
             source: self.source,
-            description: self.description,
-            structured_body: false,
+            description,
+            structured_body,
             custom_fields: vec![],
             lane: None,
             lane_seq: None,
@@ -226,6 +240,26 @@ impl ImportRecord {
             inbox: false,
         }
     }
+}
+
+/// Remove the title H1 emitted by issuectl's item renderer. Only an exact
+/// title match is removed, so hand-authored structured bodies with a distinct
+/// leading H1 are not silently rewritten.
+fn strip_exported_title<'a>(body: &'a str, title: &str) -> &'a str {
+    let Some(after_marker) = body.strip_prefix("# ") else {
+        return body;
+    };
+    let (heading, rest) = match after_marker.split_once('\n') {
+        Some(parts) => parts,
+        None if after_marker.trim_end_matches('\r') == title => return "",
+        None => return body,
+    };
+    if heading.trim_end_matches('\r') != title {
+        return body;
+    }
+    rest.strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
+        .unwrap_or(rest)
 }
 
 /// Parse a JSON import payload: either a top-level array of records or a
@@ -294,6 +328,7 @@ pub fn parse_github(input: &str) -> Result<Vec<ImportRecord>> {
             labels: Some(g.labels.into_iter().map(|l| l.name).collect()),
             source: g.url,
             description: g.body.filter(|b| !b.trim().is_empty()),
+            body: None,
         })
         .collect())
 }
@@ -339,12 +374,18 @@ mod tests {
         assert_eq!(records[0].title, "Login loops");
         assert_eq!(records[0].issue_type.as_deref(), Some("bug"));
         assert_eq!(records[0].assignee.as_deref(), Some("bob"));
-        // body alias feeds description
         assert!(records[0]
-            .description
+            .body
             .as_deref()
             .unwrap()
             .contains("Something broke"));
+        assert!(records[0].description.is_none());
+        let args = records.into_iter().next().unwrap().into_new_args("task");
+        assert!(args.structured_body);
+        assert_eq!(
+            args.description.as_deref(),
+            Some("## Description\n\nSomething broke.")
+        );
     }
 
     #[test]
@@ -474,6 +515,46 @@ mod tests {
         );
         // empty body becomes None
         assert!(records[1].description.is_none());
+        assert!(records[1].body.is_none());
         assert!(records[1].assignee.is_none());
+
+        let args = records[0].clone().into_new_args("task");
+        assert!(!args.structured_body);
+        assert_eq!(args.description.as_deref(), Some("Body text"));
+    }
+
+    #[test]
+    fn foreign_description_stays_free_text() {
+        let rec = parse_json(r#"{"title":"Foreign","description":"Plain text"}"#)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let args = rec.into_new_args("bug");
+        assert!(!args.structured_body);
+        assert_eq!(args.description.as_deref(), Some("Plain text"));
+    }
+
+    #[test]
+    fn structured_body_takes_precedence_over_description() {
+        let rec = parse_json(
+            r##"{"title":"Both","description":"Foreign","body":"# Both\n\n## Expected\n\nStructured"}"##,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        let args = rec.into_new_args("bug");
+        assert!(args.structured_body);
+        assert_eq!(
+            args.description.as_deref(),
+            Some("## Expected\n\nStructured")
+        );
+    }
+
+    #[test]
+    fn structured_body_keeps_a_nonmatching_h1() {
+        assert_eq!(
+            strip_exported_title("# Other\n\nContent", "Title"),
+            "# Other\n\nContent"
+        );
     }
 }
