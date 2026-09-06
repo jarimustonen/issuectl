@@ -44,9 +44,11 @@ Molemmat muutokset julkaistiin v0.18.2:ssa. `orchestratectl`-binääri on poistu
 koneelta ja nykyinen ajonhallintapinta on `taskfleet`; sen legacy-home-varoitus on
 tunnettu migraatiomuistutus, ei tämän repon avoin työ.
 
-**Seuraavan stintin valmisteltu intentio:** tarkoituksella tyhjä. Live-aikataulu
-ja avoimien issueiden lista ovat tyhjiä. Älä keksi uutta toteutuskierrosta ilman
-uutta hyväksyttyä tuotetarvetta.
+**Seuraavan stintin valmisteltu intentio:** tarkoituksella tyhjä. Suoritettava
+live-aikataulu on tyhjä. Uusi @intake-bug-issuectl-39e53451c50d (suljetun
+stdoutin `BrokenPipe`-paniikki) odottaa ihmisen lane-or-close-triagea; se on vain
+intake-kontekstia, ei hyväksytty, aikataulutettu tai valmisteltuun agendaan kuuluva
+työ. Älä käynnistä sitä ilman nimenomaista tuotedispositiota.
 
 **Operatiivinen siivous:** kahden jo syrjäytetyn create-body-reviewn säilytetyt
 legacy-työtilat ovat edelleen levyllä (runit `01m1g9865gsc5kjrq3f91rzc2m` ja
