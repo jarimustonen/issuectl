@@ -1812,8 +1812,8 @@ mod tests {
         );
 
         // `/issue-intake` is the PROCESSING half: it reads the queue, drives the
-        // read-only analysis engine (never reimplementing it), and documents
-        // that it replaces `/triage-bugs`.
+        // read-only Taskfleet analysis engine (never reimplementing it), and
+        // documents that it replaces `/triage-bugs`.
         let issue_intake = read("issue-intake");
         assert!(
             issue_intake.contains("issuectl intake queue"),
@@ -1822,6 +1822,14 @@ mod tests {
         assert!(
             issue_intake.contains("/worktree-bug-analysis"),
             "issue-intake must drive /worktree-bug-analysis as the analysis engine"
+        );
+        assert!(
+            issue_intake.contains("`taskfleet`"),
+            "issue-intake must name taskfleet as the analysis worker prerequisite"
+        );
+        assert!(
+            !issue_intake.contains("additionally needs `orchestratectl`"),
+            "issue-intake must not advertise the retired orchestratectl prerequisite"
         );
         assert!(
             issue_intake.contains("## Triage analysis"),

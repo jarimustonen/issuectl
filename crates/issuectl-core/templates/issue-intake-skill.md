@@ -18,8 +18,8 @@ apply it — that is the user's call.
 This **replaces `/triage-bugs`** (same job, now against the first-class intake
 state model instead of `via:<channel>` labels) and **drives
 `/worktree-bug-analysis`** as its analysis engine — it does not reimplement
-analysis. It assumes the `issuectl` + `/worktree-*` toolchain and sits on top of
-them.
+analysis. It assumes `issuectl` plus Taskfleet's `/worktree-*` toolchain and sits
+on top of them.
 
 Arguments: `$ARGUMENTS`
 
@@ -253,4 +253,4 @@ This skill was installed for `issuectl {{ISSUECTL_VERSION}}` and drives the
 `issuectl --version`; if `intake` is missing (`issuectl intake --help` errors), the
 binary is too old — tell the user to upgrade and stop. To refresh this skill after
 an `issuectl` upgrade, re-run `issuectl skill install --force`.
-`/worktree-bug-analysis` additionally needs `orchestratectl`.
+`/worktree-bug-analysis` is provided by `taskfleet`, which must also be installed.
