@@ -2,8 +2,12 @@
 created: 2026-09-06
 updated: 2026-09-06
 type: task
-status: open
+status: done
 priority: high
+closed: 2026-09-06
+commits:
+- hash: 3d374e1
+  summary: point issue-intake analysis prerequisite to Taskfleet
 ---
 
 # Converge issue-intake templates on Taskfleet
@@ -26,7 +30,13 @@ Taskfleet ADR 0002 E1 owner map: https://github.com/jarimustonen/taskfleet/blob/
 
 ## Acceptance Criteria
 
-- [ ] Canonical template and all dogfood copies consistently identify `taskfleet`.
-- [ ] Generated-copy integrity tests pass and intentional compatibility fixtures remain unchanged.
-- [ ] Full repository gate passes.
+- [x] Canonical template and all dogfood copies consistently identify `taskfleet`.
+- [x] Generated-copy integrity tests pass and intentional compatibility fixtures remain unchanged.
+- [x] Full repository gate passes.
 - [ ] A normal issuectl release is cut if required by repository policy, and the downstream refresh coordinate is recorded.
+
+## Resolution
+
+### 2026-09-06T11:04:39Z · @issuectl
+
+Canonical templates, all generated dogfood copies, prerequisite guard, changelog, and the exact full repository green gate are complete at 3d374e1. Per run policy, the normal release remains a post-merge conductor action after exact-main CI is green; no release was cut from this worker branch.
