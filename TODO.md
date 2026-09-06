@@ -248,3 +248,4 @@ poista osio triagen yhteydessä kunnes lähdepää on korjattu.
 - [ ] 🐛 Piialiisan bugiraportti: update JSON omits persisted blocked_by after add-blocked-by — jari via Telegram ([`intake-bug-issuectl-704cd8eb0a0e`](issues/intake-bug-issuectl-704cd8eb0a0e/item.md))
 - [ ] 🐛 Piialiisan bugiraportti: issuectl create --body-file duplicates Description heading — jari via Telegram ([`intake-bug-issuectl-3148539799d8`](issues/intake-bug-issuectl-3148539799d8/item.md))
 - [ ] 🐛 Piialiisan bugiraportti: doctor warns about issuectl-owned intake fields — jari via Telegram ([`intake-bug-issuectl-af715e8b5283`](issues/intake-bug-issuectl-af715e8b5283/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: Handle closed stdout without panicking — jari via Telegram ([`intake-bug-issuectl-39e53451c50d`](issues/intake-bug-issuectl-39e53451c50d/item.md))
