@@ -12,13 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+### Fixed
+<!-- oss-changelog:unreleased-end -->
+
+## [0.18.2] - 2026-09-06
+
+### Changed
+
 - The bundled `/issue-intake` workflow now identifies `taskfleet` as the provider
   and prerequisite for its `/worktree-bug-analysis` worker.
 - Binary-release CI is now generated and run with cargo-dist 0.32.0 while
   preserving the existing platform matrix, attestations, and Homebrew publish.
-
-### Fixed
-<!-- oss-changelog:unreleased-end -->
 
 ## [0.18.1] - 2026-09-03
 
