@@ -2,9 +2,13 @@
 created: 2026-09-06
 updated: 2026-09-06
 type: task
-status: open
+status: done
 priority: high
 related: ['@taskfleet-issue-intake-template-convergence']
+closed: 2026-09-06
+commits:
+- hash: bdada55
+  summary: converge repository on Taskfleet identity
 ---
 
 # Converge entire issuectl repository on Taskfleet identity
@@ -28,3 +32,9 @@ Do not mutate the installed issuectl, deploy machines, publish a release, or edi
 - [x] A disposable fresh init/install exercise emits Taskfleet-only skills and leaves no residue.
 - [x] Full repository gate passes.
 - [x] The change is ready for a normal issuectl release and Homebase deployment by the conductor.
+
+## Resolution
+
+### 2026-09-06T16:09:14Z · @issuectl
+
+Removed the retired task-runner identity from every maintained tracked path and file, added a repository-wide regression guard, regenerated all nine dogfood copies through the candidate binary, verified a clean disposable init/install, and passed the exact full repository gate.
