@@ -14,49 +14,45 @@ säännöt → `AGENTS.md`.
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-09-03, rupeama 5 + release valmis):** `main` on puhdas ja julkaistu.
-Live-release on **v0.17.1 kaikissa kanavissa**: `issuectl` ja `issuectl-core`
-crates.io:ssa 0.17.1, GitHub Releasessa 12 odotettua assetia, cargo-dist-ajon
-lopputulos `success`, ja Homebrew-tapissa 0.17.1. Paikallinen Homebrew-binääri sekä
-`/issue`, `/issue-new` ja `/issue-intake` -ohjeet ovat 0.17.1:ssa. Integroitu täysi
-green gate meni läpi, samoin release-bumpin jälkeisen dogfood-refreshin täysi gate.
-Repoon ei ole eläviä tai huomiota odottavia orchestratectl-ajoja.
+**Tila (2026-09-06, rupeama 6 + myöhempi konvergenssijulkaisu valmis):**
+`main` on puhdas, synkassa `origin/main`:n kanssa ja julkaistu. Live-release on
+**v0.18.2 kaikissa kanavissa**: `issuectl` ja `issuectl-core` crates.io:ssa
+0.18.2, GitHub Releasessa 12 odotettua assetia, cargo-dist-workflow päättyi
+onnistuneesti ja Homebrew-tapissa on 0.18.2. Paikallinen `issuectl` sekä sen
+kolme mukana toimitettua agenttiohjetta raportoivat version 0.18.2. Shipshape-run
+`01M1V6F08EJ5ZZMA4E7KKXNKQQ` on completed ja kaikki neljä kohdetta
+verifioituivat. Taskfleetissä ei ole tähän repoon kuuluvia eläviä,
+huomiota odottavia tai jatkettavia ajoja.
 
-**Rupeama 5:**
-- @intake-bug-issuectl-af715e8b5283 korjasi doctorin false positivet: issuectl:n omat
-  intake/review-metadatakentät tunnetaan oletusskeemassa, mutta aidosti tuntemattomista
-  avaimista varoitetaan edelleen.
-- @intake-bug-issuectl-3148539799d8 korjasi `create --body-file` -polun: valmis
-  rakenteinen Markdown sijoitetaan H1:n alle ilman tyhjää, duplikoitua
-  `## Description` -otsikkoa. Schema saa edelleen lisätä puuttuvat pakolliset H2-stubit.
-  Työ kävi läpi poikkeuksellisen pitkän provider-retry/review-polun; lopullinen toteutus,
-  review-evidence ja gate ovat valmiit ja issue suljettu fixed-tilaan.
-- v0.17.1 sisältää lisäksi edellisen valmistellun kolmikon: Linuxin clap-stack-korjauksen,
-  toimituksen merkitseviin sulkutiloihin rajatun DoD-portin ja canonical `.data.path`
-  -ohjeen `/issue`-skillissä.
+**Rupeama 6 / v0.18.1:**
+- @json-export-import-headings korjasi issuectl:n oman JSON
+  export→import-round-tripin: rakenteinen Markdown säilyy ilman sisäkkäistä H1:tä
+  tai duplikoitua `## Description` -otsikkoa. Vieraat `description`-syötteet ja
+  GitHub-importit pysyvät vapaana tekstinä.
+- @release-bump-refresh-dogfood lisäsi engine-owned release-bumpiin eristetyn
+  hookin, joka generoi ja tarkistaa kaikki yhdeksän seurattua Claude-, pi- ja
+  Codex-kopiota tuoreella bumpatulla binäärillä ennen release-commitin
+  sinetöintiä.
+- Integroitu täysi green gate meni läpi ennen julkaisua ja uudelleen
+  release-ankkurin päällä. v0.18.1 toimitettiin ja tarkistettiin kaikissa
+  kanavissa; julkaisu jatkettiin oikealla disposablella cargo-dist-versiolla,
+  eikä pysyvää unmanaged-asennusta jätetty.
 
-**Release-havainto:** ensimmäinen cut pysähtyi ennen publishia, koska paikallinen
-`dist` puuttui. Sama journaloitu run jatkettiin checksum-verifioidulla, disposablella
-cargo-dist 0.28.2:lla (täsmää `dist-workspace.toml`:iin); molemmat cratet julkaistiin,
-tag laukaistiin kerran ja kaikki neljä kohdetta verifioituivat. Pysyvää unmanaged
-cargo-dist-asennusta ei jätetty. Homebase-konvergenssi päivitti issuectl:n, mutta sen
-pitkä ajo päättyi transienttiin `macos-defaults`-timeoutiin; tuore `homebase fleet
-status` näyttää kaikki tuetut unitit vihreinä. Release-bumpin jälkeen kuusi seurattua
-dogfood-kopiota päivitettiin erillisessä housekeeping-commitissa v0.17.1:een.
+**Rupeaman jälkeinen v0.18.2:** rinnakkainen työ päivitti cargo-distin 0.32.0:aan
+ja muutti bundled `/issue-intake` -ohjeen käyttämään nykyistä Taskfleet-nimeä.
+Molemmat muutokset julkaistiin v0.18.2:ssa. `orchestratectl`-binääri on poistunut
+koneelta ja nykyinen ajonhallintapinta on `taskfleet`; sen legacy-home-varoitus on
+tunnettu migraatiomuistutus, ei tämän repon avoin työ.
 
-**Seuraavan stintin valmisteltu intentio:** tee molemmat hyväksytyt follow-upit;
-ajantasainen järjestys ja rinnakkaisuus luetaan aina `issuectl dag --json --reservations
-'[]'` -pinnalta. @json-export-import-headings korjaa issuectl:n oman JSON
-export→import-round-tripin rakenteellisen otsikkoduplikaation. @release-bump-refresh-dogfood
-automatisoi kuuden repossa seurattavan agenttiohjekopion versionpäivityksen engine-owned
-release-bumpiin eristetyssä ympäristössä, jotta release-commit on heti testivihreä.
+**Seuraavan stintin valmisteltu intentio:** tarkoituksella tyhjä. Live-aikataulu
+ja avoimien issueiden lista ovat tyhjiä. Älä keksi uutta toteutuskierrosta ilman
+uutta hyväksyttyä tuotetarvetta.
 
-**Operatiivinen siivous:** kahden epäonnistuneen mutta lopullisella toteutuksella
-syrjäytetyn create-body-reviewn säilytetyt työtilat ovat vielä levyllä
-(runit `01m1g9865gsc5kjrq3f91rzc2m` ja `01m1gc62273xn52kzkgtpd1p73`). Ne eivät omista
-aktiivista työtä eikä niitä saa pelastaa tai mergeätä; poista ne vain tarkoituksellisessa,
-ihmisen valvomassa cleanupissa, kun lopullisen v0.17.1-toteutuksen säilyminen on vielä
-varmistettu.
+**Operatiivinen siivous:** kahden jo syrjäytetyn create-body-reviewn säilytetyt
+legacy-työtilat ovat edelleen levyllä (runit `01m1g9865gsc5kjrq3f91rzc2m` ja
+`01m1gc62273xn52kzkgtpd1p73`). Ne eivät omista aktiivista työtä eikä niitä saa
+pelastaa tai mergeätä; poista ne vain tarkoituksellisessa, ihmisen valvomassa
+cleanupissa.
 
 <details>
 <summary>Edellinen handoff (2026-08-20)</summary>
