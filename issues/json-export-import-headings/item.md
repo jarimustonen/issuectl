@@ -5,7 +5,7 @@ type: bug
 status: fixed
 priority: normal
 provenance: ai-review
-source_ref: orchestratectl:01m1gc62273xn52kzkgtpd1p73/review-finding:sha1:a4c841fb4444af33cd2a67a4effce804ba6e6854
+source_ref: taskfleet:01m1gc62273xn52kzkgtpd1p73/review-finding:sha1:a4c841fb4444af33cd2a67a4effce804ba6e6854
 review_source: ai-review
 originating_run: 01m1gc62273xn52kzkgtpd1p73
 originating_run_kind: spinoff

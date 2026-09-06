@@ -1609,7 +1609,7 @@ pub(crate) enum ExtendedCommand {
     /// carries `schema_version`). Optionally pass `--reservations` so
     /// spawnability accounts for the lane/collision tokens an orchestrator's
     /// in-flight runs already hold; issuectl never reads that from
-    /// orchestratectl itself.
+    /// Taskfleet itself.
     Dag {
         /// Caller-supplied live run reservations, as JSON. Accepts a file
         /// path, `-` for stdin, or an inline JSON string. Shapes:

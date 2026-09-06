@@ -25,7 +25,7 @@ Taskfleet ADR 0002 E1 owner map: https://github.com/jarimustonen/taskfleet/blob/
 - Change the canonical issue-intake skill and prompt templates from the old product/command prerequisite to canonical `taskfleet` wording.
 - Regenerate/synchronize `.claude`, `.pi`, and `.codex` dogfood copies through issuectl's supported generation path; do not hand-fork generated files.
 - Update exact template/hash/snapshot tests and documentation that represents current prerequisites.
-- Preserve old `tool:"orchestratectl"` compatibility corpus, immutable history, stable `OCTL_*`, and the telemetry contract id where they are intentional fixtures/protocol.
+- Preserve predecessor compatibility fixtures and protocol identifiers where intentional. This bounded compatibility strategy was later superseded by the repository-wide clean break.
 - Run the repository's full green gate and follow its normal release cadence so downstream repositories can refresh from an available canonical template.
 
 ## Acceptance Criteria

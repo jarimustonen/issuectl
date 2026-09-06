@@ -24,7 +24,7 @@ edelleen koodissa (`WriteLock::acquire` jokaisen mutaation alussa), mutta nyt te
 Vasta jos tuleva refaktorointi vahingossa siirtää kirjoituksen lukon ulkopuolelle.
 
 ## Miten se näkyy
-Rinnakkaiset `issuectl`-mutaatiot (useampi agentti / esim. orchestratectl-worktreet samaan
+Rinnakkaiset `issuectl`-mutaatiot (useampi agentti / esim. taskfleet-worktreet samaan
 repoon) voisivat revitä toisensa päälle ilman että mikään testi huomaa regressiota.
 
 ## Miksi sillä on väliä

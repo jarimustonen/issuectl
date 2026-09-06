@@ -6,7 +6,7 @@ status: done
 priority: normal
 provenance: other
 provenance_detail: Orchestrated repository maintenance
-source_ref: orchestratectl:01m1kqhkep6x7ymm5s1z9vmnze/task:cargo-dist-0.32.0
+source_ref: taskfleet:01m1kqhkep6x7ymm5s1z9vmnze/task:cargo-dist-0.32.0
 originating_run: 01m1kqhkep6x7ymm5s1z9vmnze
 originating_run_kind: spinoff
 closed: 2026-09-03

@@ -6,7 +6,7 @@ reporter: jari
 status: wontfix
 priority: normal
 provenance: agent:homebase-wrapup
-source_ref: agent:homebase-wrapup/reporter:jari/id:orchestratectl-stint8-issuectl-update-blocked-by-json
+source_ref: agent:homebase-wrapup/reporter:jari/id:taskfleet-stint8-issuectl-update-blocked-by-json
 closed: 2026-08-22
 disposition_note: blocked_by persists correctly and its canonical value is read through show or dag; the conditional update echo contract covers lane, lane_seq, and collision. The wording clarification has been folded into intake-bug-issuectl-71ea534241c2.
 disposition_reason: by-design
@@ -22,7 +22,7 @@ update JSON omits persisted blocked_by after add-blocked-by
 
 With issuectl 0.17.0, a positional update that explicitly requested a DAG dependency persisted the dependency but did not echo the persisted value in the JSON response as documented.
 
-This occurred twice in the orchestratectl repository on 2026-08-22:
+This occurred twice in the taskfleet repository on 2026-08-22:
 
 ```sh
 issuectl --json update add-configurable-agent \

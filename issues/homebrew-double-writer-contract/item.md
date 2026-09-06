@@ -110,7 +110,7 @@ Fleet context and the full per-repo audit:
 
 ## Target state: the fleet ships uniformly
 
-All four public fleet repos (`issuectl`, `glasspad`, `orchestratectl`, `project-canon`)
+All four public fleet repos (`issuectl`, `glasspad`, `taskfleet`, `project-canon`)
 should end up with the same declared shape, since all four already carry
 `publish-jobs = ["homebrew"]` and their own `publish-crates.yml`:
 

@@ -27,7 +27,7 @@ But there is no way to set it:
   `--lane` and `--lane-seq` among the scheduling fields).
 - `issuectl set <slug> collision <path>` — rejected, because `set` routes non-built-in keys
   through `custom_fields` and `collision` is not schema-declared in `.issuectl/.schema.yaml`.
-- No issue in the orchestratectl repo uses the field (`grep -rl '^collision:' issues/*/item.md`
+- No issue in the taskfleet repo uses the field (`grep -rl '^collision:' issues/*/item.md`
   returns nothing), so it appears to be documented-but-never-shipped.
 
 ## Expected
@@ -42,7 +42,7 @@ mechanism for an issue that touches a *second* lane's hot files — a spawn-time
 marker. It is the difference between "these two lanes are parallel-safe" and "these two look
 parallel but will collide".
 
-Concretely, in orchestratectl today: `add-configurable-agent` is laned `surface` (config
+Concretely, in taskfleet today: `add-configurable-agent` is laned `surface` (config
 surface) but also touches `harness::select` and the run-create path, which is `lifecycle`
 territory. That is exactly a `collision:` case, and running the two in parallel is the shape
 that has broken integrated `main` twice in that repo. With no way to set the field, the

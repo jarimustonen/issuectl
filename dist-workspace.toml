@@ -40,7 +40,7 @@ targets = [
 ]
 # NOTE: no `x86_64-apple-darwin`. The macOS build runs on a self-hosted macOS ARM64
 # runner (below), which uses Homebrew Rust (no rustup) and so cannot cross-compile
-# the Intel-mac target — same constraint, same choice as orchestratectl. Apple
+# the Intel-mac target — the same constraint and choice as Taskfleet. Apple
 # silicon is covered natively; Intel-mac users install via `cargo install issuectl`.
 # Where to host releases.
 hosting = "github"

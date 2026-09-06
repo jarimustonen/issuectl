@@ -6,7 +6,7 @@ status: done
 priority: normal
 provenance: other
 provenance_detail: fleet product migration
-source_ref: orchestratectl:01m0qg3nqzb6m7vqd5ac001bdm/task:shipshape-product-migration
+source_ref: taskfleet:01m0qg3nqzb6m7vqd5ac001bdm/task:shipshape-product-migration
 originating_run: 01m0qg3nqzb6m7vqd5ac001bdm
 originating_run_kind: spinoff
 closed: 2026-09-02

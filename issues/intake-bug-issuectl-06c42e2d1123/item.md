@@ -55,6 +55,6 @@ moving on, when in fact eight issues were missing a required field.
 
 ## Environment
 
-Repo: orchestratectl (~/Sources/orchestratectl), 2026-08-16.
+Repo: taskfleet (~/Sources/taskfleet), 2026-08-16.
 Reproduced simply by running `issuectl doctor --fix` then `issuectl doctor` in a
 repo with more than one class of unfixable finding.

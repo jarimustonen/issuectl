@@ -49,6 +49,6 @@ remaining actionable scope is the three papercuts under **Open**.
 
 ## Comments
 
-Environment: installed `issuectl` (deutschpad has `.issuectl/`), `orchestratectl 0.1.0` era.
+Environment: installed `issuectl` (deutschpad has `.issuectl/`), `taskfleet 0.1.0` era.
 Discoverability/UX only; low severity. Trimmed 2026-07-31 after v0.6.5 shipped the overlap
 (items #1 + #4); #2/#3/#5 remain.

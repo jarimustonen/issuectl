@@ -44,7 +44,7 @@ and `0.2.0`:
 gh_account: "jarimustonen".to_string(),
 repo_root:  "~/Sources".to_string(),
 const DEFAULT_FAMILY_TOOLS: [&str; 7] = [
-    "issuectl", "orchestratectl", "crmctl", "tilictl", "ossctl", "intakectl", "glasspad",
+    "issuectl", "taskfleet", "crmctl", "tilictl", "ossctl", "intakectl", "glasspad",
 ];
 ```
 

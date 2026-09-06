@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Maintained source, tests, documentation, issue records, and generated surfaces
+  now use Taskfleet exclusively for the task-runner identity, with a repository
+  guard preventing retired names and environment prefixes from returning.
+
 ### Fixed
 <!-- oss-changelog:unreleased-end -->
 

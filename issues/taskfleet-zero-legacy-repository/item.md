@@ -23,8 +23,8 @@ Do not mutate the installed issuectl, deploy machines, publish a release, or edi
 
 ## Acceptance Criteria
 
-- [ ] Case-insensitive tracked path/content scans find zero retired product, command, environment-prefix, package, protocol, or repository identities.
-- [ ] Canonical generator templates and all dogfood copies are byte/hash coherent.
-- [ ] A disposable fresh init/install exercise emits Taskfleet-only skills and leaves no residue.
-- [ ] Full repository gate passes.
-- [ ] The change is ready for a normal issuectl release and Homebase deployment by the conductor.
+- [x] Case-insensitive tracked path/content scans find zero retired product, command, environment-prefix, package, protocol, or repository identities.
+- [x] Canonical generator templates and all dogfood copies are byte/hash coherent.
+- [x] A disposable fresh init/install exercise emits Taskfleet-only skills and leaves no residue.
+- [x] Full repository gate passes.
+- [x] The change is ready for a normal issuectl release and Homebase deployment by the conductor.

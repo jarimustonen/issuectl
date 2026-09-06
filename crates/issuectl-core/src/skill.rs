@@ -891,7 +891,7 @@ fn install_rendered_file(
 // gates are `symlink_metadata`-then-act (check-then-use): they fully close the
 // documented threat — a symlink planted BEFORE issuectl runs (a user footgun or
 // a sibling tool's leftover), plus the cross-process advisory flock that
-// serializes cooperating issuectl/orchestratectl processes. They do NOT close a
+// serializes cooperating issuectl and Taskfleet processes. They do NOT close a
 // TOCTOU race against a *hostile* process that swaps a real dir for a symlink in
 // the window between the check and the destructive syscall, nor a `--force`
 // overwrite through a hard link; a same-UID adversary racing us on the corpus
@@ -900,8 +900,8 @@ fn install_rendered_file(
 // `renameat`) — tracked in `pi-corpus-fd-relative-hardening`.
 
 /// The provenance-manifest filename at the root of the pi corpus. Namespaced
-/// by tool so the sibling `orchestratectl` corpus writer keeps its own manifest
-/// and neither prunes the other's entries.
+/// by tool so the sibling Taskfleet corpus writer keeps its own manifest and
+/// neither prunes the other's entries.
 pub const PI_MANIFEST_FILE: &str = ".issuectl-manifest.json";
 
 /// Current on-disk schema version of [`PiManifest`].
@@ -1749,6 +1749,54 @@ mod tests {
         }
     }
 
+    /// Maintained repository paths and content must use only the canonical
+    /// Taskfleet identity. Build the retired tokens from fragments so this
+    /// guard does not itself preserve them in source or generated artifacts.
+    #[test]
+    fn tracked_repository_has_no_retired_task_runner_identity() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        if !repo_root.join(".git").exists() {
+            return; // packaged/standalone crate — no tracked repository corpus
+        }
+
+        let output = std::process::Command::new("git")
+            .args(["-C", repo_root.to_str().unwrap(), "ls-files", "-z"])
+            .output()
+            .expect("run git ls-files");
+        assert!(output.status.success(), "git ls-files must succeed");
+
+        let retired = [
+            ["orchestrate", "ctl"].concat().to_ascii_lowercase(),
+            ["o", "ctl_"].concat().to_ascii_lowercase(),
+        ];
+        for relative in output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|p| !p.is_empty())
+        {
+            let relative = String::from_utf8(relative.to_vec()).expect("tracked path is UTF-8");
+            let path_text = relative.to_ascii_lowercase();
+            for token in &retired {
+                assert!(
+                    !path_text.contains(token),
+                    "tracked path contains a retired task-runner identity: {relative}"
+                );
+            }
+
+            let path = repo_root.join(&relative);
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue; // e.g. a platform-specific broken symlink
+            };
+            let content = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+            for token in &retired {
+                assert!(
+                    !content.contains(token),
+                    "tracked file contains a retired task-runner identity: {relative}"
+                );
+            }
+        }
+    }
+
     /// Content guard for the standalone intake skills. `/issue-new` and
     /// `/issue-intake` are binary-shipped via [`IntakeSkill`] in both agent
     /// formats (a Claude skill and a Codex prompt) —
@@ -1826,10 +1874,6 @@ mod tests {
         assert!(
             issue_intake.contains("`taskfleet`"),
             "issue-intake must name taskfleet as the analysis worker prerequisite"
-        );
-        assert!(
-            !issue_intake.contains("additionally needs `orchestratectl`"),
-            "issue-intake must not advertise the retired orchestratectl prerequisite"
         );
         assert!(
             issue_intake.contains("## Triage analysis"),
@@ -3158,7 +3202,7 @@ mod tests {
         assert!(load_pi_manifest(pi.path()).skills.is_empty());
         std::fs::write(
             pi.path().join(PI_MANIFEST_FILE),
-            r#"{"manifest_version":1,"tool":"orchestratectl","skills":{"x":{"version":"1"}}}"#,
+            r#"{"manifest_version":1,"tool":"another-tool","skills":{"x":{"version":"1"}}}"#,
         )
         .unwrap();
         assert!(

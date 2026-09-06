@@ -8,7 +8,7 @@ closed: 2026-08-12
 closed_by: jari
 ---
 
-# issuectl --json create emits a FLAT object, not a {data:…} envelope (inconsistent with ls/update + orchestratectl)
+# issuectl --json create emits a FLAT object, not a {data:…} envelope (inconsistent with ls/update + taskfleet)
 
 ## Description
 
@@ -30,7 +30,7 @@ closed_by: jari
 
 **Expected** — the same `{schema_version, data:{…}}` envelope that the other
 `--json` subcommands use. `issuectl --json ls` and `issuectl --json update`
-return `{data: […]}` / `{data:{…}}`, and every `orchestratectl --json`/`--output
+return `{data: […]}` / `{data:{…}}`, and every `taskfleet --json`/`--output
 jsonl` command wraps its payload in `data`. So a caller that does
 `json.load(...)['data']['slug']` — the natural pattern learned from every other
 command — gets a `KeyError: 'data'` from `create` only.
@@ -43,7 +43,7 @@ until a script hits it.
 
 ## Fix options
 - (preferred) Wrap `create`'s `--json` output in `{schema_version, data:{…}}` to
-  match `ls`/`update`/`orchestratectl`. This is the consistency fix.
+  match `ls`/`update`/`taskfleet`. This is the consistency fix.
 - OR, if the flat shape is intentional/load-bearing, document it explicitly in
   `--json`'s help and AGENTS.md so callers know `create` is the exception.
 
@@ -53,4 +53,4 @@ Found 2026-08-12 in the 3dbear-monorepo `/stint` flow.
 
 ### 2026-08-12T15:09:48Z · @jari
 
-Wontfix: issuectl's --json create contract is INTENTIONALLY a flat object (per AGENTS.md), not orchestratectl's {data:…} envelope. Reporter (parallel session) conflated the two family contracts. No change.
+Wontfix: issuectl's --json create contract is INTENTIONALLY a flat object (per AGENTS.md), not taskfleet's {data:…} envelope. Reporter (parallel session) conflated the two family contracts. No change.

@@ -12,7 +12,7 @@ commits:
 - hash: 7b7c252
   summary: strengthen parser stack regression after review
 closed: 2026-08-23
-closed_by: orchestratectl:01m0qyqxgddx9wc05ha92vyp38
+closed_by: taskfleet:01m0qyqxgddx9wc05ha92vyp38
 ---
 
 # Linux CI stack-overflows parsing apply help example
@@ -52,6 +52,6 @@ A container comparison pins the regression to `a3119e6` (`feat: deprecate triage
 
 ## Resolution
 
-### 2026-08-23T19:01:20Z · @orchestratectl:01m0qyqxgddx9wc05ha92vyp38
+### 2026-08-23T19:01:20Z · @taskfleet:01m0qyqxgddx9wc05ha92vyp38
 
 Split the generated clap command tree into flattened boxed groups, added a two-MiB construction and wide-parse regression, and passed the full green gate plus multi-model review.

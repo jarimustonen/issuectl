@@ -24,7 +24,7 @@ issuectl is a public OSS project and must carry zero references to the
 maintainer's personal machine fleet or private repos. A sweep of the working
 tree found five such references. None of them leak into the templates that
 `issuectl skill install` writes into *other people's* repos (those were checked
-and reference only shared CLIs — `/worktree-bug-analysis` is orchestratectl's
+and reference only shared CLIs — `/worktree-bug-analysis` is taskfleet's
 bundled skill, a legitimate cross-CLI dependency), so this is contained to the
 repo's own source and docs.
 

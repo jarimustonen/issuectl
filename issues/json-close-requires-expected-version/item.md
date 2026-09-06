@@ -16,7 +16,7 @@ _Source: cli: close/update --json_
 
 `issuectl --json close <slug> --status <status>` fails with `--expected-version is required with --json`, while the non-JSON `issuectl close <slug> --status <status>` succeeds with no version token. The `--json` flag — which a caller reasonably expects to change only the OUTPUT FORMAT — silently changes the REQUIRED-ARGUMENT surface, so automated/agent callers that add `--json` for machine-readable output get a hard non-zero failure until they also fetch and pass `--expected-version`.
 
-## Observed (issuectl, orchestratectl repo, 2026-07-25)
+## Observed (issuectl, taskfleet repo, 2026-07-25)
 ```
 $ issuectl --json close reducer-adopt-explicit-merge --status fixed
 {

@@ -35,9 +35,9 @@ provenance: agent-homebase-wrapup
 
 Retire the deferred label; doctor must flag residual uses
 
-Decision (Jari, 2026-08-17, orchestratectl stint-5 wrap-up): the `deferred` label is RETIRED.
+Decision (Jari, 2026-08-17, taskfleet stint-5 wrap-up): the `deferred` label is RETIRED.
 
-Background: `issuectl dag` surfaced a `deferred`-labelled issue as a lane head (orchestratectl's `config-show-layered-view`, label set 2026-08-16, stale by the time it scheduled). The old markdown-DAG convention excluded `deferred` from the active set; `issuectl dag` has no such exclusion. Rather than teach `dag` the label, the label goes away — under the no-backlog model (ADR 0010) an open issue is laned or untriaged-transient, and "deferred" is expressed by lane position / blocked_by, not a label.
+Background: `issuectl dag` surfaced a `deferred`-labelled issue as a lane head (taskfleet's `config-show-layered-view`, label set 2026-08-16, stale by the time it scheduled). The old markdown-DAG convention excluded `deferred` from the active set; `issuectl dag` has no such exclusion. Rather than teach `dag` the label, the label goes away — under the no-backlog model (ADR 0010) an open issue is laned or untriaged-transient, and "deferred" is expressed by lane position / blocked_by, not a label.
 
 Expected:
 - `issuectl doctor` flags any issue still carrying the `deferred` label (residual from the retired convention) and suggests removing it — ideally as a `--fix`-able check.

@@ -40,7 +40,7 @@ huomiota odottavia tai jatkettavia ajoja.
 
 **Rupeaman jälkeinen v0.18.2:** rinnakkainen työ päivitti cargo-distin 0.32.0:aan
 ja muutti bundled `/issue-intake` -ohjeen käyttämään nykyistä Taskfleet-nimeä.
-Molemmat muutokset julkaistiin v0.18.2:ssa. `orchestratectl`-binääri on poistunut
+Molemmat muutokset julkaistiin v0.18.2:ssa. Edeltäjäbinääri on poistunut
 koneelta ja nykyinen ajonhallintapinta on `taskfleet`; sen legacy-home-varoitus on
 tunnettu migraatiomuistutus, ei tämän repon avoin työ.
 

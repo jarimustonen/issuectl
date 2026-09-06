@@ -21,7 +21,7 @@ The changelog is trailer-driven: `issuectl changelog <range>` compiles release n
 Discovered during the 2026-08-14 stint when the DAG drained and the release step found the [Unreleased] section empty and the trailer compile near-empty.
 
 Fix options (pick during design):
-1. Auto-inject `Fixes-Issue: <slug>` when a run/worktree closes an issue (orchestratectl `run merge` and/or `issuectl close --commit` could stamp the trailer into the landing commit), so the changelog compiles correctly with zero human discipline.
+1. Auto-inject `Fixes-Issue: <slug>` when a run/worktree closes an issue (taskfleet `run merge` and/or `issuectl close --commit` could stamp the trailer into the landing commit), so the changelog compiles correctly with zero human discipline.
 2. A commit-msg hook that maps a branch/issue context to a trailer.
 3. Document the trailer convention in CONTRIBUTING and rely on committers (weakest — this round shows agents don't add them).
 

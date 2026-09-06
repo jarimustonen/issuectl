@@ -16,7 +16,7 @@ home-global pi.dev corpus `~/.pi/agent/skills/<name>/SKILL.md` (see
 repo-local Claude/Codex targets, these pi copies are **global and unmanaged**:
 nothing tracks, verifies, or removes them. This is a deliberate scope cut for
 the initial dual-home landing; the follow-up lifecycle work is captured here.
-The sibling binary `orchestratectl` filed an identically-scoped issue of the
+The sibling binary `taskfleet` filed an identically-scoped issue of the
 same name.
 
 ## Problems to address (surfaced by the /llm-review panel on the dual-home diff)
@@ -40,7 +40,7 @@ same name.
 
 - Add out-of-band provenance to pi copies (a marker or a manifest under
   `~/.pi/agent/skills/`) so prune/drift can distinguish issuectl-owned entries
-  from hand-authored ones — the same mechanism orchestratectl needs.
+  from hand-authored ones — the same mechanism taskfleet needs.
 - `issuectl doctor` (or a dedicated `skill pi-status` / `skill pi-prune`):
   detect version drift vs the running binary, list orphans, offer `--fix`.
 - Decide the reconciliation policy: overwrite-only-if-newer vs. always-on-force.

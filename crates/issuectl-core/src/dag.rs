@@ -6,7 +6,7 @@
 //! head-of-line, and spawnability. issuectl stays orchestrator-agnostic:
 //! the one signal it cannot know alone (which lane/collision tokens an
 //! in-flight run currently holds) is supplied by the caller as
-//! [`Reservations`], never read out of orchestratectl.
+//! [`Reservations`], never read out of Taskfleet.
 //!
 //! ## Model
 //!

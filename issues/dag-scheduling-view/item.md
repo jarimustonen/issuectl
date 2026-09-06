@@ -26,7 +26,7 @@ closed_by: agent-dag
 Recommendation from a homebase research report (`agent-dag-tool-placement`, 2026-08-09): the
 per-project agent execution-DAG (today a hand-maintained markdown block in each repo's
 `TODO.md`, driven by the `/stint-*` skills) should live **mostly in issuectl**, not in a new
-tool and not in orchestratectl.
+tool and not in taskfleet.
 
 ## Why issuectl
 issuectl already owns the DAG's edges: `blocked_by` is a first-class field, `depend
@@ -42,10 +42,10 @@ edge" validation. The markdown block has been re-implementing what issuectl alre
    `blocked_by` with live status. Computes head-of-line **on read** (never stores status —
    status stays issuectl's, the plan is lanes+deps). `--json` for agents.
 3. **Spawnability is computed-on-read, not stored.** The one thing issuectl cannot know alone
-   is *live run reservations* (which lane/collision files an in-flight orchestratectl run holds).
+   is *live run reservations* (which lane/collision files an in-flight taskfleet run holds).
    Design the `dag` view so that signal can be supplied (e.g. an optional `--reservations
    <file|json>` the caller passes, or a documented hook) rather than issuectl reaching into
-   orchestratectl. Keep issuectl orchestrator-agnostic.
+   taskfleet. Keep issuectl orchestrator-agnostic.
 
 ## Acceptance
 - `lane` + `collision` fields in the schema, round-tripped, `doctor`-validated.
@@ -103,7 +103,7 @@ shapes (flexible, all unioned into one reserved-token set):
 - `{"lanes": ["schema"], "collision": ["crates/.../schema.rs"]}`
 - `[{"run_id":"…","lane":"schema","collision":["…"]}, …]`
 An issue is `reserved` when its lane ∈ reserved ∨ any of its collision ∈ reserved. issuectl
-never reads orchestratectl state — the caller passes this in.
+never reads taskfleet state — the caller passes this in.
 
 #### `--json` shape
 { "schema_version": 1, "reservations_applied": bool,

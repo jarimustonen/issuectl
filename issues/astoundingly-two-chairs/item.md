@@ -5,8 +5,8 @@ type: feature
 status: done
 priority: normal
 provenance: other
-provenance_detail: orchestratectl implementation task
-source_ref: orchestratectl:01m1khdx02st05xkbaf2xqy475/task:canon-s15-skill-targets
+provenance_detail: taskfleet implementation task
+source_ref: taskfleet:01m1khdx02st05xkbaf2xqy475/task:canon-s15-skill-targets
 originating_run: 01m1khdx02st05xkbaf2xqy475
 originating_run_kind: spinoff
 commits:

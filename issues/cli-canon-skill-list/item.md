@@ -28,6 +28,6 @@ re-verification 2026-08-16. Canon: `AGENTS-AI-FIRST-CLI.md`. This is a **fix** i
 **Gap (§15) — `skill install`/`print` exist but no `skill list`.**
 
 **Do:** add `skill list` (enumerate the companion skills the CLI can install), completing the
-`list/install/print` triad to match ossctl/orchestratectl.
+`list/install/print` triad to match ossctl/taskfleet.
 
 **Current state (evidence):** `skill install`/`print` exist, no `skill list`.
