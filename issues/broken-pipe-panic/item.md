@@ -1,15 +1,17 @@
 ---
 created: 2026-09-06
-updated: 2026-09-06
+updated: 2026-09-07
 type: bug
 reporter: jari
-status: untriaged
+status: open
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:homebase-wrapup-20260906-issuectl-broken-pipe
+lane: cli-output
+collision: [crates/issuectl/src/cmd/mod.rs]
 ---
 
-# Handle closed stdout without panicking
+# Handle broken pipe without panicking
 
 ## Description
 
