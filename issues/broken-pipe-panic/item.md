@@ -3,7 +3,7 @@ created: 2026-09-06
 updated: 2026-09-08
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:homebase-wrapup-20260906-issuectl-broken-pipe
@@ -16,6 +16,7 @@ commits:
   summary: finish commands after broken output pipes
 - hash: 2a16891974f3d478f9e0af05621c6ef09a0f12d6
   summary: harden broken pipe regression coverage
+closed: 2026-09-08
 ---
 
 # Handle broken pipe without panicking
