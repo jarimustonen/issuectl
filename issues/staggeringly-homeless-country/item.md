@@ -27,6 +27,8 @@ commits:
   summary: harden generated intake settlement and layout guidance
 - hash: 706cfaf063a338c8ecac3d651d7969ee82609ece
   summary: cover aggregate wait failures in intake contract
+- hash: 752d00f8132ceaaf639945fb7c346f0f49449375
+  summary: record multi-model review and assessed follow-up
 ---
 
 # Generated skill contracts drift from current Taskfleet and issue layout
