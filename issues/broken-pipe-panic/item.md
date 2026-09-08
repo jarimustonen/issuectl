@@ -12,6 +12,10 @@ collision: [crates/issuectl/src/cmd/mod.rs]
 commits:
 - hash: 5f10defe95004d6ceaf3a0b23d83a6640c1d103e
   summary: handle broken stdout pipes gracefully
+- hash: 37ad1fc0d1406e4fad238446eeb2b9e267cefc50
+  summary: finish commands after broken output pipes
+- hash: 2a16891974f3d478f9e0af05621c6ef09a0f12d6
+  summary: harden broken pipe regression coverage
 ---
 
 # Handle broken pipe without panicking
