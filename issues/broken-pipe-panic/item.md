@@ -1,14 +1,17 @@
 ---
 created: 2026-09-06
-updated: 2026-09-07
+updated: 2026-09-08
 type: bug
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:homebase-wrapup-20260906-issuectl-broken-pipe
 lane: cli-output
 collision: [crates/issuectl/src/cmd/mod.rs]
+commits:
+- hash: 5f10defe95004d6ceaf3a0b23d83a6640c1d103e
+  summary: handle broken stdout pipes gracefully
 ---
 
 # Handle broken pipe without panicking
