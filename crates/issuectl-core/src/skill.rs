@@ -1900,7 +1900,10 @@ mod tests {
                 "issue-intake pre-spawn gate is missing contract: {required}"
             );
         }
-        let normalized_intake = issue_intake.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_intake = issue_intake
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         for required in [
             "Unclear non-bug",
             "(slug, run id)",
