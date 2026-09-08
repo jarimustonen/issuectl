@@ -64,7 +64,8 @@ fn emit_deprecation_warning(
 /// this final output seam makes the envelope impossible to omit accidentally.
 fn emit_stdout(value: String, newline: bool) {
     use std::io::Write;
-    if JSON_OUTPUT.load(std::sync::atomic::Ordering::Relaxed) {
+
+    let result = if JSON_OUTPUT.load(std::sync::atomic::Ordering::Relaxed) {
         // Text-mode renderers sometimes add a trailing `println!()` after a
         // JSON `print!()`. It is formatting only, never a second result.
         if value.is_empty() {
@@ -82,16 +83,26 @@ fn emit_stdout(value: String, newline: bool) {
             serde_json::to_string_pretty(&enveloped).expect("JSON envelope must serialize");
         let mut stdout = std::io::stdout().lock();
         let _ = newline;
-        writeln!(stdout, "{rendered}").expect("stdout must be writable");
-        stdout.flush().expect("stdout must be writable");
+        writeln!(stdout, "{rendered}").and_then(|()| stdout.flush())
     } else {
         let mut stdout = std::io::stdout().lock();
-        if newline {
-            writeln!(stdout, "{value}").expect("stdout must be writable");
+        let write_result = if newline {
+            writeln!(stdout, "{value}")
         } else {
-            write!(stdout, "{value}").expect("stdout must be writable");
+            write!(stdout, "{value}")
+        };
+        write_result.and_then(|()| stdout.flush())
+    };
+
+    match result {
+        Ok(()) => {}
+        // A downstream consumer may deliberately stop reading early (for
+        // example, `issuectl --json list | head`). That is successful
+        // pipeline termination, not an issuectl failure.
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+            std::process::exit(0);
         }
-        stdout.flush().expect("stdout must be writable");
+        Err(error) => panic!("stdout must be writable: {error}"),
     }
 }
 
