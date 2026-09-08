@@ -2,7 +2,7 @@
 created: 2026-09-08
 updated: 2026-09-08
 type: improvement
-status: untriaged
+status: duplicate
 priority: normal
 provenance: ai-review
 source_ref: taskfleet:01m2053akan8f49ac04s3vm67j/review-finding:taskfleet-triage-heading-contract
@@ -19,6 +19,7 @@ labels:
 - ai-review-model:gpt-5.6-sol
 - ai-review-model:claude-fable-5
 - ai-review-model:deepseek-v4-pro
+closed: 2026-09-08
 ---
 
 # Taskfleet bug analysis should emit canonical triage heading
@@ -38,3 +39,9 @@ A Taskfleet worker that chooses the alternative heading leaves issuectl's canoni
 ## Scope
 
 Update Taskfleet's bundled `/worktree-bug-analysis` contract and its generated copies/tests so completed issue enrichment uses the exact `## Triage analysis` heading. Coordinate the released contract before removing issuectl's caller-side compatibility handling. Do not change issuectl as part of this follow-up.
+
+## Resolution
+
+### 2026-09-08T10:55:04Z · @issuectl
+
+Transferred to Taskfleet as @canonical-triage-heading; no issuectl product change remains.
