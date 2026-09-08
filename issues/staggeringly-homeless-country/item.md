@@ -29,6 +29,14 @@ commits:
   summary: cover aggregate wait failures in intake contract
 - hash: 752d00f8132ceaaf639945fb7c346f0f49449375
   summary: record multi-model review and assessed follow-up
+- hash: 327bcbdcfe31ba263d4429c6e417726669833473
+  summary: align generated skills with Taskfleet 0.7.1 contracts after rebase
+- hash: 1ba966034ec912799bc23518fecd22a3486dbe66
+  summary: harden generated intake settlement and layout guidance after rebase
+- hash: 168b05406f4b11b5f6102d768511e3955cf966b4
+  summary: cover aggregate wait failures in intake contract after rebase
+- hash: 61e7bc6d4b663b5573c3dd5ea48a0a2e27c3d874
+  summary: record multi-model review and assessed follow-up after rebase
 ---
 
 # Generated skill contracts drift from current Taskfleet and issue layout

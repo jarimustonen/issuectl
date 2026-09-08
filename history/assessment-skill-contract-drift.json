@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source_review": "history/review-skill-contract-drift.md",
-  "head_sha": "706cfaf063a338c8ecac3d651d7969ee82609ece",
+  "head_sha": "168b05406f4b11b5f6102d768511e3955cf966b4",
   "generated_at": "2026-09-08T10:11:51Z",
   "findings": [
     {
