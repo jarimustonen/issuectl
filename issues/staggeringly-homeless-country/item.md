@@ -2,7 +2,7 @@
 created: 2026-09-08
 updated: 2026-09-08
 type: bug
-status: untriaged
+status: open
 priority: normal
 provenance: ai-review
 source_ref: taskfleet:01m1zhvjmbr2tp5xkcekwd2jar/review-finding:generated-skill-contract-drift
@@ -19,6 +19,7 @@ labels:
 - ai-review-model:gpt-5.6-sol
 - ai-review-model:claude-fable-5
 - ai-review-model:deepseek-v4-pro
+lane: skills
 ---
 
 # Generated skill contracts drift from current Taskfleet and issue layout
