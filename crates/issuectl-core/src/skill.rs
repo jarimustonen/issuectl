@@ -1885,6 +1885,47 @@ mod tests {
             "issue-intake must document that it replaces /triage-bugs"
         );
 
+        // Pin the Taskfleet 0.7.1 caller/callee boundary without coupling the
+        // test to the surrounding prose. Intake must route only bugs to the
+        // bug-only worker, wait for canonical settlement, consume landing and
+        // report projections, and acknowledge the callee's alternate heading.
+        for required in [
+            "Unclear non-bug",
+            "taskfleet run wait",
+            ".data.landed == true",
+            ".data.report",
+            "## Suspected Root Cause",
+        ] {
+            assert!(
+                issue_intake.contains(required),
+                "issue-intake is missing current workflow contract: {required}"
+            );
+        }
+        for stale in [
+            "git log --oneline",
+            "run-status is unreliable",
+            "intake-return",
+        ] {
+            assert!(
+                !issue_intake.contains(stale),
+                "issue-intake retains stale workflow guidance: {stale}"
+            );
+        }
+
+        let issue = read("issue");
+        assert!(
+            !issue.contains("issues/open/<slug>/item.md"),
+            "issue skill must not reconstruct the retired active-item path"
+        );
+        assert!(
+            issue.contains("active items use `issues/<slug>/item.md`"),
+            "issue skill must document the canonical flat active-item layout"
+        );
+        assert!(
+            issue.contains("unclear non-bugs are not sent to that worker"),
+            "issue skill must preserve the bug-only analysis boundary"
+        );
+
         // `/triage-bugs` is a THIN deprecation alias delegating to
         // `/issue-intake`; it must not reimplement any triage logic.
         let triage = read("triage-bugs");

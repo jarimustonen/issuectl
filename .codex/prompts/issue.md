@@ -705,9 +705,10 @@ issuectl intake reopen    <slug> [--to untriaged|open] --reason "…"  --json  #
 **Never file a reception item with plain `create`** — `create` fixes the creation
 status at `open`. Reception filing goes through `issuectl intake file`.
 
-The `/issue-intake` skill drives the developer/PM side (queue → drive
-`/worktree-bug-analysis` on unclear items → PO briefing → stop; the disposition
-is the user's).
+The `/issue-intake` skill drives the developer/PM side (queue → drive the
+bug-only `/worktree-bug-analysis` workflow on unclear bug items → PO briefing →
+stop; unclear non-bugs are not sent to that worker, and the disposition is the
+user's).
 
 ### Action: Render an agent context bundle
 
@@ -808,6 +809,8 @@ On `--fix`, the JSON envelope carries an `apply_outcome` object with a
 - **Epic linkage**: prefer the `epic:` frontmatter field, value is the parent epic's slug
 - **Closing statuses** also move the directory to `closed/`. Use `issuectl
   --json close` (or `update --status`) — never `git mv` by hand
-- For raw filesystem operations, `issues/open/<slug>/item.md` is the format;
-  but prefer the CLI for anything it supports
+- For raw filesystem operations, active items use `issues/<slug>/item.md`;
+  closed items may be under `issues/closed/` or the bucketed `issues/archive/`
+  layout. Prefer `.data.path` / `.data.dir` from the CLI instead of reconstructing
+  any path
 - **Always `--json`** when invoking `issuectl` from this skill

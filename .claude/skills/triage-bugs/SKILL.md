@@ -9,9 +9,9 @@ argument-hint: (deprecated — passes through to /issue-intake)
 This skill was **renamed to `/issue-intake`** when ad-hoc channel-labelled bug
 triage folded into the standard intake flow (`docs/design/intake-flow.md`).
 `/issue-intake` does the same job — read the intake queue, drive
-`/worktree-bug-analysis` on unclear items, brief the user in product-owner
-language, and stop — but against the first-class `untriaged` intake state and
-across **both** bug reports and feature requests, regardless of provenance.
+`/worktree-bug-analysis` on unclear **bug** items, brief the user in
+product-owner language, and stop — but against the first-class `untriaged`
+intake state and across both bug reports and non-bugs, regardless of provenance.
 
 This alias exists only for the deprecation window so old habits and `/stint` call
 sites don't break. It will be removed.
@@ -26,8 +26,8 @@ sites don't break. It will be removed.
    of its own beyond the notice and the hand-off.
 
 Do not reimplement any triage logic here. Everything — the queue read, the
-read-only analysis engine, the PO briefing, the "present then STOP" contract, the
-`<!-- intake-return -->` block — lives in `/issue-intake`.
+bug-only analysis engine, the PO briefing, and the "present then STOP" contract
+— lives in `/issue-intake`.
 
 ## Arguments
 
