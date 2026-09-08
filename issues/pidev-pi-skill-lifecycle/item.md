@@ -4,6 +4,7 @@ type: feature
 priority: normal
 status: done
 slug: pidev-pi-skill-lifecycle
+created: 2026-08-11
 updated: 2026-08-12
 closed: 2026-08-12
 ---
