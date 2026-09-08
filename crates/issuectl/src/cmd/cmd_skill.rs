@@ -409,16 +409,11 @@ pub(crate) fn cmd_completions(shell: ShellArg) -> Result<()> {
     use clap::CommandFactory;
     let mut cmd = Cli::command();
     let bin = "issuectl";
-    let mut output = Vec::new();
     clap_complete::generate(
         clap_complete::Shell::from(shell),
         &mut cmd,
         bin,
-        &mut output,
-    );
-    print!(
-        "{}",
-        String::from_utf8(output).context("completion output was not UTF-8")?
+        &mut std::io::stdout(),
     );
     Ok(())
 }

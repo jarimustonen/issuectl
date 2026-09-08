@@ -54,21 +54,32 @@ fn json_command_exits_successfully_when_stdout_consumer_closes_early() {
 
     // The peer is closed before spawn, so the command's first stdout write
     // deterministically encounters BrokenPipe instead of racing the parent.
-    let output = run_with_closed_stdout(repo.path(), &["--json", "config", "show"]);
+    let output = run_with_closed_stdout(repo.path(), &["--json", "dag"]);
 
     assert_silent_success(&output);
 }
 
 #[cfg(unix)]
 #[test]
-fn text_and_direct_writer_commands_also_tolerate_closed_stdout() {
+fn text_command_tolerates_closed_stdout_and_finishes_later_mutations() {
     let repo = fresh_repo();
+    std::fs::write(
+        repo.path().join("todo.rs"),
+        "// TODO(issue:) Replace this placeholder\n",
+    )
+    .expect("write TODO source");
 
-    assert_silent_success(&run_with_closed_stdout(repo.path(), &["config", "show"]));
-    assert_silent_success(&run_with_closed_stdout(
-        repo.path(),
-        &["completions", "bash"],
-    ));
+    // Text-mode scan-todos prints each hit before filing its intake item. A
+    // BrokenPipe must stop later rendering without aborting that mutation.
+    let output = run_with_closed_stdout(repo.path(), &["scan-todos", "--file-intake"]);
+    assert_silent_success(&output);
+
+    let filed_items = std::fs::read_dir(repo.path().join("issues"))
+        .expect("read issues directory")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().join("item.md").is_file())
+        .count();
+    assert_eq!(filed_items, 1, "intake filing must complete after EPIPE");
 }
 
 #[cfg(target_os = "linux")]
