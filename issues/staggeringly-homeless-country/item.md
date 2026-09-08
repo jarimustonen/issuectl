@@ -2,7 +2,7 @@
 created: 2026-09-08
 updated: 2026-09-08
 type: bug
-status: open
+status: in-progress
 priority: normal
 provenance: ai-review
 source_ref: taskfleet:01m1zhvjmbr2tp5xkcekwd2jar/review-finding:generated-skill-contract-drift
@@ -20,6 +20,9 @@ labels:
 - ai-review-model:claude-fable-5
 - ai-review-model:deepseek-v4-pro
 lane: skills
+commits:
+- hash: 62dc3ce5b7a644aa85507e7b9280cfcad1346f11
+  summary: align generated skills with Taskfleet 0.7.1 contracts
 ---
 
 # Generated skill contracts drift from current Taskfleet and issue layout
