@@ -14,36 +14,40 @@ säännöt → `AGENTS.md`.
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-09-08, rupeama 7:n toteutus valmis):** `main` on puhdas ja
-sisältää vielä pushaamattoman julkaisuaihion `origin/main`:n päällä. Taskfleetissä ei ole tähän repoon kuuluvia
-eläviä, huomiota odottavia tai jatkettavia ajoja. `issuectl dag --json
---reservations '[]'` on tyhjä, ja syvä `/triage-unlaned-issues`-tarkistus ei
-löydä avoimia non-epic-issueita DAGin ulkopuolelta.
+**Tila (2026-09-08, rupeama 8 valmis):** `main` on puhdas ja synkassa
+`origin/main`:n kanssa release-commitissa `34d52ff` (`v0.18.4`). Taskfleetissä
+ei ole tähän repoon kuuluvia eläviä, huomiota odottavia tai jatkettavia ajoja.
+Live-DAG on tyhjä, eikä seuraavalle rupeamalle ole valmisteltua toteutusagendaa.
+`issuectl archive --dry-run --json` ei löytänyt arkistoitavaa.
 
-**Rupeama 7:**
-- @broken-pipe-panic on korjattu ja suljettu. Suljettu stdout ei enää panikoi;
-  `BrokenPipe` käsitellään normaalina downstream-päätöksenä, komennon mahdollinen
-  mutaatio viedään loppuun ja muut kirjoitusvirheet säilyvät virheinä.
-  Prosessitason regressiotesti kattaa aikaisin sulkeutuvan kuluttajan.
-- @staggeringly-homeless-country on korjattu ja suljettu. Kaikki yhdeksän
-  toimitettua Claude-, pi- ja Codex-ohjetta käyttävät nykyistä issue-layoutia ja
-  Taskfleet 0.7.1:n `run wait` / `landed` / raportti -sopimusta; bugianalyysi on
-  rajattu yhteensopiviin issue-tyyppeihin ja käyttämätön stint-palautusblokki on
-  poistettu.
-- Molemmat workerit ajoivat omissa worktreeissään täyden green gaten sekä
-  `/llm-review` + `/assess-findings`, ja Taskfleet vahvisti molemmat landatuiksi.
-- Katselmuksen ainoa repo-rajan ylittävä jatko siirrettiin Taskfleetin intakeen
-  nimellä @canonical-triage-heading ja pushattiin sen mainiin. Issuectl-kopio
-  @tolerably-wet-summer suljettiin siirrettynä duplikaattina.
+**Rupeama 8 — integrointi ja julkaisu:**
+- Rupeaman 7 korjaukset (@broken-pipe-panic ja
+  @staggeringly-homeless-country) vietiin integroidun green gaten läpi. Ensimmäinen
+  ajo löysi yhden rustfmt-poikkeaman; erillinen worker korjasi sen mekaanisesti,
+  ajoi täyden green gaten ja landasi commitin `680a68d`. Orkestroija ajoi tämän
+  jälkeen koko gaten uudelleen yhdistetyllä mainilla: fmt, clippy `-D warnings`,
+  workspace-testit, build ja rustdoc olivat vihreitä.
+- Main pushattiin, ja Shipshape-plan
+  `478e1283cd13e48e76c2255fefea1fa89699c5f0452b33874ba8ef03ad420109`
+  leikkasi patch-julkaisun **v0.18.4** runilla
+  `01M20QXBK8V9BC9YETV35R3XME`. Enginen kaikki vaiheet bumpista
+  `advance-branch`iin valmistuivat onnistuneesti.
+- Julkaisu on varmistettu suoraan jokaisesta kanavasta: `issuectl` ja
+  `issuectl-core` ovat crates.io:ssa 0.18.4, GitHub Releasessa on odotetut 12
+  assetia, cargo-dist-workflow `34241619135` valmistui onnistuneesti ja
+  Homebrew-tap on 0.18.4.
+- Cut-preflight vaati repo-pinattua cargo-dist 0.32.0:aa koneella näkyneen 0.28.2:n
+  sijaan. Täsmäversio rakennettiin kertakäyttöiseen `/tmp`-prefixiin, cut ajettiin
+  sillä ja väliaikaiset binääri- sekä build-hakemistot poistettiin onnistuneen
+  verifioinnin jälkeen; koneen globaalia asennusta ei muutettu.
 
-**Julkaisu:** nykyinen live-release on edelleen **v0.18.3 kaikissa kanavissa**:
-crates.io 0.18.3, GitHub Releasessa 12 assetia ja Homebrew-tapissa 0.18.3.
-Rupeaman yhdistettyä mainia ei ole vielä ajettu orkestroijan integroidun green
-gaten läpi, pushattu eikä julkaistu. Seuraava stint aloittaa pull/reconcilella,
-ajaa AGENTS.md:n täyden green gaten yhdistetyllä mainilla ja, jos se on vihreä,
-pushaa mainin sekä tekee patch-julkaisun Shipshape plan→cut -polulla kaikkine
-pysyvine kanavakohtaisine backstop-tarkistuksineen. Tämä on operatiivinen
-viimeistely, ei uusi DAG-issue.
+**Tuotesuunta:** issuectl-repossa ei ole nyt hyväksyttyä avointa työtä. Seuraava
+rupeama ei saa keksiä toteutuslistaa tyhjästä: aloita intake-/lane-or-close-
+tilanteen tarkistuksella ja tee suunnittelupassi Jarin kanssa vain, jos uutta
+hyväksyttävää työtä on tullut. Katselmuksen repo-rajan ylittävä triage-otsikon
+jatko elää Taskfleetissä nimellä @canonical-triage-heading; issuectl-kopio
+@tolerably-wet-summer on suljettu siirrettynä duplikaattina eikä vaadi täällä
+toimia.
 
 **Operatiivinen siivous:** kahden jo syrjäytetyn create-body-reviewn legacy-
 työtilat ovat edelleen levyllä. Niiden vanhat runit
