@@ -23,6 +23,10 @@ lane: skills
 commits:
 - hash: 62dc3ce5b7a644aa85507e7b9280cfcad1346f11
   summary: align generated skills with Taskfleet 0.7.1 contracts
+- hash: 2e4a006f09e1e86ef3b86c29fe42aca6bb5ecbe1
+  summary: harden generated intake settlement and layout guidance
+- hash: 706cfaf063a338c8ecac3d651d7969ee82609ece
+  summary: cover aggregate wait failures in intake contract
 ---
 
 # Generated skill contracts drift from current Taskfleet and issue layout

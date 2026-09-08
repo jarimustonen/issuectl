@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "source_review": "history/review-skill-contract-drift.md",
+  "head_sha": "706cfaf063a338c8ecac3d651d7969ee82609ece",
+  "generated_at": "2026-09-08T10:11:51Z",
+  "findings": [
+    {
+      "id": "F1",
+      "cluster_key": "sha1:c43608e460def7fe162d06724199d339683e1294",
+      "title": "Alternative-heading analysis can respawn across invocations",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-skill-contract-drift.md",
+          "line": 12,
+          "section": "Critical Issues (Consensus)",
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl-core/templates/issue-intake-skill.md",
+      "target_symbol": "Step 2 pre-spawn analysis reuse",
+      "claim": "The current skill checks Taskfleet’s permitted alternative analysis heading only after spawning, allowing repeat workers on later invocations.",
+      "suggested_fix": "Move the alternate-heading check before classification and spawning.",
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The current Step 2 reuses both exact and parsed alternative analysis before classifying an unclear bug; the section-scoped regression assertion pins that ordering."
+    },
+    {
+      "id": "F2",
+      "cluster_key": "sha1:3b80f3eb3dfad160e2c693ef12286f5c1df4902e",
+      "title": "Settlement failure states are under-specified",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-skill-contract-drift.md",
+          "line": 19,
+          "section": "Critical Issues (Consensus)",
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl-core/templates/issue-intake-skill.md",
+      "target_symbol": "Step 3 Taskfleet settlement",
+      "claim": "The current skill can lose run correlation or diagnostics and lacks bounded recovery for partial, timed-out, malformed, or unreadable worker states.",
+      "suggested_fix": "Retain slug/run pairs and define bounded wait plus per-run fallback handling.",
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Step 3 now retains `(slug, run id)` pairs, checks supervisors, uses a two-hour wait, handles every wait exit class, and treats malformed reports or shows as incomplete."
+    },
+    {
+      "id": "F3",
+      "cluster_key": "sha1:d44b668fdcca63b249f68097c894c7ef5129ef2d",
+      "title": "Landing semantics treat every false value as unknown",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-skill-contract-drift.md",
+          "line": 26,
+          "section": "Critical Issues (Consensus)",
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl-core/templates/issue-intake-skill.md",
+      "target_symbol": "Step 3 landing interpretation",
+      "claim": "The current skill treats every `landed: false` as uncertain instead of distinguishing `unverified` from git-verified non-landing.",
+      "suggested_fix": "Scope uncertainty to `landed_method: unverified`.",
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The current text explicitly says unverified is unknown and git-verified `landed: false` is confirmed non-landing, matching Taskfleet 0.7.1."
+    },
+    {
+      "id": "F4",
+      "cluster_key": "sha1:5913ed4850605debd912d9a083ac5c9868bd86c9",
+      "title": "Close layout still implies legacy paths",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-skill-contract-drift.md",
+          "line": 33,
+          "section": "Critical Issues (Consensus)",
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl-core/templates/issue-skill.md",
+      "target_symbol": "Close and raw path guidance",
+      "claim": "The current skill says closing status changes move issues into legacy `issues/closed/` storage.",
+      "suggested_fix": "Document flat unarchived paths, separate archive movement, and explain the legacy-named output flag.",
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The current skill documents flat unarchived paths and bucketed archives, and explains that `moved_to_closed` signals a lifecycle transition rather than a flat-directory move."
+    },
+    {
+      "id": "F5",
+      "cluster_key": "sha1:7f0b5953c75b51aad51a304be6c8f10c7cbbe1f8",
+      "title": "Issuectl should recognize both analysis headings",
+      "kind": "DESIGN",
+      "sources": [
+        {
+          "file": "history/review-skill-contract-drift.md",
+          "line": 42,
+          "section": "Disputed or Incorrect Findings",
+          "model": null
+        }
+      ],
+      "target_file": null,
+      "target_symbol": "Analysis heading compatibility",
+      "claim": "Issuectl should broaden its exact analysis projection to recognize Taskfleet’s alternative heading in this patch.",
+      "suggested_fix": "Teach issuectl to project both headings.",
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The task is a shipped caller-contract alignment, and the current exact-heading projection remains intentional. The localized parsed-H2 caller compatibility path resolves this patch without redefining CLI output."
+    },
+    {
+      "id": "F6",
+      "cluster_key": "sha1:5521b516f905a61ee9bcb2c8749812f302c431f0",
+      "title": "Issuectl intake JSON paths are unwrapped",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-skill-contract-drift.md",
+          "line": 47,
+          "section": "Disputed or Incorrect Findings",
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl/src/cmd/intake.rs",
+      "target_symbol": "JSON output envelope",
+      "claim": "The skill’s `.data.body` and `.data.analysis` paths do not exist because intake handlers print unwrapped JSON.",
+      "suggested_fix": "Use top-level JSON paths or wrap the handlers.",
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Worktree-local `issuectl intake queue --json` empirically emits the standard schema envelope. The handler data is wrapped by the shared command output layer."
+    },
+    {
+      "id": "F7",
+      "cluster_key": "sha1:0244cfafbaabc18488a7bc60935b890b8da7bad0",
+      "title": "Generated skill copies are absent",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-skill-contract-drift.md",
+          "line": 51,
+          "section": "Disputed or Incorrect Findings",
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl-core/src/skill.rs",
+      "target_symbol": "dogfooded_copies_match_templates",
+      "claim": "The templates changed without regenerating all Claude, pi, and Codex copies.",
+      "suggested_fix": "Regenerate and byte-compare all copies.",
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "Every affected generated copy is present in the branch diff, and both `dogfooded_copies_match_templates` and the focused wellformedness test pass."
+    },
+    {
+      "id": "F8",
+      "cluster_key": "sha1:9e3c5ac7982e55400318db8a6abf522ed48586ec",
+      "title": "Branch reverts broken-pipe work",
+      "kind": "DESIGN",
+      "sources": [
+        {
+          "file": "history/review-skill-contract-drift.md",
+          "line": 55,
+          "section": "Disputed or Incorrect Findings",
+          "model": null
+        }
+      ],
+      "target_file": null,
+      "target_symbol": "Review diff scope",
+      "claim": "This branch authors a rollback of the broken-pipe fix and its tests, issue state, changelog, and review history.",
+      "suggested_fix": "Restore those files from main.",
+      "confirmation": "INCORRECT",
+      "likelihood": null,
+      "readability": null,
+      "architecture": null,
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1a",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The claim came from a two-dot diff after main advanced. `git diff main...HEAD` contains no broken-pipe paths; rebasing onto current main preserves that independently landed work."
+    },
+    {
+      "id": "F9",
+      "cluster_key": "sha1:bab9d1a8bc42cf943761308ce0c6e908fd3d96d7",
+      "title": "Taskfleet version-specific prose creates maintenance pressure",
+      "kind": "CODE",
+      "sources": [
+        {
+          "file": "history/review-skill-contract-drift.md",
+          "line": 62,
+          "section": "Minor Findings",
+          "model": null
+        }
+      ],
+      "target_file": "crates/issuectl-core/templates/issue-intake-skill.md",
+      "target_symbol": "Taskfleet 0.7.1 compatibility notes",
+      "claim": "Hard-coded Taskfleet 0.7.1 compatibility prose can become stale after a future Taskfleet release.",
+      "suggested_fix": "Replace version-specific prose with a capability contract.",
+      "confirmation": "CONFIRMED",
+      "likelihood": "RARE",
+      "readability": "NEUTRAL",
+      "architecture": "MINOR",
+      "confidence": "HIGH",
+      "recommendation": "DROP",
+      "drop_rule": "1b",
+      "applicability": null,
+      "write_up": null,
+      "user_override": false,
+      "evidence": "The version-specific text is deliberate evidence for this released-contract fix. Drift occurs only after a future Taskfleet contract change, and replacing it now would not simplify the current exact compatibility explanation."
+    }
+  ]
+}
