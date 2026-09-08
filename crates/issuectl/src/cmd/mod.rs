@@ -16,6 +16,7 @@ use issuectl_core::{
 use mutate::new_issue::{do_new, NewArgs};
 
 static JSON_OUTPUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static STDOUT_BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static PENDING_WARNINGS: std::sync::OnceLock<std::sync::Mutex<Vec<serde_json::Value>>> =
     std::sync::OnceLock::new();
 
@@ -65,6 +66,10 @@ fn emit_deprecation_warning(
 fn emit_stdout(value: String, newline: bool) {
     use std::io::Write;
 
+    if STDOUT_BROKEN.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+
     let result = if JSON_OUTPUT.load(std::sync::atomic::Ordering::Relaxed) {
         // Text-mode renderers sometimes add a trailing `println!()` after a
         // JSON `print!()`. It is formatting only, never a second result.
@@ -97,10 +102,11 @@ fn emit_stdout(value: String, newline: bool) {
     match result {
         Ok(()) => {}
         // A downstream consumer may deliberately stop reading early (for
-        // example, `issuectl --json list | head`). That is successful
-        // pipeline termination, not an issuectl failure.
+        // example, `issuectl --json list | head`). Stop rendering, but let the
+        // command finish so output interleaved with mutations cannot turn a
+        // partial operation into a false-success exit.
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
-            std::process::exit(0);
+            STDOUT_BROKEN.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         Err(error) => panic!("stdout must be writable: {error}"),
     }
