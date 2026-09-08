@@ -239,11 +239,3 @@ Hyväksytty kohde lanetetaan `issuectl`-frontmatteriin ja näkyy sen jälkeen
 Huom: raportoivan pään filaus-flow (sisarrepon wrapper) appendaa tänne oman
 checklist-osionsa joka kerta. Se ei tule issuectl:n binääristä eikä templateista;
 poista osio triagen yhteydessä kunnes lähdepää on korjattu.
-
-## Piialiisan bugiraportit
-
-- [ ] 🐛 Piialiisan bugiraportti: Issue skill reads the wrong create result path field — jari via Telegram ([`intake-bug-issuectl-71ea534241c2`](issues/intake-bug-issuectl-71ea534241c2/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: update JSON omits persisted blocked_by after add-blocked-by — jari via Telegram ([`intake-bug-issuectl-704cd8eb0a0e`](issues/intake-bug-issuectl-704cd8eb0a0e/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: issuectl create --body-file duplicates Description heading — jari via Telegram ([`intake-bug-issuectl-3148539799d8`](issues/intake-bug-issuectl-3148539799d8/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: doctor warns about issuectl-owned intake fields — jari via Telegram ([`intake-bug-issuectl-af715e8b5283`](issues/intake-bug-issuectl-af715e8b5283/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: Handle closed stdout without panicking — jari via Telegram ([`intake-bug-issuectl-39e53451c50d`](issues/intake-bug-issuectl-39e53451c50d/item.md))
