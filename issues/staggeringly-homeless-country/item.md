@@ -2,7 +2,7 @@
 created: 2026-09-08
 updated: 2026-09-08
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 provenance: ai-review
 source_ref: taskfleet:01m1zhvjmbr2tp5xkcekwd2jar/review-finding:generated-skill-contract-drift
@@ -37,6 +37,7 @@ commits:
   summary: cover aggregate wait failures in intake contract after rebase
 - hash: 61e7bc6d4b663b5573c3dd5ea48a0a2e27c3d874
   summary: record multi-model review and assessed follow-up after rebase
+closed: 2026-09-08
 ---
 
 # Generated skill contracts drift from current Taskfleet and issue layout
@@ -65,3 +66,9 @@ Update the source templates under `crates/issuectl-core/templates/`, not install
 ## Review assessment
 
 Classification: CONFIRMED. Outcome: FIX_WITH_CARE because the Taskfleet synchronization and output contracts should be checked against the exact released Taskfleet version while editing the upstream templates. Severity: high. Confidence: high.
+
+## Resolution
+
+### 2026-09-08T10:19:23Z · @issuectl
+
+Aligned all generated issue-family contracts with issuectl 0.18.3 and Taskfleet 0.7.1, regenerated dogfood copies, completed multi-model review and assessment, and passed the full green gate.
