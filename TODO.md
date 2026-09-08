@@ -235,7 +235,3 @@ issuectl ls --status open --label needs-triage
 
 Hyväksytty kohde lanetetaan `issuectl`-frontmatteriin ja näkyy sen jälkeen
 `issuectl dag`issa.
-
-Huom: raportoivan pään filaus-flow (sisarrepon wrapper) appendaa tänne oman
-checklist-osionsa joka kerta. Se ei tule issuectl:n binääristä eikä templateista;
-poista osio triagen yhteydessä kunnes lähdepää on korjattu.
