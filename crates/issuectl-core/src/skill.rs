@@ -1886,45 +1886,66 @@ mod tests {
         );
 
         // Pin the Taskfleet 0.7.1 caller/callee boundary without coupling the
-        // test to the surrounding prose. Intake must route only bugs to the
-        // bug-only worker, wait for canonical settlement, consume landing and
-        // report projections, and acknowledge the callee's alternate heading.
+        // test to complete prose sentences. Intake must route only bugs to the
+        // bug-only worker, recognize the alternate heading before the spawn
+        // gate, use a bounded canonical wait, and consume landing + reports.
+        let step_2 = issue_intake
+            .split_once("### 2. Read each item, judge clarity")
+            .and_then(|(_, rest)| rest.split_once("### 3. Analyse the unclear ones"))
+            .map(|(section, _)| section)
+            .expect("issue-intake retains ordered Steps 2 and 3");
+        for required in ["## Suspected Root Cause", "before deciding to spawn"] {
+            assert!(
+                step_2.contains(required),
+                "issue-intake pre-spawn gate is missing contract: {required}"
+            );
+        }
+        let normalized_intake = issue_intake.split_whitespace().collect::<Vec<_>>().join(" ");
         for required in [
             "Unclear non-bug",
-            "taskfleet run wait",
+            "(slug, run id)",
+            "taskfleet run wait --timeout",
+            "Exit `2`",
+            ".data.runs[]",
             ".data.landed == true",
             ".data.report",
-            "## Suspected Root Cause",
+            "git-verified `landed: false`",
+            "null or malformed",
         ] {
             assert!(
-                issue_intake.contains(required),
+                normalized_intake.contains(required),
                 "issue-intake is missing current workflow contract: {required}"
             );
         }
         for stale in [
-            "git log --oneline",
+            "git log",
+            "merge-base --is-ancestor",
             "run-status is unreliable",
             "intake-return",
         ] {
             assert!(
-                !issue_intake.contains(stale),
+                !normalized_intake.contains(stale),
                 "issue-intake retains stale workflow guidance: {stale}"
             );
         }
 
         let issue = read("issue");
         assert!(
-            !issue.contains("issues/open/<slug>/item.md"),
-            "issue skill must not reconstruct the retired active-item path"
+            !issue.contains("issues/open/<slug>/item.md")
+                && !issue.contains("issues/closed/<slug>/item.md"),
+            "issue skill must not present legacy open/closed paths as canonical"
         );
-        assert!(
-            issue.contains("active items use `issues/<slug>/item.md`"),
-            "issue skill must document the canonical flat active-item layout"
-        );
-        assert!(
-            issue.contains("unclear non-bugs are not sent to that worker"),
-            "issue skill must preserve the bug-only analysis boundary"
-        );
+        for canonical in [
+            "`issues/<slug>/item.md`",
+            "`issues/archive/YYYY/MM/<slug>/item.md`",
+            "legacy-named lifecycle-transition indicator",
+            "bug-only `/worktree-bug-analysis`",
+        ] {
+            assert!(
+                issue.contains(canonical),
+                "issue skill is missing current contract: {canonical}"
+            );
+        }
 
         // `/triage-bugs` is a THIN deprecation alias delegating to
         // `/issue-intake`; it must not reimplement any triage logic.
@@ -1941,6 +1962,10 @@ mod tests {
         assert!(
             !triage.contains("issuectl intake queue"),
             "triage-bugs alias must NOT reimplement the queue read"
+        );
+        assert!(
+            !triage.contains("intake-return"),
+            "triage-bugs alias must not advertise the removed return block"
         );
         assert!(
             triage.len() < 3000,

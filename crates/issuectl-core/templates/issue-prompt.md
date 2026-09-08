@@ -206,8 +206,9 @@ result as a compact list when displaying back to the user (e.g.
 
 ### Action: Close
 
-Closing means setting a **closing status** and moving the issue to `closed/`.
-The CLI does both atomically — never `git mv` by hand.
+Closing means setting a **closing status** and recording the close metadata.
+In the canonical flat layout, the issue remains at `issues/<slug>/`; cold-storage
+movement is a separate `issuectl archive` operation. Never `git mv` by hand.
 
 - `issuectl --json close <slug>` — defaults to `fixed` for bugs, `done` otherwise
 - `issuectl --json close <slug> --status wontfix` — explicit closing status
@@ -220,13 +221,17 @@ Output shape (`closed_by` present only when `--as` is passed; `stamp` present on
 
 ```json
 { "slug": "extremely-quiet-otter",
-  "dir": "/abs/path/issues/closed/extremely-quiet-otter",
+  "dir": "/abs/path/issues/extremely-quiet-otter",
   "moved_to_closed": true, "version": "sha256:...", "closed_by": "alice" }
 ```
 
-Reopening (`update --status <active>`) clears `closed_by` alongside `closed:`.
+`moved_to_closed` is the legacy-named lifecycle-transition indicator: `true`
+means the issue entered a closing status, not that its flat directory moved.
+Reopening (`update --status <active>`) similarly reports `moved_to_open` and
+clears `closed_by` alongside `closed:`; only reopening an archived issue moves
+its directory back to the flat root.
 
-**Closing statuses** (any of these triggers move to `closed/`):
+**Closing statuses** (any of these enters the closed lifecycle class):
 
 - `done` — work completed successfully (tasks, features, chores, epics)
 - `fixed` — bug fix committed and verified
@@ -255,8 +260,9 @@ classifying the status as `closing` under `status_classes` and including it in
 ### Action: Update
 
 Use `issuectl --json update <slug>` with one or more flags. The CLI updates
-frontmatter and bumps `updated:` automatically. If the new status is a
-closing status, the issue is also moved to `closed/` (same as `close`).
+frontmatter and bumps `updated:` automatically. If the new status is a closing
+status, the issue receives the same close metadata as `close`; its flat-layout
+directory is not relocated.
 
 Common flags:
 
@@ -807,10 +813,11 @@ On `--fix`, the JSON envelope carries an `apply_outcome` object with a
 - There is no default type — always pass `--type`
 - All images must be AVIF — convert PNG/JPG/WebP first
 - **Epic linkage**: prefer the `epic:` frontmatter field, value is the parent epic's slug
-- **Closing statuses** also move the directory to `closed/`. Use `issuectl
-  --json close` (or `update --status`) — never `git mv` by hand
-- For raw filesystem operations, active items use `issues/<slug>/item.md`;
-  closed items may be under `issues/closed/` or the bucketed `issues/archive/`
-  layout. Prefer `.data.path` / `.data.dir` from the CLI instead of reconstructing
-  any path
+- **Closing statuses** update lifecycle metadata without moving a flat-layout
+  directory. Use `issuectl --json close` (or `update --status`) — never `git mv`
+  by hand
+- For raw filesystem operations, unarchived items (active or closed) use
+  `issues/<slug>/item.md`; archived closed items use
+  `issues/archive/YYYY/MM/<slug>/item.md`. Prefer `.data.path` / `.data.dir`
+  from the CLI instead of reconstructing any path
 - **Always `--json`** when invoking `issuectl` from this skill
