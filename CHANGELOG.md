@@ -13,10 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 ### Fixed
+<!-- oss-changelog:unreleased-end -->
+
+## [0.18.4] - 2026-09-08
+
+### Fixed
 
 - Closed stdout pipes now terminate silently and successfully instead of
   producing a panic and backtrace.
-<!-- oss-changelog:unreleased-end -->
 
 ## [0.18.3] - 2026-09-06
 
