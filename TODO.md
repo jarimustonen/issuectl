@@ -14,46 +14,42 @@ säännöt → `AGENTS.md`.
 
 ## 🔄 Continue here · ALOITA TÄSTÄ
 
-**Tila (2026-09-06, rupeama 6 + myöhempi konvergenssijulkaisu valmis):**
-`main` on puhdas, synkassa `origin/main`:n kanssa ja julkaistu. Live-release on
-**v0.18.2 kaikissa kanavissa**: `issuectl` ja `issuectl-core` crates.io:ssa
-0.18.2, GitHub Releasessa 12 odotettua assetia, cargo-dist-workflow päättyi
-onnistuneesti ja Homebrew-tapissa on 0.18.2. Paikallinen `issuectl` sekä sen
-kolme mukana toimitettua agenttiohjetta raportoivat version 0.18.2. Shipshape-run
-`01M1V6F08EJ5ZZMA4E7KKXNKQQ` on completed ja kaikki neljä kohdetta
-verifioituivat. Taskfleetissä ei ole tähän repoon kuuluvia eläviä,
-huomiota odottavia tai jatkettavia ajoja.
+**Tila (2026-09-08, rupeama 7:n toteutus valmis):** `main` on puhdas ja
+sisältää vielä pushaamattoman julkaisuaihion `origin/main`:n päällä. Taskfleetissä ei ole tähän repoon kuuluvia
+eläviä, huomiota odottavia tai jatkettavia ajoja. `issuectl dag --json
+--reservations '[]'` on tyhjä, ja syvä `/triage-unlaned-issues`-tarkistus ei
+löydä avoimia non-epic-issueita DAGin ulkopuolelta.
 
-**Rupeama 6 / v0.18.1:**
-- @json-export-import-headings korjasi issuectl:n oman JSON
-  export→import-round-tripin: rakenteinen Markdown säilyy ilman sisäkkäistä H1:tä
-  tai duplikoitua `## Description` -otsikkoa. Vieraat `description`-syötteet ja
-  GitHub-importit pysyvät vapaana tekstinä.
-- @release-bump-refresh-dogfood lisäsi engine-owned release-bumpiin eristetyn
-  hookin, joka generoi ja tarkistaa kaikki yhdeksän seurattua Claude-, pi- ja
-  Codex-kopiota tuoreella bumpatulla binäärillä ennen release-commitin
-  sinetöintiä.
-- Integroitu täysi green gate meni läpi ennen julkaisua ja uudelleen
-  release-ankkurin päällä. v0.18.1 toimitettiin ja tarkistettiin kaikissa
-  kanavissa; julkaisu jatkettiin oikealla disposablella cargo-dist-versiolla,
-  eikä pysyvää unmanaged-asennusta jätetty.
+**Rupeama 7:**
+- @broken-pipe-panic on korjattu ja suljettu. Suljettu stdout ei enää panikoi;
+  `BrokenPipe` käsitellään normaalina downstream-päätöksenä, komennon mahdollinen
+  mutaatio viedään loppuun ja muut kirjoitusvirheet säilyvät virheinä.
+  Prosessitason regressiotesti kattaa aikaisin sulkeutuvan kuluttajan.
+- @staggeringly-homeless-country on korjattu ja suljettu. Kaikki yhdeksän
+  toimitettua Claude-, pi- ja Codex-ohjetta käyttävät nykyistä issue-layoutia ja
+  Taskfleet 0.7.1:n `run wait` / `landed` / raportti -sopimusta; bugianalyysi on
+  rajattu yhteensopiviin issue-tyyppeihin ja käyttämätön stint-palautusblokki on
+  poistettu.
+- Molemmat workerit ajoivat omissa worktreeissään täyden green gaten sekä
+  `/llm-review` + `/assess-findings`, ja Taskfleet vahvisti molemmat landatuiksi.
+- Katselmuksen ainoa repo-rajan ylittävä jatko siirrettiin Taskfleetin intakeen
+  nimellä @canonical-triage-heading ja pushattiin sen mainiin. Issuectl-kopio
+  @tolerably-wet-summer suljettiin siirrettynä duplikaattina.
 
-**Rupeaman jälkeinen v0.18.2:** rinnakkainen työ päivitti cargo-distin 0.32.0:aan
-ja muutti bundled `/issue-intake` -ohjeen käyttämään nykyistä Taskfleet-nimeä.
-Molemmat muutokset julkaistiin v0.18.2:ssa. Edeltäjäbinääri on poistunut
-koneelta ja nykyinen ajonhallintapinta on `taskfleet`; sen legacy-home-varoitus on
-tunnettu migraatiomuistutus, ei tämän repon avoin työ.
+**Julkaisu:** nykyinen live-release on edelleen **v0.18.3 kaikissa kanavissa**:
+crates.io 0.18.3, GitHub Releasessa 12 assetia ja Homebrew-tapissa 0.18.3.
+Rupeaman yhdistettyä mainia ei ole vielä ajettu orkestroijan integroidun green
+gaten läpi, pushattu eikä julkaistu. Seuraava stint aloittaa pull/reconcilella,
+ajaa AGENTS.md:n täyden green gaten yhdistetyllä mainilla ja, jos se on vihreä,
+pushaa mainin sekä tekee patch-julkaisun Shipshape plan→cut -polulla kaikkine
+pysyvine kanavakohtaisine backstop-tarkistuksineen. Tämä on operatiivinen
+viimeistely, ei uusi DAG-issue.
 
-**Seuraavan stintin valmisteltu intentio:** korjaa hyväksytty
-@broken-pipe-panic. Julkaistu CLI panikoi, jos putken vastaanottaja sulkee stdoutin
-aikaisin; korjauksen pitää käsitellä `BrokenPipe` normaalina downstream-päätöksenä
-mutta säilyttää muut kirjoitusvirheet oikeina virheinä. Regressiotesti kattaa
-aikaisin sulkeutuvan kuluttajan.
-
-**Operatiivinen siivous:** kahden jo syrjäytetyn create-body-reviewn säilytetyt
-legacy-työtilat ovat edelleen levyllä (runit `01m1g9865gsc5kjrq3f91rzc2m` ja
-`01m1gc62273xn52kzkgtpd1p73`). Ne eivät omista aktiivista työtä eikä niitä saa
-pelastaa tai mergeätä; poista ne vain tarkoituksellisessa, ihmisen valvomassa
+**Operatiivinen siivous:** kahden jo syrjäytetyn create-body-reviewn legacy-
+työtilat ovat edelleen levyllä. Niiden vanhat runit
+`01m1g9865gsc5kjrq3f91rzc2m` ja `01m1gc62273xn52kzkgtpd1p73` eivät enää löydy
+Taskfleetin tilasta, eikä niillä ole aktiivista omistajuutta. Älä pelasta tai
+mergeä niitä; poista hakemistot vain tarkoituksellisessa, ihmisen valvomassa
 cleanupissa.
 
 <details>
