@@ -207,8 +207,9 @@ moves the item toward **no** disposition — status stays `untriaged`.
   explain that the product question remains unclear and needs a manual look
   rather than turning a worker failure into `needs-info` about the report.
 
-Once every successful run is settled or the finite wait has timed out and each
-known run has been checked, present the briefing.
+Once every returned run id has either settled or been individually checked
+after timeout, aggregate-wait failure, or malformed output, present the
+briefing.
 
 ### 4. Compose the PO briefing
 
