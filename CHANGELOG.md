@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Binary-release CI is now generated and run with cargo-dist 0.33.0 while
+  preserving the existing platform matrix, attestations, and Homebrew publish.
+
 ### Fixed
 <!-- oss-changelog:unreleased-end -->
 
