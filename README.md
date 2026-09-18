@@ -173,8 +173,9 @@ issuectl --version
 brew install jarimustonen/issuectl/issuectl
 ```
 
-The first run automatically taps `jarimustonen/homebrew-issuectl`. To
-upgrade later: `brew upgrade issuectl`.
+The first run automatically taps `jarimustonen/homebrew-issuectl`. The formula
+supports both native Apple Silicon Homebrew and Intel/Rosetta Homebrew prefixes
+on macOS. To upgrade later: `brew upgrade issuectl`.
 
 ### Cargo
 

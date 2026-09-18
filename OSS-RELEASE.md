@@ -15,6 +15,7 @@ distribution:
   homebrew_tap: jarimustonen/homebrew-issuectl
   platforms:
     - aarch64-apple-darwin
+    - x86_64-apple-darwin
     - aarch64-unknown-linux-musl
     - x86_64-unknown-linux-musl
 versioning: semver
@@ -47,6 +48,9 @@ docs_site: none
 > **Updated 2026-09-03 (`@release-bump-refresh-dogfood`):** the engine-owned bump now runs
 > `scripts/release-bump-hook.sh` before sealing its release commit, regenerating every tracked
 > Claude, pi, and Codex issuectl skill copy from the bumped binary in an isolated HOME and target.
+> **Updated 2026-09-18 (`@inordinately-innate-station`):** binary distribution now includes
+> `x86_64-apple-darwin`, so Intel Macs and Intel-prefix/Rosetta Homebrew installations on Apple
+> Silicon receive an applicable formula URL instead of being silently stranded on an old version.
 
 ## Rationale
 - **maturity: mvp** — inferred by `ossctl facts` (mvp because there is **no ≥1.0 release** yet;
