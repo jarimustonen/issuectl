@@ -3,7 +3,7 @@ created: 2026-09-16
 updated: 2026-09-18
 type: bug
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 provenance: other
 provenance_detail: Observed during 3DBear issuectl doctor cleanup
