@@ -1,15 +1,16 @@
 ---
 created: 2026-09-16
-updated: 2026-09-16
+updated: 2026-09-18
 type: bug
 reporter: jari
-status: untriaged
+status: open
 priority: normal
 provenance: other
 provenance_detail: Observed during 3DBear issuectl doctor cleanup
 source_ref: taskfleet:01m2mezzw40464813xn8d8zw56/observed:homebrew-intel-prefix-macos
 originating_run: 01m2mezzw40464813xn8d8zw56
 originating_run_kind: spinoff
+lane: release-infra
 ---
 
 # Homebrew formula silently skips Intel-prefix macOS installs
