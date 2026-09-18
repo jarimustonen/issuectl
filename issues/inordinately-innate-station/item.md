@@ -3,7 +3,7 @@ created: 2026-09-16
 updated: 2026-09-18
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 provenance: other
 provenance_detail: Observed during 3DBear issuectl doctor cleanup
@@ -11,6 +11,8 @@ source_ref: taskfleet:01m2mezzw40464813xn8d8zw56/observed:homebrew-intel-prefix-
 originating_run: 01m2mezzw40464813xn8d8zw56
 originating_run_kind: spinoff
 lane: release-infra
+closed: 2026-09-18
+closed_by: agent
 ---
 
 # Homebrew formula silently skips Intel-prefix macOS installs
@@ -38,3 +40,9 @@ The formula should either support macOS x86_64/Rosetta or fail with an explicit 
 ## Quick Test
 
 Run Homebrew through an Intel-prefix/Rosetta installation on Apple Silicon and verify that `brew install` or `brew upgrade jarimustonen/issuectl/issuectl` either installs a supported artifact or reports a clear architecture error.
+
+## Resolution
+
+### 2026-09-18T11:34:35Z · @agent
+
+Added the x86_64-apple-darwin release target. cargo-dist 0.33.0 validation assigns it to macos-15-intel while retaining the aarch64 self-hosted runner, and the generated formula now includes an Intel macOS URL/install branch.
