@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+### Fixed
+<!-- oss-changelog:unreleased-end -->
+
+## [0.18.5] - 2026-09-18
+
+### Changed
+
 - Binary-release CI is now generated and run with cargo-dist 0.33.0 while
   preserving the existing platform matrix, attestations, and Homebrew publish.
 
@@ -20,7 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Homebrew releases now include an Intel macOS artifact, allowing Intel Macs and
   Intel-prefix/Rosetta Homebrew installations on Apple Silicon to upgrade rather
   than silently retaining an obsolete version.
-<!-- oss-changelog:unreleased-end -->
 
 ## [0.18.4] - 2026-09-08
 
