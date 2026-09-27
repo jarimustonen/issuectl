@@ -1,34 +1,25 @@
 ---
 name: triage-bugs
-description: "DEPRECATED — renamed to /issue-intake. Read-only intake processing for filed bug reports and feature requests. This is now a thin alias that prints a rename notice and delegates to /issue-intake, kept so existing muscle memory and `/stint` call sites keep working during the deprecation window. Use /issue-intake directly. Composes /issue-intake; drives /worktree-bug-analysis."
+description: "DEPRECATED alias for /issue-intake, kept so the old name still works. Prints a one-line rename notice and forwards to /issue-intake. Prefer /issue-intake directly; load this only when the user types /triage-bugs."
 argument-hint: (deprecated — passes through to /issue-intake)
 ---
 
-# triage-bugs — DEPRECATED, renamed → /issue-intake
+# triage-bugs — renamed to /issue-intake
 
-This skill was **renamed to `/issue-intake`** when ad-hoc channel-labelled bug
-triage folded into the standard intake flow (`docs/design/intake-flow.md`).
-`/issue-intake` does the same job — read the intake queue, drive
-`/worktree-bug-analysis` on unclear **bug** items, brief the user in
-product-owner language, and stop — but against the first-class `untriaged`
-intake state and across both bug reports and non-bugs, regardless of provenance.
+This skill used to triage bot-filed bugs by their `via:<channel>` labels. That
+job was folded into the standard intake flow (`docs/design/intake-flow.md`),
+where the queue is a first-class `untriaged` status covering bugs and non-bugs
+from any provenance. `/issue-intake` is that skill. Nothing of the old
+behaviour lives here any more; this file exists only so a habit of typing the
+old name does not strand the user, and it will be removed once the habit has
+faded.
 
-This alias exists only for the deprecation window so old habits and `/stint` call
-sites don't break. It will be removed.
+Tell the user in one line that `/triage-bugs` is now `/issue-intake` and that
+you are running that instead. The line is the mechanism by which the habit
+gets corrected, so it should be said every time, and once is enough. Then run
+`/issue-intake` with the arguments below unchanged. Its flags (`--no-pull`,
+`--state`, `--type`, `--provenance`) are documented there, and it owns the
+whole behaviour, including the read-only "brief, then stop" contract, so any
+detail you would be tempted to restate here is better read from that skill.
 
-## What to do
-
-1. **Tell the user, once:** `/triage-bugs` has been renamed to `/issue-intake`;
-   running that instead. (Keep it to one line — do not lecture.)
-2. **Delegate to `/issue-intake`**, forwarding whatever arguments were passed
-   (`--no-pull`, `--state …`, `--type …`, `--provenance …` all pass through
-   unchanged). `/issue-intake` owns the entire behaviour; this file adds nothing
-   of its own beyond the notice and the hand-off.
-
-Do not reimplement any triage logic here. Everything — the queue read, the
-bug-only analysis engine, the PO briefing, and the "present then STOP" contract
-— lives in `/issue-intake`.
-
-## Arguments
-
-Argument: `$ARGUMENTS` (forwarded verbatim to `/issue-intake`).
+Arguments: `$ARGUMENTS`
