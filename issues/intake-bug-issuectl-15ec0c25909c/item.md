@@ -3,7 +3,7 @@ created: 2026-09-21
 updated: 2026-09-27
 type: bug
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:native-agent-host-wrapup-note-eof-20260921
