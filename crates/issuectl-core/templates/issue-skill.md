@@ -77,9 +77,9 @@ alternatives.
   `usage-error`; not-found is `not-found`; illegal status transitions are
   `transition-illegal`.
 - **Exit codes.** `0` success. `2` refused-but-actionable: a `--check-duplicates`
-  strong match (error envelope on stderr) or a partial `import` where some
-  records landed (success envelope on stdout). `1` everything else. Branch on
-  the exit code, then decide which stream to read.
+  strong match or an illegal status transition (error envelope on stderr) or a
+  partial `import` where some records landed (success envelope on stdout). `1`
+  everything else. Branch on the exit code, then decide which stream to read.
 - **Shared vocabulary.** The same key means the same thing everywhere: `slug`,
   `title`, `version` (the concurrency token), `dir` (the issue directory),
   `path` (a single file), `dry_run`, `diff` (unified diff), `warnings`.
@@ -142,8 +142,9 @@ archive.
   `untriaged`, `needs-info`, `deferred`. Closing statuses are `done`, `fixed`,
   `wontfix`, `duplicate`, `cannot-reproduce`, `obsolete`.
 - Query syntax is shared by `ls`, `search`, and the web `?q=` filter. Fields:
-  `status`, `type`, `priority`, `assignee`, `owner`, `epic`, `label`, `slug`,
-  `folder`, `updated`, `created`, `closed`, `text`; a bareword is `text:`.
+  `status`, `type`, `priority`, `assignee`, `owner`, `reviewer`,
+  `review_status`, `epic`, `label`, `slug`, `folder`, `blocked_by`, `blocks`,
+  `updated`, `created`, `closed`, `text`; a bareword is `text:`.
   `-label:wontfix` negates; `assignee:none` / `assignee:any` test absence and
   presence; dates take relative offsets anchored on today in local time
   (`updated:<-14d`, `<=`, `>`, `>=`; `<=0d` means today or earlier, and avoid
@@ -154,10 +155,11 @@ archive.
   respective characters. Pass a leading-hyphen negation as one quoted argument.
 - **Scope.** Bare `ls` and `search` are open-only. Any positional query to `ls`,
   or a positive `status:`/`folder:` term, or a pinned `-s/--status`, lifts that
-  default so `ls -s fixed` finds closed and archived issues. A negated status
-  alone does not lift it. `--all` (everything) and `--closed` (closed only)
-  stay authoritative when given, so `ls --closed -s done` stays in the closed
-  set. `search` takes `--all`. When the user says "all issues", "closed
+  default so `ls -s fixed` finds closed and archived issues. `--all`
+  (everything) and `--closed` (closed only) stay authoritative when given, so
+  `ls --closed -s done` stays in the closed set. `search` widens only for
+  `--all` or a positive `status:`/`folder:` term; a bareword or a negated
+  status alone leaves it open-only. When the user says "all issues", "closed
   issues", or asks for the history of something, they want the wider scope.
 - `issuectl --json show <slug>` for one issue. `issuectl --json epic tree
   [<slug>]` renders an epic with its children as nested
@@ -325,10 +327,11 @@ touch nothing.
   The text comes from exactly one source: the positional argument,
   `--message`/`--body`/`--comment`, `--body-file`/`--from-file PATH` (`-`
   reads stdin), or `--stdin`; two is a usage error, none is an error. The
-  author is a single token without whitespace or a leading `@` (the heading
-  adds the sigil). Transition-rule mismatches found by `note` and `check` are
-  warnings and the write goes through; only `apply` keeps them as errors so
-  they can be fixed in the same transaction. The generated block:
+  author is a single token without whitespace; a leading `@` is stripped (the
+  heading adds the sigil). Transition-rule mismatches found by `note` and
+  `check` are warnings and the write goes through; `apply` and `update` keep
+  them as errors so they can be fixed in the same transaction. The generated
+  block:
 
   ```
   ### 2026-05-07T12:00:00Z · @alice
@@ -413,7 +416,7 @@ not scheduled). They show up in `ls` like any active issue. The fields:
 an enum), `provenance_detail`, `source_ref` (the external message id and the
 idempotency key), `disposition_reason` (`by-design`, `out-of-scope`,
 `wontfix`, `withdrawn`, `superseded`), `disposition_note`, `duplicate_of`,
-`deferred_until`.
+`deferred_until`, `superseded_by`.
 
 **Filing.** `issuectl --json intake file --type bug --title "…" --body-file
 report.md --reporter alice --provenance chat --source-ref "chat:123/message:456"`
