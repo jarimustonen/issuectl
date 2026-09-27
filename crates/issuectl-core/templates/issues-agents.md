@@ -7,12 +7,13 @@ and are still found by every query. `issues/.schema.yaml` declares the fields
 and their allowed values.
 
 The `issuectl` CLI is the interface to this tree. It holds the repo-wide write
-lock, validates every write against the schema, keeps `updated:` and the
-version token current, and rewrites cross-references when a slug changes. A
-hand edit to frontmatter, or a directory moved with `mv`, gets none of that:
-other issues end up pointing at a slug that no longer exists, and
-`issuectl doctor` will report the damage later. Body markdown is yours to
-edit directly when the CLI has no verb for what you need.
+lock, validates every write against the schema, keeps `updated:` current,
+emits a version token for optimistic concurrency, and rewrites
+cross-references when a slug changes. A hand edit to frontmatter, or a
+directory moved with `mv`, gets none of that: other issues end up pointing at
+a slug that no longer exists, and `issuectl doctor` will report the damage
+later. Body markdown is yours to edit directly when the CLI has no verb for
+what you need.
 
 The `/issue` skill installed alongside this file is the agent-facing manual:
 `.claude/skills/issue/SKILL.md` for Claude Code, `.pi/agent/skills/issue/SKILL.md`
