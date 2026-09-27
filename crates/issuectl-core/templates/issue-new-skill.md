@@ -105,7 +105,9 @@ does not tell you:
   literally named `-`) or `--body "<text>"`, one or the other. Prefer the
   file form for anything multi-line so shell quoting cannot mangle the
   reporter's text. There is no `@file` shorthand. Only trailing whitespace is
-  stripped; an empty or whitespace-only body is rejected.
+  stripped from a body file; an empty or whitespace-only file is rejected
+  (`command-failed`). `--body` refuses an empty value, and also one with
+  leading or trailing whitespace such as a final newline (`usage-error`).
 - `--provenance` is required and names the channel: `chat`, `email`,
   `slack`, `github`, `phone`, and so on. It is open-valued unless the
   repository's schema declares an enum, in which case an unknown value is
@@ -118,12 +120,13 @@ does not tell you:
 - `--priority low|normal|high` defaults to `normal`. Use it for a filing-time
   severity signal ("site is down" versus "tooltip typo").
 - `--label <tag>` is repeatable. `--field key=value` sets repository-declared
-  custom fields only; lifecycle keys (`status`, `type`, `closed`, `created`,
-  `updated`, `version`, `reporter`, `provenance`, `provenance_detail`,
-  `source_ref`, and the disposition fields) are rejected with
-  `protected-field`, because letting a filer set them would hollow out the
-  "always `untriaged`, cannot be spoofed" guarantee and could corrupt the
-  idempotency key.
+  custom fields only. Lifecycle keys are rejected: the built-in keys
+  (`status`, `type`, `closed`, `created`, `updated`, `reporter`) fail at
+  argument parsing with `usage-error`, and the intake-managed keys
+  (`version`, `provenance`, `provenance_detail`, `source_ref`, and the
+  disposition fields) with `protected-field`, because letting a filer set
+  them would hollow out the "always `untriaged`, cannot be spoofed"
+  guarantee and could corrupt the idempotency key.
 
 The result, exit 0:
 
@@ -136,12 +139,15 @@ The result, exit 0:
 ```
 
 Read `.data.slug` for the next step and the return value; take `.data.dir`
-rather than reconstructing the path.
+rather than reconstructing the path. `status` is a constant `untriaged`,
+also on a deduplicated hit whose item has since been accepted or closed; do
+not read the item's current state from it.
 
 On error the command exits 1 with the error envelope on stderr. Codes you may
-meet: `usage-error` for a missing required flag or an empty value,
-`validation` for an epic type or an unknown provenance, `protected-field` as
-above, `schema-violation` when the repository schema rejects a field, and
+meet: `usage-error` for a missing required flag, an empty value, or a
+built-in `--field` key, `validation` for an epic type, an unknown provenance,
+or a `--slug` that already exists, `protected-field` as above,
+`schema-violation` when the repository schema rejects a field, and
 `duplicate-source-ref` when two or more existing issues already carry the
 same `(provenance, source_ref)`. The last one means the tracker already has
 a conflict that is the triager's to resolve; report it with the slugs from
