@@ -563,7 +563,10 @@ fn insert_block_in_section(lines: &[&str], start: usize, block: &str) -> String 
     }
 
     let head = lines[..splice].join("\n");
-    let tail_lines = &lines[splice..];
+    // `split('\n')` represents a terminal LF as an empty final element.
+    // Only a real following section needs a separator and a tail; otherwise
+    // rejoining that empty element would add a blank line at EOF.
+    let following_section = (next_h2 < lines.len()).then_some(&lines[next_h2..]);
 
     let mut out = String::with_capacity(head.len() + block.len() + 16);
     out.push_str(&head);
@@ -573,7 +576,7 @@ fn insert_block_in_section(lines: &[&str], start: usize, block: &str) -> String 
     out.push('\n');
     out.push_str(block.trim_end_matches('\n'));
     out.push('\n');
-    if !tail_lines.is_empty() {
+    if let Some(tail_lines) = following_section {
         out.push('\n');
         out.push_str(&tail_lines.join("\n"));
     }
@@ -1212,6 +1215,41 @@ mod tests {
         let i_second = out.find("second").unwrap();
         assert!(i_first < i_second, "newest must be appended after older");
         assert_eq!(out.matches("## Comments").count(), 1);
+    }
+
+    #[test]
+    fn append_to_final_comments_has_one_terminal_lf_even_when_repeated() {
+        let block = "### 2026-05-02T00:00:00Z · @alice\n\nsecond\n";
+        let prefix = "\n# T\n\n## Description\n\nkeep me\n\n## Comments\n\nfirst";
+        for ending in ["", "\n", "\n\n"] {
+            let body = format!("{prefix}{ending}");
+            let once = append_block(&body, COMMENTS, block);
+            assert_eq!(once, format!("{prefix}\n\n{block}"), "ending={ending:?}");
+            let twice = append_block(&once, COMMENTS, block);
+            assert_eq!(twice, format!("{prefix}\n\n{block}\n{block}"));
+            assert!(twice.ends_with("second\n"));
+        }
+    }
+
+    #[test]
+    fn append_before_following_h2_keeps_separator_and_rest_of_body() {
+        let block = "### 2026-05-02T00:00:00Z · @alice\n\nsecond\n";
+        let prefix = "\n# T\n\n## Comments\n\nfirst";
+        let suffix = "## Decisions\n\n```sh\n## not a section\n```\n\nchosen\n";
+        for separator in ["\n", "\n\n", "\n\n\n"] {
+            let body = format!("{prefix}{separator}{suffix}");
+            let out = append_block(&body, COMMENTS, block);
+            assert_eq!(out, format!("{prefix}\n\n{block}\n{suffix}"));
+            assert!(out.ends_with(suffix));
+        }
+
+        // A heading in the Comments fence is content, not the next H2.
+        let fenced = format!("{prefix}\n\n```sh\n## fake section\n```\n\n{suffix}");
+        let out = append_block(&fenced, COMMENTS, block);
+        assert_eq!(
+            out,
+            format!("{prefix}\n\n```sh\n## fake section\n```\n\n{block}\n{suffix}")
+        );
     }
 
     #[test]
