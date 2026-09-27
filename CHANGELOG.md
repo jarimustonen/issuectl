@@ -13,11 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 ### Fixed
+<!-- oss-changelog:unreleased-end -->
+
+## [0.18.6] - 2026-09-27
+
+### Fixed
 
 - Self-hosted macOS binary-release jobs now install cargo-dist into a unique
   job-local directory instead of the persistent runner Cargo home; generation
   and hermetic regression checks guard the override.
-<!-- oss-changelog:unreleased-end -->
 
 ## [0.18.5] - 2026-09-18
 
