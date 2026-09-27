@@ -4,10 +4,12 @@ members = ["cargo:."]
 # Config for 'dist' (cargo-dist). issuectl is a portable, POSIX-friendly CLI
 # (no fork/tmux/signal machinery), so the target set is broad. The tag-triggered
 # `.github/workflows/release.yml` is GENERATED from this [dist] section via
-# `dist generate` — edit config here, then regenerate; never hand-edit the
-# workflow. Only `crates/issuectl` is marked distributable (its
-# `[package.metadata.dist] dist = true`), so the produced binary artifact is
-# `issuectl`.
+# `scripts/release_workflow.py --write --dist /path/to/pinned/dist` — the
+# wrapper regenerates in a disposable workspace and reapplies the self-hosted
+# macOS install override. Never run `dist generate` in the live workspace: it
+# silently removes the isolation guard. Only `crates/issuectl` is marked
+# distributable (its `[package.metadata.dist] dist = true`), so the produced
+# binary artifact is `issuectl`.
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax). Pinned to
 # the version this config was generated against so a regenerated workflow and

@@ -130,7 +130,26 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
-      - name: Install dist
+      # Repository-specific override: the self-hosted ARM64 runner persists its
+      # Cargo home between jobs. Keep the generated installer on hosted runners.
+      - name: Install dist (self-hosted macOS)
+        if: ${{ matrix.runner == 'self-hosted' && runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${RUNNER_TEMP:?RUNNER_TEMP must be set for isolated dist install}"
+          # Atomic allocation permits simultaneous release jobs on one runner.
+          export CARGO_DIST_INSTALL_DIR="$(mktemp -d "$RUNNER_TEMP/issuectl-dist.XXXXXXXX")"
+          export CARGO_DIST_NO_MODIFY_PATH=1
+          ${{ matrix.install_dist.run }}
+          export PATH="$CARGO_DIST_INSTALL_DIR/bin:$PATH"
+          # Reject a missing binary, an old PATH entry, or a symlink outside the job.
+          test "$(command -v dist)" = "$CARGO_DIST_INSTALL_DIR/bin/dist"
+          test -x "$CARGO_DIST_INSTALL_DIR/bin/dist"
+          test "$(realpath "$(command -v dist)")" = "$CARGO_DIST_INSTALL_DIR/bin/dist"
+          echo "$CARGO_DIST_INSTALL_DIR/bin" >> "$GITHUB_PATH"
+      - name: Install dist (hosted)
+        if: ${{ matrix.runner != 'self-hosted' || runner.os != 'macOS' }}
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
       - name: Fetch local artifacts

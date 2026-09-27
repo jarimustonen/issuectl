@@ -27,6 +27,26 @@ jobs:
       - name: Test
         run: cargo test --all-targets --verbose
 
+  release-workflow:
+    name: Release workflow guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test isolation and generated workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/release-workflow-venv"
+          "$RUNNER_TEMP/release-workflow-venv/bin/pip" install PyYAML
+          "$RUNNER_TEMP/release-workflow-venv/bin/python" tests/release_workflow.py
+          dir="$(mktemp -d "$RUNNER_TEMP/issuectl-dist-check.XXXXXXXX")"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            https://github.com/axodotdev/cargo-dist/releases/download/v0.33.0/cargo-dist-x86_64-unknown-linux-gnu.tar.xz \
+            -o "$dir/dist.tar.xz"
+          echo '4b3f0a5f0ebbdb798f6db649d01b32ba1518376b6f7a0502b7d92b75cc2c8293  '"$dir/dist.tar.xz" | sha256sum --check
+          tar -xf "$dir/dist.tar.xz" -C "$dir"
+          python3 scripts/release_workflow.py --check --dist "$dir/cargo-dist-x86_64-unknown-linux-gnu/dist"
+
   lint:
     name: Lint (clippy + fmt)
     runs-on: ubuntu-latest
