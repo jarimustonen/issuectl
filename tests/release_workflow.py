@@ -2,6 +2,8 @@
 
 Run with `python3 tests/release_workflow.py` (requires PyYAML). The generation
 check is `python3 scripts/release_workflow.py --check --dist /path/to/pinned/dist`.
+The guard regenerates without allow-dirty, since native CI checking ignores the
+reviewed workflow override when that setting is enabled.
 """
 import os
 from pathlib import Path
@@ -17,6 +19,8 @@ WORKFLOW = yaml.safe_load((ROOT / '.github/workflows/release.yml').read_text())
 
 class ReleaseWorkflowTest(unittest.TestCase):
     def test_scope_and_downstream(self):
+        config = (ROOT / 'dist-workspace.toml').read_text()
+        self.assertEqual(config.count('allow-dirty = ["ci"]\n'), 1)
         jobs = WORKFLOW['jobs']
         plan = jobs['plan']['steps']
         self.assertEqual(plan[1]['name'], 'Install dist')

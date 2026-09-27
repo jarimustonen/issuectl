@@ -15,6 +15,10 @@ members = ["cargo:."]
 # the version this config was generated against so a regenerated workflow and
 # the local `dist` stay in lockstep.
 cargo-dist-version = "0.33.0"
+# Permit the reviewed, repository-specific CI installer override at build time.
+# cargo-dist's own CI drift check is disabled by this setting; the independent
+# scripts/release_workflow.py --check guard compares pristine generation instead.
+allow-dirty = ["ci"]
 # CI backend.
 ci = "github"
 # Installer scripts generated as release assets: curl-to-shell (Unix),

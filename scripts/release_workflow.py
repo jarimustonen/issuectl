@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Generate or check cargo-dist CI with the self-hosted macOS install guard.
 
+cargo-dist ignores CI drift with allow-dirty = ["ci"]. Generate without that
+exception in a disposable workspace, then compare the reviewed override.
 Never run `dist generate` against the live workflow: it replaces this override.
 Use the pinned cargo-dist from dist-workspace.toml, e.g.:
   python3 scripts/release_workflow.py --check --dist /path/to/dist
@@ -49,9 +51,17 @@ def generate(dist: str) -> str:
             git.stdout.close()
             if git.wait() != 0:
                 raise RuntimeError('git archive failed')
-        for file in ('Cargo.toml', 'Cargo.lock', 'dist-workspace.toml'):
+        for file in ('Cargo.toml', 'Cargo.lock'):
             shutil.copy2(ROOT / file, Path(tmp) / file)
+        config = (ROOT / 'dist-workspace.toml').read_text()
+        marker = 'allow-dirty = ["ci"]\n'
+        if config.count(marker) != 1:
+            raise RuntimeError('expected exactly one approved cargo-dist allow-dirty override')
+        (Path(tmp) / 'dist-workspace.toml').write_text(config.replace(marker, ''))
         subprocess.run([dist, 'generate', '--mode', 'ci'], cwd=tmp, check=True)
+        # The native check refuses when CI is marked allow-dirty. Run it on
+        # pristine output without the exception, not against the live override.
+        subprocess.run([dist, 'generate', '--mode', 'ci', '--check'], cwd=tmp, check=True)
         generated = (Path(tmp) / WORKFLOW).read_text()
         if generated.count(ORIGINAL) != 1:
             raise RuntimeError('cargo-dist local installer template changed; review override')
