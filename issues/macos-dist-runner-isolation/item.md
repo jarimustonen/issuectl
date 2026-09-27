@@ -3,8 +3,10 @@ created: 2026-09-27
 updated: 2026-09-27
 type: bug
 reporter: agent
-status: in-progress
+status: fixed
 priority: normal
+closed: 2026-09-27
+closed_by: agent
 ---
 
 # Isolate cargo-dist on self-hosted macOS release runner
