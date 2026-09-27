@@ -3,7 +3,7 @@ created: 2026-09-27
 updated: 2026-09-27
 type: bug
 reporter: agent
-status: open
+status: in-progress
 priority: normal
 ---
 
