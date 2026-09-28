@@ -300,7 +300,7 @@ accepted work from `issuectl dag --json`; it does not consume recommendations.
 
 ## Install or upgrade `issuectl`
 
-This skill was installed for `issuectl 0.18.6` and needs the
+This skill was installed for `issuectl 0.18.7` and needs the
 `issuectl intake` command group (issuectl ≥ 0.7.0; the `--json` envelope read
 above needs ≥ 0.13.0). On first use in a session,
 run `issuectl --version`; if `issuectl intake --help` errors, the binary is too
