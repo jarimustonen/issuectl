@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The installed `/issue`, `/issue-intake`, and `/issue-new` skills and the generated `issues/AGENTS.md` are rewritten to explain purpose and considerations instead of prescribed steps, with their claims about the CLI checked against the source (homebase `rethink-all-instructions`).
+
 ### Fixed
 <!-- oss-changelog:unreleased-end -->
 
