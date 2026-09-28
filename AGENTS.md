@@ -75,10 +75,12 @@ copies drifts from its template:
 | `issue-intake-skill.md` | `.claude/skills/issue-intake/SKILL.md`, `.pi/agent/skills/issue-intake/SKILL.md` |
 | `issue-intake-prompt.md` | `.codex/prompts/issue-intake.md` |
 
-After editing a template, `issuectl skill install --agent all --force`
-refreshes the copies. If a Claude/Codex pair has drifted, regenerate the Codex
-file from the Claude one; `/issue`'s frontmatter is four lines and the intake
-skills carry an extra `argument-hint` line, hence the different offsets:
+After editing a template, `cargo run -- skill install --agent all --force`
+refreshes the copies; it must be the binary built from this tree, because an
+installed release carries its own release's templates. If a Claude/Codex pair
+has drifted, regenerate the Codex file from the Claude one; `/issue`'s
+frontmatter is four lines and the intake skills carry an extra
+`argument-hint` line, hence the different offsets:
 
 ```sh
 tail -n +5 templates/issue-skill.md         > templates/issue-prompt.md
@@ -165,7 +167,7 @@ name collides with a repo-root file; the test
 `doctor` also warns on binaries over 1 MiB and non-AVIF raster images, since
 the tracker is git-history.
 
-**The planning-doc-type list is owned by the upstream `init-project` skill.**
+**The planning-doc-type list is owned by the upstream `create-project` skill.**
 issuectl neither enumerates nor enforces it, so there is one source.
 
 **Tests sit next to the code** in `#[cfg(test)]` modules. The integration
@@ -225,7 +227,8 @@ shipshape release cut --plan <id>
 The cut owns the workspace version bump, `Cargo.lock` refresh, CHANGELOG
 finalization, the `scripts/release-bump-hook.sh` refresh of the dogfooded
 skill copies, the release commit, the crates.io publishes (`issuectl-core`
-before `issuectl`), and the tag. The tag fires cargo-dist
+before `issuectl`), the tag, and the fast-forward of remote `main` to the
+release commit. The tag fires cargo-dist
 (`.github/workflows/release.yml`) for GitHub Release binaries, the shell
 installer, and the Homebrew tap; Shipshape's verify barrier waits for those
 too. An interrupted cut is continued with `shipshape release resume <run_id>`;
@@ -254,7 +257,7 @@ gh release view vX.Y.Z --json assets --jq '.assets|length'   # compare with the 
 curl -s -H 'User-Agent: issuectl-check' https://crates.io/api/v1/crates/issuectl | jq -r '.crate.max_version'
 ```
 
-The `User-Agent` header matters: crates.io returns `null` for every field
+The `User-Agent` header matters: crates.io answers 403 with an empty body
 without one, which makes a successful publish look failed. A zero asset count
 is ambiguous between "still building", "died", and "never ran"; resolve it at
 the delegated run (`gh run list --workflow=release.yml --limit 1`, then `gh
