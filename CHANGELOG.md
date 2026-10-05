@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Repositories can opt into a preparation gate for the scheduling DAG. An issue needs explicit approval for its next agreed worker action before it becomes spawnable; the DAG reports why an unapproved head is blocked. Existing repositories keep their previous scheduling behavior unless they opt in.
+
 ### Changed
 
 ### Fixed
