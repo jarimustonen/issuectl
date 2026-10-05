@@ -26,7 +26,7 @@ tell which they want: which of several similar issues they mean, or whether
 
 ## Version pin
 
-This skill was installed for `issuectl 0.18.7`. It describes
+This skill was installed for `issuectl 0.19.0`. It describes
 the CLI surface and the JSON shapes of that version. Once per session, compare
 against `issuectl --version`:
 
