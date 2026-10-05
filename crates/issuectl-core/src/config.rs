@@ -97,6 +97,13 @@ pub fn show(root: &Path) -> Result<ConfigShow> {
         nested_source_for(&raw, "dod", "delivery_statuses"),
     )?;
 
+    insert(
+        &mut values,
+        "schema.preparation_gate",
+        &effective.preparation_gate,
+        source_for(&raw, "preparation_gate"),
+    )?;
+
     for (name, spec) in &effective.fields {
         insert(
             &mut values,

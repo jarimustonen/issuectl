@@ -1387,7 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn build_emits_no_instructions_when_schema_unconstrained() {
+    fn build_preserves_fixed_preparation_constraint_when_other_fields_relaxed() {
         let tmp = fresh_repo();
         // Relax every constrained built-in to drop enums and requirements.
         fs::write(
@@ -1397,13 +1397,11 @@ mod tests {
         .unwrap();
         write_issue(tmp.path(), "amber-loud-fox", "type: bug\n", "\n# X\n");
         let b = build(tmp.path(), "amber-loud-fox").unwrap();
-        assert!(
-            b.schema.instructions.is_empty(),
-            "no constraints should yield no instructions, got {:?}",
-            b.schema.instructions
+        // Preparation is a fixed enum even when every configurable field is relaxed.
+        assert_eq!(
+            b.schema.instructions,
+            vec!["`preparation` is optional; if set, must be one of: `pending`, `reviewing`, `ready`."]
         );
-        let md = render_markdown(&b);
-        assert!(!md.contains("## Agent Instructions"));
     }
 
     #[test]

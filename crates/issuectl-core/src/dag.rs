@@ -39,8 +39,9 @@
 //!   the whole lane. `None` when the lane has no runnable issue (all done,
 //!   or every not-done issue still has an open blocker).
 //! - **Spawnable** = the issue is its lane's head-of-line ∧ its
-//!   lane/collision tokens are not currently reserved. (Head-of-line
-//!   already implies "not done" and "all blockers done".) `in-progress`
+//!   lane/collision tokens are not currently reserved ∧ (when the repo
+//!   opts into the preparation gate) its `preparation` is `ready`.
+//!   (Head-of-line already implies "not done" and "all blockers done".) `in-progress`
 //!   is deliberately **not** excluded: an in-progress issue means
 //!   *started, not done* — not "someone is on it right now". `dag` is
 //!   intended to be consulted only when nothing is actively running
@@ -279,6 +280,10 @@ pub struct DagIssue {
     pub blockers_missing: Vec<String>,
     pub is_head_of_line: bool,
     pub spawnable: bool,
+    /// Optional per-issue next-action approval state (null when absent).
+    pub preparation: Option<String>,
+    /// Stable machine reason when an opted-in head lacks approval.
+    pub preparation_reason: Option<&'static str>,
     pub reserved: bool,
     /// Echoed scheduling fields (null when unset) so a single row is
     /// self-describing.
@@ -393,6 +398,7 @@ pub fn compute(issues: &[Issue], schema: &Schema, reservations: Option<&Reservat
         done: &done,
         all_slugs: &all_slugs,
         reservations,
+        preparation_gate: schema.preparation_gate,
     };
 
     let lanes: Vec<DagLane> = by_lane
@@ -433,6 +439,7 @@ struct ComputeCtx<'a> {
     done: &'a BTreeSet<&'a str>,
     all_slugs: &'a BTreeSet<&'a str>,
     reservations: Option<&'a Reservations>,
+    preparation_gate: bool,
 }
 
 impl ComputeCtx<'_> {
@@ -471,7 +478,7 @@ impl ComputeCtx<'_> {
     /// The row still echoes the issue's *own* `lane` (so an `unlaned`
     /// sentinel surfaces), which is why the two are threaded separately.
     ///
-    /// `spawnable` = head ∧ runnable ∧ not reserved. The runnable check is
+    /// `spawnable` = head ∧ runnable ∧ not reserved ∧ preparation approved\n    /// when the repo opts in. The runnable check is
     /// redundant for a lane head (which is runnable by construction) but
     /// load-bearing for unscheduled issues. `in-progress` is deliberately
     /// NOT excluded: it means *started, not done*, and `dag` is consulted
@@ -487,8 +494,26 @@ impl ComputeCtx<'_> {
             .reservations
             .map(|r| r.reserves(res_lane, &collision))
             .unwrap_or(false);
-        let spawnable =
-            is_head && blockers_open.is_empty() && blockers_missing.is_empty() && !reserved;
+        let preparation = i
+            .extra
+            .get("preparation")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let preparation_reason =
+            if self.preparation_gate && is_head && preparation.as_deref() != Some("ready") {
+                Some(match preparation.as_deref() {
+                    Some("pending") => "preparation_pending",
+                    Some("reviewing") => "preparation_reviewing",
+                    _ => "preparation_missing",
+                })
+            } else {
+                None
+            };
+        let spawnable = is_head
+            && blockers_open.is_empty()
+            && blockers_missing.is_empty()
+            && !reserved
+            && preparation_reason.is_none();
         DagIssue {
             slug: i.slug.clone(),
             title: i.title.clone(),
@@ -496,6 +521,8 @@ impl ComputeCtx<'_> {
             priority: i.priority.clone(),
             position: pos,
             spawnable,
+            preparation,
+            preparation_reason,
             is_head_of_line: is_head,
             blocked_by,
             blockers_open,
@@ -704,6 +731,85 @@ mod tests {
             .iter()
             .find(|l| l.lane == name)
             .expect("lane present")
+    }
+
+    fn with_preparation(mut i: Issue, value: &str) -> Issue {
+        i.extra
+            .insert("preparation".into(), serde_json::json!(value));
+        i
+    }
+
+    #[test]
+    fn preparation_gate_keeps_unready_head_in_place() {
+        let mut schema = default_schema();
+        schema.preparation_gate = true;
+        let members = vec![
+            with_lane(
+                with_preparation(mk("a", "open", "normal"), "pending"),
+                "work",
+            ),
+            with_lane(with_preparation(mk("b", "open", "normal"), "ready"), "work"),
+        ];
+        let v = compute(&members, &schema, None);
+        let l = lane(&v, "work");
+        assert_eq!(l.head_of_line.as_deref(), Some("a"));
+        assert!(!l.issues[0].spawnable);
+        assert_eq!(l.issues[0].preparation_reason, Some("preparation_pending"));
+        assert!(!l.issues[1].is_head_of_line);
+        assert!(!l.issues[1].spawnable);
+        assert_eq!(v.spawnable_heads, 0);
+        // Opt-out restores existing eligibility without modifying the issue.
+        let v = compute(&members, &default_schema(), None);
+        assert!(lane(&v, "work").issues[0].spawnable);
+        assert_eq!(
+            lane(&v, "work").issues[0].preparation.as_deref(),
+            Some("pending")
+        );
+    }
+
+    #[test]
+    fn preparation_gate_combines_with_blockers_reservations_and_testing() {
+        let mut schema = default_schema();
+        schema.preparation_gate = true;
+        let issues = vec![
+            with_lane(mk("missing", "testing", "normal"), "a"),
+            with_lane(
+                with_preparation(mk("approved-item", "open", "normal"), "ready"),
+                "b",
+            ),
+            with_lane(
+                with_preparation(
+                    with_blocked_by(mk("blocked-item", "open", "normal"), &["approved-item"]),
+                    "ready",
+                ),
+                "c",
+            ),
+            with_lane(
+                with_preparation(mk("review", "open", "normal"), "reviewing"),
+                "d",
+            ),
+        ];
+        let v = compute(&issues, &schema, None);
+        assert_eq!(
+            lane(&v, "a").issues[0].preparation_reason,
+            Some("preparation_missing")
+        );
+        assert!(
+            !lane(&v, "a").issues[0].spawnable,
+            "testing can finish, but a new worker needs approval"
+        );
+        assert!(lane(&v, "b").issues[0].spawnable);
+        assert!(!lane(&v, "c").issues[0].spawnable);
+        assert_eq!(lane(&v, "c").issues[0].blockers_open, vec!["approved-item"]);
+        assert_eq!(
+            lane(&v, "d").issues[0].preparation_reason,
+            Some("preparation_reviewing")
+        );
+        let held = Reservations::from_tokens(["b".to_string()]);
+        let v = compute(&issues, &schema, Some(&held));
+        assert!(lane(&v, "b").issues[0].reserved);
+        assert!(!lane(&v, "b").issues[0].spawnable);
+        assert_eq!(v.spawnable_heads, 0);
     }
 
     #[test]

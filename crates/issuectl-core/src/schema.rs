@@ -90,6 +90,9 @@ pub struct Schema {
     /// body, not custom YAML fields.
     #[serde(default)]
     pub dod: DodConfig,
+    /// Opt-in scheduling approval gate. Missing preparation never implies ready.
+    #[serde(default)]
+    pub preparation_gate: bool,
 }
 
 /// Definition-of-Done gate policy. Defaults to warning on the built-in
@@ -292,6 +295,11 @@ fields:
   # slot; `set`/`update --field` reject it as reserved.
   closed_by:
     required: false
+  # Preparation approval for the next agreed worker action. Optional even
+  # with preparation_gate enabled: missing means not approved.
+  preparation:
+    required: false
+    enum: [pending, reviewing, ready]
   # Scheduling-DAG fields (see `issuectl dag`). Both optional and
   # absent-by-default; declared here so schema validation and `doctor`'s
   # unknown-key check recognise them as first-class known fields. `lane`
@@ -393,6 +401,10 @@ fields:
 #   archived: closing
 #   verified: active
 
+# Opt in to requiring `preparation: ready` before a DAG head is spawnable.
+# Absence of the field on legacy issues is NOT approval.
+# preparation_gate: true
+
 # Definition-of-Done applies only to delivery-signifying closing statuses.
 # The default delivery statuses are `done` and `fixed`; non-delivery closes
 # (`wontfix`, `duplicate`, `cannot-reproduce`, `obsolete`) stay ungated.
@@ -491,6 +503,7 @@ pub fn load(root: &Path) -> Result<Schema> {
         merged.type_aliases.insert(from, to);
     }
     merged.dod = user.dod;
+    merged.preparation_gate = user.preparation_gate;
     // Drop inherited built-in aliases whose target fell outside a
     // user-narrowed field enum. The alias merge has no removal semantics,
     // so a project that narrows `status`/`type` cannot delete a now-stale
@@ -599,6 +612,18 @@ fn validate_body_sections(sections: &BTreeMap<String, Vec<String>>) -> Result<()
 /// message at the moment they edit `.schema.yaml`, rather than a
 /// confusing "missing required field" or "expected sequence" later.
 fn validate_loadability(schema: &Schema) -> Result<()> {
+    // Preparation values are a fixed scheduling contract, not a repo-defined enum.
+    let prep = schema.fields.get("preparation");
+    if prep.is_none_or(|spec| {
+        spec.required
+            || spec.list
+            || spec.allowed.as_deref()
+                != Some(&["pending".into(), "reviewing".into(), "ready".into()][..])
+    }) {
+        anyhow::bail!(
+            "fields.preparation must remain optional scalar with enum [pending, reviewing, ready]"
+        );
+    }
     const BUILTIN_LIST_FIELDS: &[&str] = &["labels", "related"];
     for (name, spec) in &schema.fields {
         if name == "slug" && spec.required {
@@ -1096,6 +1121,26 @@ fn is_yaml_empty(v: &Value, expect_list: bool) -> bool {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn preparation_is_optional_but_strictly_validated() {
+        let schema = default_schema();
+        let mut fm = Mapping::new();
+        fm.insert(
+            Value::String("preparation".into()),
+            Value::String("approved".into()),
+        );
+        assert!(validate(&schema, &fm).iter().any(
+            |v| matches!(v, ViolationKind::InvalidEnum { field, .. } if field == "preparation")
+        ));
+        fm.remove(Value::String("preparation".into()));
+        assert!(!validate(&schema, &fm).iter().any(
+            |v| matches!(v, ViolationKind::MissingRequired { field } if field == "preparation")
+        ));
+        let mut altered = schema;
+        altered.fields.get_mut("preparation").unwrap().allowed = None;
+        assert!(validate_loadability(&altered).is_err());
+    }
 
     #[test]
     fn default_schema_parses() {

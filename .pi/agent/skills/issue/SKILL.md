@@ -276,7 +276,14 @@ not tell you:
   `--lane unlaned` means confirmed parallel-safe (every member spawnable),
   which differs from no lane (unclassified). `issuectl --json dag
   [--reservations <file|-|json>]` renders lanes, depth, heads, and
-  `spawnable_heads`. Full reasoning: `docs/design/lane-design.md`.
+  `spawnable_heads`. Repos may opt in via `preparation_gate: true` in
+  `issues/.schema.yaml`; set `preparation: pending|reviewing|ready` using
+  `issuectl update <slug> --field preparation=ready --json` for approval
+  of this issue's **next agreed action**, not blanket implementation approval
+  or a person's consent. Missing/pending/reviewing heads stay in place and
+  have `spawnable: false` plus `preparation_reason`; reservations and blockers
+  still apply. A `testing` issue can finish existing tests, but a fresh
+  worker spawn requires `ready`. Never bulk-approve legacy issues. Full reasoning: `docs/design/lane-design.md`.
 
 Among scheduling and dependency fields, `update` conditionally echoes only
 `lane`, `lane_seq`, and `collision`: when the call requests one of them,

@@ -1204,6 +1204,46 @@ mod tests {
     }
 
     #[test]
+    fn preparation_update_is_validated_and_versioned_under_lock() {
+        let tmp = fresh_repo();
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "version: 1\npreparation_gate: true\n",
+        )
+        .unwrap();
+        let v0 = seed_issue(tmp.path(), "open", "prep-item", "testing");
+        let mut bad = UpdateIssueRequest::default();
+        bad.custom_fields
+            .insert("preparation".into(), Patch::Set("approved".into()));
+        assert!(matches!(
+            update_issue(tmp.path(), "prep-item", bad),
+            Err(MutateError::SchemaViolation(_))
+        ));
+        let req = UpdateIssueRequest {
+            expected_version: Some(v0.clone()),
+            custom_fields: [("preparation".into(), Patch::Set("ready".into()))].into(),
+            ..Default::default()
+        };
+        let out = update_issue(tmp.path(), "prep-item", req).unwrap();
+        assert_ne!(out.version, v0);
+        assert_eq!(
+            out.issue.extra.get("preparation"),
+            Some(&serde_json::json!("ready"))
+        );
+        let parsed = crate::parser::parse_item_md_with_warnings(
+            &out.issue_dir.join("item.md"),
+            "prep-item",
+            "open",
+        );
+        let view = crate::dag::compute(
+            &[parsed.issue],
+            &crate::schema::load(tmp.path()).unwrap(),
+            None,
+        );
+        assert!(view.unscheduled[0].spawnable);
+    }
+
+    #[test]
     fn update_clears_custom_field_via_null_patch() {
         let tmp = fresh_repo();
         let dir = tmp.path().join("issues/cf-clear");

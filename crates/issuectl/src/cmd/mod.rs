@@ -829,7 +829,9 @@ pub(crate) enum PrimaryCommand {
 
         /// Set a custom frontmatter field (repeatable). Format `key=value`.
         /// Mirrors `create --field`. Built-in fields use their dedicated
-        /// flags (`--status`, `--priority`, ...).
+        /// flags (`--status`, `--priority`, ...). For the opt-in DAG gate,
+        /// `--field preparation=pending|reviewing|ready` approves only the
+        /// next agreed worker action when set to `ready`.
         #[arg(long = "field", value_parser = parse_custom_field)]
         custom_fields: Vec<(String, String)>,
 
@@ -1606,6 +1608,11 @@ pub(crate) enum ExtendedCommand {
     /// `lane` / `collision` fields joined with live status. The output
     /// reports each lane's serial depth and the current count of spawnable
     /// heads: the practical answer to "how parallel is my plan right now?"
+    ///
+    /// If issues/.schema.yaml sets preparation_gate: true, only heads with
+    /// preparation: ready are spawnable; missing/pending/reviewing heads
+    /// remain heads and report preparation_reason. Testing work may finish,
+    /// but a new worker action still requires approval.
     ///
     /// Design lanes as serial queues, not theme labels: only each lane's
     /// head-of-line can spawn, so the number of lanes is the parallelism

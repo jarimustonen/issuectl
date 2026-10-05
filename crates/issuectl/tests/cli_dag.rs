@@ -309,3 +309,60 @@ fn dag_fields_ok_on_pre_existing_v1_schema_without_them() {
         "lane flagged as unknown key: {unknown:?}"
     );
 }
+
+#[test]
+fn opted_in_preparation_is_exposed_and_gates_new_spawns() {
+    let tmp = scheduled_repo();
+    let r = tmp.path();
+    // Existing issues remain unapproved when the repo opts in.
+    std::fs::write(
+        r.join("issues/.schema.yaml"),
+        "version: 1\npreparation_gate: true\n",
+    )
+    .unwrap();
+    let v = json(&run(r, &["--json", "dag"]));
+    assert_eq!(v["lanes"][1]["head_of_line"], "schema-a");
+    assert_eq!(
+        v["lanes"][1]["issues"][0]["preparation"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        v["lanes"][1]["issues"][0]["preparation_reason"],
+        "preparation_missing"
+    );
+    assert_eq!(v["spawnable_heads"], 0);
+    let text = run(r, &["dag"]);
+    assert!(String::from_utf8_lossy(&text.stdout).contains("[preparation_missing]"));
+    assert!(
+        run(
+            r,
+            &[
+                "--json",
+                "update",
+                "schema-a",
+                "--field",
+                "preparation=approved"
+            ]
+        )
+        .status
+        .code()
+            != Some(0)
+    );
+    json(&run(
+        r,
+        &[
+            "--json",
+            "update",
+            "schema-a",
+            "--field",
+            "preparation=ready",
+        ],
+    ));
+    let v = json(&run(r, &["--json", "dag"]));
+    assert_eq!(v["lanes"][1]["issues"][0]["spawnable"], true);
+    assert_eq!(
+        v["lanes"][1]["issues"][0]["preparation_reason"],
+        serde_json::Value::Null
+    );
+    assert_eq!(v["lanes"][1]["issues"][1]["spawnable"], false);
+}

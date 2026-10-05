@@ -81,6 +81,9 @@ pub(crate) fn print_dag_row(mark: &str, i: &dag::DagIssue) {
     if !i.blockers_missing.is_empty() {
         suffix.push_str(&format!(" missing-dep:{}", i.blockers_missing.join(",")));
     }
+    if let Some(reason) = i.preparation_reason {
+        suffix.push_str(&format!(" [{reason}]"));
+    }
     if i.reserved {
         suffix.push_str(" [reserved]");
     }
