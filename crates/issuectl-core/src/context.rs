@@ -1400,7 +1400,7 @@ mod tests {
         // Preparation is a fixed enum even when every configurable field is relaxed.
         assert_eq!(
             b.schema.instructions,
-            vec!["`preparation` is optional; if set, must be one of: `pending`, `reviewing`, `ready`."]
+            vec!["`preparation` is optional; if set, must be one of: `pending`, `reviewing`, `ready`.", "`scheduling` is optional; if set, must be one of: `excluded`."]
         );
     }
 

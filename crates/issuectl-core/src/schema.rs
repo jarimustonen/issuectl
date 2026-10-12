@@ -300,6 +300,13 @@ fields:
   preparation:
     required: false
     enum: [pending, reviewing, ready]
+  # Explicitly reviewed, open but non-executable issues. Omission means
+  # unclassified if there is no lane; exclusion requires a reason.
+  scheduling:
+    required: false
+    enum: [excluded]
+  scheduling_reason:
+    required: false
   # Scheduling-DAG fields (see `issuectl dag`). Both optional and
   # absent-by-default; declared here so schema validation and `doctor`'s
   # unknown-key check recognise them as first-class known fields. `lane`
@@ -797,11 +804,13 @@ pub enum ViolationKind {
         status: String,
         status_class: StatusClass,
     },
+    Scheduling(String),
 }
 
 impl ViolationKind {
     pub fn message(&self) -> String {
         match self {
+            ViolationKind::Scheduling(message) => message.clone(),
             ViolationKind::MissingRequired { field } => {
                 format!("missing required field {field:?}")
             }
@@ -949,6 +958,42 @@ pub fn validate(schema: &Schema, fm: &Mapping) -> Vec<ViolationKind> {
                     status: status.to_string(),
                     status_class: status_class(schema, status),
                 });
+            }
+        }
+    }
+    // Exclusion is a deliberate decision, not an alternate spelling for
+    // an issue that has yet to be laned. Check it independently of repo
+    // schema overrides so doctor and every mutation path agree.
+    let scalar = |key: &str| fm.get(Value::String(key.into())).and_then(Value::as_str);
+    match scalar("scheduling") {
+        Some("excluded") => {
+            if scalar("scheduling_reason").is_none_or(|r| r.trim().is_empty()) {
+                out.push(ViolationKind::Scheduling(
+                    "scheduling: excluded requires a non-empty scheduling_reason".into(),
+                ));
+            }
+            if scalar("lane").is_some_and(|lane| !lane.is_empty())
+                || fm.contains_key(Value::String("lane_seq".into()))
+                || fm.contains_key(Value::String("collision".into()))
+            {
+                out.push(ViolationKind::Scheduling(
+                    "scheduling: excluded cannot have lane, lane_seq or collision; remove scheduling exclusion before assigning execution work".into(),
+                ));
+            }
+            if matches!(status, Some("untriaged" | "needs-info" | "deferred")) {
+                out.push(ViolationKind::Scheduling(
+                    "scheduling: excluded requires an accepted issue; resolve its intake status first".into(),
+                ));
+            }
+        }
+        Some(other) => out.push(ViolationKind::Scheduling(format!(
+            "scheduling: {other:?} is invalid; only 'excluded' is supported"
+        ))),
+        None => {
+            if scalar("scheduling_reason").is_some() {
+                out.push(ViolationKind::Scheduling(
+                    "scheduling_reason requires scheduling: excluded".into(),
+                ));
             }
         }
     }
@@ -1121,6 +1166,45 @@ fn is_yaml_empty(v: &Value, expect_list: bool) -> bool {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn excluded_scheduling_requires_reason_and_no_execution_lane() {
+        let schema = default_schema();
+        let mut fm = Mapping::new();
+        fm.insert(
+            Value::String("scheduling".into()),
+            Value::String("excluded".into()),
+        );
+        assert!(validate(&schema, &fm)
+            .iter()
+            .any(|v| matches!(v, ViolationKind::Scheduling(_))));
+        fm.insert(
+            Value::String("scheduling_reason".into()),
+            Value::String("ongoing session record".into()),
+        );
+        assert!(!validate(&schema, &fm)
+            .iter()
+            .any(|v| matches!(v, ViolationKind::Scheduling(_))));
+        fm.insert(
+            Value::String("lane".into()),
+            Value::String("unlaned".into()),
+        );
+        assert!(validate(&schema, &fm)
+            .iter()
+            .any(|v| v.message().contains("cannot have lane")));
+        fm.remove(Value::String("lane".into()));
+        fm.insert(
+            Value::String("status".into()),
+            Value::String("untriaged".into()),
+        );
+        assert!(validate(&schema, &fm)
+            .iter()
+            .any(|v| v.message().contains("accepted issue")));
+        fm.remove(Value::String("scheduling".into()));
+        assert!(validate(&schema, &fm)
+            .iter()
+            .any(|v| v.message().contains("scheduling_reason requires")));
+    }
 
     #[test]
     fn preparation_is_optional_but_strictly_validated() {

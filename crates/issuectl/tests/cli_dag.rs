@@ -171,6 +171,76 @@ fn dag_excludes_closed_issue_from_unscheduled() {
 }
 
 #[test]
+fn excluded_record_stays_visible_but_cannot_be_spawned_or_laned() {
+    let tmp = fresh_repo();
+    let root = tmp.path();
+    new_issue(root, "session-record");
+    let missing = run(
+        root,
+        &[
+            "--json",
+            "update",
+            "session-record",
+            "--field",
+            "scheduling=excluded",
+        ],
+    );
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("scheduling_reason"));
+    let v = json(&run(
+        root,
+        &[
+            "--json",
+            "update",
+            "session-record",
+            "--field",
+            "scheduling=excluded",
+            "--field",
+            "scheduling_reason=ongoing session record",
+        ],
+    ));
+    assert_eq!(v["slug"], "session-record");
+    assert_eq!(
+        json(&run(root, &["--json", "show", "session-record"]))["extra"]["scheduling"],
+        "excluded"
+    );
+    assert!(json(&run(root, &["--json", "list"]))
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["slug"] == "session-record"));
+    assert!(json(&run(root, &["--json", "dag"]))["unscheduled"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let conflict = run(
+        root,
+        &["--json", "update", "session-record", "--lane", "unlaned"],
+    );
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("cannot have lane"));
+    let v = json(&run(
+        root,
+        &[
+            "--json",
+            "update",
+            "session-record",
+            "--clear-field",
+            "scheduling",
+            "--clear-field",
+            "scheduling_reason",
+            "--lane",
+            "unlaned",
+        ],
+    ));
+    assert_eq!(v["lane"], "unlaned");
+    assert_eq!(
+        json(&run(root, &["--json", "dag"]))["unscheduled"][0]["lane"],
+        "unlaned"
+    );
+}
+
+#[test]
 fn dag_reservations_inline_json_marks_reserved() {
     let tmp = scheduled_repo();
     let v = json(&run(

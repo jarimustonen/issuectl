@@ -21,6 +21,9 @@
 //!   **absent** lane, which means "unclassified" — the row still echoes
 //!   `lane: "unlaned"` so a caller can tell "confirmed parallel-safe" from
 //!   "nobody has laned this yet".
+//! - An accepted issue marked `scheduling: excluded` is intentionally
+//!   outside the execution DAG: it remains visible in list/show, but cannot
+//!   be spawned. It must carry a reason and must not carry a lane.
 //! - **Intra-lane order** is topological on `blocked_by`, then priority,
 //!   then the optional coarse key [`Issue::lane_seq`], then `created`, then
 //!   the slug lexical tie-break. `lane_seq` lets a human pin soft
@@ -384,7 +387,9 @@ pub fn compute(issues: &[Issue], schema: &Schema, reservations: Option<&Reservat
     let mut by_lane: BTreeMap<&str, Vec<&Issue>> = BTreeMap::new();
     let mut unscheduled: Vec<&Issue> = Vec::new();
     for i in issues {
-        if done.contains(i.slug.as_str()) {
+        if done.contains(i.slug.as_str())
+            || i.extra.get("scheduling").and_then(|v| v.as_str()) == Some("excluded")
+        {
             continue;
         }
         match i.lane.as_deref() {
@@ -810,6 +815,35 @@ mod tests {
         assert!(lane(&v, "b").issues[0].reserved);
         assert!(!lane(&v, "b").issues[0].spawnable);
         assert_eq!(v.spawnable_heads, 0);
+    }
+
+    #[test]
+    fn excluded_issues_are_not_executable_or_unscheduled() {
+        let mut excluded = mk("stint-log", "open", "normal");
+        excluded
+            .extra
+            .insert("scheduling".into(), serde_json::json!("excluded"));
+        excluded.extra.insert(
+            "scheduling_reason".into(),
+            serde_json::json!("ongoing session record"),
+        );
+        let ordinary = mk("unclassified-work", "open", "normal");
+        let mut parallel = mk("parallel-work", "open", "normal");
+        parallel.lane = Some(UNLANED.into());
+        let view = compute(&[excluded, ordinary, parallel], &default_schema(), None);
+        assert_eq!(view.spawnable_heads, 2);
+        assert!(view.lanes.is_empty());
+        assert_eq!(view.unscheduled.len(), 2);
+        assert!(view.unscheduled.iter().all(|i| i.slug != "stint-log"));
+        assert_eq!(
+            view.unscheduled
+                .iter()
+                .find(|i| i.slug == "parallel-work")
+                .unwrap()
+                .lane
+                .as_deref(),
+            Some(UNLANED)
+        );
     }
 
     #[test]

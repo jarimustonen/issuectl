@@ -40,10 +40,13 @@ That is a scheduling move, not cosmetic refactoring.
 
 ## Useful conventions
 
-- A **parked** lane is a workflow convention for real findings that should
-  remain in the DAG but are intentionally never scheduled. `parked` has no
-  special CLI semantics: its head still appears in `dag`, so the orchestrator
-  must exclude it by policy.
+- An accepted, ongoing record that is not execution work can remain open
+  **outside the DAG** with `scheduling: excluded` and a non-empty
+  `scheduling_reason:`. Set both via `create` or `update --field`; it cannot
+  also carry `lane`, `lane_seq`, or `collision`. It remains in `list` and
+  `show`, but not in `dag`. This is not a holding area for deferred work.
+  Clear both fields before assigning a lane. A lane called `parked` is just
+  a normal, executable lane; it does not implement exclusion.
 - `lane: unlaned` is reserved and means **confirmed parallel-safe**. Its issues
   appear in `unscheduled`; each is its own head and is not serialized with
   other `unlaned` issues. An absent `lane` also appears in `unscheduled`, but
@@ -59,9 +62,10 @@ three only change documentation. Design three lanes instead: `importer`,
 when their heads are runnable. If an importer change and a VAT change both
 need `shared.rs`, keep their lanes separate and give those two issues
 `collision: [shared.rs]`. If `shared.rs` becomes the repeated bottleneck,
-split it so later work no longer needs that collision. Put standing findings in
-`parked`, and mark reviewed, independent leftovers as `unlaned`; leave an
-issue with no lane only while it still needs classification.
+split it so later work no longer needs that collision. Keep executable
+findings gated in a lane, mark reviewed independent work as `unlaned`, and
+explicitly exclude non-executable records. An issue with no lane or exclusion
+still needs classification.
 
 ## Dogfood lesson
 

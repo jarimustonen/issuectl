@@ -718,6 +718,31 @@ mod tests {
     }
 
     #[test]
+    fn exclusion_requires_reason_and_cannot_have_lane() {
+        let tmp = fresh_repo();
+        let mut args = new_args("task", "Session record");
+        args.custom_fields
+            .push(("scheduling".into(), "excluded".into()));
+        let err = do_new(tmp.path(), args).err().unwrap().to_string();
+        assert!(err.contains("scheduling_reason"), "{err}");
+        let mut args = new_args("task", "Session record");
+        args.custom_fields
+            .push(("scheduling".into(), "excluded".into()));
+        args.custom_fields
+            .push(("scheduling_reason".into(), "ongoing log".into()));
+        args.lane = Some("unlaned".into());
+        let err = do_new(tmp.path(), args).err().unwrap().to_string();
+        assert!(err.contains("cannot have lane"), "{err}");
+        let mut args = new_args("task", "Session record");
+        args.custom_fields
+            .push(("scheduling".into(), "excluded".into()));
+        args.custom_fields
+            .push(("scheduling_reason".into(), "ongoing log".into()));
+        let out = do_new(tmp.path(), args).unwrap();
+        assert!(read(&out.item_path).contains("scheduling: excluded"));
+    }
+
+    #[test]
     fn new_derives_slug_from_title_by_default() {
         let tmp = fresh_repo();
         // No --slug: the default is now a title-derived kebab slug, not a

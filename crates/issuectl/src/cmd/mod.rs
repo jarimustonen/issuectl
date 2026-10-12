@@ -655,9 +655,9 @@ pub(crate) enum PrimaryCommand {
         body_file: Option<PathBuf>,
 
         /// Set a custom frontmatter field (repeatable). Format `key=value`.
-        /// Use this for fields the schema declares but no built-in flag
-        /// covers (e.g. `--field team=payments`). Built-in fields use
-        /// their dedicated flags (`--type`, `--priority`, ...).
+        /// For a reviewed non-executable issue use `--field scheduling=excluded`
+        /// together with `--field scheduling_reason=...` (no lane).
+        /// Other built-in fields use dedicated flags (`--type`, `--priority`, ...).
         #[arg(long = "field", value_parser = parse_custom_field)]
         custom_fields: Vec<(String, String)>,
 
@@ -828,8 +828,9 @@ pub(crate) enum PrimaryCommand {
         add_commits: Vec<String>,
 
         /// Set a custom frontmatter field (repeatable). Format `key=value`.
-        /// Mirrors `create --field`. Built-in fields use their dedicated
-        /// flags (`--status`, `--priority`, ...). For the opt-in DAG gate,
+        /// Mirrors `create --field`. Set `scheduling=excluded` together with
+        /// `scheduling_reason=...` for reviewed non-executable issues (no lane);
+        /// clear both fields to return one to classification. For the opt-in DAG gate,
         /// `--field preparation=pending|reviewing|ready` approves only the
         /// next agreed worker action when set to `ready`.
         #[arg(long = "field", value_parser = parse_custom_field)]
@@ -1626,7 +1627,9 @@ pub(crate) enum ExtendedCommand {
     /// before unset), creation time, and finally slug. Priority deliberately
     /// outranks `lane_seq`.
     ///
-    /// `lane: unlaned` means confirmed parallel-safe work: every member is
+    /// `scheduling: excluded` keeps a reviewed, open issue outside this execution DAG;
+    /// it needs `scheduling_reason` and cannot have a lane. `lane: unlaned`
+    /// means confirmed parallel-safe work: every member is
     /// independently headed and spawnable. It differs from an absent lane,
     /// which means unclassified work. See `docs/design/lane-design.md` for
     /// the full lane-design guidance. Deterministic and AI-first (`--json`

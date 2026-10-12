@@ -270,8 +270,13 @@ not tell you:
   across lanes go in `collision:` tokens rather than merging lanes.
   `lane_seq` orders within a lane after `blocked_by` and priority.
   `--lane unlaned` means confirmed parallel-safe (every member spawnable),
-  which differs from no lane (unclassified). `issuectl --json dag
-  [--reservations <file|-|json>]` renders lanes, depth, heads, and
+  which differs from no lane (unclassified). A reviewed, open issue that
+  is not execution work uses `--field scheduling=excluded --field scheduling_reason="why it stays outside the DAG"`
+  (after intake acceptance, without a lane). It remains visible in list/show
+  but is absent from `dag`; remove both fields before assigning a lane.
+  This is not a holding area for worthwhile work: blocked or gated work
+  belongs in a lane, and unreviewed work must keep resurfacing.
+  `issuectl --json dag [--reservations <file|-|json>]` renders lanes, depth, heads, and
   `spawnable_heads`. Repos may opt in via `preparation_gate: true` in
   `issues/.schema.yaml`; set `preparation: pending|reviewing|ready` using
   `issuectl update <slug> --field preparation=ready --json` for approval
