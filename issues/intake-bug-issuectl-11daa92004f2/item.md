@@ -1,12 +1,15 @@
 ---
 created: 2026-10-01
-updated: 2026-10-01
+updated: 2026-10-12
 type: bug
 reporter: jari
-status: untriaged
+status: wontfix
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:nah-2026-10-01-unlaned-unscheduled
+closed: 2026-10-12
+disposition_note: 'issuectl DAG correctly serializes lane: unlaned under unscheduled; the consumer verifier was fixed in Homebase (ee709d4a) to recognize these rows. No issuectl DAG change needed.'
+disposition_reason: out-of-scope
 ---
 
 # lane: unlaned lands in unscheduled despite dag --help
@@ -30,3 +33,9 @@ Expected: an `unlaned` lane row in `.data.lanes[]` with the issue independently 
 - **Reproduction status:** Confirmed against repository implementation and regression test `unlaned_sentinel_members_are_parallel_spawnable` in `crates/issuectl-core/src/dag.rs`. That test explicitly asserts no `unlaned` lane is created, two sentinel issues appear in `unscheduled`, and both are spawnable with the sentinel echoed on each row.
 - **Fix sketch:** No change to DAG grouping is warranted; creating a lane would contradict the parallel-safe semantics and risk consumers treating it as a serial lane. If the wrap-up helper actually misses these rows, fix that consumer to recognize `unscheduled[]` items whose `lane` is `"unlaned"` (and verify it against current JSON). Otherwise clarify the issue's expectation rather than changing issuectl behavior.
 <!-- intakectl:analysis:end job:513fc62d-5043-4d43-ad00-c5d60d568c06 generation:0 -->
+
+## Comments
+
+### 2026-10-12T11:07:03Z · @intake
+
+Rejected (out-of-scope): issuectl DAG correctly serializes lane: unlaned under unscheduled; the consumer verifier was fixed in Homebase (ee709d4a) to recognize these rows. No issuectl DAG change needed.
