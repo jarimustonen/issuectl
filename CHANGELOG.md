@@ -10,12 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Reviewed, non-executable issues can remain open outside the scheduling DAG with `scheduling: excluded` and a required `scheduling_reason`; they remain visible in issue lists.
-
 ### Changed
 
 ### Fixed
 <!-- oss-changelog:unreleased-end -->
+
+## [0.20.0] - 2026-10-12
+
+### Added
+
+- Reviewed, non-executable issues can remain open outside the scheduling DAG with `scheduling: excluded` and a required `scheduling_reason`; they remain visible in issue lists.
 
 ## [0.19.0] - 2026-10-05
 
