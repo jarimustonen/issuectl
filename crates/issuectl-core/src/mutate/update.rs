@@ -522,6 +522,24 @@ pub(crate) fn update_issue_under_lock(
         }
     }
 
+    // Explicit reporter writes on an existing epic must not bypass the role
+    // rule enforced by create and type conversion. A conversion to epic above
+    // may already have migrated the reporter to owner; accept that path.
+    if matches!(req.reporter, Patch::Set(_))
+        && item
+            .frontmatter
+            .get(serde_yaml::Value::String("type".into()))
+            .and_then(|v| v.as_str())
+            == Some("epic")
+        && item
+            .frontmatter
+            .contains_key(serde_yaml::Value::String("reporter".into()))
+    {
+        return Err(MutateError::Validation(
+            "epics use --owner, not --reporter; set owner instead".into(),
+        ));
+    }
+
     // Body ops apply in vector order so a patch's narrative reads top-
     // to-bottom: the user can toggle a checkbox and append a note that
     // refers to the toggle, all under the single flock above. Schema

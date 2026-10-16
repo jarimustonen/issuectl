@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 ### Fixed
+
+- `update --reporter NAME` now sets the built-in reporter, with mutually exclusive clearing and epic owner validation.
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.20.0] - 2026-10-12

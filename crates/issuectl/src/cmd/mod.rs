@@ -408,6 +408,9 @@ impl Command {
     }
 }
 
+// Parsed once per invocation and already boxed by Command; boxing individual
+// update flags would add indirection solely to shrink this clap argument enum.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub(crate) enum PrimaryCommand {
     /// Print the running CLI and JSON-contract versions for drift audits.
@@ -683,7 +686,7 @@ pub(crate) enum PrimaryCommand {
         .required(false)
         .multiple(true)
         .args([
-            "title", "status", "issue_type", "assignee", "no_reporter",
+            "title", "status", "issue_type", "assignee", "reporter", "no_reporter",
             "no_assignee", "owner", "no_owner", "priority", "epic", "no_epic",
             "lane", "no_lane", "lane_seq", "no_lane_seq", "add_collision",
             "remove_collision", "add_labels", "remove_labels", "add_related",
@@ -751,8 +754,12 @@ pub(crate) enum PrimaryCommand {
         #[arg(short = 'a', long, value_parser = parse_non_empty)]
         assignee: Option<String>,
 
+        /// New reporter (issues only; epics use --owner)
+        #[arg(long, value_parser = parse_non_empty)]
+        reporter: Option<String>,
+
         /// Remove the reporter
-        #[arg(long)]
+        #[arg(long, conflicts_with = "reporter")]
         no_reporter: bool,
 
         /// Remove the assignee

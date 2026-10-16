@@ -578,6 +578,13 @@ impl UpdateIssueRequest {
         // the post-mutation frontmatter; that's the right layer.
         check_set_nonempty("priority", &self.priority)?;
         check_set_nonempty("reporter", &self.reporter)?;
+        if let Patch::Set(reporter) = &self.reporter {
+            if reporter.trim().is_empty() || reporter.trim() != reporter {
+                return Err(MutateError::Validation(format!(
+                    "reporter {reporter:?} must be non-empty without leading or trailing whitespace (use null to clear)"
+                )));
+            }
+        }
         check_set_nonempty("assignee", &self.assignee)?;
         check_set_nonempty("owner", &self.owner)?;
         check_set_nonempty("epic", &self.epic)?;

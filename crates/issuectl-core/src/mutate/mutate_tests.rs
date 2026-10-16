@@ -30,6 +30,57 @@ mod tests {
         canonical_hash(&issue)
     }
 
+    #[test]
+    fn reporter_patch_enforces_epic_role_and_nonempty_validation() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "reporter-epic", "open");
+        let path = tmp.path().join("issues/reporter-epic/item.md");
+        let text = fs::read_to_string(&path)
+            .unwrap()
+            .replace("type: bug", "type: epic");
+        fs::write(&path, &text).unwrap();
+        for issue_type in [Patch::Unspecified, Patch::Set("epic".into())] {
+            let req = UpdateIssueRequest {
+                issue_type,
+                reporter: Patch::Set("alice".into()),
+                ..Default::default()
+            };
+            let err = update_issue(tmp.path(), "reporter-epic", req).unwrap_err();
+            assert!(matches!(err, MutateError::Validation(ref msg) if msg.contains("--owner")));
+            assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        }
+        for value in ["", "   ", " alice", "alice "] {
+            let req = UpdateIssueRequest {
+                reporter: Patch::Set(value.into()),
+                ..Default::default()
+            };
+            assert!(matches!(req.validate(), Err(MutateError::Validation(_))));
+        }
+        // Clearing remains available to repair old epic data; changing away
+        // from epic permits a reporter in the same transaction.
+        let out = update_issue(
+            tmp.path(),
+            "reporter-epic",
+            UpdateIssueRequest {
+                reporter: Patch::Clear,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(out.issue.reporter.is_none());
+        let out = update_issue(
+            tmp.path(),
+            "reporter-epic",
+            UpdateIssueRequest {
+                issue_type: Patch::Set("task".into()),
+                reporter: Patch::Set("alice".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.issue.reporter.as_deref(), Some("alice"));
+    }
+
     fn descriptive_request() -> UpdateIssueRequest {
         UpdateIssueRequest {
             preserve_updated: true,

@@ -825,3 +825,159 @@ fn preserve_updated_cli_single_patch_query_and_rejections() {
     ));
     assert!(!item(&root, "summary-one").contains("updated: 2020-01-02"));
 }
+
+#[test]
+fn reporter_create_update_clear_and_version_contract() {
+    let (_tmp, root, _) = pair();
+    success_json(run(
+        &root,
+        &[
+            "create",
+            "--type",
+            "task",
+            "--title",
+            "Reporter",
+            "--slug",
+            "reporter-task",
+            "--reporter",
+            "alice",
+        ],
+    ));
+    let shown = success_json(run(&root, &["show", "reporter-task"]));
+    assert_eq!(shown["data"]["reporter"], "alice");
+    let version = shown["data"]["version"].as_str().unwrap();
+    let updated = success_json(run(
+        &root,
+        &[
+            "update",
+            "reporter-task",
+            "--reporter",
+            "bob",
+            "--expected-version",
+            version,
+        ],
+    ));
+    assert_ne!(updated["data"]["version"], version);
+    assert_eq!(
+        success_json(run(&root, &["show", "reporter-task"]))["data"]["reporter"],
+        "bob"
+    );
+    let before = item(&root, "reporter-task");
+    error_json(run(
+        &root,
+        &[
+            "update",
+            "reporter-task",
+            "--reporter",
+            "carol",
+            "--expected-version",
+            version,
+        ],
+    ));
+    for flags in [
+        vec!["--reporter", "bob", "--no-reporter"],
+        vec!["--reporter", ""],
+        vec!["--reporter", "   "],
+        vec!["--field", "reporter=bob"],
+    ] {
+        let mut args = vec!["update", "reporter-task"];
+        args.extend(flags);
+        let error = error_json(run(&root, &args));
+        if args.contains(&"--no-reporter") {
+            assert_eq!(error["error"]["code"], "usage-error");
+            let message = error["error"]["message"].as_str().unwrap();
+            assert!(message.contains("--reporter") && message.contains("--no-reporter"));
+            assert!(message.contains("cannot be used with"));
+        }
+        assert_eq!(item(&root, "reporter-task"), before);
+    }
+    success_json(run(&root, &["update", "reporter-task", "--no-reporter"]));
+    assert!(success_json(run(&root, &["show", "reporter-task"]))["data"]["reporter"].is_null());
+}
+
+#[test]
+fn reporter_patch_query_and_epic_rules() {
+    let (_tmp, root, _) = pair();
+    seed_old_summary(&root, "reporter-one");
+    seed_old_summary(&root, "reporter-two");
+    let before = item(&root, "reporter-one");
+    for target in [vec!["reporter-one"], vec!["--query", "status:open"]] {
+        for change in [vec!["--reporter", "alice"], vec!["--no-reporter"]] {
+            let mut args = vec!["update"];
+            args.extend(target.clone());
+            args.extend(change);
+            args.extend(["--preserve-updated", "--field", "status_summary=Summary"]);
+            let error = error_json(run(&root, &args));
+            assert!(error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("descriptive custom-field"));
+            assert_eq!(item(&root, "reporter-one"), before);
+        }
+    }
+    let dry = success_json(run(
+        &root,
+        &[
+            "update",
+            "--query",
+            "status:open",
+            "--reporter",
+            "alice",
+            "--dry-run",
+        ],
+    ));
+    assert_eq!(dry["data"]["count"], 2);
+    assert_eq!(item(&root, "reporter-one"), before);
+    success_json(run(
+        &root,
+        &["update", "--query", "status:open", "--reporter", "alice"],
+    ));
+    for slug in ["reporter-one", "reporter-two"] {
+        assert_eq!(
+            success_json(run(&root, &["show", slug]))["data"]["reporter"],
+            "alice"
+        );
+        assert!(!item(&root, slug).contains("updated: 2020-01-02"));
+    }
+    let shown = success_json(run(&root, &["show", "reporter-one"]));
+    let version = shown["data"]["version"].as_str().unwrap();
+    let patch = format!("slug: reporter-one\nexpected_version: {version}\nreporter: bob\n");
+    error_json(run(
+        &root,
+        &["update", "--patch-file", "-", "--reporter", "bob"],
+    ));
+    let before = item(&root, "reporter-one");
+    error_json(run_stdin(
+        &root,
+        &["update", "--patch-file", "-"],
+        &format!("{patch}preserve_updated: true\ncustom_fields:\n  status_summary: Summary\n"),
+    ));
+    assert_eq!(item(&root, "reporter-one"), before);
+    success_json(run_stdin(&root, &["update", "--patch-file", "-"], &patch));
+    assert_eq!(
+        success_json(run(&root, &["show", "reporter-one"]))["data"]["reporter"],
+        "bob"
+    );
+    success_json(run(&root, &["update", "reporter-one", "--type", "epic"]));
+    let epic = success_json(run(&root, &["show", "reporter-one"]));
+    assert_eq!(epic["data"]["owner"], "bob");
+    assert!(epic["data"]["reporter"].is_null());
+    let before = item(&root, "reporter-one");
+    error_json(run(
+        &root,
+        &["update", "reporter-one", "--reporter", "alice"],
+    ));
+    assert_eq!(item(&root, "reporter-one"), before);
+    error_json(run(
+        &root,
+        &[
+            "create",
+            "--type",
+            "epic",
+            "--title",
+            "Invalid epic",
+            "--reporter",
+            "alice",
+        ],
+    ));
+}

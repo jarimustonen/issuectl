@@ -271,6 +271,7 @@ pub(crate) struct UpdateArgs {
     pub status: Option<String>,
     pub issue_type: Option<String>,
     pub assignee: Option<String>,
+    pub reporter: Option<String>,
     pub no_reporter: bool,
     pub no_assignee: bool,
     pub owner: Option<String>,
@@ -456,7 +457,9 @@ pub(crate) fn build_update_request(
     } else if args.no_assignee {
         req.assignee = Patch::Clear;
     }
-    if args.no_reporter {
+    if let Some(reporter) = args.reporter {
+        req.reporter = Patch::Set(reporter);
+    } else if args.no_reporter {
         req.reporter = Patch::Clear;
     }
     if let Some(o) = args.owner {

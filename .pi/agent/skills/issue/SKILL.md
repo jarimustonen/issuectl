@@ -241,7 +241,7 @@ at `open`, which skips triage. See Intake below.
 
 `issuectl --json update <slug> …` changes frontmatter and bumps `updated:`.
 The flags mirror the fields (`--status`, `-t/--type`, `--assignee` /
-`--no-assignee`, `--owner` / `--no-owner`, `--no-reporter`, `--priority`,
+`--no-assignee`, `--owner` / `--no-owner`, `--reporter` / `--no-reporter`, `--priority`,
 `--epic` / `--no-epic`, `--add-label` / `--remove-label`, `--add-related` /
 `--remove-related`, `--add-blocked-by` / `--remove-blocked-by`,
 `--add-commit HASH:summary`, `--field` / `--clear-field`, `--title`,
@@ -252,6 +252,9 @@ not tell you:
   `close`. Moving from a closing status back to an active one is the reopen
   path: it clears `closed:` and `closed_by:`, appends a `## Reopen Notes —
   <today>` section in the same write, and reports `moved_to_open`.
+- `--reporter NAME` sets the built-in reporter (as `create --reporter` does);
+  `--no-reporter` clears it, and the two flags are mutually exclusive. Existing
+  epics use `--owner` instead. Reporter edits cannot use `--preserve-updated`.
 - Converting to `epic` migrates a lone `reporter:` to `owner:` with a warning,
   but an assignee or conflicting owner is an error that tells you which
   `--no-…` flag to add. A type change that leaves required body sections
