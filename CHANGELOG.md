@@ -10,14 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `update --preserve-updated` (also available in patches) preserves issue recency during guarded descriptive custom-field-only maintenance.
-
 ### Changed
+
+### Fixed
+<!-- oss-changelog:unreleased-end -->
+
+## [0.21.0] - 2026-10-16
+
+### Added
+
+- `update --preserve-updated` (also available in patches) preserves issue recency during guarded descriptive custom-field-only maintenance.
 
 ### Fixed
 
 - `update --reporter NAME` now sets the built-in reporter, with mutually exclusive clearing and epic owner validation.
-<!-- oss-changelog:unreleased-end -->
 
 ## [0.20.0] - 2026-10-12
 
