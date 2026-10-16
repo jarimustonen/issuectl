@@ -3,11 +3,13 @@ created: 2026-10-06
 updated: 2026-10-16
 type: feature
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 provenance: agent:3dbear-monorepo
 source_ref: agent:3dbear-monorepo/reporter:jari/id:3dbear-status-summary-preserve-updated-20261006
 lane: mutation
+closed: 2026-10-16
+closed_by: pi
 ---
 
 # Allow summary-only custom field updates without touching updated
