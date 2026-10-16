@@ -265,6 +265,7 @@ pub(crate) fn cmd_import_github(
 
 #[derive(Default)]
 pub(crate) struct UpdateArgs {
+    pub preserve_updated: bool,
     pub slug: String,
     pub title: Option<String>,
     pub status: Option<String>,
@@ -435,6 +436,7 @@ pub(crate) fn build_update_request(
 ) -> Result<mutate::UpdateIssueRequest> {
     use mutate::Patch;
     let mut req = mutate::UpdateIssueRequest {
+        preserve_updated: args.preserve_updated,
         expected_version: args.expected_version,
         set_body: args.set_body,
         dry_run,

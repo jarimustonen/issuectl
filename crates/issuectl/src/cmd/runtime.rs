@@ -633,6 +633,7 @@ fn dispatch_primary(command: PrimaryCommand, json_output: bool) -> Result<()> {
             )
         }
         PrimaryCommand::Update {
+            preserve_updated,
             slug,
             patch_file,
             query,
@@ -678,6 +679,7 @@ fn dispatch_primary(command: PrimaryCommand, json_output: bool) -> Result<()> {
                 None => description,
             };
             let args = UpdateArgs {
+                preserve_updated,
                 slug: slug.unwrap_or_default(),
                 title,
                 status,

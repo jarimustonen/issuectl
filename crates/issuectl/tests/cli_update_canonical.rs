@@ -677,3 +677,151 @@ fn canonical_targets_and_patch_fields_are_mutually_exclusive() {
         .unwrap()
         .contains("--dry-run"));
 }
+
+fn seed_old_summary(root: &Path, slug: &str) {
+    let dir = root.join("issues").join(slug);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("item.md"), "---\ntype: task\nstatus: open\npriority: normal\ncreated: 2020-01-01\nupdated: 2020-01-02\n---\n\n# Summary fixture\n").unwrap();
+}
+
+fn success_json(out: Output) -> Value {
+    assert!(out.status.success(), "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert!(value["warnings"].is_array());
+    value
+}
+
+fn error_json(out: Output) -> Value {
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    let value: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert!(value["error"]["code"].is_string());
+    value
+}
+
+#[test]
+fn preserve_updated_cli_single_patch_query_and_rejections() {
+    let (_tmp, root, _) = pair();
+    seed_old_summary(&root, "summary-one");
+    seed_old_summary(&root, "summary-two");
+    let shown = success_json(run(&root, &["show", "summary-one"]));
+    let v0 = shown["data"]["version"].as_str().unwrap();
+    let out = success_json(run(
+        &root,
+        &[
+            "update",
+            "summary-one",
+            "--field",
+            "status_summary=Waiting",
+            "--preserve-updated",
+            "--expected-version",
+            v0,
+        ],
+    ));
+    assert_ne!(out["data"]["version"], v0);
+    assert!(item(&root, "summary-one").contains("updated: 2020-01-02"));
+    let before = item(&root, "summary-one");
+    error_json(run(
+        &root,
+        &[
+            "update",
+            "summary-one",
+            "--field",
+            "status_summary=Later",
+            "--preserve-updated",
+            "--expected-version",
+            v0,
+        ],
+    ));
+    for extra in [
+        vec!["--status", "open"],
+        vec!["--title", "Retitle"],
+        vec!["--body", "# Body"],
+        vec!["--priority", "high"],
+        vec!["--add-label", "triaged"],
+        vec!["--lane", "maintenance"],
+        vec!["--field", "preparation=ready"],
+    ] {
+        let mut args = vec![
+            "update",
+            "summary-one",
+            "--preserve-updated",
+            "--field",
+            "status_summary=Later",
+        ];
+        args.extend(extra);
+        error_json(run(&root, &args));
+        assert_eq!(item(&root, "summary-one"), before);
+    }
+    error_json(run(&root, &["update", "summary-one", "--preserve-updated"]));
+    error_json(run(
+        &root,
+        &["update", "--patch-file", "-", "--preserve-updated"],
+    ));
+
+    let shown = success_json(run(&root, &["show", "summary-one"]));
+    let version = shown["data"]["version"].as_str().unwrap();
+    let patch = format!("slug: summary-one\nexpected_version: {version}\npreserve_updated: true\ncustom_fields:\n  status_summary: Refreshed\n");
+    let dry = success_json(run_stdin(
+        &root,
+        &["update", "--patch-file", "-", "--dry-run"],
+        &patch,
+    ));
+    assert_eq!(dry["data"]["dry_run"], true);
+    assert!(!dry["data"]["diff"].as_str().unwrap().contains("-updated:"));
+    assert_eq!(item(&root, "summary-one"), before);
+    error_json(run_stdin(
+        &root,
+        &["update", "--patch-file", "-"],
+        &format!("{patch}status: in-progress\n"),
+    ));
+    assert_eq!(item(&root, "summary-one"), before);
+    success_json(run_stdin(&root, &["update", "--patch-file", "-"], &patch));
+    assert!(item(&root, "summary-one").contains("updated: 2020-01-02"));
+    error_json(run_stdin(&root, &["update", "--patch-file", "-"], &patch));
+
+    let before_one = item(&root, "summary-one");
+    let before_two = item(&root, "summary-two");
+    let args = [
+        "update",
+        "--query",
+        "status:open",
+        "--preserve-updated",
+        "--field",
+        "status_summary=Batch",
+    ];
+    let mut dry_args = args.to_vec();
+    dry_args.push("--dry-run");
+    assert_eq!(success_json(run(&root, &dry_args))["data"]["count"], 2);
+    assert_eq!(item(&root, "summary-one"), before_one);
+    assert_eq!(item(&root, "summary-two"), before_two);
+    let mut mixed = args.to_vec();
+    mixed.extend(["--add-blocked-by", "other-issue"]);
+    error_json(run(&root, &mixed));
+    assert_eq!(item(&root, "summary-one"), before_one);
+    assert_eq!(item(&root, "summary-two"), before_two);
+    assert_eq!(success_json(run(&root, &args))["data"]["count"], 2);
+    for slug in ["summary-one", "summary-two"] {
+        assert!(item(&root, slug).contains("updated: 2020-01-02"));
+    }
+    success_json(run(
+        &root,
+        &[
+            "update",
+            "summary-one",
+            "--clear-field",
+            "status_summary",
+            "--preserve-updated",
+        ],
+    ));
+    assert!(!item(&root, "summary-one").contains("status_summary:"));
+    assert!(item(&root, "summary-one").contains("updated: 2020-01-02"));
+    success_json(run(
+        &root,
+        &["update", "summary-one", "--status", "in-progress"],
+    ));
+    assert!(!item(&root, "summary-one").contains("updated: 2020-01-02"));
+}

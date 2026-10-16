@@ -455,7 +455,9 @@ pub(crate) fn update_issue_under_lock(
         }
     }
 
-    write::set_string(&mut item.frontmatter, "updated", &today);
+    if !req.preserve_updated {
+        write::set_string(&mut item.frontmatter, "updated", &today);
+    }
 
     // Reopen flow: when transitioning closing → active, append a
     // `## Reopen Notes — <date>` section so the rationale isn't

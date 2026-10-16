@@ -689,7 +689,7 @@ pub(crate) enum PrimaryCommand {
             "remove_collision", "add_labels", "remove_labels", "add_related",
             "remove_related", "add_blocked_by", "remove_blocked_by", "add_commits",
             "custom_fields", "clear_fields", "description", "body_file",
-            "expected_version"
+            "expected_version", "preserve_updated"
         ])))]
     Update {
         /// Issue slug. Mutually exclusive with `--query` and `--patch-file`.
@@ -715,6 +715,12 @@ pub(crate) enum PrimaryCommand {
         /// Plan a `--patch-file` or `--query` update without writing.
         #[arg(long, conflicts_with = "slug")]
         dry_run: bool,
+
+        /// Preserve updated for descriptive custom-field-only set/clear edits.
+        /// Rejects built-in, body, list, dependency and scheduling changes.
+        /// Works with --query; for --patch-file set preserve_updated in the patch.
+        #[arg(long)]
+        preserve_updated: bool,
 
         /// Rewrite the issue title stored in the markdown body's H1
         #[arg(long, value_parser = parse_non_empty)]

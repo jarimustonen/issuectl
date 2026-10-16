@@ -81,6 +81,11 @@ where
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateIssueRequest {
+    /// Preserve the existing `updated` date for descriptive custom-field-only
+    /// maintenance. Requires at least one custom set/clear; built-in, body,
+    /// list, dependency, and known scheduling-control edits are rejected.
+    #[serde(default)]
+    pub preserve_updated: bool,
     #[serde(default)]
     pub expected_version: Option<String>,
     #[serde(default)]
@@ -513,6 +518,30 @@ impl UpdateIssueRequest {
     /// effects (a `status: null` patch used to migrate legacy issues
     /// and create `.schema.yaml` before erroring out — round-2 #1).
     pub fn validate(&self) -> Result<(), MutateError> {
+        if self.preserve_updated {
+            // Reuse the complete mutation-slot inventory rather than maintaining
+            // a second list that could miss a future built-in field.
+            let mut non_custom = self.clone();
+            non_custom.custom_fields.clear();
+            let has_custom_edit = self
+                .custom_fields
+                .values()
+                .any(|p| !matches!(p, Patch::Unspecified));
+            let has_scheduling_edit = self.custom_fields.keys().any(|key| {
+                matches!(
+                    key.as_str(),
+                    "scheduling" | "scheduling_reason" | "preparation"
+                )
+            });
+            if !has_custom_edit || !non_custom.is_noop() || has_scheduling_edit {
+                return Err(MutateError::Validation(
+                    "preserve_updated requires only descriptive custom-field set/clear edits; \
+                     built-in, body, list, dependency and scheduling changes are not allowed"
+                        .into(),
+                ));
+            }
+        }
+
         // `status: null` / `--clear` is rejected here rather than
         // deeper in `update_issue_under_lock` so the rejection short-
         // circuits before any disk side effect. The under-lock check

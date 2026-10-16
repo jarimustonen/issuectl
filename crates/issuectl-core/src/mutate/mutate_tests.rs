@@ -30,6 +30,168 @@ mod tests {
         canonical_hash(&issue)
     }
 
+    fn descriptive_request() -> UpdateIssueRequest {
+        UpdateIssueRequest {
+            preserve_updated: true,
+            custom_fields: [(
+                "status_summary".into(),
+                Patch::Set("Waiting for input".into()),
+            )]
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn preserve_updated_keeps_old_date_and_version_checks() {
+        use chrono::TimeZone;
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "summary-maintenance", "open");
+        let path = tmp.path().join("issues/summary-maintenance/item.md");
+        let text = fs::read_to_string(&path)
+            .unwrap()
+            .replace("created:", "updated: 2020-01-02\ncreated:");
+        fs::write(&path, &text).unwrap();
+        let clock = crate::clock::FixedClock::new(
+            chrono::Utc
+                .with_ymd_and_hms(2026, 10, 12, 12, 0, 0)
+                .unwrap(),
+        );
+        let before_version = canonical_hash(
+            &crate::parser::parse_item_md_with_warnings(&path, "summary-maintenance", "open").issue,
+        );
+        let mut req = descriptive_request();
+        req.expected_version = Some(before_version.clone());
+        req.dry_run = true;
+        let planned =
+            update_issue_via(tmp.path(), "summary-maintenance", req.clone(), &clock).unwrap();
+        assert!(planned
+            .pending_serialized
+            .unwrap()
+            .contains("updated: 2020-01-02"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        assert!(!tmp.path().join("issues/.schema.yaml").exists());
+        req.dry_run = false;
+        let out = update_issue_via(tmp.path(), "summary-maintenance", req.clone(), &clock).unwrap();
+        assert_ne!(out.version, before_version);
+        let preserved = fs::read_to_string(&path).unwrap();
+        assert!(preserved.contains("updated: 2020-01-02"));
+        assert!(matches!(
+            update_issue_via(tmp.path(), "summary-maintenance", req, &clock),
+            Err(MutateError::VersionMismatch { .. })
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), preserved);
+
+        let mut clear = descriptive_request();
+        clear
+            .custom_fields
+            .insert("status_summary".into(), Patch::Clear);
+        update_issue_via(tmp.path(), "summary-maintenance", clear, &clock).unwrap();
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("updated: 2020-01-02"));
+        let mut ordinary = descriptive_request();
+        ordinary.preserve_updated = false;
+        update_issue_via(tmp.path(), "summary-maintenance", ordinary, &clock).unwrap();
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("updated: 2026-10-12"));
+        // Restore the fixture date to prove a normal lifecycle edit stamps too.
+        let text = fs::read_to_string(&path)
+            .unwrap()
+            .replace("updated: 2026-10-12", "updated: 2020-01-02");
+        fs::write(&path, text).unwrap();
+        update_issue_via(
+            tmp.path(),
+            "summary-maintenance",
+            UpdateIssueRequest {
+                status: Patch::Set("in-progress".into()),
+                ..Default::default()
+            },
+            &clock,
+        )
+        .unwrap();
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("updated: 2026-10-12"));
+    }
+
+    #[test]
+    fn preserve_updated_rejects_all_mixed_mutation_slots_before_side_effects() {
+        use serde_json::json;
+        let edits = json!({
+            "status": "in-progress", "title": "Retitled", "type": "task",
+            "priority": "high", "reporter": "alice", "assignee": "alice",
+            "owner": "alice", "epic": "parent-epic", "closed_by": "alice",
+            "lane": "maintenance", "lane_seq": 1,
+            "add_labels": ["x"], "remove_labels": ["x"],
+            "add_related": ["other-issue"], "remove_related": ["other-issue"],
+            "add_blocked_by": ["other-issue"], "remove_blocked_by": ["other-issue"],
+            "add_collision": ["x"], "remove_collision": ["x"],
+            "add_commits": [{"hash":"abc", "summary":"change"}],
+            "set_body": "# Replacement", "body_ops": [{"set_checkbox":{"match":"task", "checked":true}}]
+        });
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "summary-maintenance", "open");
+        let path = tmp.path().join("issues/summary-maintenance/item.md");
+        let before = fs::read(&path).unwrap();
+        for (key, value) in edits.as_object().unwrap() {
+            let mut wire =
+                json!({"preserve_updated":true, "custom_fields":{"status_summary":"Summary"}});
+            wire[key] = value.clone();
+            let req: UpdateIssueRequest = serde_json::from_value(wire).unwrap();
+            assert!(
+                matches!(
+                    update_issue(tmp.path(), "summary-maintenance", req),
+                    Err(MutateError::Validation(_))
+                ),
+                "{key}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), before, "{key}");
+            assert!(!tmp.path().join("issues/.schema.yaml").exists());
+        }
+        for key in [
+            "updated",
+            "blocked_by",
+            "scheduling",
+            "scheduling_reason",
+            "preparation",
+        ] {
+            let mut req = descriptive_request();
+            req.custom_fields
+                .insert(key.into(), Patch::Set("value".into()));
+            assert!(req.validate().is_err(), "{key}");
+        }
+        assert!(UpdateIssueRequest {
+            preserve_updated: true,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn preserve_updated_still_enforces_custom_schema() {
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "summary-maintenance", "open");
+        fs::write(
+            tmp.path().join("issues/.schema.yaml"),
+            "fields:\n  status_summary:\n    enum: [approved]\n",
+        )
+        .unwrap();
+        let path = tmp.path().join("issues/summary-maintenance/item.md");
+        let before = fs::read(&path).unwrap();
+        for dry_run in [false, true] {
+            let mut req = descriptive_request();
+            req.dry_run = dry_run;
+            assert!(matches!(
+                update_issue(tmp.path(), "summary-maintenance", req),
+                Err(MutateError::SchemaViolation(_))
+            ));
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+    }
+
     #[test]
     fn depend_add_writes_blocked_by_and_normalizes_at_sigil() {
         let tmp = fresh_repo();

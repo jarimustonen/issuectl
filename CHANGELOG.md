@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `update --preserve-updated` (also available in patches) preserves issue recency during guarded descriptive custom-field-only maintenance.
+
 ### Changed
 
 ### Fixed

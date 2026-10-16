@@ -290,6 +290,24 @@ not tell you:
   still apply. A `testing` issue can finish existing tests, but a fresh
   worker spawn requires `ready`. Never bulk-approve legacy issues. Full reasoning: `docs/design/lane-design.md`.
 
+For descriptive custom-field maintenance, explicitly opt in with
+`update <slug> --field status_summary="Waiting for input" --preserve-updated`.
+Only custom-field sets/clears may be combined with this flag; at least one is
+required. Built-in fields (even same-value sets), body/title edits, list and
+dependency operations, and scheduling controls (`lane`, `lane_seq`, `collision`,
+`scheduling`, `scheduling_reason`, `preparation`) are rejected before writing.
+Other custom keys are caller-designated descriptive fields: the CLI cannot infer
+whether an arbitrary custom key represents progress. Normal updates still stamp
+today. The retained `set` command has no preservation flag; use `update` instead.
+
+Preservation also works with `update --query … --field … --preserve-updated`
+(and its `--dry-run`). For `update --patch-file` / `apply`, put
+`preserve_updated: true` beside `custom_fields:` in the patch; the same guard
+applies. Do not combine `--patch-file` with the outer flag. Single-slug `update`
+does not support `--dry-run`; preview one issue using the patch form. Schema
+validation, locking, expected-version checks, result shapes, and version-token
+changes remain unchanged; preservation keeps the existing date, not the version.
+
 Among scheduling and dependency fields, `update` conditionally echoes only
 `lane`, `lane_seq`, and `collision`: when the call requests one of them,
 `.data` carries its persisted post-update value even for a no-op, with

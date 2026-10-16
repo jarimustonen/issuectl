@@ -31,3 +31,11 @@ In 3dbear-monorepo a human-maintained `status_summary` custom field describes th
 
 **Fix sketch:** Add an explicit, guarded opt-in for preserving `updated` on narrowly scoped custom-field changes, retaining the existing default for status, content, and other ordinary updates. Ensure dry-run, expected-version checking, locking, and schema validation still apply. Add regression tests showing a custom-field-only edit preserves the prior date while a status transition updates it. Consider policy-level field declarations only if multiple descriptive fields need this behavior; a narrowly scoped option is simpler to explain and safer than silently changing the default.
 <!-- intakectl:analysis:end job:70d7e54d-26e9-4d4f-baf2-e66235c24015 generation:0 -->
+
+## Acceptance Criteria
+
+- [x] Explicit `update --preserve-updated` preserves an old `updated:` date for descriptive custom-field sets/clears; ordinary custom updates and status changes still stamp today.
+- [x] Shared request validation rejects empty preservation requests and mixed built-in, title/body, list, dependency, and known scheduling-control edits before writing, including patch/apply and query-selected updates.
+- [x] Preservation retains schema validation, the existing flock, optimistic concurrency/version changes, and truthful patch/query dry-run behavior.
+- [x] Core and CLI JSON regressions cover preservation, rejected edits without side effects, dry-run, stale versions, patch and bulk paths.
+- [x] Consumer templates, paired Codex prompt, dogfooded copies, and Unreleased Added entry document supported combinations and limitations; retained `set` stays unchanged.
