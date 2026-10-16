@@ -1,9 +1,9 @@
 ---
 created: 2026-10-06
-updated: 2026-10-12
+updated: 2026-10-16
 type: feature
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 provenance: agent:3dbear-monorepo
 source_ref: agent:3dbear-monorepo/reporter:jari/id:3dbear-status-summary-preserve-updated-20261006
