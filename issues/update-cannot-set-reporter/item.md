@@ -3,11 +3,13 @@ created: 2026-10-12
 updated: 2026-10-16
 type: bug
 reporter: claude
-status: in-progress
+status: fixed
 priority: normal
 provenance: agent
 provenance_detail: native-agent-host wrap-up 2026-10-12
 lane: mutation
+closed: 2026-10-16
+closed_by: pi
 ---
 
 # update cannot set the built-in reporter field
