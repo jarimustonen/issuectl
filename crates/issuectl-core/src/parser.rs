@@ -98,6 +98,36 @@ fn deser_epic<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Erro
     }
 }
 
+/// Warn about `commits[].hash` values that YAML read as numbers. issuectl's
+/// writer always quotes hashes, so these come from hand edits (for example
+/// a `sed` that rewrote hashes after a rebase). The typed reader accepts
+/// them as their decimal text so the item keeps its real status and lane,
+/// but the conversion can be lossy (`0123456` reads as `123456`, `315194e2`
+/// as a float), so it stays a warning: the mutation layer refuses to
+/// write an item with parser warnings, which keeps issuectl from
+/// persisting a guessed hash before someone quotes the real one.
+pub(crate) fn numeric_commit_hash_warnings(
+    map: &serde_yaml::Mapping,
+    source: &Path,
+) -> Vec<String> {
+    let Some(serde_yaml::Value::Sequence(commits)) = map.get("commits") else {
+        return Vec::new();
+    };
+    commits
+        .iter()
+        .enumerate()
+        .filter_map(|(i, entry)| match entry.get("hash") {
+            Some(serde_yaml::Value::Number(n)) => Some(format!(
+                "{}: commits[{i}].hash `{n}` is an unquoted YAML number, not a string; \
+                 quote the real hash in item.md (e.g. `hash: \"{n}\"`, restoring any \
+                 leading zeros)",
+                source.display()
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 fn shape_name(v: &serde_yaml::Value) -> &'static str {
     match v {
         serde_yaml::Value::Null => "null",
@@ -213,6 +243,10 @@ pub fn parse_item_md_text_with_warnings(
             }
         },
     };
+
+    if let Some(ref m) = mapping {
+        warnings.extend(numeric_commit_hash_warnings(m, source));
+    }
 
     // Surface legacy numeric epic refs as a warning instead of an
     // unconditional stderr print — the doctor --fix pass migrates these.
@@ -961,5 +995,43 @@ mod tests {
         let parsed = parse_item_md_text_with_warnings(text, "s", "flat", Path::new("/tmp/x.md"));
         assert_eq!(parsed.fm_typed_error, None);
         assert_eq!(parsed.issue.epic.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn unquoted_numeric_commit_hash_keeps_the_issue_readable_and_warns() {
+        // Regression (@commit-hash-unquoted): a hand-edited
+        // `hash: 2206072` used to fail the typed frontmatter, defaulting
+        // status, type and lane so the item fell out of the DAG.
+        let text = "---\ntype: bug\nstatus: done\npriority: normal\nlane: deps\n\
+                    commits:\n- hash: 2206072\n  summary: a\n- hash: '0123456'\n  summary: b\n\
+                    ---\n\nbody\n";
+        let parsed = parse_item_md_text_with_warnings(text, "s", "flat", Path::new("/tmp/x.md"));
+        assert_eq!(parsed.fm_typed_error, None);
+        assert_eq!(parsed.issue.status, "done");
+        assert_eq!(parsed.issue.lane.as_deref(), Some("deps"));
+        let hashes: Vec<String> = parsed
+            .issue
+            .commits
+            .unwrap()
+            .into_iter()
+            .map(|c| c.hash)
+            .collect();
+        assert_eq!(hashes, ["2206072", "0123456"]);
+        // Still a warning: the integer reading may have lost leading
+        // zeros, and a warning makes mutations refuse to persist it.
+        assert_eq!(parsed.warnings.len(), 1, "{:?}", parsed.warnings);
+        assert!(
+            parsed.warnings[0].contains("commits[0].hash `2206072`"),
+            "{:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn non_scalar_commit_hash_is_still_a_typed_error() {
+        let text = "---\ntype: bug\nstatus: done\npriority: normal\n\
+                    commits:\n- hash: [a]\n  summary: a\n---\n\nbody\n";
+        let parsed = parse_item_md_text_with_warnings(text, "s", "flat", Path::new("/tmp/x.md"));
+        assert!(parsed.fm_typed_error.is_some());
     }
 }

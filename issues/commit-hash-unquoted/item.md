@@ -3,7 +3,7 @@ created: 2026-11-21
 updated: 2026-11-21
 type: bug
 reporter: claude-opus-5-5
-status: untriaged
+status: open
 priority: normal
 provenance: other
 provenance_detail: seen in a consuming repository

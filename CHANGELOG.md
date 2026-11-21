@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 ### Fixed
+
+- An unquoted all-digit or float-shaped commit hash in `commits:` (`hash: 2206072`, typically from a hand edit) no longer invalidates the whole frontmatter and drops the issue's status and lane from `list` and `dag`. The issue is read with the hash as text plus a warning naming it, and mutations refuse it until the real hash is quoted, so a lossy reading (lost leading zeros) is never persisted.
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.21.0] - 2026-10-16

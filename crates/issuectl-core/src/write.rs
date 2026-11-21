@@ -756,6 +756,53 @@ mod tests {
     }
 
     #[test]
+    fn writer_quotes_every_string_that_yaml_would_read_as_another_type() {
+        // Regression (@commit-hash-unquoted): every string issuectl
+        // writes (scalar fields, string lists, commit hashes and
+        // summaries) must read back as the same string through the
+        // typed parser, whatever it looks like.
+        let tricky = [
+            "2206072", "0123456", "315194e2", "1e3", "0x1f", "0o17", "1.0", "+1", "-1", ".inf",
+            ".nan", "true", "False", "null", "~", "", "- a", "#x", "@slug", "*a", "!t", "a: b",
+        ];
+        for s in tricky {
+            let mut item = ItemFile {
+                frontmatter: Mapping::new(),
+                body: "\n# T\n".into(),
+            };
+            let fm = &mut item.frontmatter;
+            set_string(fm, "type", "bug");
+            set_string(fm, "status", "open");
+            set_string(fm, "priority", "normal");
+            set_string(fm, "assignee", s);
+            add_to_string_list(fm, "labels", s).unwrap();
+            add_commit(fm, s, s).unwrap();
+            let text = serialize_item(&item).unwrap();
+            let parsed = crate::parser::parse_item_md_text_with_warnings(
+                &text,
+                "s",
+                "open",
+                Path::new("/tmp/x.md"),
+            );
+            assert!(
+                parsed.warnings.is_empty(),
+                "{s:?}: {:?}\n{text}",
+                parsed.warnings
+            );
+            let issue = parsed.issue;
+            assert_eq!(issue.assignee.as_deref(), Some(s), "{text}");
+            assert_eq!(
+                issue.labels.as_deref(),
+                Some(&[s.to_string()][..]),
+                "{text}"
+            );
+            let commits = issue.commits.unwrap();
+            assert_eq!(commits[0].hash, s, "{text}");
+            assert_eq!(commits[0].summary, s, "{text}");
+        }
+    }
+
+    #[test]
     fn read_item_handles_no_frontmatter() {
         let (_tmp, path) = write_tmp("# Just a body\nMore content\n");
         let item = read_item(&path).unwrap();

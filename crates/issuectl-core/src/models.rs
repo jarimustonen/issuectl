@@ -5,9 +5,25 @@ use serde_json::Value as JsonValue;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Commit {
+    /// Accepts an unquoted numeric YAML scalar (`hash: 2206072`) as its
+    /// decimal text so one hand-edited hash does not fail the whole
+    /// typed frontmatter; the parser warns about it separately (see
+    /// `parser::numeric_commit_hash_warnings`).
+    #[serde(deserialize_with = "deser_commit_hash")]
     pub hash: String,
     #[serde(default)]
     pub summary: String,
+}
+
+fn deser_commit_hash<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    use serde::de::Error;
+    match serde_yaml::Value::deserialize(d)? {
+        serde_yaml::Value::String(s) => Ok(s),
+        serde_yaml::Value::Number(n) => Ok(n.to_string()),
+        other => Err(D::Error::custom(format!(
+            "commits[].hash: expected a string, got {other:?}"
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

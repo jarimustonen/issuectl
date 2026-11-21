@@ -2526,6 +2526,50 @@ mod tests {
     }
 
     #[test]
+    fn close_with_all_digit_commit_hashes_reads_back_cleanly() {
+        // Regression (@commit-hash-unquoted): a short hash made only of
+        // digits is a YAML integer unless quoted. Closing with such
+        // hashes must write them so the typed reader sees the exact
+        // strings, leading zeros included, with no warning.
+        let tmp = fresh_repo();
+        seed_issue(tmp.path(), "open", "close-digit-hash", "open");
+        let hashes = ["2206072", "0123456", "315194e2", "b671964"];
+
+        close_issue(
+            tmp.path(),
+            "close-digit-hash",
+            None,
+            None,
+            None,
+            hashes
+                .iter()
+                .map(|h| CommitSpec {
+                    hash: (*h).into(),
+                    summary: format!("commit {h}"),
+                })
+                .collect(),
+            None,
+        )
+        .unwrap();
+
+        let path = tmp.path().join("issues/close-digit-hash/item.md");
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.contains("hash: '2206072'"), "{after}");
+        assert!(after.contains("hash: '0123456'"), "{after}");
+        let parsed = crate::parser::parse_item_md_with_warnings(&path, "close-digit-hash", "open");
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.issue.status, "fixed");
+        let read: Vec<String> = parsed
+            .issue
+            .commits
+            .unwrap()
+            .into_iter()
+            .map(|c| c.hash)
+            .collect();
+        assert_eq!(read, hashes);
+    }
+
+    #[test]
     fn close_without_as_writes_no_closed_by() {
         let tmp = fresh_repo();
         seed_issue(tmp.path(), "open", "close-anon", "open");
