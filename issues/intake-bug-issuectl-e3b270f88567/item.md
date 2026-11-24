@@ -1,12 +1,16 @@
 ---
 created: 2026-10-21
-updated: 2026-10-21
+updated: 2026-11-24
 type: bug
 reporter: jari
-status: untriaged
+status: fixed
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:oh-wrapup-20261021-ictl-laneorder
+closed: 2026-11-24
+commits:
+- hash: 4d264a7
+  summary: warn when priority overrides --lane-seq
 ---
 
 # dag: priority overrides lane_seq within a lane, so a parked high-priori…
