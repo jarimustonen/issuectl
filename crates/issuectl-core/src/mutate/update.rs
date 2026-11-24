@@ -600,6 +600,7 @@ pub(crate) fn update_issue_under_lock(
     // never retroactively rejected.
     if projected.status != prev_status || projected.issue_type != prev_type {
         let intrinsic = intake::intrinsic_transition_violations(
+            slug,
             &prev_status,
             &prev_type,
             &projected.status,

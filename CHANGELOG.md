@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A status change refused by the transition rules now names the command that gets the issue to an allowed source status. Closing an untriaged, deferred, or needs-info item points to `issuectl intake accept <slug>`, or to the intake dispositions when the work will not be done; other refusals give the `update <slug> --status <step>` that unblocks them. Previously the error listed only the allowed source statuses.
+
 ### Fixed
 
 - An unquoted all-digit or float-shaped commit hash in `commits:` (`hash: 2206072`, typically from a hand edit) no longer invalidates the whole frontmatter and drops the issue's status and lane from `list` and `dag`. The issue is read with the hash as text plus a warning naming it, and mutations refuse it until the real hash is quoted, so a lossy reading (lost leading zeros) is never persisted.

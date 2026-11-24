@@ -813,6 +813,7 @@ pub fn withdraw(root: &Path, slug: &str, reason: &str) -> Result<UpdateOutcome, 
 /// `status` or `type`, so the generic `set status` path enforces the
 /// same rules as the intake verbs. Returns one message per violation.
 pub(crate) fn intrinsic_transition_violations(
+    slug: &str,
     prev_status: &str,
     _prev_type: &str,
     new_status: &str,
@@ -837,7 +838,7 @@ pub(crate) fn intrinsic_transition_violations(
     // Work cannot begin straight from reception.
     if prev_status == "untriaged" && matches!(new_status, "in-progress" | "testing") {
         out.push(format!(
-            "cannot start work from 'untriaged' — accept it into 'open' first (untriaged → {new_status} is illegal)"
+            "cannot start work from 'untriaged' — accept it into 'open' first with `issuectl intake accept {slug}` (untriaged → {new_status} is illegal)"
         ));
     }
 
@@ -1218,16 +1219,18 @@ mod tests {
     #[test]
     fn intrinsic_violations_unit() {
         // feature → done and bug → fixed are the compatible completions.
-        assert!(intrinsic_transition_violations("open", "feature", "done", "feature").is_empty());
-        assert!(intrinsic_transition_violations("testing", "bug", "fixed", "bug").is_empty());
-        // The incompatible completions are rejected.
-        assert!(!intrinsic_transition_violations("open", "bug", "done", "bug").is_empty());
         assert!(
-            !intrinsic_transition_violations("testing", "feature", "fixed", "feature").is_empty()
+            intrinsic_transition_violations("x", "open", "feature", "done", "feature").is_empty()
+        );
+        assert!(intrinsic_transition_violations("x", "testing", "bug", "fixed", "bug").is_empty());
+        // The incompatible completions are rejected.
+        assert!(!intrinsic_transition_violations("x", "open", "bug", "done", "bug").is_empty());
+        assert!(
+            !intrinsic_transition_violations("x", "testing", "feature", "fixed", "feature")
+                .is_empty()
         );
         // Reception state cannot jump straight into work.
-        assert!(
-            !intrinsic_transition_violations("untriaged", "bug", "in-progress", "bug").is_empty()
-        );
+        let v = intrinsic_transition_violations("x", "untriaged", "bug", "in-progress", "bug");
+        assert!(v[0].contains("`issuectl intake accept x`"), "{v:?}");
     }
 }

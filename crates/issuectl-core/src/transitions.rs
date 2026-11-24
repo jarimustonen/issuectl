@@ -369,10 +369,17 @@ pub fn evaluate_transition(
     }
     if prev_status != new_status {
         if !rule.allowed_from.is_empty() && !rule.allowed_from.iter().any(|s| s == prev_status) {
-            out.push(format!(
+            let mut msg = format!(
                 "transition {prev_status:?} → {new_status:?} is not in `allowed_from` (allowed: [{}])",
                 rule.allowed_from.join(", ")
-            ));
+            );
+            if let Some(hint) =
+                stepping_stone_hint(rules, &issue_after.slug, prev_status, new_status, rule)
+            {
+                msg.push_str(" — ");
+                msg.push_str(&hint);
+            }
+            out.push(msg);
         }
         if rule.forbidden_from.iter().any(|s| s == prev_status) {
             out.push(format!(
@@ -381,6 +388,50 @@ pub fn evaluate_transition(
         }
     }
     out
+}
+
+/// Intake states that `issuectl intake accept` moves to `open`.
+const ACCEPTABLE_STATES: &[&str] = &["untriaged", "deferred", "needs-info"];
+
+/// Completion statuses that an intake item cannot take directly; the
+/// non-completing intake dispositions are the alternative.
+const COMPLETION_STATES: &[&str] = &["fixed", "done"];
+
+/// Name the command that moves an issue from `prev` into one of the
+/// statuses `rule.allowed_from` accepts, so a refused transition tells
+/// the caller what to run instead of only what is wrong. Picks the first
+/// allowed status the rules let `prev` reach in one step; returns `None`
+/// when no such stepping stone exists.
+fn stepping_stone_hint(
+    rules: &TransitionRules,
+    slug: &str,
+    prev: &str,
+    new: &str,
+    rule: &StatusRule,
+) -> Option<String> {
+    let reachable = |mid: &str| match rules.status_rules.get(mid) {
+        None => true,
+        Some(r) => {
+            (r.allowed_from.is_empty() || r.allowed_from.iter().any(|s| s == prev))
+                && !r.forbidden_from.iter().any(|s| s == prev)
+        }
+    };
+    let mid = rule
+        .allowed_from
+        .iter()
+        .find(|mid| mid.as_str() != prev && reachable(mid))?;
+    if mid == "open" && ACCEPTABLE_STATES.contains(&prev) {
+        let mut hint = format!("accept it first with `issuectl intake accept {slug}` (→ open)");
+        if COMPLETION_STATES.contains(&new) {
+            hint.push_str(&format!(
+                ", or close it without completing via `issuectl intake reject|duplicate|obsolete|cannot-reproduce {slug}`"
+            ));
+        }
+        return Some(hint);
+    }
+    Some(format!(
+        "move it to {mid:?} first with `issuectl update {slug} --status {mid}`"
+    ))
 }
 
 /// Doctor-side variant of `evaluate_transition` — same `requires_*`
@@ -884,6 +935,46 @@ mod tests {
         let only_fenced = "## Acceptance Criteria\n\n```\n- [ ] inside\n```\n";
         let msg = acceptance_criteria_message(only_fenced, "done").unwrap();
         assert!(msg.contains("at least one task-list item"));
+    }
+
+    /// A refused transition names the command that reaches an allowed
+    /// source, so the caller does not have to know the intake verbs.
+    #[test]
+    fn allowed_from_violation_names_the_stepping_stone_command() {
+        let rules: TransitionRules = serde_yaml::from_str(DEFAULT_TRANSITIONS_YAML).unwrap();
+
+        // untriaged → done: accept first, or dispose without completing.
+        let v = evaluate_transition(&rules, &make_issue("done", "feature", ""), "untriaged");
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("`issuectl intake accept x`"), "{v:?}");
+        assert!(v[0].contains("issuectl intake reject|"), "{v:?}");
+
+        // deferred → fixed: same route out of a parked item.
+        let v = evaluate_transition(&rules, &make_issue("fixed", "bug", ""), "deferred");
+        assert!(v[0].contains("`issuectl intake accept x`"), "{v:?}");
+
+        // open → testing: an ordinary status step, no intake verb.
+        let v = evaluate_transition(&rules, &make_issue("testing", "bug", ""), "open");
+        assert!(
+            v[0].contains("`issuectl update x --status in-progress`"),
+            "{v:?}"
+        );
+        assert!(!v[0].contains("intake"), "{v:?}");
+
+        // No allowed source is reachable in one step ⇒ no invented hint.
+        let mut strict = rule_with(StatusRule {
+            allowed_from: vec!["testing".into()],
+            ..Default::default()
+        });
+        strict.status_rules.insert(
+            "testing".into(),
+            StatusRule {
+                allowed_from: vec!["in-progress".into()],
+                ..Default::default()
+            },
+        );
+        let v = evaluate_transition(&strict, &make_issue("done", "bug", ""), "open");
+        assert!(!v[0].contains(" — "), "{v:?}");
     }
 
     /// The shipped default matrix parses, every status it references is a
