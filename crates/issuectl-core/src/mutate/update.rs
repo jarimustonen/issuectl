@@ -624,6 +624,15 @@ pub(crate) fn update_issue_under_lock(
     let mut dod_warnings = dod_warnings;
     dod_warnings.append(&mut body_warnings);
     dod_warnings.append(&mut type_warnings);
+    // A `lane_seq` that priority overrides is stored but changes nothing
+    // about position; say so instead of letting the success read as a
+    // reorder.
+    if matches!(req.lane_seq, Patch::Set(_)) {
+        let issues = crate::repo::load_issues(root);
+        if let Some(note) = crate::dag::lane_seq_priority_note(&issues, schema, &projected) {
+            dod_warnings.push(note);
+        }
+    }
 
     // Post-mutation closing classification drives both the dry-run dir
     // prediction and the real unarchive decision below — an archived

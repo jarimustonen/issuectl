@@ -275,7 +275,10 @@ not tell you:
   draw lanes at independently mergeable conflict boundaries rather than
   themes; the number of lanes is the parallelism budget. Shared hot files
   across lanes go in `collision:` tokens rather than merging lanes.
-  `lane_seq` orders within a lane after `blocked_by` and priority.
+  `lane_seq` orders within a lane after `blocked_by` and priority, so it
+  cannot move an item across priorities (`update` warns when that is the
+  case); to park a high-priority item behind other work, lower its
+  priority. Moving it to `unlaned` is not parking: that makes it spawnable.
   `--lane unlaned` means confirmed parallel-safe (every member spawnable),
   which differs from no lane (unclassified). A reviewed, open issue that
   is not execution work uses `--field scheduling=excluded --field scheduling_reason="why it stays outside the DAG"`

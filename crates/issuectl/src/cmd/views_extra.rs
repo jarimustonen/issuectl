@@ -82,7 +82,12 @@ pub(crate) fn print_dag_row(mark: &str, i: &dag::DagIssue) {
         suffix.push_str(&format!(" missing-dep:{}", i.blockers_missing.join(",")));
     }
     if let Some(reason) = i.preparation_reason {
-        suffix.push_str(&format!(" [{reason}]"));
+        // The bracketed code is what scripts grep for; the hint after it
+        // names the approval step, which is a custom field with no flag.
+        suffix.push_str(&format!(
+            " [{reason}] (once prepared: issuectl update {} --field preparation=ready)",
+            i.slug
+        ));
     }
     if i.reserved {
         suffix.push_str(" [reserved]");

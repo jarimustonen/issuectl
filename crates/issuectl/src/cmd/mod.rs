@@ -795,7 +795,8 @@ pub(crate) enum PrimaryCommand {
         no_lane: bool,
 
         /// Set the coarse intra-lane precedence key (see `issuectl dag`);
-        /// consulted after `blocked_by` and priority, before the slug tie-break
+        /// consulted after `blocked_by` and priority, before the slug tie-break.
+        /// Warns when lane peers of another priority keep their place regardless
         #[arg(long = "lane-seq", allow_hyphen_values = true)]
         lane_seq: Option<i64>,
 
@@ -1625,7 +1626,8 @@ pub(crate) enum ExtendedCommand {
     ///
     /// If issues/.schema.yaml sets preparation_gate: true, only heads with
     /// preparation: ready are spawnable; missing/pending/reviewing heads
-    /// remain heads and report preparation_reason. Testing work may finish,
+    /// remain heads and report preparation_reason. Approve prepared work
+    /// with `update <slug> --field preparation=ready`. Testing work may finish,
     /// but a new worker action still requires approval.
     ///
     /// Design lanes as serial queues, not theme labels: only each lane's
@@ -1638,7 +1640,9 @@ pub(crate) enum ExtendedCommand {
     /// Within each lane, ordering is `blocked_by` topology first, then
     /// priority (high, normal, low), `lane_seq` (ascending, with set values
     /// before unset), creation time, and finally slug. Priority deliberately
-    /// outranks `lane_seq`.
+    /// outranks `lane_seq`, so a high-priority item cannot be sequenced
+    /// behind normal-priority work; lower its priority instead. Moving it to
+    /// `lane: unlaned` is not parking: that makes it independently spawnable.
     ///
     /// `scheduling: excluded` keeps a reviewed, open issue outside this execution DAG;
     /// it needs `scheduling_reason` and cannot have a lane. `lane: unlaned`

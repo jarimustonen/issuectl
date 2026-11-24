@@ -345,6 +345,59 @@ fn priority_rank(p: &str) -> u8 {
     }
 }
 
+/// Explain when an explicit `lane_seq` on `target` cannot move it past
+/// lane peers of a different priority, because priority outranks
+/// `lane_seq` in intra-lane ordering. Returns `None` when `target` has no
+/// real lane or no `lane_seq`, or when every scheduled peer shares its
+/// priority. `issues` is the repository as loaded; any stale copy of
+/// `target` in it is ignored in favour of `target` itself.
+///
+/// `blocked_by` topology still ranks above both keys; this note speaks
+/// only to the priority/sequence interplay, which is the part a caller
+/// setting `lane_seq` can be surprised by.
+pub fn lane_seq_priority_note(issues: &[Issue], schema: &Schema, target: &Issue) -> Option<String> {
+    let lane = target.lane.as_deref().filter(|l| *l != UNLANED)?;
+    target.lane_seq?;
+    let rank = priority_rank(&target.priority);
+    let (mut ahead, mut behind) = (Vec::new(), Vec::new());
+    for i in issues {
+        if i.slug == target.slug
+            || i.lane.as_deref() != Some(lane)
+            || status_class(schema, &i.status) == StatusClass::Closing
+            || i.extra.get("scheduling").and_then(|v| v.as_str()) == Some("excluded")
+        {
+            continue;
+        }
+        match priority_rank(&i.priority).cmp(&rank) {
+            std::cmp::Ordering::Less => ahead.push(i.slug.as_str()),
+            std::cmp::Ordering::Greater => behind.push(i.slug.as_str()),
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    if ahead.is_empty() && behind.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !ahead.is_empty() {
+        parts.push(format!(
+            "higher-priority {} stay ahead of it",
+            ahead.join(", ")
+        ));
+    }
+    if !behind.is_empty() {
+        parts.push(format!(
+            "it stays ahead of lower-priority {}",
+            behind.join(", ")
+        ));
+    }
+    Some(format!(
+        "lane_seq only orders {} among `{}`-priority members of lane `{lane}`: priority outranks lane_seq, so {}; change --priority to reorder across priorities",
+        target.slug,
+        target.priority,
+        parts.join(" and ")
+    ))
+}
+
 /// Compute the scheduling-DAG view over `issues`, classifying done-ness
 /// via `schema` (so a project's `status_classes` override is honoured)
 /// and applying optional caller `reservations`.
@@ -1454,6 +1507,50 @@ mod tests {
             .map(|i| i.slug.as_str())
             .collect();
         assert_eq!(order, vec!["m-high", "z-set", "a-unset"]);
+    }
+
+    /// The reported case: `lane_seq 99` on a high-priority head leaves it
+    /// ahead of normal-priority peers, and the note says so and why.
+    #[test]
+    fn lane_seq_priority_note_names_peers_priority_keeps_in_place() {
+        let target = with_lane_seq(with_lane(mk("parked", "open", "high"), "web"), 99);
+        let issues = vec![
+            target.clone(),
+            with_lane(mk("n-one", "open", "normal"), "web"),
+            with_lane(mk("n-done", "done", "normal"), "web"),
+            with_lane(mk("other-lane", "open", "normal"), "api"),
+            with_lane(mk("h-peer", "open", "high"), "web"),
+        ];
+        let note = lane_seq_priority_note(&issues, &default_schema(), &target).unwrap();
+        assert!(note.contains("priority outranks lane_seq"), "{note}");
+        assert!(note.contains("lower-priority n-one"), "{note}");
+        assert!(
+            !note.contains("n-done"),
+            "closed peers do not count: {note}"
+        );
+        assert!(!note.contains("other-lane"), "{note}");
+        assert!(
+            !note.contains("h-peer"),
+            "same priority is ordered by lane_seq: {note}"
+        );
+        assert!(!note.contains("stay ahead of it"), "{note}");
+
+        // Low-priority setter: higher-priority peers stay ahead.
+        let low = with_lane_seq(with_lane(mk("low", "open", "low"), "web"), 1);
+        let note = lane_seq_priority_note(&issues, &default_schema(), &low).unwrap();
+        assert!(note.contains("higher-priority"), "{note}");
+        assert!(note.contains("parked") && note.contains("n-one"), "{note}");
+
+        // Same-priority lane, unlaned, or no lane_seq ⇒ no note.
+        let same = vec![
+            target.clone(),
+            with_lane(mk("h-peer", "open", "high"), "web"),
+        ];
+        assert!(lane_seq_priority_note(&same, &default_schema(), &target).is_none());
+        let unlaned = with_lane_seq(with_lane(mk("u", "open", "high"), UNLANED), 9);
+        assert!(lane_seq_priority_note(&issues, &default_schema(), &unlaned).is_none());
+        let unset = with_lane(mk("parked", "open", "high"), "web");
+        assert!(lane_seq_priority_note(&issues, &default_schema(), &unset).is_none());
     }
 
     #[test]

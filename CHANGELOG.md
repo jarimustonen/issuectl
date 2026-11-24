@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - A status change refused by the transition rules now names the command that gets the issue to an allowed source status. Closing an untriaged, deferred, or needs-info item points to `issuectl intake accept <slug>`, or to the intake dispositions when the work will not be done; other refusals give the `update <slug> --status <step>` that unblocks them. Previously the error listed only the allowed source statuses.
+- `update --lane-seq` warns when lane peers of another priority keep their place regardless, naming them, since priority outranks `lane_seq` and the stored value otherwise reads as a reorder that never happened. `dag` help, the lane design doc, and the `/issue` skill say how to park a high-priority item (lower its priority; `unlaned` makes it spawnable).
+- Human `dag` output follows a `[preparation_missing]`/`[preparation_pending]`/`[preparation_reviewing]` head with the approval command, `issuectl update <slug> --field preparation=ready`. The JSON `preparation_reason` codes are unchanged.
 
 ### Fixed
 

@@ -402,7 +402,12 @@ fn opted_in_preparation_is_exposed_and_gates_new_spawns() {
     );
     assert_eq!(v["spawnable_heads"], 0);
     let text = run(r, &["dag"]);
-    assert!(String::from_utf8_lossy(&text.stdout).contains("[preparation_missing]"));
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("[preparation_missing]"), "{text}");
+    assert!(
+        text.contains("issuectl update schema-a --field preparation=ready"),
+        "the human row names the approval step: {text}"
+    );
     assert!(
         run(
             r,
@@ -435,4 +440,28 @@ fn opted_in_preparation_is_exposed_and_gates_new_spawns() {
         serde_json::Value::Null
     );
     assert_eq!(v["lanes"][1]["issues"][1]["spawnable"], false);
+}
+
+/// `--lane-seq` on a high-priority lane member is stored but cannot move it
+/// behind normal-priority peers; the success carries a warning saying so
+/// instead of reading as a reorder.
+#[test]
+fn update_lane_seq_warns_when_priority_overrides_it() {
+    let tmp = scheduled_repo();
+    let r = tmp.path();
+    run(r, &["--json", "update", "schema-b", "--priority", "high"]);
+    let out = run(r, &["--json", "update", "schema-b", "--lane-seq", "99"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let warnings = v["warnings"].to_string();
+    assert!(
+        warnings.contains("priority outranks lane_seq"),
+        "{warnings}"
+    );
+    assert!(warnings.contains("lower-priority schema-a"), "{warnings}");
+
+    // Equal priorities: lane_seq does order them, so no warning.
+    let out = run(r, &["--json", "update", "main-x", "--lane-seq", "3"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["warnings"], serde_json::json!([]), "{v}");
 }

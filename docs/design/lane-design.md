@@ -26,6 +26,13 @@ first, and issues with a value come before issues without one. Use `lane_seq`
 only for a coarse preference after dependencies and priority, not to invent a
 dependency.
 
+Because priority wins, `lane_seq` cannot sequence a high-priority item behind
+normal-priority work. `update --lane-seq` therefore warns, naming the peers,
+when lane members of another priority keep their place regardless. To park a
+high-priority item that waits on something outside the DAG, lower its
+priority. `lane: unlaned` is not a parking place: it makes the item
+independently spawnable.
+
 Use `collision:` for a shared cross-lane hotspot. Two otherwise independent
 lanes may both touch `crates/issuectl/src/main.rs`; give both issues the same
 collision token and have the caller pass live reservations to `issuectl dag`.
