@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+### Fixed
+<!-- oss-changelog:unreleased-end -->
+
+## [0.22.0] - 2026-11-24
+
+### Changed
+
 - A status change refused by the transition rules now names the command that gets the issue to an allowed source status. Closing an untriaged, deferred, or needs-info item points to `issuectl intake accept <slug>`, or to the intake dispositions when the work will not be done; other refusals give the `update <slug> --status <step>` that unblocks them. Previously the error listed only the allowed source statuses.
 - `update --lane-seq` warns when lane peers of another priority keep their place regardless, naming them, since priority outranks `lane_seq` and the stored value otherwise reads as a reorder that never happened. `dag` help, the lane design doc, and the `/issue` skill say how to park a high-priority item (lower its priority; `unlaned` makes it spawnable).
 - Human `dag` output follows a `[preparation_missing]`/`[preparation_pending]`/`[preparation_reviewing]` head with the approval command, `issuectl update <slug> --field preparation=ready`. The JSON `preparation_reason` codes are unchanged.
@@ -19,7 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - An unquoted all-digit or float-shaped commit hash in `commits:` (`hash: 2206072`, typically from a hand edit) no longer invalidates the whole frontmatter and drops the issue's status and lane from `list` and `dag`. The issue is read with the hash as text plus a warning naming it, and mutations refuse it until the real hash is quoted, so a lossy reading (lost leading zeros) is never persisted.
-<!-- oss-changelog:unreleased-end -->
 
 ## [0.21.0] - 2026-10-16
 
