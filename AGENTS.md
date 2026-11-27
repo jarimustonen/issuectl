@@ -192,10 +192,25 @@ earlier scan is a hint and ask it to redo the check.
 
 ## Operating policy (for `/stint`)
 
-`/stint` reads this section for how to run a work session here. The work queue
-and the session handoff live in [TODO.md](TODO.md); this section is the
-standing policy. The maintainer's preferences below are decisions, not
-suggestions: a stint follows them without asking again.
+`/stint` reads this section for how to run a work session here. The session
+narrative (handoffs, round history, open decisions) is kept outside this
+repository, and the issuectl DAG (`issuectl dag`) is the schedule; this
+section is the standing policy. The maintainer's preferences below are
+decisions, not suggestions: a stint follows them without asking again.
+
+### Schedule and intake
+
+Scheduling lives only in issue frontmatter (`lane`, `lane_seq`,
+`blocked_by`, `collision`) and is read through `issuectl dag`. Do not keep a
+markdown DAG or a backlog list in any repository file: a second copy drifts
+from the frontmatter and the DAG stops being the truth. New reports enter
+through `issuectl intake file` and are lifted from `issuectl intake queue` by
+`/issue-intake`; an accepted item becomes schedulable once it is laned.
+
+When the DAG is empty, a stint starts with the intake queue and a
+lane-or-close pass over unlaned issues, and plans implementation with the
+maintainer only if new acceptable work has arrived. Inventing a work list
+from nothing spends effort on changes nobody asked for.
 
 ### What is precious and what is not
 
@@ -274,6 +289,13 @@ both drop that override and the runner-isolation guard, and `/shipshape-dist`
 refuses to emit a runner override at all. `release.yml` is regenerated only
 through `scripts/release_workflow.py` (see CONTRIBUTING "Updating cargo-dist
 itself").
+
+The cut preflight requires exactly the `cargo-dist-version` pinned in
+`dist-workspace.toml`, which may differ from the one installed on the
+machine. Build that exact version into a disposable prefix, run the cut with
+it, and remove the prefix after verification; do not change the machine's
+global install, because cargo-dist is a fleet-managed binary and a local
+override drifts silently.
 
 ### Git
 
