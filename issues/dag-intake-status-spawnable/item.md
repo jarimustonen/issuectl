@@ -2,13 +2,17 @@
 created: 2026-11-27
 updated: 2026-11-27
 type: bug
-status: untriaged
+status: fixed
 priority: normal
 provenance: other
 provenance_detail: observed while running a conductor
 source_ref: taskfleet:01m8f62x3qkdqdzdspmzxyn72g/observed:dag-intake-spawnable
 originating_run: 01m8f62x3qkdqdzdspmzxyn72g
 originating_run_kind: spinoff
+closed: 2026-11-27
+commits:
+- hash: 48b3c8f
+  summary: 'fix(dag): never report intake items as heads of line or spawnable'
 ---
 
 # dag reports untriaged, needs-info and deferred issues as spawnable heads
@@ -54,10 +58,10 @@ behind it.
 
 ## Acceptance Criteria
 
-- [ ] Rows whose status is an intake holding state are never `spawnable` and
+- [x] Rows whose status is an intake holding state are never `spawnable` and
       never `is_head_of_line`, in lanes and in `unscheduled`.
-- [ ] A lane's work-conserving head skips such members.
-- [ ] `spawnable_heads` excludes them; they remain listed for visibility.
-- [ ] Tests cover each status (`untriaged`, `needs-info`, `deferred`, `open`
+- [x] A lane's work-conserving head skips such members.
+- [x] `spawnable_heads` excludes them; they remain listed for visibility.
+- [x] Tests cover each status (`untriaged`, `needs-info`, `deferred`, `open`
       without lane, `open` with `lane: unlaned`).
-- [ ] Docs and the `[Unreleased]` changelog describe the JSON contract change.
+- [x] Docs and the `[Unreleased]` changelog describe the JSON contract change.
