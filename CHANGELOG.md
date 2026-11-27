@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 ### Fixed
+
+- `dag` no longer reports intake items (`untriaged`, `needs-info`, `deferred`) as heads of line or spawnable, so a conductor reading `spawnable_heads` cannot start work nobody has accepted. They stay listed in their lane or under `unscheduled`, and a lane's head moves past them to the first accepted, runnable member. This changes the `dag --json` contract that orchestrators read: such rows now carry `is_head_of_line: false` and `spawnable: false`, `spawnable_heads` excludes them, and a lane whose only members are intake items has `head_of_line: null`. Previously every unscheduled row was its own head and intake items counted as spawnable.
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.22.0] - 2026-11-24

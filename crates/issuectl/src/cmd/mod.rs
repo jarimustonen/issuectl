@@ -1624,6 +1624,10 @@ pub(crate) enum ExtendedCommand {
     /// reports each lane's serial depth and the current count of spawnable
     /// heads: the practical answer to "how parallel is my plan right now?"
     ///
+    /// Only accepted work is executable: intake items (untriaged,
+    /// needs-info, deferred) are listed in their lane or under unscheduled
+    /// but are never head-of-line or spawnable until `intake accept`.
+    ///
     /// If issues/.schema.yaml sets preparation_gate: true, only heads with
     /// preparation: ready are spawnable; missing/pending/reviewing heads
     /// remain heads and report preparation_reason. Approve prepared work

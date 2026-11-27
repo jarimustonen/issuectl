@@ -27,6 +27,16 @@ pub const ACTIVE_STATUSES: &[&str] = &[
     "deferred",
     "needs-info",
 ];
+/// Intake holding statuses: active (not closing) but not yet accepted as
+/// work. An item leaves them through an intake disposition, and only then
+/// becomes executable; `dag` never reports one as head of line or spawnable.
+pub const INTAKE_STATUSES: &[&str] = &["untriaged", "needs-info", "deferred"];
+
+/// True when `status` is an intake holding status (see [`INTAKE_STATUSES`]).
+pub fn is_intake_status(status: &str) -> bool {
+    INTAKE_STATUSES.contains(&status)
+}
+
 /// Closing statuses that signify delivered work and therefore participate in
 /// the zero-config Definition-of-Done gate.
 pub const DELIVERY_STATUSES: &[&str] = &["done", "fixed"];

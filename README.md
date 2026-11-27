@@ -394,12 +394,14 @@ issuectl dag --reservations run-holds.json      # account for in-flight runs
 per-lane order + the `blocked_by` mirror with **live status**, and
 computes the **head-of-line** and **spawnability** entirely on read —
 nothing is stored, so status stays issuectl's and the plan stays
-lanes+deps. Head-of-line is *work-conserving*: it is the first not-done
-issue in a lane whose dependencies are all satisfied, so a lane whose
+lanes+deps. Head-of-line is *work-conserving*: it is the first not-done,
+accepted issue in a lane whose dependencies are all satisfied, so a lane whose
 front issue is stuck behind a cross-lane blocker advances to the next
 runnable member instead of stalling. An issue is `spawnable` when it is
 its lane's head-of-line and none of its lane/collision tokens are
-reserved. A dangling `blocked_by` ref (target slug not in the repo)
+reserved. Intake items (`untriaged`, `needs-info`, `deferred`) are
+listed in their lane or under `unscheduled` but are never head-of-line
+or spawnable until an intake disposition accepts them. A dangling `blocked_by` ref (target slug not in the repo)
 surfaces separately as `blockers_missing` so a broken graph is
 distinguishable from real pending work.
 

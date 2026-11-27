@@ -34,17 +34,25 @@
 //!   order of the independent `unscheduled` bucket (absent-lane and
 //!   `unlaned` rows) — harmless there since each such issue is its own
 //!   head, but it keeps a one-at-a-time consumer deterministic.
-//! - **Head-of-line** for a lane is the first not-done issue in the lane's
+//! - **Executable** statuses are the non-closing ones outside the intake
+//!   holding states ([`crate::issue_fields::INTAKE_STATUSES`]: `untriaged`,
+//!   `needs-info`, `deferred`). An intake item has not been accepted as
+//!   work, so it is never head-of-line and never spawnable. It still
+//!   renders in its lane or in `unscheduled`, so a caller can see it.
+//! - **Head-of-line** for a lane is the first executable issue in the lane's
 //!   deterministic order whose `blocked_by` dependencies are all done —
 //!   i.e. the front *runnable* issue. This is **work-conserving**: if the
 //!   earliest not-done issue is stuck behind an open (cross-lane) blocker,
 //!   the head advances to the next runnable member rather than stalling
-//!   the whole lane. `None` when the lane has no runnable issue (all done,
-//!   or every not-done issue still has an open blocker).
+//!   the whole lane; an intake-status member is skipped the same way. `None`
+//!   when the lane has no runnable issue (all done, or every remaining issue
+//!   is blocked or in an intake status). An unscheduled issue is its own
+//!   head-of-line when its status is executable.
 //! - **Spawnable** = the issue is its lane's head-of-line ∧ its
 //!   lane/collision tokens are not currently reserved ∧ (when the repo
 //!   opts into the preparation gate) its `preparation` is `ready`.
-//!   (Head-of-line already implies "not done" and "all blockers done".) `in-progress`
+//!   (Head-of-line already implies "executable", "not done" and "all
+//!   blockers done".) `in-progress`
 //!   is deliberately **not** excluded: an in-progress issue means
 //!   *started, not done* — not "someone is on it right now". `dag` is
 //!   intended to be consulted only when nothing is actively running
@@ -73,6 +81,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
+use crate::issue_fields::is_intake_status;
 use crate::models::Issue;
 use crate::query;
 use crate::schema::{status_class, Schema, StatusClass};
@@ -322,6 +331,8 @@ pub struct DagView {
     /// Number of rows currently eligible to spawn. This includes ordinary
     /// lane heads and independently-headed unscheduled / `unlaned` issues,
     /// and is derived from the computed `DagIssue::spawnable` predicates.
+    /// Intake-status rows (`untriaged`, `needs-info`, `deferred`) are never
+    /// counted, although they are listed.
     pub spawnable_heads: usize,
     /// Whether a caller-supplied reservations set was applied.
     pub reservations_applied: bool,
@@ -467,12 +478,13 @@ pub fn compute(issues: &[Issue], schema: &Schema, reservations: Option<&Reservat
     // Unscheduled issues are independent (no lane mutual-exclusion); order
     // them by the same tiebreak and render each as its own head-of-line.
     // Terminal issues were already filtered out of the bucket above, so
-    // every unscheduled issue is a non-done, independent head; `spawnable`
-    // still requires blockers to be satisfied.
+    // every executable unscheduled issue is an independent head; an
+    // intake-status one is listed but is no head. `spawnable` still
+    // requires blockers to be satisfied.
     let unscheduled: Vec<DagIssue> = tiebreak_sorted(&unscheduled)
         .iter()
         .enumerate()
-        .map(|(pos, i)| ctx.make_issue(i, pos, None, true))
+        .map(|(pos, i)| ctx.make_issue(i, pos, None, !is_intake_status(&i.status)))
         .collect();
 
     let spawnable_heads = lanes
@@ -517,10 +529,11 @@ impl ComputeCtx<'_> {
         (open, missing)
     }
 
-    /// True when an issue is runnable now: not done and every `blocked_by`
-    /// dependency is satisfied (none open, none dangling).
+    /// True when an issue is runnable now: not done, not in an intake
+    /// holding status, and every `blocked_by` dependency is satisfied (none
+    /// open, none dangling).
     fn is_runnable(&self, i: &Issue) -> bool {
-        if self.done.contains(i.slug.as_str()) {
+        if self.done.contains(i.slug.as_str()) || is_intake_status(&i.status) {
             return false;
         }
         let empty = Vec::new();
@@ -1707,5 +1720,76 @@ mod tests {
         ];
         let v = compute(&issues, &default_schema(), None);
         assert_eq!(lane(&v, "schema").issues.len(), 2);
+    }
+
+    #[test]
+    fn intake_statuses_are_listed_but_never_spawnable_heads() {
+        // Each status in its own case: intake holding states stay visible
+        // under `unscheduled` but are neither head-of-line nor spawnable;
+        // accepted `open` issues with an absent lane or `lane: unlaned`
+        // remain independent spawnable heads.
+        let cases: [(Issue, bool); 5] = [
+            (mk("a-untriaged", "untriaged", "normal"), false),
+            (mk("b-needs-info", "needs-info", "normal"), false),
+            (mk("c-deferred", "deferred", "normal"), false),
+            (mk("d-open", "open", "normal"), true),
+            (with_lane(mk("e-unlaned", "open", "normal"), UNLANED), true),
+        ];
+        for (issue, executable) in &cases {
+            let v = compute(std::slice::from_ref(issue), &default_schema(), None);
+            assert_eq!(v.unscheduled.len(), 1, "{} stays listed", issue.slug);
+            let row = &v.unscheduled[0];
+            assert_eq!(row.spawnable, *executable, "{} spawnable", issue.slug);
+            assert_eq!(row.is_head_of_line, *executable, "{} head", issue.slug);
+            assert_eq!(
+                v.spawnable_heads,
+                usize::from(*executable),
+                "{}",
+                issue.slug
+            );
+        }
+        let all: Vec<Issue> = cases.into_iter().map(|(i, _)| i).collect();
+        let v = compute(&all, &default_schema(), None);
+        assert_eq!(v.unscheduled.len(), 5);
+        assert_eq!(v.spawnable_heads, 2);
+    }
+
+    #[test]
+    fn intake_status_does_not_take_or_block_a_lane_head() {
+        // A high-priority untriaged member sorts first in its lane but is
+        // not accepted work: the work-conserving head skips it to the
+        // accepted member behind it.
+        let issues = vec![
+            with_lane(mk("a-untriaged", "untriaged", "high"), "work"),
+            with_lane(mk("b-open", "open", "normal"), "work"),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        let l = lane(&v, "work");
+        assert_eq!(l.issues[0].slug, "a-untriaged");
+        assert!(!l.issues[0].is_head_of_line && !l.issues[0].spawnable);
+        assert_eq!(l.head_of_line.as_deref(), Some("b-open"));
+        assert!(l.issues[1].spawnable);
+        assert_eq!(v.spawnable_heads, 1);
+
+        // A lane holding only intake items has no head at all.
+        let issues = vec![
+            with_lane(mk("a-deferred", "deferred", "normal"), "parked"),
+            with_lane(mk("b-needs-info", "needs-info", "normal"), "parked"),
+        ];
+        let v = compute(&issues, &default_schema(), None);
+        assert_eq!(lane(&v, "parked").head_of_line, None);
+        assert_eq!(lane(&v, "parked").depth, 2);
+        assert_eq!(v.spawnable_heads, 0);
+    }
+
+    #[test]
+    fn intake_head_never_reports_a_preparation_reason() {
+        // Under the preparation gate an intake row is no head, so it must
+        // not claim to be waiting for preparation approval.
+        let mut schema = default_schema();
+        schema.preparation_gate = true;
+        let v = compute(&[mk("a-untriaged", "untriaged", "normal")], &schema, None);
+        assert_eq!(v.unscheduled[0].preparation_reason, None);
+        assert!(!v.unscheduled[0].spawnable);
     }
 }

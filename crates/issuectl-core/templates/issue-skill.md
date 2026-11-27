@@ -287,8 +287,9 @@ not tell you:
   This is not a holding area for worthwhile work: blocked or gated work
   belongs in a lane, and unreviewed work must keep resurfacing.
   `issuectl --json dag [--reservations <file|-|json>]` renders lanes, depth, heads, and
-  `spawnable_heads`. Repos may opt in via `preparation_gate: true` in
-  `issues/.schema.yaml`; set `preparation: pending|reviewing|ready` using
+  `spawnable_heads`. Intake items (`untriaged`, `needs-info`, `deferred`) are
+  listed but never head of line or spawnable until `intake accept`. Repos
+  may opt in via `preparation_gate: true` in `issues/.schema.yaml`; set `preparation: pending|reviewing|ready` using
   `issuectl update <slug> --field preparation=ready --json` for approval
   of this issue's **next agreed action**, not blanket implementation approval
   or a person's consent. Missing/pending/reviewing heads stay in place and

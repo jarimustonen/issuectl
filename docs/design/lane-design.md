@@ -14,6 +14,12 @@ and merged. Theme names are fine *names* for those lanes, but are a poor reason
 to group work: a `reporting` lane with nine unrelated changes still permits
 only one of them at a time.
 
+Only accepted work can be a head. An issue in an intake holding status
+(`untriaged`, `needs-info`, `deferred`) still renders in its lane or under
+`unscheduled`, so it stays visible, but it is never head of line, never
+spawnable, and not counted in `spawnable_heads`; the lane's head moves past
+it. `issuectl intake accept` makes it executable.
+
 Use `blocked_by` for a real prerequisite. It orders same-lane dependencies and
 also prevents an unsatisfied cross-lane dependency from being spawnable.
 
